@@ -468,7 +468,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <p>The clamp applies after the review-queue penalty, so <code>wip_min</code> stays the floor. The budget line applies last and can go below <code>wip_min</code>, down to 0, because money is a hard limit and WIP is not.</p>
   <ul>
     <li><b>accept_rate.</b> PBIs accepted per working day, last 14 days.</li>
-    <li><b>median_cycle_time.</b> Working days from InProgress to Accepted, same window.</li>
+    <li><b>median_cycle_time.</b> Working days an item holds a WIP slot, summed across its spells between InProgress and Accepted, same window. Time in Sign-off and Needs input is left out, because the item holds no slot there and Little's Law needs W to match what L counts. The budget line uses the same value.</li>
     <li><b>review_queue.</b> Factory PRs and scenario sign-offs waiting on a human right now. <code>review_capacity</code> is a config value, default 3.</li>
     <li><b>Damping.</b> WIP moves by at most 1 per hour. Lowering it only stops new starts and never kills a running cell. A WIP override from the dashboard applies at once and skips the damping.</li>
     <li><b>Cold start.</b> Until 10 items have been accepted, the factory runs fixed at <code>wip_min</code>.</li>
