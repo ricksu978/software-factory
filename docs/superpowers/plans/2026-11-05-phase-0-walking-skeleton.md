@@ -63,7 +63,8 @@ These rules hold across every task. A task that touches one of them follows this
    - the latest decision or answer, with its note;
    - `lockSha` and `lockedFiles`;
    - `prNumber`, `repo`, `base` and `branch`;
-   - `configSha` and `sopVersion`.
+   - `configSha` and `sopVersion`;
+   - `dodVerdicts`, the latest `dod.md` verdicts from `policy_result`, so a cell resumed at open-pr still gives the classifier the `person` lines.
 6. **CI status.** Only the control plane reads checks, with the App's own `RepoHost`. The cell reports its PR through `POST /pr` as soon as the PR exists. After every push, the cell asks about the exact commit it pushed with `GET /internal/cells/:runId/checks?sha=<sha>`. The control plane polls the checks on each sha it has been asked about, and on every merge commit. A sha with no checks reported 10 minutes after the control plane first saw it returns `none`. The engine treats `none` as `blocked`, with "no CI ran on the PR". Phase 0 requires CI on the target repo. Cell tokens keep the permissions in Global Constraints. The cell's own repo calls go through `cellRepoHost`, which opens PRs and requests reviewers with the token from `/github-token`.
 7. **Branches and runs.** A run's branch is `factory/pbi-<externalId>-r<runNumber>`. These start a new run on a new branch from the base:
    - `criteria_changed`;
@@ -87,7 +88,7 @@ These rules hold across every task. A task that touches one of them follows this
     - **Criteria.** Only `dor.md`, `pr-review.md` and `dod.md` have criteria, one per top-level `- [ ]` line, numbered from 1 in file order. The judge answers one JSON line per criterion: `{"index","status","reason"}`, where `status` is `passed`, `failed` or, in `dod.md` only, `person`. `person` means the line can only be met by a person or after merge, such as "deployed to staging". It goes to the PR checklist unticked and never counts as a fail. A missing index fails, and when an index appears twice, a fail wins. `scenarios.md` and `risk.md` are guidance, given whole to the agent that uses them.
     - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`. `loadPolicy` rejects it in any other file with `PolicyError`. The cell runs `dod.md` commands at the end of green, in the checkout, as `execFile("sh", ["-c", command], { cwd, timeout: 900_000, env: { PATH, HOME, CI: "true" } })`. That env carries none of the cell's tokens. It isn't a sandbox, though: the command runs as the cell's own user, as `commands.test` does and as the agent does. So it has no more reach than the agent that wrote the code already has.
     - **Results.** Every result is stored in `policy_result`, with `source` set to `repo` or `default`. The control plane writes readiness rows itself, and the cell sends its rows through `POST /policy-results` (Task 12).
-    - **Re-gating.** `item.readiness_policy_sha` records the `dor.md` blob sha, or `default`, that the item's last readiness check used. When that changes, the poller re-runs the gate on the item.
+    - **Re-gating.** `readinessSha(inputs)` is the SHA-256 over every file the readiness check reads: the five policy files and `.factory/config.yml`. Each file contributes its `sha`, as defined under Defaults, or the word `absent`. `item.readiness_policy_sha` records the value from the item's last check. When it changes, because a team fixed any of those files or a deploy changed a default, the poller re-runs the gate on the item.
     - **Engine rules.** The rules no policy file can weaken are the list under "What stays in the engine" in spec §6. They live in code and prompts that the factory owns.
 
 ---
@@ -434,7 +435,7 @@ export interface RepoHost {
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
-- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `dor.sha`. Also `POLL_INTERVAL_MS = 300_000`.
+- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six readiness inputs (Run contract 11). Also `POLL_INTERVAL_MS = 300_000`.
 - Each `pollOnce` does four things:
   - lists new and changed eligible items from the cursor;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
@@ -459,7 +460,7 @@ export interface RepoHost {
   - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
     - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
-  - **Policy change.** After the repo's `dor.md` changes on the default branch, so its sha no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text.
+  - **Policy change.** After any readiness input changes on the default branch, so `readinessSha` no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text. Adding a missing `dod.md`, or fixing a `pr-review.md` that held a `run:` line, re-gates too, and posts a fresh comment.
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
@@ -512,7 +513,7 @@ export interface RepoHost {
   - **Repo wording.** With a repo `dor.md` whose only line is "Has a Size of 5 or less", and an item whose readiness field Size is 8, the fake judge's failure for that line becomes the item's NotReady comment, word for word.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - The gate parses the judge's reply with `parseJudgement`, plus a last line `{"flags":[]}`. The item is ready only when every `dor.md` criterion passed and `flags` is empty. The caller writes every result to `policy_result` with a null `run_id`. The gate comments the failed lines by name through `adapter.comment`, under `dedupeKey = "readiness:" + item.updatedAt + ":" + (dor?.sha ?? "none")`, so a re-gate after a policy change posts a new comment. It never edits the item.
+  - The gate parses the judge's reply with `parseJudgement`, plus a last line `{"flags":[]}`. The item is ready only when every `dor.md` criterion passed and `flags` is empty. The caller writes every result to `policy_result` with a null `run_id`. The gate comments the failed lines by name through `adapter.comment`, under `dedupeKey = "readiness:" + item.updatedAt + ":" + readinessSha(inputs)`, so a re-gate after any readiness input changes posts a new comment. It never edits the item.
   - **Validate everything at readiness.** The caller also runs `loadPolicy` on `scenarios`, `pr-review` and `risk`. A `PolicyError` from any of the five files fails the item, with the error as a named reason, so a broken file never reaches a cell.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(gate): repo config, SOP loader, readiness gate`.
@@ -714,7 +715,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 type CellContext = { externalId: string; title: string; acceptanceCriteria: string[]; nextStage: string;
   decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
-  configSha: string; sopVersion: string };            // the body of GET /context (Run contract 5)
+  configSha: string; sopVersion: string; dodVerdicts: Verdict[] };   // the body of GET /context (Run contract 5)
 type Git = { clone(url: string, branch: string): Promise<string>; mergeBase(base: string): Promise<"clean" | "conflict">;
   commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> };
 function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent; git: Git;
@@ -846,10 +847,11 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Consumes: `runAgent` and `RepoConfig.sensitivePaths`.
 - Produces:
   - `pathFloor(files: string[], sensitive: string[]): { min: "Low" | "Medium" | "High"; reasons: string[] }`. CI workflow files, `sensitive_paths`, anything under `.factory/` or `.claude/`, and any `AGENTS.md` or `CLAUDE.md` force at least Medium. Those paths hold the policy files and what steers the factory's agents. This floor is the engine's, and no `risk.md` lowers it.
-  - `classifyRisk(diff: string, files: string[], ctx: { sop: Sop; config: RepoConfig; risk: Policy; agent: typeof runAgent }): Promise<{ tier: "Low" | "Medium" | "High"; reasons: string[] }>`. It runs two passes on `sop.models.coding`, with the repo's `risk.md` as the definition of each tier: the tier, then "does this change need a person anyway". It never returns below `pathFloor`.
+  - `classifyRisk(diff: string, files: string[], ctx: { sop: Sop; config: RepoConfig; risk: Policy; dodVerdicts: Verdict[]; agent: typeof runAgent }): Promise<{ tier: "Low" | "Medium" | "High"; reasons: string[] }>`. Any `dod.md` verdict with status `person` raises the floor to Medium, with the reason "a DoD line needs a person at merge: <line>". So a line only a person can check never slips through a Low merge that no person sees. It runs two passes on `sop.models.coding`, with the repo's `risk.md` as the definition of each tier: the tier, then "does this change need a person anyway". It never returns below `pathFloor`.
 
 - [ ] **Step 1: Write failing tests:**
   - **Path floor.** `pathFloor` gives Medium for `.github/workflows/ci.yml`, `.factory/config.yml`, `.factory/dod.md`, `.claude/agents/self-reviewer.md`, `AGENTS.md`, `src/CLAUDE.md` and a file matching `src/billing/**`, and gives Low for `docs/readme.md`.
+  - **Person lines.** A docs-only diff that the fake agent calls Low, with one `dod.md` verdict "Deployed to staging" judged `person`, yields Medium with that reason.
   - **Repo risk.** A repo `risk.md` that calls any change to `src/payments/**` High makes the fake agent's prompt carry that text, and a diff there comes back High. A `risk.md` that calls `.factory/` changes Low still yields Medium, because of the floor.
   - **No lowering.** A fake agent answering Low for a diff that touches `.factory/config.yml` still yields Medium, with both reasons kept.
   - **Second pass.** A second pass that answers "needs a person" raises Low to Medium.
