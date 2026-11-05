@@ -8,7 +8,7 @@
 
 **Tech Stack.** Node 26.13.0 LTS running `.ts` files directly through type stripping, `node:test`, TypeScript 7.0.2 for type checks only, `pg` 8.23.1, `yaml` 2.9.1, `@anthropic-ai/claude-agent-sdk` 0.3.318, `@octokit/app` 16.1.4, `@azure/identity` 4.14.1, `@azure/arm-appcontainers` 4.0.0, `@azure/storage-blob` 12.34.0, `@testcontainers/postgresql` 12.2.1, Bicep for infrastructure.
 
-**Spec.** `docs/superpowers/specs/2026-11-05-software-factory-design.html`, as merged in cca3e23. §13's Phase 0 row is the scope. §14 lists the settled decisions this plan does not reopen.
+**Spec.** `docs/superpowers/specs/2026-11-05-software-factory-design.html`, as revised on this plan's branch with the 14 flow-review fixes. §13's Phase 0 row is the scope. §14 lists the settled decisions this plan does not reopen.
 
 ## Global Constraints
 
@@ -21,9 +21,9 @@
 - The Phase 0 backlog is a Project owned by a GitHub organization, and the target repo lives in that organization. A GitHub App can reach only organization-owned Projects. This was decided 2026-11-05.
 - Eligibility label `factory`. Definition of Done path defaults to `DoD.md`. A repo with no DoD file fails readiness for every item.
 - Poll every 5 minutes on top of webhooks. Leases renew every 60 seconds and expire after 5 missed renewals. A cell stops itself after 3 minutes of failed renewals.
-- Each claim increments `lease_generation`. A cell checks its generation before every push, comment and state write.
+- `lease_generation` changes only as Run contract 2 says. A cell checks its generation before every push, comment and state write.
 - NeedsInput and SignOff items get reminders at day 2 and day 4, and move to Abandoned after 5 days with no answer. An operator re-queue or a late answer brings an Abandoned item back.
-- The scheduler starts nothing new while the items waiting on a person (open questions, sign-offs and factory PRs awaiting review) reach `review_capacity`, default 3, or while the last reported usage utilization is at or above `usage_reserve_at`, default 0.7.
+- The scheduler starts nothing new while the waiting count (Run contract 3) reaches `review_capacity`, default 3, or while the last reported usage utilization is at or above `usage_reserve_at`, default 0.7.
 - The factory owns board status. The project's built-in status workflows are off, factory PRs reference their item with `Refs #n`, and the factory closes the item at Done.
 - Sign-off (`/approve`, `/changes <note>`) and answers (`/answer <text>`) are accepted as item comments from GitHub logins mapped to allowlisted users, and in Run detail.
 - An override takes effect within 30 seconds. The kill switch stops every cell within a minute.
@@ -39,6 +39,47 @@
 3. **Duplicate or replayed webhook deliveries.** The same `X-GitHub-Delivery` id processed twice yields one event. A bad or missing signature yields 401 and no event. Tests in Task 7.
 4. **Spoofed identity headers.** A request that carries `X-MS-CLIENT-PRINCIPAL` on an auth-excluded path never authenticates a dashboard action, and an unknown signed-in subject gets the no-access page. Tests in Task 15, plus a live check in Task 2.
 5. **Control plane restart mid-run.** A fresh scheduler process sees the running cell's live lease and starts no second cell for that item. Test in Task 13.
+
+## Run contract
+
+These rules hold across every task. A task that touches one of them follows this section and does not restate it.
+
+1. **Resume pointer.** `run.next_stage` names the stage the next cell runs, and the scheduler passes it to the cell as `RESUME_FROM`. These are its only writers:
+   - `/stage` with `passed` sets it to the next stage in the pinned SOP;
+   - a passed `specify` leaves it at `sign-off`, which no cell runs;
+   - `decide` sets it to `red` on approve, and to `specify` on changes;
+   - `changes_requested` sets it to `address`;
+   - a new run starts it at `understand`.
+2. **Leases and generations.** `lease_generation` goes up by 1 exactly twice in a lease's life: when a claim moves an item into InProgress, and when any transition moves an item out of InProgress. The second bump fences the old cell, so its next cell API call gets 409. Leaving InProgress also clears `lease_owner` and `lease_expires`. `expireLeases` looks only at InProgress items. No other transition touches the generation.
+3. **Waiting on people.** The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered, plus every InReview item. Answered and Abandoned items don't count. The brake gates only claims of Queued items, which is new work. A SignOff or NeedsInput item with an answer can always be claimed, so answering never deadlocks the line.
+4. **Item scope.** Specify tags every feature file it writes with `@pbi-<externalId>` at Feature level.
+   - `redGate` and `traceability` consider only scenarios carrying that tag.
+   - `greenGate` requires every scenario in the suite to be green, which keeps earlier items' scenarios as regression tests.
+   - At sign-off, `run.locked_files` records the files carrying the tag, and `matchesLock` diffs only those files. So other items merged into the base never trip the lock.
+5. **Cell context.** The cell's env holds only `RUN_ID`, `ITEM_ID`, `GENERATION`, `RUN_TOKEN`, `CONTROL_URL` and `RESUME_FROM`. Everything else comes from `GET /internal/cells/:runId/context`:
+   - the item's external id, title and acceptance criteria;
+   - `nextStage`;
+   - the latest decision or answer, with its note;
+   - `lockSha` and `lockedFiles`;
+   - `prNumber`, `repo`, `base` and `branch`;
+   - `configSha` and `sopVersion`.
+6. **CI status.** Only the control plane reads checks, with the App's own `RepoHost`. The cell reports its PR through `POST /pr` as soon as the PR exists. After every push, the cell asks about the exact commit it pushed with `GET /internal/cells/:runId/checks?sha=<sha>`. The control plane polls the checks on each sha it has been asked about, and on every merge commit. A sha with no checks reported 10 minutes after the control plane first saw it returns `none`. The engine treats `none` as `blocked`, with "no CI ran on the PR". Phase 0 requires CI on the target repo. Cell tokens keep the permissions in Global Constraints. The cell's own repo calls go through `cellRepoHost`, which opens PRs and requests reviewers with the token from `/github-token`.
+7. **Branches and runs.** A run's branch is `factory/pbi-<externalId>-r<runNumber>`. These start a new run on a new branch from the base:
+   - `criteria_changed`;
+   - a re-queue of an item whose PR already merged.
+
+   The previous PR, if still open, is closed with a comment that names the kept branch.
+8. **Board mirroring.** One `onTransition(itemId, from, to, event)` hook runs after every committed transition.
+   - It writes `fieldMap.statusFor[to]` through `setStatus`. A null entry leaves the board's status as it is.
+   - It calls `claim` on every move into InProgress, which is idempotent, so a revived item gets its marker back. It calls `release` on reaching Done, Failed or Abandoned, and `linkPr` on `pr_opened`.
+   - It closes the item at Done.
+   - Whenever an item with an open PR reaches Abandoned, through `withdrawn` from any state, the PR is closed with a comment that names the kept branch.
+9. **End-of-stage order.** A stage ends with these calls in this order: `/stage` with `passed`, then every `/upload-url` upload, then `/pr` when the stage opened a PR, and the `/transition` last. The transition is the call that raises the generation, so any call after it would get 409.
+10. **Review triggers.** Requested changes count only when a changes-requested review was submitted after `run.reviews_seen_at`. Two writes set that column:
+    - the first `pr_opened`;
+    - the claim that starts an address run, set to that claim's time.
+
+    A review left while address is running is newer than the claim, so the next poll still catches it once the item is back in InReview. The webhook compares the review's `submitted_at`, and the poll compares the newest such review from `prState`. GitHub's aggregate `reviewDecision` isn't used, because it can stay `CHANGES_REQUESTED` after the fix is pushed.
 
 ---
 
@@ -68,11 +109,12 @@ src/risk/shadow.ts
 src/agent/run.ts                   the only file that imports the Agent SDK
 src/cell/engine.ts, api-client.ts, main.ts
 src/control/cell-api.ts            /internal/cells/* routes
+src/control/decisions.ts           decide(): sign-off and answers from both channels
 src/scheduler/scheduler.ts, launcher.ts
 src/http/server.ts, auth.ts, views.ts, routes.ts
 src/main.ts                        control plane entry
 sop/default.yml, sop/prompts/*.md
-cell/Dockerfile, cell/claude/agents/self-reviewer.md
+cell/Dockerfile, cell/claude/agents/self-reviewer.md, cell/claude/agents/pr-addresser.md
 Dockerfile                         control plane image
 spike/hello.ts, spike/sdk-oauth.ts
 docs/superpowers/spikes/2026-11-phase-0-platform.md
@@ -113,26 +155,34 @@ The spec says these tests come first, because their results can change §11. Thi
   - Log Analytics workspace `log-factory`.
   - Container Apps environment `cae-factory`, Consumption only.
   - ACR `acrfactory<uniqueString>`, Basic. The spec has not priced it, so record its monthly cost in the spike file.
-  - User-assigned identities `id-factory-control` and `id-factory-cell`.
-  - Key Vault `kv-factory-<uniqueString>` with RBAC. The control identity reads both secrets. The cell identity reads only `claude-oauth-token`.
-  - Storage account with a `transcripts` container, Hot LRS.
-  - Postgres Flexible Server `psql-factory-<uniqueString>`, B1ms, 32 GB, Entra auth only, with `id-factory-control` as the Entra admin.
-  - Container App `ca-factory-control` at 0.5 vCPU and 1 GiB with external ingress, running the spike image first.
+  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:<org>/software-factory:environment:production`. `deploy.yml` runs only from `main` into the `production` environment, which has required reviewers set in GitHub.
+  - Storage roles for `id-factory-control`: Storage Blob Data Contributor and Storage Blob Delegator on the storage account, so it can sign write-only SAS URLs with a user delegation key. No account key is used.
+  - Key Vault `kv-factory-<uniqueString>` with RBAC and three secrets: `github-app-key`, `claude-oauth-token` and `cell-secret`, a random 32-byte value for signing run tokens. The control identity reads all three. The cell identity reads only `claude-oauth-token`.
+  - Storage account with `transcripts` and `reports` containers, Hot LRS.
+  - Postgres Flexible Server `psql-factory-<uniqueString>`, B1ms, 32 GB, Entra auth only. Its firewall admits Azure services only, so no GitHub runner or laptop connects to it directly. The Entra admin is `id-factory-migrate`, a fourth identity attached only to `caj-factory-migrate`.
+  - Job `caj-factory-migrate`, manual trigger, running the control plane image in one container named `migrate`, with the command `node src/store/migrate-cli.ts`. That runs `migrate()` from Task 4, and with the dash-free first argument `seed-owner` it runs `scripts/seed-owner.ts`. This is the only migration path, and Step 4 sets its order in `deploy.yml`. The control identity maps to a role `factory_app`, which can read and write the factory's tables but can only `SELECT` and `INSERT` on `event`. That keeps the event log append-only for the identity the app runs as.
+  - Container App `ca-factory-control` at 0.5 vCPU and 1 GiB with external ingress. Its image comes from a `controlImage` parameter, which defaults to the public placeholder `mcr.microsoft.com/k8se/quickstart:latest`, so the Step 2b bootstrap works while ACR is still empty. The cell and migrate jobs take the same placeholder default. `deploy.yml` passes the real ACR images, the spike image first. Its env takes `CLAUDE_CODE_OAUTH_TOKEN` and `CELL_SECRET` from Key Vault references, and `CLAUDE_TOKEN_CREATED_AT` from `main.bicepparam`, set to the date you ran `claude setup-token`.
   - Job `caj-factory-cell` with a manual trigger, 2 vCPU and 4 GiB, `replicaRetryLimit: 1`, and `CLAUDE_CODE_OAUTH_TOKEN` from a Key Vault secret reference.
   - An `authConfigs` child on the app with the Microsoft provider (any Entra directory and personal accounts), the Google provider, `unauthenticatedClientAction: RedirectToLoginPage`, and `globalValidation.excludedPaths: ['/webhooks/github', '/internal/cells']`.
   - A custom role on the job for the control identity, granting job start and execution stop. Find the exact action names with `az provider operation show --namespace Microsoft.App`.
 - [ ] **Step 2: Run `az bicep build --file infra/main.bicep`.** Expected: no errors. Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
+- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`. Every later deploy runs through `deploy.yml`.
 - [ ] **Step 3: Write `spike/hello.ts`**, a `node:http` server with three routes:
   - `GET /`, which returns every request header that starts with `x-ms-client-principal`.
   - `POST /webhooks/github`, which verifies `X-Hub-Signature-256` with `crypto.timingSafeEqual` and returns 204 or 401.
   - `POST /internal/cells/ping`, which returns 204.
-- [ ] **Step 4: Write `deploy.yml`.** It builds both Dockerfiles with `docker buildx build --platform linux/amd64`, pushes them to ACR, and runs `az deployment group create`. It authenticates to Azure through OIDC federated credentials, never a stored secret.
+- [ ] **Step 4: Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials, never a stored secret. It runs in this order, and each step waits for the one before:
+  1. Build both Dockerfiles with `docker buildx build --platform linux/amd64`, and push them to ACR with the commit sha as the tag.
+  2. Run the migrations on the new image: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --image <acr>/control:<sha> --command node src/store/migrate-cli.ts`. The container name and command are passed explicitly, in case a start override replaces the template's container instead of merging into it (Step 10b checks which). Wait until that execution reports Succeeded, and stop the workflow if it doesn't.
+  3. Run `az deployment group create` with the new image tags, which updates the app and the jobs.
+
+  So the new app code never runs before its migration.
 - [ ] **Step 5: Sign-in test.** Sign in with a Google account, a personal Microsoft account and a work account from another tenant. Record each case's `x-ms-client-principal-idp` and `x-ms-client-principal-id`. Expected: all three reach `/` and show distinct ids.
 - [ ] **Step 6: Header spoofing test.** Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out. Expected: a redirect to login, not a 200. Then send the same header to `/internal/cells/ping` and confirm the response doesn't echo the forged value as an authenticated identity.
 - [ ] **Step 7a: Organization and App.** Create a free GitHub organization for Phase 0. Creating it is your step, because the API can't create organizations for a personal account. Then register the factory GitHub App with this setup:
-  - Repository permissions: write on contents, pull requests, issues and commit statuses, read on checks and metadata.
+  - Repository permissions: write on contents, pull requests and issues, read on checks, commit statuses and metadata. Phase 1 raises commit statuses to write, when it starts posting `risk-approval`.
   - Organization permissions: write on organization projects.
-  - App webhook events: issues, issue comment, pull request, check suite and issue dependencies.
+  - App webhook events: issues, issue comment, pull request, pull request review, check suite and issue dependencies. Pull request review is a separate subscription from pull request, and "a GitHub App must have at least read-level access for the 'Pull requests' repository permission" to receive it ([GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)).
 
   GitHub doesn't offer `projects_v2_item` to App webhooks, so also add an organization webhook for that event. It goes to the same `/webhooks/github` URL with the same secret. Install the App on the organization, scoped to the selected repos only. Store its private key in Key Vault as `github-app-key`.
 - [ ] **Step 7: Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery. Expected: 204 in the App's delivery log, and no login redirect. Change the secret on one side, then expect 401.
@@ -143,6 +193,7 @@ The spec says these tests come first, because their results can change §11. Thi
   - Expected: example.com blocked, api.github.com allowed.
   - If the result is `error_during_execution` because bubblewrap can't start in Container Apps, record that. The egress allowlist then needs another mechanism, which is a pending decision.
 - [ ] **Step 10: Bot assignment probe.** Try to assign the GitHub App's bot user to an issue. Use `gh api repos/<o>/<r>/issues/<n>/assignees -f assignees[]=<app-slug>[bot]` with an installation token. Record whether GitHub accepts it.
+- [ ] **Step 10b: Job override probe.** Start one `caj-factory-migrate` execution with `--image` and `--args`, then read its resolved template with `az containerapp job execution show`. Record whether the job's env vars survived, such as the identity client id and the Postgres host. The az reference says only that `--image` starts "a job with different image and configurations" ([az containerapp job](https://learn.microsoft.com/en-us/cli/azure/containerapp/job)). If the env is dropped, add `--env-vars` for those values to both calls in Step 4 and Task 18.
 - [ ] **Step 11: Record results** in `docs/superpowers/spikes/2026-11-phase-0-platform.md`. Give each probe its expected result, its actual result and the evidence: a command, a screenshot path or a delivery id. If Step 5, 7 or 8 fails, stop and raise it, because the spec's §11 changes before Task 3 starts.
 - [ ] **Step 12: Commit** `chore: platform baseline and phase 0 platform tests`.
 
@@ -156,11 +207,11 @@ The spec says these tests come first, because their results can change §11. Thi
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "requeued" | "criteria_changed" | "withdrawn"`
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"`. `approvals_met` is reserved for Phase 1. In Phase 0 a person's merge is `merged`.
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`, which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`, which always succeeds. The caller logs it as an override event.
 
-- [ ] **Step 1: Write the failing table test.** It asserts every edge in the spec §5 diagram, as amended by the merged spec:
+- [ ] **Step 1: Write the failing table test.** It asserts every edge in the spec §5 diagram, plus the withdrawal and criteria-change moves that §5's "Backlog changes" bullet describes in prose:
 
 ```ts
 const edges: [ItemState, ItemEvent, ItemState][] = [
@@ -168,12 +219,14 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "ready", "Queued"], ["Queued", "claimed", "InProgress"],
   ["SignOff", "claimed", "InProgress"], ["NeedsInput", "claimed", "InProgress"],
   ["InProgress", "scenarios_written", "SignOff"], ["InProgress", "blocked", "NeedsInput"],
-  ["InProgress", "pr_opened", "InReview"], ["InReview", "changes_requested", "InProgress"],
+  ["InProgress", "pr_opened", "InReview"], ["InReview", "changes_requested", "Queued"],
+  ["InReview", "merged", "Accepted"], ["InProgress", "merged", "Accepted"],
   ["InReview", "approvals_met", "Accepted"], ["Accepted", "dod_verified", "Done"],
   ["Accepted", "dod_failed", "Failed"], ["InProgress", "retries_exhausted", "Failed"],
   ["NeedsInput", "timed_out", "Abandoned"], ["SignOff", "timed_out", "Abandoned"],
-  ["InProgress", "lease_expired", "Queued"], ["Failed", "requeued", "Queued"],
-  ["Abandoned", "requeued", "Queued"],
+  ["InProgress", "lease_expired", "Queued"], ["InProgress", "usage_limited", "Queued"],
+  ["Failed", "requeued", "Queued"], ["Abandoned", "requeued", "Queued"],
+  ["Abandoned", "reopened_signoff", "SignOff"], ["Abandoned", "reopened_question", "NeedsInput"],
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
     [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
 ];
@@ -182,7 +235,7 @@ test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
 test("answer alone does not move state", () => assert.equal(next("NeedsInput", "ready"), null));
 ```
 
-  `criteria_changed` goes to Queued rather than straight to Specify, because the item needs a slot again. The caller resets `run.last_stage` to `understand` and clears `features_lock_sha`, so the next cell re-runs Specify and asks for a new sign-off. The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, because a waiting item gave up its WIP slot and has to take one again. The answer itself is recorded on the `question` row.
+  Every move that needs a cell again goes to Queued, or to a waiting state, and then through `claimed`, because the item holds no slot until it's claimed. That covers `changes_requested`, `criteria_changed` and `usage_limited`. `criteria_changed` starts a new run, per Run contract 7. The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, and the answer itself is recorded on the `question` row. `reopened_signoff` and `reopened_question` return a re-queued Abandoned item to waiting when its question is still open.
 - [ ] **Step 2: Run `node --test src/core/states.test.ts`.** Expected: FAIL, module not found.
 - [ ] **Step 3: Implement `next` and `overrideTo`** in `src/core/states.ts` as a lookup table keyed `` `${from}:${event}` ``.
 - [ ] **Step 4: Run the test.** Expected: every case passes.
@@ -193,7 +246,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 ### Task 4: Schema and store basics
 
 **Files:**
-- Create: `db/migrations/001_init.sql`, `src/store/db.ts`, `src/store/items.ts`, `src/store/events.ts`, `src/store/runs.ts`, `src/store/test-db.ts`, `src/store/items.test.ts`
+- Create: `db/migrations/001_init.sql`, `src/store/db.ts`, `src/store/items.ts`, `src/store/events.ts`, `src/store/runs.ts`, `src/store/migrate-cli.ts`, `src/store/test-db.ts`, `src/store/items.test.ts`. `migrate-cli.ts` is the migrate job's entry point. It runs `migrate()`. When its first argument is the word `seed-owner`, it hands the remaining `key=value` words to `scripts/seed-owner.ts` from Task 15. Arguments carry no leading dashes, because `az containerapp job start --args` reads any dash-prefixed word as one of its own options. It exits 1 on any word it doesn't recognise, so a mistyped seed never passes as a plain migration.
 
 **Interfaces:**
 - Consumes: `next`, `ItemState`, `ItemEvent` from Task 3.
@@ -202,7 +255,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `migrate(pool): Promise<void>`, which applies `db/migrations/*.sql` in name order and tracks them in `schema_migrations`.
   - `withTx<T>(pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T>`
   - `appendEvent(c, e: { actor: "agent" | "human" | "system"; actorId: string; itemId: string | null; kind: string; payload: unknown }): Promise<void>`. It also runs `NOTIFY factory_events`.
-  - `transitionItem(c, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState>`. It throws `IllegalTransition` when `next` returns null. It writes `item.state` and the event row in one transaction.
+  - `transitionItem(c, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState>`. It throws `IllegalTransition` when `next` returns null. It writes `item.state` and the event row in one transaction, and applies Run contract 2 to the lease columns.
+  - `onTransition(hook: (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>): void` registers the hook that runs after each committed transition. Task 12 registers the board mirroring from Run contract 8.
   - `upsertItem(c, item: FactoryItem): Promise<string>`, keyed on `(source_id, external_id)`.
   - `startTestDb(): Promise<{ pool: pg.Pool; stop(): Promise<void> }>`, which uses `@testcontainers/postgresql` with image `postgres:17` and runs `migrate`.
 
@@ -214,16 +268,22 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `item.criteria_hash text`, the SHA-256 of the acceptance criteria the run started from.
   - `question.reminders_sent int default 0`.
   - `wip_policy.usage_reserve_at numeric default 0.7` and `wip_policy.usage_paused_until timestamptz`.
-  - `run.last_stage text`, the checkpoint.
+  - `run.next_stage text`, the resume pointer from Run contract 1.
+  - `run.run_number int`, counting runs per item, for the branch name in Run contract 7.
+  - `run.scenarios_sha text` and `run.locked_files text[]`, written when Specify posts scenarios. `decide` copies `scenarios_sha` into `features_lock_sha` on approve.
+  - `run.pr_number int`, `run.reviews_seen_at timestamptz` (Run contract 10) and `run.merge_sha text`.
   - `run.resume_at timestamptz`, for usage-limit stalls.
   - `run.execution_name text`, the Container Apps execution.
+  - `stage_run.report_ref text`, the BDD report a red or green stage uploaded.
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
 
-  Skip `increment` and `approval`, which belong to Phase 1. Make `event` append-only by revoking UPDATE and DELETE on it from the app role.
+  Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 2 names. Its `event` grant is `SELECT, INSERT` only.
 - [ ] **Step 2: Write failing tests** in `items.test.ts` against `startTestDb()`:
   - `transitionItem` moves Eligible to Queued on `ready` and writes exactly one event with `kind = "transition"` and `payload = { from: "Eligible", to: "Queued", event: "ready" }`.
   - `transitionItem` on `Done` with `claimed` throws `IllegalTransition`, and both the item and the event table are unchanged.
   - `upsertItem` called twice with the same `(source_id, external_id)` returns the same id.
+  - **Generations.** A transition out of InProgress raises `lease_generation` by 1 and clears `lease_owner` and `lease_expires`. A transition between two non-InProgress states leaves all three untouched.
+  - **Append-only.** Connected as `factory_app`, an `UPDATE event` fails with a permission error.
 - [ ] **Step 3: Run `node --test src/store/items.test.ts`.** Expected: FAIL.
 - [ ] **Step 4: Implement** `db.ts`, `events.ts`, the item functions in `items.ts`, and the empty `runs.ts` exports used later.
 - [ ] **Step 5: Run the tests.** Expected: PASS.
@@ -246,10 +306,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - Constants `LEASE_RENEW_MS = 60_000` and `LEASE_EXPIRY_MS = 300_000`.
 
 - [ ] **Step 1: Write failing tests:**
-  - **Claim order.** `claimNext` picks a SignOff or NeedsInput item whose open `question` has an answer before any Queued item. Among Queued items it picks highest `priority`, then lowest `backlog_rank`. It skips `held` items and items with an open dependency. It moves the claimed item to InProgress through `transitionItem(..., "claimed")`.
-  - **Generations.** Each claim sets `lease_generation` to the previous value plus 1, and `lease_expires = now + 300s`.
+  - **Claim order.** `claimNext` picks a SignOff or NeedsInput item whose `question` has an answer before any Queued item. Among Queued items it picks highest `priority`, then lowest `backlog_rank`. It skips `held` items and items with an open dependency. It moves the claimed item to InProgress through `transitionItem(..., "claimed")`.
+  - **Generations.** Each claim sets `lease_generation` to the previous value plus 1, and `lease_expires = now + 300s`. That is the claim half of Run contract 2.
   - **Renewal.** `renewLease` with the current generation returns `"ok"` and pushes `lease_expires` out. With an older generation it returns `"lost"` and changes nothing.
-  - **Expiry.** `expireLeases(now + 301s)` returns the item, moves it to Queued through `lease_expired`, and leaves `run.last_stage` unchanged, so a new cell resumes there.
+  - **Expiry.** `expireLeases(now + 301s)` returns the item, moves it to Queued through `lease_expired`, and leaves `run.next_stage` unchanged, so a new cell resumes there. An expired `lease_expires` on an item that isn't InProgress is ignored.
   - **Concurrency.** Two concurrent `claimNext` calls with one Queued item return one claim and one null. Use `SELECT ... FOR UPDATE SKIP LOCKED`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement** the four functions. A claim of an item with no open run creates a `run` row. The scheduler fills `sop_version`, `config_sha` and `repo_id` right after the claim, in Task 13.
@@ -274,7 +334,7 @@ export type FactoryWebhookEvent =
   | { kind: "item_changed"; externalId: string } | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
   | { kind: "pr_closed"; prNumber: number; repo: string } | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; login: string; body: string; commentId: string }
-  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented" }
+  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string }
   | { kind: "ignored" };
 export interface BacklogAdapter {
   capabilities: { webhooks: boolean };
@@ -294,7 +354,7 @@ export interface RepoHost {
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>; // CODEOWNERS first
-  prState(repo: string, prNumber: number): Promise<{ merged: boolean; open: boolean; mergeable: boolean | null }>;
+  prState(repo: string, prNumber: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
   defaultBranchSha(repo: string): Promise<string>;
@@ -326,10 +386,11 @@ export interface RepoHost {
 - Consumes: `BacklogAdapter`, `RepoHost` and `backlogContract` from Task 6, and `appendEvent` from Task 4.
 - Produces:
   - `githubBacklog(cfg: { app: App; installationId: number; projectNodeId: string; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`. Issue, PR, check and dependency events come from the App webhook. Project item changes come from the organization's `projects_v2_item` webhook, and `parseWebhook` maps them to `item_changed`. That event is still in public preview, so the 5-minute poll stays the backstop.
-  - `githubRepoHost(app: App, installationId: number): RepoHost`
+  - `githubRepoHost(app: App, installationId: number): RepoHost`, used only in the control plane, which holds the App key.
+  - `cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers">`, used in the cell with the token from `/github-token`. Checks reach the cell only through the cell API, per Run contract 6.
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
   - `handleWebhook(deps, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 }>`
-- `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusQueued: string; statusDone: string; optInLabel: string; sprintField: string | null; sizeField: string | null; maxSize: number | null }`
+- `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusFor: Record<ItemState, string | null>; optInLabel: string; sprintField: string | null; sizeField: string | null; maxSize: number | null }`. `statusFor` names the board status for each factory state, and a null entry leaves the board alone. For example, Queued maps to "Todo", InProgress, SignOff and NeedsInput map to "In Progress", InReview maps to "In Review", Done maps to "Done", and Eligible maps to null.
 
 - [ ] **Step 1: Write failing tests:**
   - `verifySignature` returns true for `sha256=` plus the HMAC-SHA256 hex digest of the body. It returns false for a one-character change, a missing header and a `sha1=` header.
@@ -338,6 +399,7 @@ export interface RepoHost {
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
   - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
   - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
+  - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED`, and null when there is none. That is the poller's backstop for a missed review webhook, under Run contract 10.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - `verifySignature` uses `crypto.createHmac` and `crypto.timingSafeEqual` after a length check.
@@ -357,9 +419,14 @@ export interface RepoHost {
 - Create: `src/watcher/poller.ts`, `src/watcher/poller.test.ts`
 
 **Interfaces:**
-- Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`.
-- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; sourceId: string }): Promise<{ seen: number; cursor: string }>` and `POLL_INTERVAL_MS = 300_000`.
-- Both moves below go through `transitionItem`, which bumps the lease generation, so a running cell gets 409 on its next cell API call and stops. That is the same fence as Review Focus 2.
+- Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate` and `parseRepoConfig` from Task 9.
+- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>` and `POLL_INTERVAL_MS = 300_000`.
+- Each `pollOnce` does four things:
+  - lists new and changed eligible items from the cursor;
+  - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
+  - runs `gate` on every Eligible item;
+  - reads `prState` for every InReview item.
+- The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
 
 - [ ] **Step 1: Write failing tests** with the fake adapter:
   - A new labelled item becomes an `item` row in Eligible.
@@ -367,9 +434,18 @@ export interface RepoHost {
   - A Done item that loses its label is left alone.
   - The cursor persists in `backlog_source.cursor`, so a second `pollOnce` with no changes upserts nothing.
   - A paused `backlog_source` is skipped.
-  - **Criteria change.** An item in SignOff whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. Its `run.last_stage` resets to `understand`, `features_lock_sha` is cleared, the open sign-off question closes, and the item gets a comment saying the scenarios need a new sign-off.
-  - **Withdrawal.** An InReview item whose label was removed, or that is now `closed`, moves to Abandoned through `withdrawn`. Its PR is closed through `repoHost.closePr` with a comment naming the kept branch.
-  - **Conflict.** An InReview item whose PR reports `mergeable: false` moves to InProgress through `changes_requested`, with `run.last_stage` set so the cell resumes at `address`.
+  - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`. One that fails moves to NotReady through `readiness_failed` with a reasons comment. The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch.
+  - **Criteria change.** An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. In the same transaction:
+    - `item.criteria_hash` takes the new value, so the next poll sees no change and fires nothing more;
+    - a new `run` row starts at `understand` on a new branch, per Run contract 7;
+    - its PR is closed with a comment, and the open question, if any, closes.
+
+    The item gets a comment saying the scenarios need a new sign-off. The same holds from Queued, InProgress, SignOff and NeedsInput, and a second `pollOnce` after the change fires nothing.
+  - **Withdrawal.** An InProgress item returned by `getItem` with the label gone, or with `closed: true`, moves to Abandoned through `withdrawn`, which fences its cell. An InReview item does the same. Either way an open PR is closed by Run contract 8.
+  - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
+    - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
+    - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
+  - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
@@ -386,13 +462,14 @@ export interface RepoHost {
 - Produces:
   - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { definitionOfDone: string; sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `definitionOfDone: "DoD.md"`, `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
-  - `gate(item: FactoryItem, ctx: { dodExists: boolean; repoKnown: boolean; openDeps: string[]; maxSize: number | null; judge: (item: FactoryItem) => Promise<string> }): Promise<{ ready: boolean; reasons: string[] }>`
+  - `gate(item: FactoryItem, ctx: { dodExists: boolean; configValid: boolean; repoKnown: boolean; openDeps: string[]; maxSize: number | null; judge: (item: FactoryItem) => Promise<string> }): Promise<{ ready: boolean; reasons: string[] }>`
   - Tests pass a fake `judge`. The real one, `haikuJudge`, comes in Task 11.
 
 - [ ] **Step 1: Write failing tests:**
   - `parseRepoConfig(null)` throws `ConfigError("bdd")`. A repo with no config can't run BDD, so it can't be ready.
   - `gate` rule checks run first, and the judge isn't called when any rule fails. Rules:
     - The DoD file is missing: "No DoD.md in this repo".
+    - The repo config is missing or invalid: "No valid .factory/config.yml in this repo".
     - There are zero acceptance criteria.
     - The size is over `maxSize`.
     - There is an open dependency, and the reason names it.
@@ -416,10 +493,10 @@ export interface RepoHost {
 **Interfaces:**
 - Produces:
   - `classify(ndjson: string): Map<string, { name: string; tags: string[]; verdict: "red" | "green" | "crash"; reason: string }>`, keyed by pickle id.
-  - `redGate(results): { ok: boolean; findings: string[] }`, which is ok only when every scenario is red.
-  - `greenGate(results): { ok: boolean; findings: string[] }`, which is ok only when every scenario is green.
-  - `traceability(results, criteriaCount: number): string[]`, which lists every `@ac-N` with no scenario.
-  - `matchesLock(repoDir: string, lockSha: string, glob: string): Promise<boolean>`
+  - `redGate(results, pbiTag: string): { ok: boolean; findings: string[] }`, which is ok only when every scenario tagged `pbiTag` is red. Per Run contract 4, other scenarios are ignored here.
+  - `greenGate(results): { ok: boolean; findings: string[] }`, which is ok only when every scenario in the suite is green.
+  - `traceability(results, criteriaCount: number, pbiTag: string): string[]`, which lists every `@ac-N` with no scenario tagged `pbiTag`.
+  - `matchesLock(repoDir: string, lockSha: string, files: string[]): Promise<boolean>`, which diffs only the locked files.
 
 - [ ] **Step 1: Write fixtures.** Hand-write small Cucumber Messages streams covering:
   - a Then step `FAILED`, which is red;
@@ -432,12 +509,13 @@ export interface RepoHost {
   Statuses come from `TestStepResult.status` (`UNKNOWN`, `PASSED`, `SKIPPED`, `PENDING`, `UNDEFINED`, `AMBIGUOUS`, `FAILED`). Step kind comes from the pickle step `type` (`Context`, `Action` or `Outcome`). Both are defined in `cucumber/messages` `jsonschema/messages.schema.json`.
 - [ ] **Step 2: Write failing tests.** Each fixture maps to the verdict above.
   - `redGate` fails with the finding "scenario passes before any behaviour exists: <name>" when any scenario is green at Red, which is spec §6 Red proof.
-  - `traceability` with three criteria and scenarios tagged only `@ac-1` and `@ac-3` returns `["@ac-2"]`.
-  - `matchesLock` returns false after a test commit edits a locked `.feature` file. It returns true after a commit that only adds a step definition.
+  - `traceability` with three criteria and `@pbi-482` scenarios tagged only `@ac-1` and `@ac-3` returns `["@ac-2"]`, even when an `@pbi-481` scenario carries `@ac-2`.
+  - **Second item.** `redGate(results, "@pbi-482")` is ok when the `@pbi-482` scenarios are red and an earlier item's `@pbi-481` scenarios are green. This is the case that would otherwise block every item after the first.
+  - `matchesLock` returns false after a test commit edits a locked `.feature` file. It returns true after a commit that only adds a step definition, and true after a merge that adds another item's feature file.
 - [ ] **Step 3: Run the tests.** Expected: FAIL.
 - [ ] **Step 4: Implement.**
   - **`classify`.** Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`. A scenario is red when its first non-`PASSED` step is `FAILED` and of type `Outcome`.
-  - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <glob>` through `execFile`.
+  - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`.
 - [ ] **Step 5: Run the tests.** Expected: PASS.
 - [ ] **Step 6: Commit** `feat(bdd): red and green from Cucumber Messages, lock check`.
 
@@ -456,12 +534,12 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string };
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
-  maxTurns?: number; tools: boolean; signal: AbortSignal }): Promise<AgentResult>;
+  maxTurns?: number; mode: "cell" | "judge"; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
 export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; // raw reply; gate() parses it
 ```
 
-  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `tools: false`. Its prompt treats the item text as requirements to weigh and never as commands. It asks for `{"ready":bool,"reasons":[],"flags":[]}` on the last line, where `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires.
+  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `mode: "judge"`. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt treats the item text as requirements to weigh and never as commands. It asks for `{"ready":bool,"reasons":[],"flags":[]}` on the last line, where `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires.
 
 - [ ] **Step 1: Write failing `foldMessages` tests** against arrays of SDK-shaped messages:
   - A `result` with `subtype: "success"` gives `ok: true`, the result text, and `costUsd` as the sum of `modelUsage[*].costUSD`. `tokensIn` sums `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`, and `tokensOut` sums `outputTokens`.
@@ -470,12 +548,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
   - A `result` with `subtype: "error_max_turns"` gives `ok: false` and keeps the cost.
   - `transcript` is the JSONL of every message, for Blob upload.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement `runAgent`.** Call `query({ prompt, options })` with these options:
-  - `model`, `cwd`, `maxTurns` and the `AbortController` behind `signal`.
+- [ ] **Step 3: Implement `runAgent`.** Call `query({ prompt, options })` with `model`, `cwd`, `maxTurns` and the `AbortController` behind `signal`, plus the options for its mode.
+
+  In `cell` mode:
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
   - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
   - `sandbox` from the Task 2 Step 9 result: the egress allowlist when the sandbox can start, otherwise omitted, with the pending decision recorded.
-  - When `tools` is false, `disallowedTools: ["*"]`.
+
+  In `judge` mode:
+  - `settingSources: []`, so nothing on disk loads;
+  - no `permissionMode`, so the default applies;
+  - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)).
+
+  Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings.
 
   The spike may show that the SDK refuses the OAuth token. In that case `runAgent` spawns `claude -p --output-format stream-json --verbose`, with the same model and cwd, and feeds the parsed lines to `foldMessages`. The CLI emits the same message shapes, so nothing else changes.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
@@ -495,21 +580,32 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
-  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.last_stage`. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
-  - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string }, prUrl?: string, resumeAt?: string, lockSha?: string }`.
-  - `POST /transcript-url` takes `{ stageId, attempt }` and returns a write-only SAS URL for `transcripts/<runId>/<stageId>-<attempt>.jsonl`, valid for 15 minutes.
+  - `GET /context` returns the fields Run contract 5 lists.
+  - `POST /pr` takes `{ prNumber, prUrl }` and records them on the run, so the control plane starts polling that PR's checks (Run contract 6).
+  - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none" }` for that commit on the run's branch, from the control plane's own poll in Run contract 6. The first request for a sha starts its 10-minute `none` clock. A sha that isn't on the run's branch gets 400.
+  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.next_stage` per Run contract 1. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
+  - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string }, scenariosSha?: string, lockedFiles?: string[], prNumber?: number, prUrl?: string, resumeAt?: string, tier?: "Low" | "Medium" | "High", tierReasons?: string[] }`. A cell may send only `scenarios_written`, `blocked`, `pr_opened`, `retries_exhausted` and `usage_limited`, and any other event gets 400.
+  - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
 - `runToken(secret: string, runId: string, generation: number): string`
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
   - With the current generation's token, `/stage` writes one `stage_run` row.
-  - **Review Focus 2.** After a re-claim bumps the generation, each of the five routes with the old token returns 409, and the `stage_run`, `event` and `item` tables are unchanged.
-  - `/transition` with `scenarios_written` and a `sign_off` question moves InProgress to SignOff, inserts the question, releases the lease, and so frees the WIP slot.
+  - **Review Focus 2.** After a re-claim bumps the generation, each of the eight routes with the old token returns 409, and the `stage_run`, `event` and `item` tables are unchanged.
+  - **End-of-stage order.** Calls in Run contract 9 order all succeed. A `/stage` sent after the stage's own `/transition` gets 409, which is why the order is fixed.
+  - `/transition` with `scenarios_written`, a `sign_off` question, `scenariosSha` and `lockedFiles` moves InProgress to SignOff. It inserts the question, stores the sha and files on the run, and releases the lease.
+  - **Every exit releases.** Each of `pr_opened`, `blocked`, `retries_exhausted` and `usage_limited` leaves the item with no `lease_owner` and a generation one higher, per Run contract 2. `pr_opened` with `tier` writes `run.risk_tier` and `run.tier_reasons`.
+  - `/context` after an approved sign-off returns `nextStage: "red"`, the `lockSha` and the `lockedFiles`.
   - `/transition` with `retries_exhausted` moves to Failed, and the event payload lists every attempt from `stage_run`.
   - `/lease` returns `stop: true` while a factory `pause` override is active.
   - `/stage` with `usage: { utilization: 0.72, resetsAt }` sets `usage_paused_until` to that reset time, and with `utilization: 0.5` leaves it unchanged.
-  - **Status mirroring.** Every transition mirrors to the PBI through `adapter.setStatus`, using the source's field map, as spec §5 requires. SignOff, NeedsInput and Failed also post a comment that names what the item is waiting for. Assert this against the fake adapter.
+  - **Board mirroring.** Run contract 8, asserted against the fake adapter:
+    - each transition writes `statusFor[to]`, and a null entry writes nothing;
+    - every claim calls `claim`, including the re-claim of a revived item, and Done, Failed and Abandoned call `release`;
+    - `pr_opened` calls `linkPr`;
+    - Done closes the item;
+    - SignOff, NeedsInput and Failed also post a comment that names what the item is waiting for.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement** the routes in `src/http/server.ts` and mount them first, so they work without a dashboard session. Ignore every `x-ms-client-principal*` header on these routes. Put the status mirroring in one `onTransition(itemId, from, to)` hook that the store calls after commit, so the watcher and the dashboard mirror the same way.
+- [ ] **Step 3: Implement** the routes in `src/http/server.ts` and mount them first, so they work without a dashboard session. Ignore every `x-ms-client-principal*` header on these routes. Register the board mirroring through `onTransition` from Task 4, so the watcher, the scheduler and the dashboard all mirror the same way.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(control): cell API fenced by lease generation`.
 
@@ -537,25 +633,29 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
   - **Kill switch.** A `kill` override, or `killFlag: true`, makes `tick` call `stop` for every execution with a live lease and start nothing.
   - **Drain and pause.** Neither starts anything. Under drain the running cell's `/lease` reply has `stop: false`, and under pause it has `stop: true`.
   - **Hold.** A `hold` item override keeps that item out of `claimNext`.
-  - **Stale branch.** The env passed to `start` includes `BASE`, the target repo's default branch, so the cell can merge it in at claim.
+  - **Cell env.** The env passed to `start` holds exactly the six variables in Run contract 5, so a cell learns its base, branch and lock only from `/context`.
+  - **CI poll.** Each `tick` refreshes the cached check status of every open factory PR head and every Accepted item's `merge_sha`, through the App's `RepoHost`. A merge commit with no checks reported 60 minutes after the merge moves the item to Failed through `dod_failed`, with a comment that CI didn't run on main.
   - **Stop a run.** A `stop_run` override stops the execution, moves the item to Failed through `overrideTo`, sets `held = true`, and comments the branch name on the PBI.
-  - **Usage limit.** An item with `run.resume_at` in the future is skipped, and nothing at all starts before the earliest `resume_at`, as spec §7 requires.
+  - **Usage limit.** An item that came back through `usage_limited` has `run.resume_at` in the future. It is skipped, and nothing at all starts before the earliest `resume_at`, as spec §7 requires.
   - **Expiry.** Item overrides end when the item reaches Done, Failed or Abandoned.
   - **Timeouts.** SignOff and NeedsInput items whose open question is older than 5 days move to Abandoned through `timed_out`.
   - **Reminders.** A question 2 days old with `reminders_sent = 0` gets a comment on the item and `reminders_sent = 1`. At 4 days it gets the second. A second `tick` the same hour sends nothing more.
-  - **Waiting on people.** With 3 open questions and sign-offs plus InReview PRs, and `review_capacity = 3`, `tick` starts nothing, although a slot is free. When one is answered, the next `tick` starts one item.
+  - **Waiting on people.** With one SignOff, one NeedsInput and one InReview item, all unanswered, and `review_capacity = 3`, `tick` starts no Queued item, although a slot is free. These cases follow:
+    - When the SignOff item is approved, the next `tick` claims that answered item, because answered items are always claimable and no longer count (Run contract 3).
+    - With three answered SignOff items and nothing else waiting, `tick` claims one of them, so answering never deadlocks.
+    - When an unanswered item times out to Abandoned instead, the count drops to 2, and a Queued item starts.
   - **Usage reserve.** With `usage_paused_until` in the future, `tick` starts nothing, and running cells' `/lease` replies keep `stop: false`, so they finish.
-  - **Re-queue.** A `requeue` item override on a Failed or Abandoned item moves it to Queued through `requeued`. An Abandoned item whose question is still open goes back to waiting, with `asked_at` reset to now and `reminders_sent` reset to 0.
+  - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Two variants:
+    - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
+    - A Failed item whose PR already merged starts a new run on a new branch, per Run contract 7.
+  - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement.** Right after a claim that opens a new run, the scheduler records:
-  - `run.repo_id`;
+- [ ] **Step 3: Implement.** A run can be created by a claim, by `criteria_changed` in Task 8, or by a re-queue after a merge. So the scheduler pins on the first claim of any run whose `config_sha` is still null, and records:
+  - `run.repo_id` and `run.run_number`;
   - `run.config_sha`, from `RepoHost.defaultBranchSha`;
   - `run.sop_version`, from the loaded SOP file.
 
-  The cell reads both files at those pins for the whole run, as spec §6 requires. The cell env passed to `start` is:
-  - `RUN_ID`, `ITEM_ID`, `GENERATION`, `RUN_TOKEN`, `CONTROL_URL` and `REPO`;
-  - `BRANCH=factory/pbi-<externalId>`;
-  - `RESUME_FROM`, set to `run.last_stage`.
+  The cell reads both files at those pins for the whole run, as spec §6 requires. The cell env passed to `start` is the six variables in Run contract 5, with `RESUME_FROM` set to `run.next_stage`.
 
   `wip_policy` holds one row, `mode = 'fixed'` with `current_wip = 1`, and the scheduler reads it each tick.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
@@ -570,44 +670,56 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
 - Modify: `cell/Dockerfile`
 
 **Interfaces:**
-- Consumes: `runAgent`, `classify`, `redGate`, `greenGate`, `traceability`, `matchesLock`, `loadSop`, `parseRepoConfig`, and the cell API from Task 12 through `api-client.ts`.
-- Produces: `runCell(deps: { api: CellApi; agent: typeof runAgent; git: Git; sop: Sop; config: RepoConfig; resumeFrom: string | null; now: () => Date }): Promise<"done" | "waiting" | "failed" | "stopped" | "limited">`
+- Consumes: `runAgent`, `classify`, `redGate`, `greenGate`, `traceability`, `matchesLock`, `loadSop`, `parseRepoConfig`, `cellRepoHost` from Task 7, and the cell API from Task 12 through `api-client.ts`.
+- Produces:
 
-  Also `type Git = { clone(url: string, branch: string): Promise<string>; mergeBase(base: string): Promise<"clean" | "conflict">; commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> }`. `runCell` also takes `repoHost: RepoHost` and `base: string`.
+```ts
+type CellContext = { externalId: string; title: string; acceptanceCriteria: string[]; nextStage: string;
+  decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
+  lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
+  configSha: string; sopVersion: string };            // the body of GET /context (Run contract 5)
+type Git = { clone(url: string, branch: string): Promise<string>; mergeBase(base: string): Promise<"clean" | "conflict">;
+  commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> };
+function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent; git: Git;
+  repoHost: ReturnType<typeof cellRepoHost>; sop: Sop; config: RepoConfig; now: () => Date })
+  : Promise<"done" | "waiting" | "failed" | "stopped" | "limited">;
+```
 
-  Before the first stage of every claim, `runCell` calls `git.mergeBase(base)`. On `conflict` it runs the coding agent once to resolve it; a conflict still left goes to `blocked` with the conflicting paths.
+  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
 
 Stage behaviour, from spec §6 rows 1 to 7:
 
 | Stage | Exit check in code | On failure |
 |---|---|---|
 | understand | Agent output lists each criterion with an `@ac-N` tag | `blocked`, with the agent's question |
-| specify | `bdd.parse` exits 0, and `traceability()` is empty. Feature files are committed and posted on the PBI with dedupe key `scenarios:<sha>` | 1 retry, then `blocked` |
-| sign-off | The engine posts `scenarios_written` with a `sign_off` question and returns `waiting`. On resume, an approval sets `lockSha`, and "changes asked" goes back to specify | none |
-| red | `bdd.run` and then `redGate(classify(report))` is ok, and `matchesLock` is true. The report is uploaded as red evidence | 2 retries, then `blocked` |
-| green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass | 3 retries, then `retries_exhausted` |
+| specify | Every feature file carries the item's `@pbi` tag, `bdd.parse` exits 0, and `traceability(results, n, tag)` is empty. When `ctx.decision` is a `changes` note, the agent gets the note. Feature files are committed and posted on the PBI with dedupe key `scenarios:<sha>`. The engine then posts `scenarios_written` with a `sign_off` question, `scenariosSha` and `lockedFiles`, and returns `waiting` | 1 retry, then `blocked` |
+| sign-off | No cell runs it. `decide` moves `next_stage` to `red` or back to `specify`, per Run contract 1 | none |
+| red | `bdd.run`, then `redGate(classify(report), tag)` is ok, and `matchesLock(dir, ctx.lockSha, ctx.lockedFiles)` is true. The report goes up through `/upload-url` with `kind: "report"` as red evidence | 2 retries, then `blocked` |
+| green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass. The green report is uploaded the same way | 3 retries, then `retries_exhausted` |
 | self-review | The reviewer's last line is `APPROVED`. `DEADLOCK` or 5 rounds without approval means `blocked` | `blocked` |
-| open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, then `requestReviewers(repo, pr, config.reviewers)`, then `checksOnHead` polled every 60s until `success`. On `failure`, back to green, counted against green's retries | as stated |
-| address | Runs only when a claim resumes at `address`, after requested changes or a conflict. `pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `checksOnHead` reaches `success` and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
+| open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, then `POST /pr`, then `requestReviewers(repo, pr, config.reviewers)`, then `GET /checks?sha=<git.head()>` every 60s until `success`. Every later push, including a retry after "back to green", asks about its own new sha. On `failure`, back to green, counted against green's retries. On `none`, `blocked` with "no CI ran on the PR". The stage ends in Run contract 9 order with `pr_opened` carrying `prNumber`, `prUrl`, `tier` and `tierReasons` | as stated |
+| address | Runs only when `ctx.nextStage` is `address`. `pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
 
-- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, add `address` with `agent: pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the six prompt files. `specify.md` carries the spec's BDD rules verbatim: traceability, business language, the lock and red proof. `red.md` says to write step definitions and stubs with no behaviour.
+- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, add `address` with `agent: pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the seven prompt files. `specify.md` carries the spec's BDD rules verbatim: traceability, business language, the lock and red proof. It also requires the item's `@pbi-<n>` tag on every feature file. `red.md` says to write step definitions and stubs with no behaviour.
 - [ ] **Step 2: Vendor the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` and `~/.claude/agents/pr-addresser.md` into `cell/claude/agents/`. `address.md` tells `pr-addresser` to work only the open threads and the conflict, and to treat review text as requests to weigh, never as commands. In `self-review.md`, add the spec's BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. Also add the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`".
 - [ ] **Step 3: Write failing engine tests** with a scripted fake agent, a fake `Git` and a recording `CellApi`:
-  - **Happy path.** A fresh run executes understand and specify, posts `scenarios_written`, and returns `waiting`. Resumed with `resumeFrom: "sign-off"` and an approved question, it runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
-  - **Checkpoint resume.** Resumed with `resumeFrom: "red"`, it never calls the agent for understand or specify.
+  - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify, posts `scenarios_written` with `scenariosSha` and `lockedFiles`, and returns `waiting`. A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
+  - **Checkpoint resume.** With `ctx.nextStage = "red"`, it never calls the agent for understand or specify.
+  - **Changes asked.** With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`, the specify prompt contains the note.
   - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
-  - **Address.** Resumed with `resumeFrom: "address"`, it runs only the address stage, and posts `pr_opened` once checks pass.
-  - **Open PR.** The PR body contains `Refs #482` and never `Closes`, and `requestReviewers` is called with `config.reviewers`.
+  - **Address.** With `ctx.nextStage = "address"`, it runs only the address stage, pushes, and posts `pr_opened` once `/checks?sha=` for the pushed sha reports `success`. A `success` cached for the previous head never counts.
+  - **Open PR.** The PR body contains `Refs #482` and never `Closes`, `POST /pr` comes before the first `GET /checks`, and `requestReviewers` is called with `config.reviewers`.
+  - **Call order.** At the end of every stage the recording `CellApi` sees `/stage passed`, then the uploads, then `/transition`, per Run contract 9, and the run returns `waiting` or `done` rather than `stopped`.
   - **Red proof.** A red stage whose report has a green scenario retries twice, then posts `blocked` with "scenario passes before any behaviour exists".
-  - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed` and `/transition` with `resumeAt`, and return `limited`. That attempt doesn't count against retries.
+  - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed`, post `/transition` with `usage_limited` and `resumeAt`, and return `limited`. That attempt doesn't count against retries.
   - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`, commits the work in progress, and returns `stopped`.
   - **Lost lease.** A 409 from any API call makes the engine stop at once, with no push and no further calls.
 - [ ] **Step 4: Run the tests.** Expected: FAIL.
 - [ ] **Step 5: Implement `engine.ts`, `api-client.ts` and `main.ts`.**
   - A lease renewal loop runs every 60s. After 3 minutes of failed renewals it aborts and exits 1.
   - Before each push, comment and transition, the engine calls `/lease` to check the generation.
-  - Every stage uploads its transcript through `/transcript-url`.
-  - `main.ts` clones with a token from `/github-token`, refreshing it 5 minutes before `expiresAt`. It reads `.factory/config.yml` at the pinned `config_sha` and the SOP at the pinned version, then runs `runCell`.
+  - Every stage uploads its transcript through `/upload-url` with `kind: "transcript"`.
+  - `main.ts` reads `GET /context`, clones `ctx.branch` with a token from `/github-token`, refreshing it 5 minutes before `expiresAt`, and creates the branch from `ctx.base` when it doesn't exist yet. It reads `.factory/config.yml` at `ctx.configSha` and the SOP at `ctx.sopVersion`, then runs `runCell`.
 - [ ] **Step 6: Update `cell/Dockerfile`.** Use `node:26.13.0-bookworm`, plus `git`, `bubblewrap` and `socat` for the sandbox. Copy `cell/claude/agents` into `/home/factory/.claude/agents` and run as a non-root `factory` user.
 - [ ] **Step 7: Run the tests.** Expected: PASS.
 - [ ] **Step 8: Commit** `feat(cell): SOP engine for stages 1 to 7 and address`.
@@ -635,8 +747,10 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - `POST /overrides` needs operator.
     - `POST /users` needs owner.
     - `GET /phase0` is the exit report.
-  - `scripts/seed-owner.ts` takes `--provider`, `--subject`, `--email` and `--github-login`, and inserts the first owner.
+  - `scripts/seed-owner.ts` takes dash-free words `provider=<p>`, `subject=<id>`, `email=<e>` and `github-login=<login>`, plus an optional bare `product-owner`, and inserts the first owner. It exits 1 on any other word. It runs only inside the migrate job (Task 2).
   - `decide(c, d: { itemId: string; userId: string; kind: "approve" | "changes" | "answer"; text: string; via: "dashboard" | "comment" }): Promise<"applied" | "ignored" | "forbidden">`. The routes and the webhook's `comment` events both call it, so the two channels can't drift.
+    - **Roles.** `decide` owns the role rules. `approve` and `changes` need `product_owner`, and `answer` needs operator or product owner. The routes only check that the user is signed in and allowlisted.
+    - **Effects.** It answers the open question and applies Run contract 1. On approve it copies `scenarios_sha` into `features_lock_sha`. On an Abandoned item it revives the item through `requeued`.
   - `parseCommand(body: string): { kind: "approve" | "changes" | "answer"; text: string } | null`, which reads only a leading `/approve`, `/changes` or `/answer`.
 
 - [ ] **Step 1: Write failing tests:**
@@ -649,7 +763,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Run detail.** Run detail shows:
     - the SOP version and config sha;
     - the signed-off feature files at `features_lock_sha`;
-    - each scenario's red and green verdicts;
+    - each scenario's red and green verdicts, read by running `classify` on the reports at `stage_run.report_ref`;
     - per stage: attempts, model, tokens, cost and a transcript link;
     - the shadow risk tier with its reasons.
   - **Token expiry.** A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
@@ -658,8 +772,10 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - The same comment from an unmapped login, or from a user who isn't a product owner, returns `forbidden`. The item gets one reply saying who can sign off, and nothing changes.
     - A comment with no leading command is `ignored`.
     - `/answer` on an Abandoned item's open question answers it and moves the item to Queued through `requeued`.
+    - A late `/approve` on an item Abandoned in SignOff does the same, with `next_stage = "red"` and the lock set.
+    - `/answer` from a mapped user with only the viewer role returns `forbidden`, exactly as the dashboard route does for that user.
   - **Floor strips.** Floor shows:
-    - "Waiting on you", with every open question and sign-off oldest first, plus each InReview PR and how long it has waited;
+    - "Waiting on you", with every SignOff and NeedsInput item oldest first, plus each InReview PR and how long it has waited, which matches the count in Run contract 3;
     - "Next up", the first five items `claimNext` would pick;
     - "Not ready", each NotReady item with its readiness reasons;
     - the waiting count beside the WIP number, as "3 of 3 waiting".
@@ -669,7 +785,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - [ ] **Step 3: Implement.**
   - The server is plain `node:http` with a route table and HTML from template literals through one `escapeHtml`.
   - `views.ts` defines its colours as CSS custom properties with a dark-mode override, and every form control has a label.
-  - `main.ts` wires the pool, `migrate`, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server.
+  - `main.ts` wires the pool, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server. It never runs `migrate`, because it connects as `factory_app`, which has no DDL rights. Migrations run only in the migrate job from Task 2.
   - The kill switch is `FACTORY_KILL=1` in the app's env or a `kill` override from the dashboard. Either one stops every cell on the next tick.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(dashboard): sign-in allowlist, Floor, Run detail, overrides`.
@@ -705,8 +821,8 @@ Stage behaviour, from spec §6 rows 1 to 7:
 **Files:**
 - Create: `src/e2e.test.ts`
 - Modify: `src/watcher/webhook.ts` for these mappings:
-  - `pr_merged` moves InReview to Accepted and records `mergeSha`. When `checksOnSha(repo, mergeSha)` reaches `success`, through `checks_completed` or the poller, the item moves to Done through `dod_verified`. The board status becomes Done and the factory closes the item. On `failure` the item moves to Failed through `dod_failed`, with a comment linking the failed run. Phase 0 files no bug PBI.
-  - `review` with `changes_requested` moves InReview to InProgress through `changes_requested`, resuming at `address`.
+  - `pr_merged` moves InReview, or InProgress during address, to Accepted through `merged`, and stores `run.merge_sha`. When the cached check status of `merge_sha` reaches `success`, through `checks_completed` matched on `merge_sha` or the poll in Task 13, the item moves to Done through `dod_verified`. Run contract 8 then sets Done on the board and closes the item. On `failure` the item moves to Failed through `dod_failed`, with a comment linking the failed run. Phase 0 files no bug PBI.
+  - `review` with `changes_requested` and a `submittedAt` after `run.reviews_seen_at` moves InReview to Queued through `changes_requested`, with `next_stage = "address"`, per Run contract 10. An older review is ignored.
   - `pr_closed` without a merge, by anyone but the factory, moves the item to Abandoned through `withdrawn`.
 
 **Interfaces:**
@@ -717,7 +833,8 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - Eligible goes to Queued with a fake judge reply of `ready`.
     - Queued goes to InProgress and then SignOff.
     - The product owner approves, and SignOff goes to InProgress and then InReview with a PR URL.
-    - A `review` webhook with `changes_requested` sends it to InProgress, and the address stage returns it to InReview.
+    - A `review` webhook with `changes_requested` sends it to Queued. The next claim runs the address stage, which returns it to InReview.
+    - **Second item.** A second item is then taken through the same path to Done, so its Red stage runs with the first item's scenarios already green on main.
     - A `pr_merged` webhook moves InReview to Accepted, and green checks on the merge commit move it to Done. The fake adapter shows status Done and `closed: true`.
   - **Event trail.** The `event` table holds every transition in order, and `/phase0` reports 1 merged PR and its cost.
   - **Sign-off by comment.** A copy of the full path signs off with a `/approve` comment instead of the dashboard, and reaches the same states.
@@ -735,7 +852,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Modify: `infra/main.bicep`, swapping the spike image for the control plane image, `deploy.yml`
 - Create: `docs/superpowers/runbooks/phase-0.md`
 
-- [ ] **Step 1: Deploy through `deploy.yml`.** Then run `scripts/seed-owner.ts` once against the deployed database with your Microsoft identity, and mark yourself `product_owner`.
+- [ ] **Step 1: Deploy through `deploy.yml`.** Then seed yourself as the first owner and product owner by starting the migrate job with your sign-in details: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --command node src/store/migrate-cli.ts --args seed-owner provider=microsoft subject=<id> email=<you> github-login=<login> product-owner`. The words after `--args` carry no leading dashes, because az would read a dash-prefixed word as its own option and reject the call. Then confirm the execution succeeded and that you can sign in past the no-access page. Take the subject id from the Task 2 Step 5 spike record.
 - [ ] **Step 2: Create the Phase 0 target repo.**
   - Add `DoD.md`, `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, a CODEOWNERS file, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
   - In the org project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.

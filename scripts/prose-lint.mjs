@@ -2,7 +2,7 @@
 // Mechanical prose rules from ~/.claude/CLAUDE.md "Writing style", for .md and .html.
 // Usage: node prose-lint.mjs <file>...   or as a PostToolUse hook (reads tool JSON on stdin).
 // Exit 2 with findings on stderr, so a hook feeds them back to Claude. Exit 0 when clean.
-// A copy lives in software-factory/scripts/prose-lint.mjs for CI; keep the two in sync.
+// Two copies exist, the hook at ~/.claude/hooks/prose-lint.mjs and the CI copy at software-factory/scripts/prose-lint.mjs. Keep them in sync.
 import { readFileSync, existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

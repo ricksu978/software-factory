@@ -282,25 +282,28 @@ stateDiagram-v2
   InProgress --> NeedsInput: agent blocked
   NeedsInput --> InProgress: human answers
   InProgress --> InReview: PR open, CI green
-  InReview --> InProgress: changes requested, or a conflict
-  InReview --> Accepted: approvals met
+  InReview --> Queued: changes requested, or a conflict
+  InReview --> Accepted: approvals met, or merged by a person
+  InProgress --> Accepted: merged during address
   Accepted --> Done: DoD verified after merge
   InProgress --> Failed: retry budget spent
   NeedsInput --> Abandoned: no answer in 5 days
   SignOff --> Abandoned: no answer in 5 days
-  InProgress --> Queued: lease expired
+  InProgress --> Queued: lease expired, or a usage limit
   Accepted --> Failed: DoD fails after merge, bug PBI filed
   Failed --> Queued: human re-queues
   Abandoned --> Queued: re-queued, or a late answer
+  Abandoned --> SignOff: re-queued, sign-off still open
+  Abandoned --> NeedsInput: re-queued, question still open
   Done --> [*]
 </pre>
   <ul>
-    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. Each lease carries a generation number that goes up on every claim. A cell checks its generation before every push, comment and state write, and exits once it no longer holds the lease. It also stops itself after 3 minutes of failed renewals, before the 5-minute expiry, so an old cell is gone before a new one starts. <span class="tag call">My call</span></li>
+    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. Each lease carries a generation number that goes up on every claim, and again whenever the item leaves InProgress. A cell checks its generation before every push, comment and state write, and exits once it no longer holds the lease. It also stops itself after 3 minutes of failed renewals, before the 5-minute expiry, so an old cell is gone before a new one starts. <span class="tag call">My call</span></li>
     <li><b>Needs input.</b> The agent posts its question as a comment on the item and in the dashboard. You answer in either place. On the item, a comment that starts with <code>/answer</code> counts, and only when its GitHub login maps to a user on the dashboard's allowlist, so ordinary discussion on the item is never taken as an answer. The item gives up its WIP slot while it waits, so one stuck item can't stall the line. The factory reminds on the item and on Floor at day 2 and day 4, and after 5 days with no answer the item is Abandoned. <span class="tag call">My call</span></li>
     <li><b>Sign-off.</b> Scenarios wait for the Product Owner the same way. On the item, a product owner comments <code>/approve</code>, or <code>/changes</code> followed by a note. The sign-off view lists each acceptance criterion beside the scenarios tagged with it and flags any criterion with none. Reminders and the 5-day limit work as for Needs input.</li>
-    <li><b>Waiting on people.</b> An item that waits for a person holds no slot, so the WIP number alone doesn't bound the work landing on people. In every concurrency mode the scheduler starts nothing new while the items waiting on a person reach <code>review_capacity</code>, default 3. Those are open questions, sign-offs and factory PRs waiting on a reviewer. Floor shows the count beside the WIP number. <span class="tag call">My call</span></li>
-    <li><b>Coming back.</b> A Failed or Abandoned item returns to Queued when an operator re-queues it, and an Abandoned item also returns when its question gets a late answer. It resumes at its last checkpoint. An item re-queued while its question is still open goes back to waiting, with a fresh 5-day clock.</li>
-    <li><b>Backlog changes.</b> The watcher compares each item in the factory with the version the run started from. When the acceptance criteria change, the factory comments on the item and sends it back to Specify, and the signed-off scenarios are unlocked for a new sign-off. When the opt-in label is removed or the item is closed, the factory stops the run, frees the slot, closes the factory's PR with a comment, keeps the branch and moves the item to Abandoned. Both moves are logged as system events. <span class="tag call">My call</span></li>
+    <li><b>Waiting on people.</b> An item that waits for a person holds no slot, so the WIP number alone doesn't bound the work landing on people. In every concurrency mode the scheduler starts no new item while the items waiting on a person reach <code>review_capacity</code>, default 3. Those are items whose question or sign-off is still unanswered, plus factory PRs waiting on a reviewer. An item whose answer has arrived can always resume, so answering never stalls the line. Floor shows the count beside the WIP number. <span class="tag call">My call</span></li>
+    <li><b>Coming back.</b> A Failed or Abandoned item returns to Queued when an operator re-queues it, and an Abandoned item also returns when its question gets a late answer. It resumes at its last checkpoint, except when its PR has already merged; then it starts a new run on a new branch. An item re-queued while its question is still open goes back to waiting, with a fresh 5-day clock.</li>
+    <li><b>Backlog changes.</b> The watcher compares each item in the factory with the version the run started from. When the acceptance criteria change, the factory comments on the item, closes its PR if one is open, and starts a new run from Understand on a new branch from the base, which leads to a new sign-off. A fresh branch matters because the old one already holds code, so new scenarios would pass before Red. When the opt-in label is removed or the item is closed, the factory stops the run, frees the slot, closes the factory's PR with a comment, keeps the branch and moves the item to Abandoned. Both moves are logged as system events. <span class="tag call">My call</span></li>
     <li><b>Board status.</b> The factory owns the status field of the items it holds. The project's built-in workflows that set status, such as item closed and pull request merged, stay off. A factory PR references its item with <code>Refs #n</code>, so a merge doesn't close it, and the factory closes the item when it reaches Done. <span class="tag yours">Yours</span></li>
     <li><b>Assignment.</b> While an item is in the factory, it's assigned to the factory's bot account, so no person picks it up at the same time. Where the git host can't assign the bot, a <code>factory:in-progress</code> label does the same job.</li>
     <li><b>Overrides.</b> A dashboard override can move an item along paths the diagram doesn't draw, such as holding a queued item or sending a reviewed one back to Specify. Each such move is logged as an override event. See §8.</li>
@@ -355,7 +358,7 @@ Feature: Export invoices to CSV
         | 99.00  | USD      |</pre>
   <h3>BDD rules</h3>
   <ul>
-    <li><b>Traceability.</b> Every acceptance criterion gets a tag, and at least one scenario carries it. Stage 2 fails on any criterion without a scenario.</li>
+    <li><b>Traceability.</b> Every acceptance criterion gets a tag, and at least one scenario carries it. Stage 2 fails on any criterion without a scenario. Each feature file also carries its PBI's tag, such as <code>@pbi-482</code>. Red and the traceability check look only at that PBI's scenarios, and the lock covers only its files. Green runs the whole suite, so earlier Increments' scenarios keep guarding against regressions.</li>
     <li><b>Business language.</b> Scenarios describe behaviour the Product Owner can read, with no selectors, SQL or class names. Implementation detail belongs in step definitions.</li>
     <li><b>The lock.</b> At sign-off the factory records the commit of the feature files. After that the build may add step definitions and unit tests, but it may not edit, skip or tag out a locked scenario. Every later gate compares the feature files against the lock. A scenario that turns out wrong goes back to Specify and through sign-off again. <span class="tag call">My call</span></li>
     <li><b>Red proof.</b> A scenario that passes before any behaviour exists tests nothing new, or its steps don't assert. Stage 4 reports it as a finding and doesn't proceed.</li>
@@ -391,7 +394,7 @@ sensitive_paths:                # each match needs at least one person
   - "src/billing/**"
 reviewers:                      # used when the repo has no CODEOWNERS
   - your-org/payments-team
-bdd:                          # this repo's own runner commands
+bdd:                            # this repo's own runner commands
   parse: npm run bdd -- --dry-run
   run: npm run bdd
   report: reports/bdd.ndjson    # Cucumber Messages, written by run
