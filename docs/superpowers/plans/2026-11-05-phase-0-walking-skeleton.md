@@ -49,6 +49,7 @@ These rules hold across every task. A task that touches one of them follows this
    - a passed `specify` leaves it at `sign-off`, which no cell runs;
    - `decide` sets it to `red` on approve, and to `specify` on changes;
    - `changes_requested` sets it to `address`;
+   - `requeued` sets it to `open-pr` when `prState` reports the run's PR closed without a merge, so `openOrUpdatePr` opens a fresh PR from the kept branch;
    - a new run starts it at `understand`.
 2. **Leases and generations.** `lease_generation` goes up by 1 exactly twice in a lease's life: when a claim moves an item into InProgress, and when any transition moves an item out of InProgress. The second bump fences the old cell, so its next cell API call gets 409. Leaving InProgress also clears `lease_owner` and `lease_expires`. `expireLeases` looks only at InProgress items. No other transition touches the generation.
 3. **Waiting on people.** The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered, plus every InReview item. Answered and Abandoned items don't count. The brake gates only claims that start new work: a Queued item with no open run, or whose open run has no `stage_run` row yet. Every other claim resumes work already in flight and is never gated. That covers an answered SignOff or NeedsInput item, and a Queued item back from `changes_requested`, `lease_expired`, `usage_limited` or a late answer. So answering never deadlocks the line, and an address run never waits behind the brake.
@@ -649,6 +650,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
   - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Two variants:
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
     - A Failed item whose PR already merged starts a new run on a new branch, per Run contract 7.
+    - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1.
   - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.** A run can be created by a claim, by `criteria_changed` in Task 8, or by a re-queue after a merge. So the scheduler pins on the first claim of any run whose `config_sha` is still null, and records:
