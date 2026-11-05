@@ -1,0 +1,681 @@
+<title>Software Factory Design</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Public+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: blueprint sheet. Sticky section index on wide screens, one column on phones. */
+:root {
+  --bg: #f4f6f9;
+  --sheet: #ffffff;
+  --ink: #18212d;
+  --muted: #5a6677;
+  --rule: #d7dde6;
+  --accent: #1f5fad;
+  --accent-soft: #e4edf9;
+  --yours: #1d7a4e;
+  --yours-soft: #e2f3ea;
+  --call: #8a5a00;
+  --call-soft: #fbf0d9;
+  --open: #b3261e;
+  --open-soft: #fbe6e4;
+  --code-bg: #eef1f5;
+  --display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --body: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141b; --sheet: #161d27; --ink: #e3e8ef; --muted: #9aa6b6; --rule: #2a3442;
+    --accent: #7fb0ec; --accent-soft: #1c2c42;
+    --yours: #6fd3a0; --yours-soft: #17322a; --call: #f0c060; --call-soft: #3a2f16;
+    --open: #ff8a80; --open-soft: #3d1d1b; --code-bg: #1d2532;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141b; --sheet: #161d27; --ink: #e3e8ef; --muted: #9aa6b6; --rule: #2a3442;
+  --accent: #7fb0ec; --accent-soft: #1c2c42;
+  --yours: #6fd3a0; --yours-soft: #17322a; --call: #f0c060; --call-soft: #3a2f16;
+  --open: #ff8a80; --open-soft: #3d1d1b; --code-bg: #1d2532;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--body);
+  font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 24px); align-self: start; font-size: 14px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; counter-reset: s; }
+nav.toc li { counter-increment: s; }
+nav.toc a { color: var(--muted); text-decoration: none; display: grid; grid-template-columns: 28px 1fr; }
+nav.toc a::before { content: counter(s, decimal-leading-zero); font-family: var(--mono); font-size: 12px; padding-top: 2px; }
+nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent); }
+main { min-width: 0; display: grid; gap: 28px; }
+header.top { display: grid; gap: 12px; padding-bottom: 16px; border-bottom: 2px solid var(--ink); }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(34px, 6vw, 52px); line-height: 1.05; margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 700; font-size: 26px; line-height: 1.2; margin: 0; text-wrap: balance; display: flex; gap: 12px; align-items: baseline; }
+h2 .n { font-family: var(--mono); font-size: 14px; color: var(--accent); font-weight: 600; }
+h3 { font-family: var(--display); font-weight: 700; font-size: 18px; margin: 8px 0 0; }
+p, li { max-width: 70ch; }
+p { margin: 0; }
+.lead { font-size: 18px; }
+section { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: 24px; display: grid; gap: 14px; scroll-margin-top: 24px; min-width: 0; }
+ul, ol { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font-family: var(--mono); font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+pre.code { background: var(--code-bg); padding: 14px 16px; border-radius: 4px; overflow-x: auto; margin: 0; font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+pre.mermaid { background: var(--sheet); margin: 0; overflow-x: auto; text-align: center; }
+blockquote { margin: 0; padding: 10px 16px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 4px 4px 0; }
+blockquote cite { display: block; font-style: normal; font-size: 13px; color: var(--muted); margin-top: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 14px; color: var(--muted); }
+.tag { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; padding: 1px 7px; border-radius: 3px; vertical-align: 2px; white-space: nowrap; }
+.tag.yours { color: var(--yours); background: var(--yours-soft); }
+.tag.call { color: var(--call); background: var(--call-soft); }
+.tag.open { color: var(--open); background: var(--open-soft); }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+td:first-child { font-weight: 600; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+.cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.cols > div { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.cols h3 { margin: 0; }
+.formula { font-family: var(--mono); font-size: 14px; background: var(--code-bg); padding: 12px 16px; border-radius: 4px; overflow-x: auto; white-space: pre; }
+.pick { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 12px 16px; display: grid; gap: 8px; }
+footer { font-size: 13px; color: var(--muted); }
+@media (max-width: 860px) {
+  .wrap { grid-template-columns: minmax(0, 1fr); }
+  nav.toc { display: none; }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  section { padding: 18px; }
+}
+</style>
+
+<div class="wrap">
+<nav class="toc" aria-label="Sections">
+  <ol>
+    <li><a href="#intent">Intent</a></li>
+    <li><a href="#scope">Scope</a></li>
+    <li><a href="#terms">Scrum terms</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#lifecycle">PBI lifecycle</a></li>
+    <li><a href="#sop">SOP</a></li>
+    <li><a href="#concurrency">Concurrency</a></li>
+    <li><a href="#dashboard">Dashboard</a></li>
+    <li><a href="#safety">Safety</a></li>
+    <li><a href="#recovery">Failure and recovery</a></li>
+    <li><a href="#platform">Platform</a></li>
+    <li><a href="#data">Data model</a></li>
+    <li><a href="#rollout">Rollout</a></li>
+    <li><a href="#decisions">Decision log</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="top">
+  <div class="eyebrow">Draft spec · v0.9 · 2026-11-05</div>
+  <h1>Software Factory</h1>
+  <p class="lead">A cloud service that never stops. It watches one or more Scrum backlogs, takes Product Backlog Items one at a time or several in parallel, and runs each through a written SOP with Claude agents. Every item that meets the Definition of Done ships as an Increment.</p>
+  <div class="legend">
+    <span><span class="tag yours">Yours</span> you asked for it</span>
+    <span><span class="tag call">My call</span> a default you can override</span>
+    <span>All decisions logged in §14</span>
+  </div>
+</header>
+
+<section id="intent">
+  <h2><span class="n">01</span>Intent</h2>
+  <p>Refined, ordered backlog items sit waiting for a developer to free up. The factory takes the routine ones, so people spend their time refining the backlog and reviewing and accepting work.</p>
+  <p>Throughput and quality are measured together. The factory is working when its Increments pass the same Definition of Done as human work, cost per item is one the team accepts, and people spend less time per item than they would building it themselves.</p>
+</section>
+
+<section id="scope">
+  <h2><span class="n">02</span>Scope</h2>
+  <div class="cols">
+    <div>
+      <h3>Goals</h3>
+      <ul>
+        <li>Runs in the cloud 24/7. <span class="tag yours">Yours</span></li>
+        <li>A private dashboard for reporting and monitoring. <span class="tag yours">Yours</span></li>
+        <li>Watches backlogs, picks PBIs, runs the SOP, delivers an Increment. <span class="tag yours">Yours</span></li>
+        <li>Concurrency is a fixed number or comes from past cadence. <span class="tag yours">Yours</span></li>
+        <li>Any orchestration decision can be overridden from the dashboard. <span class="tag yours">Yours</span></li>
+        <li>BDD and TDD by default. Behaviour is written in Gherkin at planning, and every test fails before the code that makes it pass. <span class="tag yours">Yours</span></li>
+        <li>PRs are tiered Low, Medium or High risk and need 0, 1 or 2 human approvals, the model Anthropic's Claude Code team uses. <span class="tag yours">Yours</span></li>
+        <li>Every run is auditable, down to the SOP version, model and cost. <span class="tag call">My call</span></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Non-goals</h3>
+      <ul>
+        <li>Writing or ordering the backlog. The Product Owner keeps that. <span class="tag call">My call</span></li>
+        <li>Running Sprint events. The factory feeds Sprint Review and nothing more. <span class="tag call">My call</span></li>
+        <li>Production deploys in v1. The factory stops where your Definition of Done stops, staging at most. <span class="tag call">My call</span></li>
+      </ul>
+    </div>
+    <div>
+      <h3>Anti-goals</h3>
+      <p>The factory has failed, even if it runs, when it:</p>
+      <ul>
+        <li>merges work a human reviewer would have rejected,</li>
+        <li>touches items or repos nobody gave it,</li>
+        <li>adds to human review load,</li>
+        <li>spends money it can't account for item by item.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="terms">
+  <h2><span class="n">03</span>Scrum terms the factory uses</h2>
+  <p>The factory follows the 2020 Scrum Guide. Two passages set its delivery rule.</p>
+  <blockquote>"The moment a Product Backlog item meets the Definition of Done, an Increment is born."<cite>Scrum Guide 2020, Commitment: Definition of Done, <a href="https://scrumguides.org/scrum-guide.html" target="_blank" rel="noopener">scrumguides.org</a></cite></blockquote>
+  <blockquote>"Multiple Increments may be created within a Sprint. ... However, an Increment may be delivered to stakeholders prior to the end of the Sprint."<cite>Scrum Guide 2020, Increment</cite></blockquote>
+  <p>So the factory never holds work for the end of a Sprint. Each PBI that passes the DoD gate becomes an Increment right then. At Sprint Review, the team presents the sum of that Sprint's Increments.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Term</th><th>What it means in the factory</th></tr></thead>
+    <tbody>
+      <tr><td>PBI</td><td>One work item in a connected backlog, either a GitHub Projects item or an Azure DevOps work item. It is eligible only when it carries the opt-in label, <code>factory</code> by default. <span class="tag call">My call</span></td></tr>
+      <tr><td>Ready</td><td>The Scrum Guide has no formal "Ready". It says only that items which can be Done within one Sprint are "deemed ready for selection". The factory adds its own readiness check. An item needs testable acceptance criteria, meaning each one can become a Given/When/Then scenario. It also needs a size under the limit, no open dependency and a known repo. An item that fails gets a comment saying why and stays in the backlog. <span class="tag call">My call</span></td></tr>
+      <tr><td>Definition of Done</td><td>The repo's own <code>DoD.md</code>, so each repo can have a different one. The factory reads it from the repo and adds one line of its own: every scenario passes on main. The last SOP stage checks every line. <span class="tag yours">Yours</span></td></tr>
+      <tr><td>Increment</td><td>The merged change and its evidence: PR link, DoD results, the scenario runs from before and after the code, and a release note line. Recorded per PBI, rolled up per Sprint. The feature files stay in the repo as living documentation of what the product does.</td></tr>
+      <tr><td>Scenario</td><td>One Gherkin Example, tied to an acceptance criterion by a tag such as <code>@ac-2</code>. Scenarios are the contract between the Product Owner and the factory. Once signed off, the build can't change them. <span class="tag yours">Yours</span> for Gherkin, <span class="tag call">My call</span> for the lock.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="architecture">
+  <h2><span class="n">04</span>Architecture</h2>
+  <p>There are two planes. A small control plane runs all the time. Work cells start once per PBI and shut down when it finishes. Only the control plane runs 24/7, which keeps idle cost low. <span class="tag call">My call</span></p>
+<pre class="mermaid">
+flowchart LR
+  subgraph Sources
+    GH[GitHub Projects]
+    ADO[Azure DevOps Boards]
+  end
+  subgraph Control["Control plane, always on"]
+    W[Backlog watcher]
+    G[Readiness gate]
+    S[Scheduler and WIP controller]
+    DB[(State store and event log)]
+    D[Dashboard]
+  end
+  subgraph Cells["Work cells, one per PBI"]
+    C1[Cell: SOP runner + agents]
+    C2[Cell: SOP runner + agents]
+  end
+  GH --> W
+  ADO --> W
+  W --> G --> S
+  S --> C1
+  S --> C2
+  C1 --> DB
+  C2 --> DB
+  S --> DB
+  DB --> D
+  C1 -->|branch, PR| Repo[(Git repos + CI)]
+  C2 -->|branch, PR| Repo
+  Repo -->|checks, merges| W
+</pre>
+  <div class="tbl"><table>
+    <thead><tr><th>Component</th><th>Job</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Backlog watcher</td><td>Mirrors eligible items from each backlog into the state store.</td><td>Takes webhooks where the backlog system sends them, and polls every 5 minutes to catch missed events. Each backlog system gets its own adapter, described below. <span class="tag call">My call</span></td></tr>
+      <tr><td>Readiness gate</td><td>Decides whether an item can enter.</td><td>Rule checks run first. Then a cheap model reads the item for missing or untestable acceptance criteria and vague scope. It comments on items and never edits them. <span class="tag call">My call</span></td></tr>
+      <tr><td>Scheduler</td><td>Starts a cell when a WIP slot frees up.</td><td>Follows backlog order. Takes the top ready item and skips any whose dependencies aren't Done. See §7.</td></tr>
+      <tr><td>Work cell</td><td>Runs one PBI through the SOP in an isolated sandbox.</td><td>Fresh clone, its own branch, a token for one repo, a budget cap. Saves a checkpoint after every stage so a crashed cell can resume.</td></tr>
+      <tr><td>State store</td><td>The one source of truth for items, runs, stages, costs and WIP policy.</td><td>Postgres. Every state change is also appended to an event log, which feeds the dashboard and the audit trail. <span class="tag call">My call</span></td></tr>
+      <tr><td>Dashboard</td><td>Reporting, monitoring and a few controls.</td><td>See §8.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Backlog and repo adapters</h3>
+  <p>GitHub ships first. Azure DevOps and other systems plug in later without changes to the scheduler, SOP runner or dashboard. <span class="tag yours">Yours</span> The core talks to two interfaces, one for backlogs and one for repo hosts. They're separate because a team can keep its backlog in one system and its code in another.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Interface</th><th>Calls</th><th>First adapter</th></tr></thead>
+    <tbody>
+      <tr><td>Backlog</td><td>List eligible items since a cursor, get one item, claim and release, comment, set status, link a PR, and turn a webhook payload into a factory event.</td><td>GitHub Projects</td></tr>
+      <tr><td>Repo host</td><td>Clone and push a branch, open and update a PR, post the <code>risk-approval</code> status check, read approvals with the commit each covers, and read branch protection.</td><td>GitHub</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><b>One shape inside.</b> The core only sees factory items, events and states. Each backlog source's config maps its own fields to them: where acceptance criteria live, which status values mean Queued or Done, which label or tag opts an item in. A new board layout needs config, not code. <span class="tag call">My call</span></li>
+    <li><b>Contract tests.</b> One shared test suite that every adapter must pass, plus an in-memory fake adapter that the rest of the factory's tests run against. A new adapter is done when it passes the suite. <span class="tag call">My call</span></li>
+    <li><b>Declared capabilities.</b> Each adapter states what its system supports, webhooks for example. The watcher polls when a system has no webhooks. <span class="tag call">My call</span></li>
+    <li><b>Next in line.</b> Azure DevOps Boards and Azure DevOps Repos in Phase 3. Jira, Linear or any other system follows the same path.</li>
+  </ul>
+</section>
+
+<section id="lifecycle">
+  <h2><span class="n">05</span>PBI lifecycle</h2>
+  <p>Every item moves through one state machine, and its state lives only in the state store. The backlog item mirrors it through a status field and comments, so people who never open the dashboard can still follow along.</p>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> Eligible
+  Eligible --> NotReady: readiness check fails
+  NotReady --> Eligible: item edited
+  Eligible --> Queued: ready
+  Queued --> InProgress: WIP slot + claim
+  InProgress --> SignOff: scenarios written
+  SignOff --> InProgress: approved, or changes asked
+  InProgress --> NeedsInput: agent blocked
+  NeedsInput --> InProgress: human answers
+  InProgress --> InReview: PR open, CI green
+  InReview --> InProgress: changes requested
+  InReview --> Accepted: approvals met
+  Accepted --> Done: DoD verified after merge
+  InProgress --> Failed: retry budget spent
+  NeedsInput --> Abandoned: no answer in 5 days
+  Failed --> Queued: human re-queues
+  Done --> [*]
+</pre>
+  <ul>
+    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. <span class="tag call">My call</span></li>
+    <li><b>Needs input.</b> The agent posts its question as a comment on the item and in the dashboard inbox. The item gives up its WIP slot while it waits, so one stuck item can't stall the line. <span class="tag call">My call</span></li>
+    <li><b>Sign-off.</b> Scenarios wait for the Product Owner the same way, in the Inbox and as a comment on the item. The item gives up its WIP slot while it waits.</li>
+    <li><b>Assignment.</b> While an item is in the factory, it's assigned to the factory's bot account, so no person picks it up at the same time.</li>
+    <li><b>Overrides.</b> A dashboard override can move an item along paths the diagram doesn't draw, such as holding a queued item or sending a reviewed one back to Specify. Each such move is logged as an override event. See §8.</li>
+  </ul>
+</section>
+
+<section id="sop">
+  <h2><span class="n">06</span>SOP</h2>
+  <p>You said the SOP is still to be defined. The factory treats it as data, a versioned file in a repo. Each run pins the SOP version it started with, so an SOP change never alters a run already in flight. Below is a v0 to start from. It works outside in. Gherkin scenarios define the behaviour at planning and must fail first. Unit tests then drive the code inside each scenario, and the scenarios pass last. Review uses the agents you already run.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>#</th><th>Stage</th><th>Who</th><th>Exit gate</th><th>On failure</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Understand</td><td>Planner agent</td><td>Restates each acceptance criterion and tags it <code>@ac-1</code>, <code>@ac-2</code> and so on. Lists the files likely to change. Stops at Needs input if a criterion can't be tested.</td><td>Needs input</td></tr>
+      <tr><td class="num">2</td><td>Specify</td><td>Planner agent</td><td>Gherkin feature files committed to the branch, with a Rule per business rule and scenarios for the happy path, edge cases and failures. Every criterion has at least one tagged scenario, the files parse in the runner, and the scenarios are posted on the PBI. A short plan names the unit tests expected under each scenario.</td><td>Retry once, then Needs input</td></tr>
+      <tr><td class="num">3</td><td>Sign-off</td><td>Product Owner</td><td>Approves the scenarios on the PBI or in the dashboard. The factory then locks the feature files at that commit. <span class="tag yours">Yours</span></td><td>Requested changes go back to stage 2</td></tr>
+      <tr><td class="num">4</td><td>Red</td><td>Builder agent</td><td>Step definitions written. Every scenario runs and fails on an assertion, never on an undefined step or a crash. The failing run is kept as evidence, and the feature files match the lock.</td><td>Retry up to 2 times, then Needs input</td></tr>
+      <tr><td class="num">5</td><td>Green</td><td>Builder agent</td><td>TDD inside each scenario: a failing unit test, the least code that passes it, then refactor. Exits when every scenario and the full unit suite pass, lint and type check are clean, and the feature files still match the lock.</td><td>Retry up to 3 times</td></tr>
+      <tr><td class="num">6</td><td>Self-review</td><td><code>self-reviewer</code></td><td>Reports <code>APPROVED</code>. Its brief adds BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario from the run. The builder fixes or rebuts each finding and sends it back, the same loop your CLAUDE.md sets for every PR.</td><td>A finding still held after 2 rebuttals goes to Needs input</td></tr>
+      <tr><td class="num">7</td><td>Open PR</td><td>Builder agent</td><td>PR linked to the PBI. The body lists each scenario with its red and green result and states the review rounds. CI green.</td><td>CI failures go back to stage 5</td></tr>
+      <tr><td class="num">8</td><td>PR review</td><td><code>pr-reviewer</code>, <code>pr-addresser</code></td><td>Threads resolved, branch current with base, required approvals met.</td><td>Back to stage 5, counted against the retry budget</td></tr>
+      <tr><td class="num">9</td><td>Risk approval</td><td>Risk classifier, then people</td><td>The classifier sets the PR's tier to Low, Medium or High. The PR then needs 0, 1 or 2 human approvals on its current commit. See Risk tiers below. <span class="tag yours">Yours</span></td><td>Requested changes go back to stage 8</td></tr>
+      <tr><td class="num">10</td><td>Merge and verify</td><td>Factory</td><td>Merged under the git host's branch protection, CI green on main, every scenario passing on main, every DoD line checked.</td><td>Files a bug PBI and flags it on the dashboard. No automatic revert in v1</td></tr>
+      <tr><td class="num">11</td><td>Record Increment</td><td>Factory</td><td>PBI set to Done, Increment record written, release note line added.</td><td>Retry. The merge has already happened</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Example feature file</h3>
+  <p>What stage 2 produces for a PBI with two acceptance criteria:</p>
+<pre class="code">@pbi-482
+Feature: Export invoices to CSV
+  Finance exports one month of invoices to reconcile them in a spreadsheet.
+
+  Rule: Only invoices dated in the chosen month are exported
+
+    @ac-1
+    Scenario: Invoices from other months are left out
+      Given invoices dated 2026-10-31, 2026-11-01 and 2026-12-01
+      When finance exports November 2026
+      Then the file contains 1 invoice
+      And that invoice is dated 2026-11-01
+
+  Rule: Amounts keep their currency
+
+    @ac-2
+    Scenario Outline: Amount and currency are separate columns
+      Given an invoice for &lt;amount&gt; &lt;currency&gt;
+      When finance exports that invoice's month
+      Then the row shows "&lt;amount&gt;" under Amount and "&lt;currency&gt;" under Currency
+
+      Examples:
+        | amount | currency |
+        | 120.50 | AUD      |
+        | 99.00  | USD      |</pre>
+  <h3>BDD rules</h3>
+  <ul>
+    <li><b>Traceability.</b> Every acceptance criterion gets a tag, and at least one scenario carries it. Stage 2 fails on any criterion without a scenario.</li>
+    <li><b>Business language.</b> Scenarios describe behaviour the Product Owner can read, with no selectors, SQL or class names. Implementation detail belongs in step definitions.</li>
+    <li><b>The lock.</b> At sign-off the factory records the commit of the feature files. After that the build may add step definitions and unit tests, but it may not edit, skip or tag out a locked scenario. Every later gate compares the feature files against the lock. A scenario that turns out wrong goes back to Specify and through sign-off again. <span class="tag call">My call</span></li>
+    <li><b>Red proof.</b> A scenario that passes before any production code exists tests nothing new, or its steps don't assert. Stage 4 reports it as a finding and doesn't proceed.</li>
+    <li><b>Runners.</b> Each repo uses its existing Gherkin runner. Cucumber lists official implementations for JavaScript, Java, Kotlin, Ruby, Scala and C++ (<a href="https://cucumber.io/docs/installation/" target="_blank" rel="noopener">cucumber.io</a>). For .NET, Reqnroll is "a Cucumber-style BDD test automation framework" built as "a reboot of the SpecFlow project" (<a href="https://reqnroll.net/" target="_blank" rel="noopener">reqnroll.net</a>). A repo with no runner gets one in its first factory PBI, and its commands go in the repo config. <span class="tag call">My call</span></li>
+  </ul>
+  <h3>Risk tiers</h3>
+  <p>Stage 9 copies the approval model from "How the Claude Code team does code review" (<a href="https://claude.dev/blog/solving-code-review-at-anthropic/" target="_blank" rel="noopener">claude.dev</a>, 2026-10-15). The table is theirs, word for word. <span class="tag yours">Yours</span></p>
+  <div class="tbl"><table>
+    <thead><tr><th>Risk</th><th>Examples</th><th>Human approvals</th></tr></thead>
+    <tbody>
+      <tr><td>Low</td><td>Docs, copy, internal-only features, additive changes behind a flag</td><td>None required once automated review and security checks are green</td></tr>
+      <tr><td>Medium</td><td>Ordinary product changes, and changes to sensitive areas such as caching, the auto-updater, or system prompts</td><td>One person</td></tr>
+      <tr><td>High</td><td>The highest-risk code, plus a small set of paths that always need two people</td><td>Two people</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><b>The change sets the tier.</b> A classifier reads the diff and picks the tier, whoever or whatever wrote it. A second pass asks whether this particular change needs a person even when its tier says no. Path rules run first. CI workflow files, the repo's <code>sensitive_paths</code>, anything under <code>.factory/</code> and the DoD file always need at least one person. The classifier uses the coding model, because a wrong Low lets code skip review. <span class="tag call">My call</span> for the model.</li>
+    <li><b>Agents never fill a human slot.</b> Approvals from <code>self-reviewer</code>, <code>pr-reviewer</code> or any other agent don't count toward the number. A Low PR merges without a person only once automated review and the repo's security checks are green.</li>
+    <li><b>Trusted authors.</b> In the source, only authors on a repo's trusted list get the lighter paths, and everyone else needs a second person. The factory's bot account is treated as an author like any other. It gets the table's numbers only in repos whose owners add it to the trusted list. Elsewhere a factory PR needs one more person than its tier says, up to two. <span class="tag yours">Yours</span> for per-repo trust, <span class="tag call">My call</span> on how to read "a second person".</li>
+    <li><b>No directing person.</b> In the source, whoever prompted an agent counts as one of its reviewers. A factory item has no such person, so every required approval comes from a reviewer.</li>
+    <li><b>One commit per approval.</b> An approval covers the commit it was given on. When the factory pushes after an approval, for example <code>pr-addresser</code> fixing a thread or resolving a conflict, the approval no longer counts and the factory asks again.</li>
+    <li><b>Enforcement.</b> Low needs zero approvals, so the git host can't require a fixed review count. The factory posts a required status check, <code>risk-approval</code>, that turns green only when the tier's approvals are met on the head commit. Branch protection requires that check, so the git host still enforces the rule.</li>
+    <li><b>Visible tier.</b> The PR body and the dashboard show the tier and the classifier's reasons, so a reviewer can challenge them. An operator can raise a tier. Nothing lowers one, overrides included.</li>
+  </ul>
+  <h3>Repo config</h3>
+  <p>Each repo carries its own factory settings, so they get reviewed and versioned like code. The factory reads them from the default branch when an item starts and pins that commit for the whole run. <span class="tag call">My call</span> for pinning.</p>
+<pre class="code"># .factory/config.yml, an example
+definition_of_done: DoD.md      # the default; any path in this repo
+sensitive_paths:                # each match needs at least one person
+  - "infra/**"
+  - "src/billing/**"
+bdd:                            # this repo's own runner commands
+  parse: npm run bdd -- --dry-run
+  run: npm run bdd</pre>
+  <ul>
+    <li><b>DoD.md.</b> The Definition of Done lives in the repo, at <code>DoD.md</code> in the root unless the config names another path, so each repo can have its own. <span class="tag yours">Yours</span> A repo with no DoD file fails the readiness check for every item, because the factory has no way to declare an Increment there.</li>
+    <li><b>Sensitive paths.</b> A list of globs, empty by default, which owners can fill in once they know what needs protecting. <span class="tag yours">Yours</span> CI workflow files count as sensitive whatever the list says.</li>
+    <li><b>Protecting the rules.</b> Any change under <code>.factory/</code> or to the DoD file always needs a person, whatever its tier. Without that, a factory PR could loosen the rules it gets checked against. <span class="tag call">My call</span></li>
+    <li><b>Trust lives outside the repo.</b> Repo owners set whether the factory bot is a trusted author in the dashboard, not in this file. That way no PR can grant the bot trust. <span class="tag call">My call</span></li>
+  </ul>
+  <p>The SOP file has one entry per stage. Checks named <code>bdd</code> run the commands in the repo's config.</p>
+<pre class="code">sop: default
+version: 0.1.0
+budget:              # per PBI, across all stages
+  usd: 40
+  wall_clock: 8h
+models:              # IDs live here, never in prompts
+  coding: claude-opus-5-5
+  triage: claude-haiku-5-5
+stages:
+  - id: specify
+    agent: planner
+    model: coding
+    prompt: sop/prompts/specify.md
+    outputs: [features/**/*.feature, plan.md]
+    exit:
+      - every_criterion_has_scenario: true
+      - bdd: parse                  # feature files load, steps listed
+    on_fail: needs_input
+  - id: sign-off
+    approver: product_owner
+    lock: features/**/*.feature
+  - id: red
+    agent: builder
+    model: coding
+    exit:
+      - bdd: fail_on_assertion      # not undefined steps, not crashes
+      - matches_lock: features/**/*.feature
+    keep_output: true               # red evidence for the Increment
+    retries: 2
+  - id: green
+    agent: builder
+    model: coding
+    prompt: sop/prompts/tdd.md      # red, green, refactor per unit
+    exit:
+      - bdd: pass
+      - cmd: npm test
+      - cmd: npm run lint
+      - matches_lock: features/**/*.feature
+    retries: 3
+    timeout: 90m
+    on_fail: retry
+  - id: self-review
+    agent: self-reviewer
+    loop_until: "APPROVED"
+    max_rounds: 5
+    on_fail: needs_input
+definition_of_done: from_repo   # each repo's .factory/config.yml</pre>
+  <p>The $40 item cap is a starting figure, about twice the estimated cost per item in §11. Phase 0 measures real costs, and the cap gets reset from them. <span class="tag call">My call</span></p>
+</section>
+
+<section id="concurrency">
+  <h2><span class="n">07</span>Concurrency</h2>
+  <p>You wanted the number of items in flight to be configurable or worked out from past cadence. <span class="tag yours">Yours</span> The factory has three modes, set per factory:</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Mode</th><th>How WIP is set</th></tr></thead>
+    <tbody>
+      <tr><td>fixed</td><td>A number in config, for example <code>wip: 2</code>.</td></tr>
+      <tr><td>adaptive</td><td>A formula, recomputed every hour over the last 14 days of history.</td></tr>
+      <tr><td>advised</td><td>The formula sets the default, and a model proposes changes with written reasons. A proposal applies on its own only inside the formula's bounds. Outside them it waits for a human to approve it on the dashboard.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>The adaptive formula</h3>
+  <p>Little's Law says the average number of items in a stable system equals the arrival rate times the average time each spends inside, <code>L = λW</code> (<a href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener">Wikipedia</a>). The factory's real limit is downstream, in how fast people review and accept its PRs. Starting more items than people can accept just grows the review queue, which breaks an anti-goal. So the rate in the formula is the human acceptance rate, and agent speed doesn't enter it.</p>
+  <div class="formula">wip = clamp(ceil(accept_rate × median_cycle_time), wip_min, wip_max)
+      − max(0, review_queue − review_capacity)
+wip ≤ floor(daily_budget ÷ median_cost_per_item × median_cycle_time)</div>
+  <ul>
+    <li><b>accept_rate.</b> PBIs accepted per working day, last 14 days.</li>
+    <li><b>median_cycle_time.</b> Working days from InProgress to Accepted, same window.</li>
+    <li><b>review_queue.</b> Factory PRs and scenario sign-offs waiting on a human right now. <code>review_capacity</code> is a config value, default 3.</li>
+    <li><b>Damping.</b> WIP moves by at most 1 per hour. Lowering it only stops new starts and never kills a running cell. A WIP override from the dashboard applies at once and skips the damping.</li>
+    <li><b>Cold start.</b> Until 10 items have been accepted, the factory runs fixed at <code>wip_min</code>.</li>
+    <li><b>Usage limits.</b> On a subscription, the five-hour and weekly limits bind before dollars do. When an agent hits one, its cell checkpoints and stops, and the scheduler starts nothing new until the reset time the limit message gives. Flow shows limit stalls next to the WIP line. <span class="tag call">My call</span></li>
+  </ul>
+  <p><b>Formula first.</b> A model choosing the number on its own can't be audited or reproduced, and that number sets the spend. The formula fits on one dashboard panel. The model still earns its place in advised mode, for things the formula can't see, like a holiday week or a release freeze noted in the backlog. <span class="tag call">My call</span></p>
+</section>
+
+<section id="dashboard">
+  <h2><span class="n">08</span>Dashboard</h2>
+  <p>Sign-in accepts Google accounts, personal Microsoft accounts and work or school Microsoft accounts. <span class="tag yours">Yours</span> Signing in only proves who someone is. The dashboard's own allowlist decides whether they get in and what they can do. The whole team can read it, and a named few can use the controls. <span class="tag call">My call</span> Setup details are in §11.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>View</th><th>Shows</th></tr></thead>
+    <tbody>
+      <tr><td>Floor</td><td>Every item in flight, with its stage, time in stage, cost so far and last agent message. Updates live from the event log.</td></tr>
+      <tr><td>Inbox</td><td>Items at Needs input, scenarios waiting for sign-off and PRs waiting on a person, oldest first. You answer here, and the answer is also posted on the backlog item.</td></tr>
+      <tr><td>Flow</td><td>Throughput per day, cycle time per stage, WIP over time, and the WIP formula's inputs next to its output.</td></tr>
+      <tr><td>Quality</td><td>First-pass yield, meaning items merged with no human-requested changes. Self-review rounds per item, and bugs filed later against factory items. For BDD, scenarios per item, sign-offs that asked for changes, and locked scenarios reopened after sign-off. For risk, PRs per tier and bugs later traced to each tier, which shows whether the classifier puts too much in Low.</td></tr>
+      <tr><td>Cost</td><td>Spend per item, stage, model and day, against budget.</td></tr>
+      <tr><td>Increments</td><td>Done items per Sprint with their evidence, ready for Sprint Review.</td></tr>
+      <tr><td>Run detail</td><td>One item's full trail: SOP version, the signed-off feature files with each scenario's red and green runs, and each stage's prompts, tool calls, outputs, commits and cost.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Overrides</h3>
+  <p>You can override any decision the factory makes on its own from the dashboard. <span class="tag yours">Yours</span> An override outranks policy until someone clears it or it expires. The scheduler and the cells check active overrides at every decision point, so a change takes effect within 30 seconds. <span class="tag call">My call</span></p>
+  <div class="tbl"><table>
+    <thead><tr><th>Scope</th><th>Decision</th><th>Override</th></tr></thead>
+    <tbody>
+      <tr><td>Factory</td><td>Running</td><td>Pause, resume or drain. Drain finishes the items in flight and starts nothing new.</td></tr>
+      <tr><td>Factory</td><td>WIP</td><td>Pin a number or switch mode. Approve or reject an advised-mode proposal. While a pin is active the formula keeps computing, and Flow shows the pinned and computed values side by side.</td></tr>
+      <tr><td>Backlog</td><td>Intake</td><td>Pause one backlog or change its label filter.</td></tr>
+      <tr><td>Item</td><td>Selection</td><td>Start now, taking the next free slot ahead of backlog order. Hold, so the factory never picks it up. Move it up or down the factory queue without changing the backlog's own order.</td></tr>
+      <tr><td>Item</td><td>Readiness</td><td>Admit an item that failed the readiness check.</td></tr>
+      <tr><td>Item</td><td>Stage</td><td>Rerun a stage, skip one, or send the item back to an earlier stage.</td></tr>
+      <tr><td>Item</td><td>Risk tier</td><td>Raise a PR's tier, adding required approvals. No override lowers a tier.</td></tr>
+      <tr><td>Item</td><td>Scenarios</td><td>Unlock signed-off scenarios, which sends the item back to Specify and then to the Product Owner again. Only the Product Owner signs off scenarios, overrides included.</td></tr>
+      <tr><td>Item</td><td>Resources</td><td>Change the model for a stage, raise the item's budget or retry count, or move the run to another SOP version.</td></tr>
+      <tr><td>Item</td><td>Ownership</td><td>Stop the run and hand the item to a person with its branch intact, or hand a person's item back to the factory.</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><b>Audit trail.</b> Each override stores who set it, when, a required reason and an optional expiry. It shows as a badge on the item in Floor and Run detail. Quality reports override counts per SOP stage, so you can see which stages people keep correcting.</li>
+    <li><b>Expiry.</b> An item override ends when the item reaches Done, Failed or Abandoned. A factory or backlog override lasts until cleared or until its expiry, and the dashboard flags any that have been active for more than 24 hours. <span class="tag call">My call</span></li>
+    <li><b>Hard limits.</b> No override crosses the git host's branch protection and required reviews, the monthly budget ceiling, the egress allowlist or the kill switch. Skipping a stage in the SOP never skips a check the git host enforces. Specify, Red, Green and Risk approval can't be skipped at all, so every Increment carries its scenarios, its red evidence and the approvals its tier requires. No override lowers a risk tier. <span class="tag call">My call</span></li>
+    <li><b>Who can override.</b> The operator role, held by the named few who can use the controls. Everyone else sees overrides but can't set them.</li>
+    <li><b>One API.</b> The dashboard calls the control plane's override API, so a CLI or chat bot can use the same calls later with no new logic. <span class="tag call">My call</span></li>
+  </ul>
+  <p><b>Sprint Review.</b> Your <code>ssw-scrum:prepare-sprint-review</code> skill already drafts Sprint Review emails from a GitHub project or an Azure DevOps board. As long as the factory keeps board status accurate, that skill covers factory work with no changes.</p>
+</section>
+
+<section id="safety">
+  <h2><span class="n">09</span>Safety</h2>
+  <ul>
+    <li><b>Untrusted item text.</b> Anyone who can edit a backlog item can plant instructions in it. Agents read item text as requirements to weigh and never as commands. The readiness gate flags items that ask for credentials, CI changes or access outside the repo.</li>
+    <li><b>Least privilege.</b> One bot identity per backlog system, with access granted repo by repo and never org-wide. Each cell gets a short-lived token for one repo and no production secrets.</li>
+    <li><b>Platform-enforced protection.</b> Branch protection and required reviews live in the git host's settings. A confused agent can't talk its way past them because no prompt controls them.</li>
+    <li><b>Network.</b> An egress allowlist limits cells to the model API, the git host, the backlog API and package registries.</li>
+    <li><b>Budget caps.</b> Per item, per day and per month. The daily cap pauses new starts. The item cap sends the item to Needs input.</li>
+    <li><b>Kill switch.</b> One dashboard button and one config flag. Either stops every cell within a minute.</li>
+  </ul>
+</section>
+
+<section id="recovery">
+  <h2><span class="n">10</span>Failure and recovery</h2>
+  <ul>
+    <li><b>Checkpoints.</b> The branch is the checkpoint. Each stage commits its output and the state store records the last stage completed. A new cell picks up from there.</li>
+    <li><b>Idempotent steps.</b> Opening a PR, commenting and setting status each check current state before acting, so a retry never creates duplicates.</li>
+    <li><b>Retry budget.</b> Set per stage in the SOP, plus a total per item. When it runs out, the item moves to Failed with a summary of every attempt.</li>
+    <li><b>Quarantine.</b> Three failures in a row on one repo pause that repo and raise a dashboard alert. A streak like that usually means a broken build or a bad SOP change, and the items themselves are fine.</li>
+    <li><b>Control plane restart.</b> Leases and the event log live in Postgres, so a restart loses nothing. Cells keep running, and the scheduler finds them again through their lease renewals.</li>
+  </ul>
+</section>
+
+<section id="platform">
+  <h2><span class="n">11</span>Platform</h2>
+  <p>The control plane is the same whichever option you choose: one small always-on container and a managed Postgres. The options differ in where the work cells run. Each fact below comes from Anthropic's docs as of 2026-11-05.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Option</th><th>What it buys</th><th>What it costs</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>A. Agent SDK in your containers</td>
+        <td>The same tools as Claude Code, including subagents, hooks, skills, plugins and MCP (<a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">overview</a>). Your <code>self-reviewer</code>, <code>pr-reviewer</code>, <code>pr-addresser</code> and skills run as they are. No top-level session timeout (<a href="https://code.claude.com/docs/en/agent-sdk/hosting.md" target="_blank" rel="noopener">hosting</a>). Authenticates with an API key or through Bedrock, Vertex or Foundry (<a href="https://code.claude.com/docs/en/agent-sdk/quickstart.md" target="_blank" rel="noopener">quickstart</a>).</td>
+        <td>You run the sandboxes, which means container jobs, egress rules and image updates. The hosting guide suggests starting at 1 GiB RAM, 5 GiB disk and 1 CPU per agent.</td>
+      </tr>
+      <tr>
+        <td>B. Managed Agents for cells</td>
+        <td>Anthropic runs the sandbox, an Ubuntu box with up to 8 GB RAM, 10 GB disk, git and common runtimes (<a href="https://platform.claude.com/docs/en/managed-agents/cloud-sandboxes-reference" target="_blank" rel="noopener">sandboxes</a>). A limited network mode takes an allowed-hosts list (<a href="https://platform.claude.com/docs/en/managed-agents/environments" target="_blank" rel="noopener">environments</a>). Each session can carry a hard budget cap (<a href="https://platform.claude.com/docs/en/managed-agents/sessions" target="_blank" rel="noopener">sessions</a>).</td>
+        <td>Beta. $0.08 per running session-hour on top of tokens (<a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noopener">pricing</a>). Not eligible for Zero Data Retention, and transcripts persist until deleted (<a href="https://platform.claude.com/docs/en/managed-agents/overview" target="_blank" rel="noopener">overview</a>). The docs state neither a maximum session length nor a concurrent-session cap. Your local agents and skills would need porting, which nobody has tested.</td>
+      </tr>
+      <tr>
+        <td>C. Routines or GitHub Actions</td>
+        <td>The least to build.</td>
+        <td>Routines run hourly at most, 30 runs an hour per routine, and the API trigger is for claude.ai users only, in research preview (<a href="https://code.claude.com/docs/en/routines.md" target="_blank" rel="noopener">routines</a>). The GitHub Actions doc covers GitHub only and says nothing about Azure DevOps (<a href="https://code.claude.com/docs/en/github-actions.md" target="_blank" rel="noopener">actions</a>). Neither gives the factory a scheduler of its own. Ruled out for the main loop.</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <div class="pick">
+    <p><b>Decision: A.</b> The Agent SDK in your own containers. <span class="tag yours">Yours</span> The v0 SOP is built on agents and skills you already run in Claude Code, and the SDK runs them unchanged. B stays the fallback. A switch would change only the cell launcher, and the scheduler, state store and dashboard would stay as they are.</p>
+  </div>
+  <p><b>Models.</b> <span class="tag yours">Yours</span> <code>claude-opus-5-5</code> for building and review, which the models page describes as "for long-running agentic coding and knowledge work". <code>claude-haiku-5-5</code> for the readiness gate, described as "for high-volume, latency-sensitive tasks such as classification, extraction, and routing" (<a href="https://platform.claude.com/docs/en/models/overview" target="_blank" rel="noopener">models</a>). Both IDs live in SOP config, so a model change needs no code change.</p>
+
+  <h3>Azure deployment</h3>
+  <p>The factory runs on Azure. <span class="tag yours">Yours</span> Service choices below are <span class="tag call">My call</span> unless tagged.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Part</th><th>Azure service</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Control plane</td><td>Container Apps, one app at 0.5 vCPU and 1 GiB, external ingress for the dashboard</td><td>Watcher, scheduler, API and dashboard in one container. Built-in sign-in sits in front of it.</td></tr>
+      <tr><td>Work cells</td><td>Container Apps jobs, manual trigger, 2 vCPU and 4 GiB per replica</td><td>The scheduler starts one job execution per PBI through the jobs <code>start</code> API, which can override env vars per run (<a href="https://learn.microsoft.com/en-us/azure/container-apps/jobs" target="_blank" rel="noopener">jobs</a>). A Consumption-only environment caps a replica at 2 cores and 4 GiB (<a href="https://learn.microsoft.com/en-us/azure/container-apps/containers" target="_blank" rel="noopener">containers</a>). Platform maintenance "might interrupt long-running job replicas", so the retry limit is at least 1, and stage checkpoints make a retry cheap.</td></tr>
+      <tr><td>State store</td><td>PostgreSQL Flexible Server, Burstable B1ms</td><td>Supports Microsoft Entra authentication (<a href="https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-concepts" target="_blank" rel="noopener">docs</a>), so services connect with a managed identity and no stored password.</td></tr>
+      <tr><td>Transcripts</td><td>Blob Storage, Hot LRS</td><td>Referenced from <code>stage_run</code>.</td></tr>
+      <tr><td>Secrets</td><td>Key Vault</td><td>GitHub App private key and the Claude OAuth token.</td></tr>
+      <tr><td>Logs</td><td>Log Analytics</td><td>Container logs. Agent transcripts go to Blob, not here, to keep ingestion small.</td></tr>
+      <tr><td>Models</td><td>Your Claude subscription, served by Anthropic <span class="tag yours">Yours</span></td><td>Not an Azure service. Foundry stays the fallback if billing moves to an API key.The Agent SDK supports Foundry with <code>CLAUDE_CODE_USE_FOUNDRY=1</code> (<a href="https://code.claude.com/docs/en/agent-sdk/quickstart" target="_blank" rel="noopener">quickstart</a>). Foundry hosts Opus, Sonnet and Haiku 5.5 only in US regions and swedencentral, and needs a pay-as-you-go Azure subscription (<a href="https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-from-partners" target="_blank" rel="noopener">regions</a>). Foundry tokens are billed "at standard per-model, per-feature rates (same as Claude API pricing)", with US Data Zone at 1.1x (<a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noopener">pricing</a>).</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><b>ARM64 builds.</b> Container Apps runs <code>linux/amd64</code> images only, and your machine is ARM64. Images build in CI, or with a cross-platform build, never as a native local build.</li>
+  </ul>
+
+  <h3>Dashboard sign-in</h3>
+  <ul>
+    <li><b>Two providers.</b> Container Apps built-in authentication supports Microsoft Entra, Google and others side by side (<a href="https://learn.microsoft.com/en-us/azure/container-apps/authentication" target="_blank" rel="noopener">auth</a>). The Microsoft provider uses the account type "Any Microsoft Entra directory &amp; personal Microsoft accounts", which covers work, school and personal accounts (<a href="https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-provider-aad" target="_blank" rel="noopener">Entra provider</a>). Google is the second provider. <span class="tag yours">Yours</span> for the account types.</li>
+    <li><b>Allowlist in the app.</b> In this multitenant setup, built-in auth "doesn't validate which tenant the request comes from", and app roles aren't supported for personal Microsoft accounts (<a href="https://learn.microsoft.com/en-us/entra/identity-platform/supported-accounts-validation" target="_blank" rel="noopener">account types</a>). So anyone with a Google or Microsoft account can sign in. The dashboard reads the signed-in identity and looks it up in its own <code>user</code> table. A person not on the list gets a page saying they have no access.</li>
+    <li><b>Roles.</b> Viewer, operator and owner. Owners add people and set per-repo bot trust. The first owner is seeded at deploy time.</li>
+    <li><b>Rejected options.</b> Azure AD B2C "will no longer be available to purchase for new customers" since May 1, 2025 (<a href="https://learn.microsoft.com/en-us/azure/active-directory-b2c/faq" target="_blank" rel="noopener">B2C FAQ</a>). Entra External ID would need each work or school tenant federated one at a time (<a href="https://learn.microsoft.com/en-us/entra/external-id/customers/how-to-entra-id-federation-customers" target="_blank" rel="noopener">federation</a>).</li>
+    <li><b>Test first.</b> The Container Apps docs show only single-tenant issuer URLs. Phase 0 starts with a sign-in test using a Google account, a personal Microsoft account and a work account from a different tenant, before anything else is built on it.</li>
+  </ul>
+
+  <h3>Starting budget</h3>
+  <p>All figures are USD per month, from the Azure Retail Prices API for australiaeast, your chosen region <span class="tag yours">Yours</span>, and the Claude pricing pages, fetched 2026-11-05.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Line</th><th>Basis</th><th>Phase 0, 10 items</th><th>Steady, 40 items</th></tr></thead>
+    <tbody>
+      <tr><td>Control plane</td><td>0.5 vCPU at $0.000034/s and 1 GiB at $0.000004/s, all month, minus the free 180,000 vCPU-s and 360,000 GiB-s</td><td class="num">$47</td><td class="num">$47</td></tr>
+      <tr><td>Work cells</td><td>2 vCPU and 4 GiB is $0.30 per cell-hour, at an assumed 3 cell-hours per item</td><td class="num">$9</td><td class="num">$36</td></tr>
+      <tr><td>Postgres</td><td>B1ms at $0.026/h, plus 32 GB at $0.138/GB</td><td class="num">$23</td><td class="num">$23</td></tr>
+      <tr><td>Logs</td><td>10 GB at $3.34/GB after the free 5 GB</td><td class="num">$17</td><td class="num">$17</td></tr>
+      <tr><td>Blob, Key Vault</td><td>Under $1 each at this volume</td><td class="num">$2</td><td class="num">$2</td></tr>
+      <tr><td>Claude subscription</td><td>Ultra, the plan you're on, at $200 a month flat (<a href="https://claude.com/pricing" target="_blank" rel="noopener">pricing</a>)</td><td class="num">$200</td><td class="num">$200</td></tr>
+      <tr><td>Total</td><td>Container registry not priced yet</td><td class="num">$298</td><td class="num">$325</td></tr>
+      <tr><td>API key, for comparison</td><td>About $18 per item, worked below, in place of the subscription</td><td class="num">$278</td><td class="num">$845</td></tr>
+    </tbody>
+  </table></div>
+  <p><b>API-equivalent cost per item.</b> Nothing has run yet, so this is an estimate. It still matters on a subscription, because the caps below are counted in it. Agent sessions re-read their context on every turn, mostly as cache hits. For one mid-sized PBI across all stages on Opus 5.5:</p>
+<pre class="code">12.0M cache reads   × $0.20/M = $ 2.40
+ 1.5M cache writes  × $5.00/M = $ 7.50   (5-minute cache)
+ 0.5M fresh input   × $4.00/M = $ 2.00
+ 0.3M output        × $20.0/M = $ 6.00
+                                 ------
+                                 $17.90  per item, plus well under $0.10 of Haiku for readiness and tiering</pre>
+  <div class="pick">
+    <p><b>Caps to start with.</b> $40 per item and $75 per day, counted at API rates from each run's token usage. <span class="tag call">My call</span> On a subscription these protect your shared usage limit, not your card. Usage credits stay off, so the monthly bill is the plan fee plus Azure, about $300.</p>
+    <p>The item cap is about twice the estimate, so an outlier stops at Needs input and gets looked at instead of running on. The daily cap stops a runaway loop within a day. If you turn on usage credits later, they bill at API rates, and a monthly ceiling then applies to them.</p>
+    <p><b>After Phase 0.</b> Set the item cap to 1.5 times the measured 90th percentile. Use the measured items per weekly limit to choose between Max, Ultra and an API key.</p>
+  </div>
+  <h3>Model billing</h3>
+  <p><b>Decision: your Claude subscription.</b> <span class="tag yours">Yours</span> Chosen with these terms on record, quoted as fetched on 2026-11-05:</p>
+  <ul>
+    <li><b>Consumer Terms §3.</b> "You may not access or use, or help another person to access or use, our Services in the following ways: ... Except when you are accessing our Services via an Anthropic API Key or where we otherwise explicitly permit it, to access the Services through automated or non-human means, whether through a bot, script, or otherwise." (<a href="https://www.anthropic.com/legal/consumer-terms" target="_blank" rel="noopener">Consumer Terms</a>, effective Oct 8, 2025)</li>
+    <li><b>Consumer Terms §2.</b> "You may not share your Account login information, Anthropic API key, or Account credentials with anyone else. You also may not make your Account available to anyone else."</li>
+    <li><b>Agent SDK docs.</b> "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead." (<a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">overview</a>)</li>
+    <li><b>Pointing the other way.</b> "For CI pipelines, scripts, or other environments where interactive browser login isn't available, generate a one-year OAuth token with <code>claude setup-token</code>", which "requires a Pro, Max, Ultra, Team, or Enterprise plan." (<a href="https://code.claude.com/docs/en/authentication" target="_blank" rel="noopener">authentication</a>)</li>
+  </ul>
+  <p>How the factory runs on it:</p>
+  <ul>
+    <li><b>Token.</b> You run <code>claude setup-token</code> once. The token goes into Key Vault and reaches cells as <code>CLAUDE_CODE_OAUTH_TOKEN</code>. It lasts one year and is tied to your subscription, so the dashboard warns 30 days before it expires.</li>
+    <li><b>No bare mode.</b> Bare mode "does not read <code>CLAUDE_CODE_OAUTH_TOKEN</code>" (<a href="https://code.claude.com/docs/en/github-actions" target="_blank" rel="noopener">GitHub Actions doc</a>), so cells never run with <code>--bare</code>.</li>
+    <li><b>Test first.</b> The Agent SDK docs don't say whether the SDK honours the OAuth token. Phase 0's first run checks it. If the SDK refuses it, cells drive the <code>claude</code> CLI headless instead, which documents the token.</li>
+    <li><b>Shared limits.</b> The five-hour and weekly limits are "shared across Claude and Claude Code" (<a href="https://support.claude.com/en/articles/11145838" target="_blank" rel="noopener">help center</a>), so the factory and your own Claude use draw on the same allowance. §7 covers how the scheduler reacts when a limit hits.</li>
+  </ul>
+</section>
+
+<section id="data">
+  <h2><span class="n">12</span>Data model</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Table</th><th>Key fields</th></tr></thead>
+    <tbody>
+      <tr><td>backlog_source</td><td>id, adapter (github first), url, field map, label filter, repo map, paused</td></tr>
+      <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha</td></tr>
+      <tr><td>user</td><td>id, provider (google, microsoft), subject, tenant_id, email, role (viewer, operator, owner), added_by, added_at</td></tr>
+      <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, lease_owner, lease_expires</td></tr>
+      <tr><td>run</td><td>id, item_id, sop_version, started_at, ended_at, outcome, cost_usd, branch, pr_url, features_lock_sha, signed_off_by, signed_off_at, risk_tier, tier_reasons, approved_sha</td></tr>
+      <tr><td>stage_run</td><td>id, run_id, stage_id, attempt, status, started_at, ended_at, tokens_in, tokens_out, cost_usd, transcript_ref</td></tr>
+      <tr><td>event</td><td>id, at, actor (agent, human, system), item_id, kind, payload. Append only.</td></tr>
+      <tr><td>increment</td><td>id, item_id, sprint, merged_sha, dod_results, scenario_results, red_run_ref, release_note</td></tr>
+      <tr><td>wip_policy</td><td>id, mode, wip_min, wip_max, review_capacity, daily_budget, current_wip, computed_at, inputs</td></tr>
+      <tr><td>override</td><td>id, scope (factory, backlog, item), target_id, kind, value, reason, created_by, created_at, expires_at, cleared_at, cleared_by</td></tr>
+    </tbody>
+  </table></div>
+  <p>Transcripts are large, so they go to blob storage and <code>stage_run</code> keeps a pointer. <span class="tag call">My call</span></p>
+</section>
+
+<section id="rollout">
+  <h2><span class="n">13</span>Rollout</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Phase</th><th>Scope</th><th>Exit when</th></tr></thead>
+    <tbody>
+      <tr><td>0. Walking skeleton</td><td>One GitHub repo and project. Fixed WIP of 1. SOP stages 1 to 7, so Gherkin, sign-off and red before green run from the first item, and a person merges. The risk classifier runs in shadow mode, recording a tier on every PR while a person still approves each one. Dashboard with Floor and Run detail, plus the first overrides: pause, drain, stop a run and hold an item.</td><td>10 items reach Done, cost per item is measured, and you agree with the shadow tiers.</td></tr>
+      <tr><td>1. Full SOP</td><td>Stages 8 to 11 with risk tiers enforced, budget caps, Inbox, Cost view, and the full override set in §8.</td><td>Two Sprints with a first-pass yield you're happy with.</td></tr>
+      <tr><td>2. Adaptive WIP</td><td>Adaptive mode, then advised mode. Flow view shows the formula.</td><td>A full Sprint where WIP follows the review queue with no manual tuning.</td></tr>
+      <tr><td>3. More backlogs</td><td>Azure DevOps Boards and Repos adapters, each passing the shared contract tests. More repos.</td><td>A team on Azure DevOps runs a full Sprint.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Phase 0 leaves out adaptive WIP, Azure DevOps and the human-gate switch on purpose. Each arrives once the phase before it has data to justify it. <span class="tag call">My call</span></p>
+</section>
+
+<section id="decisions">
+  <h2><span class="n">14</span>Decision log</h2>
+  <p>Nothing is open. These are your decisions, all made on 2026-11-05. Every <span class="tag call">My call</span> elsewhere in the spec is a default you can still override.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Topic</th><th>Decision</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>Hosting</td><td>Azure, compute in Australia East</td><td>§11</td></tr>
+      <tr><td>Agent runtime</td><td>Claude Agent SDK in your own containers</td><td>§11</td></tr>
+      <tr><td>Model billing</td><td>Your Claude Ultra subscription, with the Consumer Terms passages on record</td><td>§11</td></tr>
+      <tr><td>Models</td><td>Opus 5.5 for building and review, Haiku 5.5 for readiness</td><td>§11</td></tr>
+      <tr><td>Backlogs</td><td>GitHub first, behind adapters ready for Azure DevOps and others</td><td>§4</td></tr>
+      <tr><td>Method</td><td>BDD and TDD, with Gherkin written at planning</td><td>§6</td></tr>
+      <tr><td>Scenario sign-off</td><td>Product Owner, every item</td><td>§6</td></tr>
+      <tr><td>Definition of Done</td><td><code>DoD.md</code> in each repo</td><td>§6</td></tr>
+      <tr><td>PR approval</td><td>Anthropic's three risk tiers, needing 0, 1 or 2 human approvals</td><td>§6</td></tr>
+      <tr><td>Bot trust</td><td>Per repo, set by that repo's owners</td><td>§6</td></tr>
+      <tr><td>Sensitive paths</td><td>Configurable per repo in <code>.factory/config.yml</code></td><td>§6</td></tr>
+      <tr><td>Overrides</td><td>Any orchestration decision, from the dashboard</td><td>§8</td></tr>
+      <tr><td>Dashboard sign-in</td><td>Google, personal Microsoft and work or school Microsoft accounts</td><td>§8, §11</td></tr>
+      <tr><td>Concurrency</td><td>Fixed, adaptive or advised, set per factory</td><td>§7</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>Sources: <a href="https://scrumguides.org/scrum-guide.html" target="_blank" rel="noopener">Scrum Guide 2020</a> · <a href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener">Little's law</a> · <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Agent SDK</a> · <a href="https://platform.claude.com/docs/en/managed-agents/overview" target="_blank" rel="noopener">Managed Agents</a> · <a href="https://code.claude.com/docs/en/routines.md" target="_blank" rel="noopener">Routines</a> · <a href="https://platform.claude.com/docs/en/models/overview" target="_blank" rel="noopener">Models</a> · <a href="https://cucumber.io/docs/gherkin/reference/" target="_blank" rel="noopener">Gherkin reference</a> · <a href="https://reqnroll.net/" target="_blank" rel="noopener">Reqnroll</a> · <a href="https://claude.dev/blog/solving-code-review-at-anthropic/" target="_blank" rel="noopener">How the Claude Code team does code review</a></footer>
+</main>
+</div>
