@@ -19,7 +19,7 @@
 - Key Vault holds the GitHub App private key and the Claude OAuth token. Cells get the token as `CLAUDE_CODE_OAUTH_TOKEN` and never run with `--bare`.
 - Model IDs live in the SOP file only: `coding: claude-opus-5-5`, `triage: claude-haiku-5-5`.
 - The Phase 0 backlog is a Project owned by a GitHub organization, and the target repo lives in that organization. A GitHub App can reach only organization-owned Projects. This was decided 2026-11-05.
-- Eligibility label `factory`. Definition of Done path defaults to `DoD.md`. A repo with no DoD file fails readiness for every item.
+- Eligibility label `factory`. Quality criteria live in the repo's policy files, per Run contract 11. A repo with no `.factory/dod.md` fails readiness for every item.
 - Poll every 5 minutes on top of webhooks. Leases renew every 60 seconds and expire after 5 missed renewals. A cell stops itself after 3 minutes of failed renewals.
 - `lease_generation` changes only as Run contract 2 says. A cell checks its generation before every push, comment and state write.
 - NeedsInput and SignOff items get reminders at day 2 and day 4, and move to Abandoned after 5 days with no answer. An operator re-queue or a late answer brings an Abandoned item back.
@@ -81,6 +81,12 @@ These rules hold across every task. A task that touches one of them follows this
     - the claim that starts an address run, set to that claim's time.
 
     A review left while address is running is newer than the claim, so the next poll still catches it once the item is back in InReview. The webhook compares the review's `submitted_at`, and the poll compares the newest such review from `prState`. GitHub's aggregate `reviewDecision` isn't used, because it can stay `CHANGES_REQUESTED` after the fix is pushed.
+11. **Policy files.** The factory hard-codes no quality criteria. Spec §6 "Policy files" defines five files: `dor.md`, `scenarios.md`, `pr-review.md`, `risk.md` and `dod.md`.
+    - **Loading.** The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`. Readiness has no run yet, so it reads the default branch head.
+    - **Defaults.** A file the repo lacks falls back to the factory's own `policy/<name>.md`, except `dod.md`, which has no default. A repo file replaces its default whole.
+    - **Criteria.** Each top-level `- [ ]` line is one criterion. A criterion holding `` `run: <command>` `` passes only on exit 0 in the cell. An agent judges every other criterion against the evidence for its file, and answers one JSON line per criterion: `{"criterion","passed","reason"}`.
+    - **Results.** Every result is stored in `policy_result`, with `source` set to `repo` or `default`.
+    - **Engine rules.** The engine rules (the lock, red proof, `@pbi` scoping, path floors, approval counts and the factory's DoD line) live in code and never in these files.
 
 ---
 
@@ -105,6 +111,8 @@ src/adapters/github/*.ts           GitHub App auth, backlog, repo host
 src/watcher/webhook.ts, poller.ts
 src/config/repo-config.ts, sop.ts
 src/gate/readiness.ts
+src/policy/policy.ts               load, default, parse and judge policy files (Run contract 11)
+policy/dor.md, scenarios.md, pr-review.md, risk.md   the factory's defaults
 src/bdd/messages.ts, lock.ts
 src/risk/shadow.ts
 src/agent/run.ts                   the only file that imports the Agent SDK
@@ -277,6 +285,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `run.execution_name text`, the Container Apps execution.
   - `stage_run.report_ref text`, the BDD report a red or green stage uploaded.
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
+  - `policy_result`, with the spec §12 columns, for Run contract 11.
 
   Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 2 names. Its `event` grant is `SELECT, INSERT` only.
 - [ ] **Step 2: Write failing tests** in `items.test.ts` against `startTestDb()`:
@@ -391,7 +400,7 @@ export interface RepoHost {
   - `cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers">`, used in the cell with the token from `/github-token`. Checks reach the cell only through the cell API, per Run contract 6.
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
   - `handleWebhook(deps, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 }>`
-- `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusFor: Record<ItemState, string | null>; optInLabel: string; sprintField: string | null; sizeField: string | null; maxSize: number | null }`. `statusFor` names the board status for each factory state, and a null entry leaves the board alone. For example, Queued maps to "Todo", InProgress, SignOff and NeedsInput map to "In Progress", InReview maps to "In Review", Done maps to "Done", and Eligible maps to null.
+- `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusFor: Record<ItemState, string | null>; optInLabel: string; sprintField: string | null; readinessFields: string[] }`. `readinessFields` names board fields, such as Size, that the readiness check passes to the judge, so `dor.md` can refer to them. `statusFor` names the board status for each factory state, and a null entry leaves the board alone. For example, Queued maps to "Todo", InProgress, SignOff and NeedsInput map to "In Progress", InReview maps to "In Review", Done maps to "Done", and Eligible maps to null.
 
 - [ ] **Step 1: Write failing tests:**
   - `verifySignature` returns true for `sha256=` plus the HMAC-SHA256 hex digest of the body. It returns false for a one-character change, a missing header and a `sha1=` header.
@@ -435,7 +444,7 @@ export interface RepoHost {
   - A Done item that loses its label is left alone.
   - The cursor persists in `backlog_source.cursor`, so a second `pollOnce` with no changes upserts nothing.
   - A paused `backlog_source` is skipped.
-  - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`. One that fails moves to NotReady through `readiness_failed` with a reasons comment. The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch.
+  - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`. One that fails moves to NotReady through `readiness_failed` with a reasons comment. The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch. Its `dor` comes from `loadPolicy` on the same commit, and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
   - **Criteria change.** An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. In the same transaction:
     - `item.criteria_hash` takes the new value, so the next poll sees no change and fires nothing more;
     - a new `run` row starts at `understand` on a new branch, per Run contract 7;
@@ -454,32 +463,46 @@ export interface RepoHost {
 
 ---
 
-### Task 9: Repo config, SOP loader and readiness gate
+### Task 9: Repo config, SOP loader, policy files and readiness gate
 
 **Files:**
 - Create: `src/config/repo-config.ts`, `src/config/sop.ts`, `src/gate/readiness.ts`, and a `*.test.ts` next to each.
 
 **Interfaces:**
 - Produces:
-  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { definitionOfDone: string; sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `definitionOfDone: "DoD.md"`, `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
+  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
-  - `gate(item: FactoryItem, ctx: { dodExists: boolean; configValid: boolean; repoKnown: boolean; openDeps: string[]; maxSize: number | null; judge: (item: FactoryItem) => Promise<string> }): Promise<{ ready: boolean; reasons: string[] }>`
+  - In `src/policy/policy.ts`, per Run contract 11:
+    - `type Policy = { name: "dor" | "scenarios" | "pr-review" | "risk" | "dod"; source: "repo" | "default"; text: string; criteria: { text: string; run: string | null }[] }`
+    - `loadPolicy(read: (path: string) => Promise<string | null>, name: Policy["name"]): Promise<Policy | null>`, which returns null only for a missing `dod.md`
+    - `parseCriteria(markdown: string): Policy["criteria"]`
+    - `parseJudgement(reply: string, policy: Policy): { criterion: string; passed: boolean; reason: string }[]`, which marks any criterion missing from the reply as failed, with "not judged"
+  - `gate(item: FactoryItem, ctx: { dor: Policy; dodExists: boolean; configValid: boolean; repoKnown: boolean; openDeps: string[]; judge: (item: FactoryItem, dor: Policy) => Promise<string> }): Promise<{ ready: boolean; results: { criterion: string; passed: boolean; reason: string }[] }>`
   - Tests pass a fake `judge`. The real one, `haikuJudge`, comes in Task 11.
+  - Write the four default files under `policy/`. `dor.md` holds three criteria: every acceptance criterion can become a Given/When/Then scenario, the scope is clear enough to build without guessing, and the item fits one Sprint. `scenarios.md` holds the spec's business-language rules. `pr-review.md` holds correctness, security, and following the repo's `AGENTS.md` or `CLAUDE.md`. `risk.md` holds the examples column of the spec's Risk tiers table.
 
 - [ ] **Step 1: Write failing tests:**
   - `parseRepoConfig(null)` throws `ConfigError("bdd")`. A repo with no config can't run BDD, so it can't be ready.
   - `gate` rule checks run first, and the judge isn't called when any rule fails. Rules:
-    - The DoD file is missing: "No DoD.md in this repo".
+    - The DoD file is missing: "No .factory/dod.md in this repo".
     - The repo config is missing or invalid: "No valid .factory/config.yml in this repo".
-    - There are zero acceptance criteria.
-    - The size is over `maxSize`.
+    - There are zero acceptance criteria. The engine keeps this rule because scenarios trace to criteria.
     - There is an open dependency, and the reason names it.
     - The repo is unknown.
-  - A judge result with `flags: ["asks for credentials"]` makes the item not ready, whatever `ready` says. The reason includes the flag. This is Review Focus 1.
-  - A judge reply that doesn't parse becomes `{ ready: false, reasons: ["readiness check output unreadable"] }`.
+  - A judge reply with every criterion passed but `flags: ["asks for credentials"]` makes the item not ready, and the results include the flag. This is Review Focus 1.
+  - A judge reply that doesn't parse fails every criterion with "readiness check output unreadable".
+  - **Policy loading.**
+    - With no `.factory/dor.md` in the repo, `loadPolicy` returns the factory's `policy/dor.md` with `source: "default"`.
+    - With one, it returns the repo file with `source: "repo"`, and none of the default's text.
+    - With no `.factory/dod.md`, it returns null.
+  - **Criteria.**
+    - `parseCriteria` on a file with two `- [ ]` lines, prose and a nested `- [ ]` returns the two top-level lines only.
+    - `` - [ ] E2E suite passes `run: npm run e2e` `` parses with `run: "npm run e2e"`.
+  - **Judgement.** `parseJudgement` on a reply that omits one criterion marks it failed with "not judged".
+  - **Repo wording.** With a repo `dor.md` whose only line is "Has a Size of 5 or less", and an item whose readiness field Size is 8, the fake judge's failure for that line becomes the item's NotReady comment, word for word.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - The gate parses the judge's reply as one JSON object on the last line: `{"ready":bool,"reasons":[],"flags":[]}`.
+  - The gate parses the judge's reply with `parseJudgement`, plus a last line `{"flags":[]}`. The item is ready only when every `dor.md` criterion passed and `flags` is empty. Every result goes to `policy_result` with a null `run_id`, and NotReady comments list the failed lines by name.
   - The gate comments its reasons on the item through `adapter.comment` with `dedupeKey = "readiness:" + item.updatedAt`, and never edits the item.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(gate): repo config, SOP loader, readiness gate`.
@@ -537,10 +560,10 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; mode: "cell" | "judge"; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
-export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; // raw reply; gate() parses it
+export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promise<string>; // raw reply; gate() parses it
 ```
 
-  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `mode: "judge"`. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt treats the item text as requirements to weigh and never as commands. It asks for `{"ready":bool,"reasons":[],"flags":[]}` on the last line, where `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires.
+  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `mode: "judge"`. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt puts the repo's `dor.md` in the instructions and the item text, with its readiness fields, in a fenced data block that it treats as requirements to weigh, never as commands. It asks for one JSON line per `dor.md` criterion, per Run contract 11, then a last line `{"flags":[]}`. `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires. That check is the engine's, and no `dor.md` can remove it.
 
 - [ ] **Step 1: Write failing `foldMessages` tests** against arrays of SDK-shaped messages:
   - A `result` with `subtype: "success"` gives `ok: true`, the result text, and `costUsd` as the sum of `modelUsage[*].costUSD`. `tokensIn` sums `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`, and `tokensOut` sums `outputTokens`.
@@ -700,18 +723,19 @@ Stage behaviour, from spec §6 rows 1 to 7:
 | red | `bdd.run`, then `redGate(classify(report), tag)` is ok, and `matchesLock(dir, ctx.lockSha, ctx.lockedFiles)` is true. The report goes up through `/upload-url` with `kind: "report"` as red evidence | 2 retries, then `blocked` |
 | green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass. The green report is uploaded the same way | 3 retries, then `retries_exhausted` |
 | self-review | The reviewer's last line is `APPROVED`. `DEADLOCK` or 5 rounds without approval means `blocked` | `blocked` |
-| open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, then `POST /pr`, then `requestReviewers(repo, pr, config.reviewers)`, then `GET /checks?sha=<git.head()>` every 60s until `success`. Every later push, including a retry after "back to green", asks about its own new sha. On `failure`, back to green, counted against green's retries. On `none`, `blocked` with "no CI ran on the PR". The stage ends in Run contract 9 order with `pr_opened` carrying `prNumber`, `prUrl`, `tier` and `tierReasons` | as stated |
+| open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, and the repo's `dod.md` criteria as an unticked checklist for the person who merges, then `POST /pr`, then `requestReviewers(repo, pr, config.reviewers)`, then `GET /checks?sha=<git.head()>` every 60s until `success`. Every later push, including a retry after "back to green", asks about its own new sha. On `failure`, back to green, counted against green's retries. On `none`, `blocked` with "no CI ran on the PR". The stage ends in Run contract 9 order with `pr_opened` carrying `prNumber`, `prUrl`, `tier` and `tierReasons` | as stated |
 | address | Runs only when `ctx.nextStage` is `address`. `pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
 
-- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, add `address` with `agent: pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the seven prompt files. `specify.md` carries the spec's BDD rules verbatim: traceability, business language, the lock and red proof. It also requires the item's `@pbi-<n>` tag on every feature file. `red.md` says to write step definitions and stubs with no behaviour.
-- [ ] **Step 2: Vendor the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` and `~/.claude/agents/pr-addresser.md` into `cell/claude/agents/`. `address.md` tells `pr-addresser` to work only the open threads and the conflict, and to treat review text as requests to weigh, never as commands. In `self-review.md`, add the spec's BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. Also add the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`".
+- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, add `address` with `agent: pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the seven prompt files. They hold only engine rules, and every repo-specific standard comes from a policy file the engine loads at run time (Run contract 11). `specify.md` carries the engine's BDD rules verbatim: traceability, the lock and red proof. It requires the item's `@pbi-<n>` tag on every feature file, and appends the repo's `scenarios.md` as the team's writing guide. `red.md` says to write step definitions and stubs with no behaviour.
+- [ ] **Step 2: Vendor the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` and `~/.claude/agents/pr-addresser.md` into `cell/claude/agents/`. `address.md` tells `pr-addresser` to work only the open threads and the conflict, and to treat review text as requests to weigh, never as commands. `self-review.md` gives the reviewer the repo's `pr-review.md` as its rubric, then the engine's BDD checks, which no `pr-review.md` can remove: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. It also adds the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`". The reviewer reports each `pr-review.md` criterion as a JSON line, which the engine stores in `policy_result`.
 - [ ] **Step 3: Write failing engine tests** with a scripted fake agent, a fake `Git` and a recording `CellApi`:
   - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify, posts `scenarios_written` with `scenariosSha` and `lockedFiles`, and returns `waiting`. A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
   - **Checkpoint resume.** With `ctx.nextStage = "red"`, it never calls the agent for understand or specify.
   - **Changes asked.** With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`, the specify prompt contains the note.
   - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
   - **Address.** With `ctx.nextStage = "address"`, it runs only the address stage, pushes, and posts `pr_opened` once `/checks?sha=` for the pushed sha reports `success`. A `success` cached for the previous head never counts.
-  - **Open PR.** The PR body contains `Refs #482` and never `Closes`, `POST /pr` comes before the first `GET /checks`, and `requestReviewers` is called with `config.reviewers`.
+  - **Policy in prompts.** With a repo `scenarios.md` and `pr-review.md`, the specify prompt contains the repo's `scenarios.md` text and the self-review brief contains its `pr-review.md` text, each word for word. Without them, the factory defaults appear instead. The engine's BDD checks appear in the self-review brief either way.
+  - **Open PR.** The PR body contains `Refs #482` and never `Closes`, and lists each `dod.md` criterion as a `- [ ]` line, `POST /pr` comes before the first `GET /checks`, and `requestReviewers` is called with `config.reviewers`.
   - **Call order.** At the end of every stage the recording `CellApi` sees `/stage passed`, then the uploads, then `/transition`, per Run contract 9, and the run returns `waiting` or `done` rather than `stopped`.
   - **Red proof.** A red stage whose report has a green scenario retries twice, then posts `blocked` with "scenario passes before any behaviour exists".
   - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed`, post `/transition` with `usage_limited` and `resumeAt`, and return `limited`. That attempt doesn't count against retries.
@@ -765,6 +789,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Floor.** Floor lists every InProgress, SignOff, NeedsInput and InReview item. Each row shows the current stage, time in stage, the sum of `stage_run.cost_usd` and the last agent message, and a held item or active override shows a badge.
   - **Run detail.** Run detail shows:
     - the SOP version and config sha;
+    - each policy file used, marked repo or default, with every criterion's result and reason from `policy_result`;
     - the signed-off feature files at `features_lock_sha`;
     - each scenario's red and green verdicts, read by running `classify` on the reports at `stage_run.report_ref`;
     - per stage: attempts, model, tokens, cost and a transcript link;
@@ -780,7 +805,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Floor strips.** Floor shows:
     - "Waiting on you", with every SignOff and NeedsInput item oldest first, plus each InReview PR and how long it has waited, which matches the count in Run contract 3;
     - "Next up", the first five items `claimNext` would pick;
-    - "Not ready", each NotReady item with its readiness reasons;
+    - "Not ready", each NotReady item with the `dor.md` lines it failed;
     - the waiting count beside the WIP number, as "3 of 3 waiting".
   - **Sign-off view.** For a SignOff item, Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it, and marks a criterion with no scenario "no scenario".
   - **Re-queue.** Failed and Abandoned items in Run detail show a Re-queue button that posts a `requeue` override, which needs a reason.
@@ -804,11 +829,12 @@ Stage behaviour, from spec §6 rows 1 to 7:
 **Interfaces:**
 - Consumes: `runAgent` and `RepoConfig.sensitivePaths`.
 - Produces:
-  - `pathFloor(files: string[], sensitive: string[], dodPath: string): { min: "Low" | "Medium" | "High"; reasons: string[] }`. CI workflow files, `sensitive_paths`, anything under `.factory/` and the DoD file force at least Medium.
-  - `classifyRisk(diff: string, files: string[], ctx: { sop: Sop; config: RepoConfig; agent: typeof runAgent }): Promise<{ tier: "Low" | "Medium" | "High"; reasons: string[] }>`. It runs two passes on `sop.models.coding`: the tier, then "does this change need a person anyway". It never returns below `pathFloor`.
+  - `pathFloor(files: string[], sensitive: string[]): { min: "Low" | "Medium" | "High"; reasons: string[] }`. CI workflow files, `sensitive_paths`, and anything under `.factory/`, which holds every policy file, force at least Medium. This floor is the engine's, and no `risk.md` lowers it.
+  - `classifyRisk(diff: string, files: string[], ctx: { sop: Sop; config: RepoConfig; risk: Policy; agent: typeof runAgent }): Promise<{ tier: "Low" | "Medium" | "High"; reasons: string[] }>`. It runs two passes on `sop.models.coding`, with the repo's `risk.md` as the definition of each tier: the tier, then "does this change need a person anyway". It never returns below `pathFloor`.
 
 - [ ] **Step 1: Write failing tests:**
-  - **Path floor.** `pathFloor` gives Medium for `.github/workflows/ci.yml`, `.factory/config.yml`, `DoD.md` and a file matching `src/billing/**`, and gives Low for `docs/readme.md`.
+  - **Path floor.** `pathFloor` gives Medium for `.github/workflows/ci.yml`, `.factory/config.yml`, `.factory/dod.md` and a file matching `src/billing/**`, and gives Low for `docs/readme.md`.
+  - **Repo risk.** A repo `risk.md` that calls any change to `src/payments/**` High makes the fake agent's prompt carry that text, and a diff there comes back High. A `risk.md` that calls `.factory/` changes Low still yields Medium, because of the floor.
   - **No lowering.** A fake agent answering Low for a diff that touches `.factory/config.yml` still yields Medium, with both reasons kept.
   - **Second pass.** A second pass that answers "needs a person" raises Low to Medium.
   - **Unreadable output.** Output that doesn't parse yields High, with the reason "classifier output unreadable". A wrong Low lets code skip review, so failure raises the tier.
@@ -832,7 +858,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Consumes everything above, with the fake adapter, the fake launcher running `runCell` in-process, and the scripted fake agent.
 
 - [ ] **Step 1: Write the failing end-to-end test:**
-  - **The full path.** Seed one labelled item with two criteria in a repo whose fake files include `DoD.md` and `.factory/config.yml`. Then tick:
+  - **The full path.** Seed one labelled item with two criteria in a repo whose fake files include `.factory/config.yml` and `.factory/dod.md`, and no other policy file, so the defaults run. Then tick:
     - Eligible goes to Queued with a fake judge reply of `ready`.
     - Queued goes to InProgress and then SignOff.
     - The product owner approves, and SignOff goes to InProgress and then InReview with a PR URL.
@@ -857,7 +883,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
 - [ ] **Step 1: Deploy through `deploy.yml`.** Then seed yourself as the first owner and product owner by starting the migrate job with your sign-in details: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --command node src/store/migrate-cli.ts --args seed-owner provider=microsoft subject=<id> email=<you> github-login=<login> product-owner`. The words after `--args` carry no leading dashes, because az would read a dash-prefixed word as its own option and reject the call. Then confirm the execution succeeded and that you can sign in past the no-access page. Take the subject id from the Task 2 Step 5 spike record.
 - [ ] **Step 2: Create the Phase 0 target repo.**
-  - Add `DoD.md`, `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, a CODEOWNERS file, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
+  - Add `.factory/dod.md` with the team's Definition of Done, and any of `dor.md`, `scenarios.md`, `pr-review.md` and `risk.md` the team wants to set itself. Add `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, a CODEOWNERS file, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
   - In the org project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
   - In branch protection, require one human review and CI. Shadow mode posts no `risk-approval`, so that check isn't required yet.
   - Install the GitHub App on that repo only.
