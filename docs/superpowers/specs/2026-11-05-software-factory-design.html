@@ -274,7 +274,7 @@ flowchart LR
 stateDiagram-v2
   [*] --> Eligible
   Eligible --> NotReady: readiness check fails
-  NotReady --> Eligible: item edited, or dor.md changed
+  NotReady --> Eligible: item edited, or a readiness input changed
   Eligible --> Queued: ready
   Queued --> InProgress: WIP slot + claim
   InProgress --> SignOff: scenarios written
