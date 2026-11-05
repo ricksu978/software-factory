@@ -18,6 +18,7 @@
 - Transcripts go to Blob Storage, Hot LRS, and `stage_run.transcript_ref` points at them. Container logs go to Log Analytics.
 - Key Vault holds the GitHub App private key and the Claude OAuth token. Cells get the token as `CLAUDE_CODE_OAUTH_TOKEN` and never run with `--bare`.
 - Model IDs live in the SOP file only: `coding: claude-opus-5-5`, `triage: claude-haiku-5-5`.
+- The Phase 0 backlog is a Project owned by a GitHub organization, and the target repo lives in that organization. A GitHub App can reach only organization-owned Projects. This was decided 2026-11-05.
 - Eligibility label `factory`. Definition of Done path defaults to `DoD.md`. A repo with no DoD file fails readiness for every item.
 - Poll every 5 minutes on top of webhooks. Leases renew every 60 seconds and expire after 5 missed renewals. A cell stops itself after 3 minutes of failed renewals.
 - Each claim increments `lease_generation`. A cell checks its generation before every push, comment and state write.
@@ -125,6 +126,12 @@ The spec says these tests come first, because their results can change §11. Thi
 - [ ] **Step 4: Write `deploy.yml`.** It builds both Dockerfiles with `docker buildx build --platform linux/amd64`, pushes them to ACR, and runs `az deployment group create`. It authenticates to Azure through OIDC federated credentials, never a stored secret.
 - [ ] **Step 5: Sign-in test.** Sign in with a Google account, a personal Microsoft account and a work account from another tenant. Record each case's `x-ms-client-principal-idp` and `x-ms-client-principal-id`. Expected: all three reach `/` and show distinct ids.
 - [ ] **Step 6: Header spoofing test.** Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out. Expected: a redirect to login, not a 200. Then send the same header to `/internal/cells/ping` and confirm the response doesn't echo the forged value as an authenticated identity.
+- [ ] **Step 7a: Organization and App.** Create a free GitHub organization for Phase 0. Creating it is your step, because the API can't create organizations for a personal account. Then register the factory GitHub App with this setup:
+  - Repository permissions: write on contents, pull requests, issues and commit statuses, read on checks and metadata.
+  - Organization permissions: write on organization projects.
+  - App webhook events: issues, issue comment, pull request, check suite and issue dependencies.
+
+  GitHub doesn't offer `projects_v2_item` to App webhooks, so also add an organization webhook for that event. It goes to the same `/webhooks/github` URL with the same secret. Install the App on the organization, scoped to the selected repos only. Store its private key in Key Vault as `github-app-key`.
 - [ ] **Step 7: Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery. Expected: 204 in the App's delivery log, and no login redirect. Change the secret on one side, then expect 401.
 - [ ] **Step 8: Write `spike/sdk-oauth.ts`.** It calls `query({ prompt: "Reply with the word ready.", options: { model: "claude-haiku-5-5", maxTurns: 1, settingSources: [] } })` and prints each message's `type`. It also prints the result's `subtype`, `is_error`, `total_cost_usd` and `modelUsage`. Run it as one execution of `caj-factory-cell`.
   - Expected: `subtype: "success"`.
@@ -300,7 +307,7 @@ export interface RepoHost {
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `RepoHost` and `backlogContract` from Task 6, and `appendEvent` from Task 4.
 - Produces:
-  - `githubBacklog(cfg: { app: App; installationId: number; projectNodeId: string; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true` for issue, PR and check events. Project field changes arrive through the poller only, because `projects_v2_item` webhooks are org-webhook-only and in public preview.
+  - `githubBacklog(cfg: { app: App; installationId: number; projectNodeId: string; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`. Issue, PR, check and dependency events come from the App webhook. Project item changes come from the organization's `projects_v2_item` webhook, and `parseWebhook` maps them to `item_changed`. That event is still in public preview, so the 5-minute poll stays the backstop.
   - `githubRepoHost(app: App, installationId: number): RepoHost`
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
   - `handleWebhook(deps, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 }>`
