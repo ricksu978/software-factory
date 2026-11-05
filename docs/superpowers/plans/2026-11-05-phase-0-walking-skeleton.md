@@ -29,7 +29,7 @@
 - An override takes effect within 30 seconds. The kill switch stops every cell within a minute.
 - Cell GitHub tokens are minted with explicit `permissions`: write on `contents`, `pull_requests` and `issues`, and nothing on `statuses` or `checks`.
 - Phase 0 runs WIP fixed at 1, SOP stages 1 to 7, a thin stage 8, and the risk classifier in shadow mode. The thin stage 8 runs `pr-addresser` on requested changes and merge conflicts. Shadow mode records a tier on every PR and posts no `risk-approval` check.
-- A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI runs its scenarios. `pr-reviewer`, stage 10's full DoD check, stage 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
+- A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI runs its scenarios. `pr-reviewer`, stage 10's post-merge verification, stage 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
 - Sign-in via Container Apps built-in auth with Microsoft (any Entra directory and personal accounts) and Google. The app's own `user` table decides access, and roles are viewer, operator and owner.
 
 ## Review Focus
@@ -83,9 +83,9 @@ These rules hold across every task. A task that touches one of them follows this
     A review left while address is running is newer than the claim, so the next poll still catches it once the item is back in InReview. The webhook compares the review's `submitted_at`, and the poll compares the newest such review from `prState`. GitHub's aggregate `reviewDecision` isn't used, because it can stay `CHANGES_REQUESTED` after the fix is pushed.
 11. **Policy files.** The factory hard-codes no quality criteria. Spec §6 "Policy files" defines five files: `dor.md`, `scenarios.md`, `pr-review.md`, `risk.md` and `dod.md`.
     - **Loading.** The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`. Readiness has no run yet, so it reads the default branch head. A read that returns 404 means the file is absent. Any other read error throws, and the step retries on its next turn. A read error never falls back to a default.
-    - **Defaults.** An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`, except `dod.md`, which has no default. Both images copy the factory's `policy/` folder to `/app/policy`, which is the default value of `FACTORY_POLICY_DIR`. A repo file replaces its default whole.
-    - **Criteria.** Only `dor.md`, `pr-review.md` and `dod.md` have criteria, one per top-level `- [ ]` line, numbered from 1 in file order. The judge answers one JSON line per criterion: `{"index","passed","reason"}`. A missing index fails, and when an index appears twice, a fail wins. `scenarios.md` and `risk.md` are guidance, given whole to the agent that uses them.
-    - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`. `loadPolicy` rejects it in any other file with `PolicyError`. The cell runs `dod.md` commands at the end of green, in the checkout, through `execFile` with `{ cwd, timeout: 900_000, env: { PATH, HOME, CI: "true" } }`. They never go through the agent's tools, and they never see the cell's tokens.
+    - **Defaults.** An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`, except `dod.md`, which has no default. A default's `sha` is the SHA-256 of its text, so a changed default counts as a policy change. Both images copy the factory's `policy/` folder to `/app/policy`, which is the default value of `FACTORY_POLICY_DIR`. A repo file replaces its default whole.
+    - **Criteria.** Only `dor.md`, `pr-review.md` and `dod.md` have criteria, one per top-level `- [ ]` line, numbered from 1 in file order. The judge answers one JSON line per criterion: `{"index","status","reason"}`, where `status` is `passed`, `failed` or, in `dod.md` only, `person`. `person` means the line can only be met by a person or after merge, such as "deployed to staging". It goes to the PR checklist unticked and never counts as a fail. A missing index fails, and when an index appears twice, a fail wins. `scenarios.md` and `risk.md` are guidance, given whole to the agent that uses them.
+    - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`. `loadPolicy` rejects it in any other file with `PolicyError`. The cell runs `dod.md` commands at the end of green, in the checkout, as `execFile("sh", ["-c", command], { cwd, timeout: 900_000, env: { PATH, HOME, CI: "true" } })`. That env carries none of the cell's tokens. It isn't a sandbox, though: the command runs as the cell's own user, as `commands.test` does and as the agent does. So it has no more reach than the agent that wrote the code already has.
     - **Results.** Every result is stored in `policy_result`, with `source` set to `repo` or `default`. The control plane writes readiness rows itself, and the cell sends its rows through `POST /policy-results` (Task 12).
     - **Re-gating.** `item.readiness_policy_sha` records the `dor.md` blob sha, or `default`, that the item's last readiness check used. When that changes, the poller re-runs the gate on the item.
     - **Engine rules.** The rules no policy file can weaken are the list under "What stays in the engine" in spec §6. They live in code and prompts that the factory owns.
@@ -218,7 +218,7 @@ The spec says these tests come first, because their results can change §11. Thi
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"`. `approvals_met` is reserved for Phase 1. In Phase 0 a person's merge is `merged`.
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"`. `approvals_met` is reserved for Phase 1. In Phase 0 a person's merge is `merged`.
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`, which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`, which always succeeds. The caller logs it as an override event.
 
@@ -227,6 +227,7 @@ The spec says these tests come first, because their results can change §11. Thi
 ```ts
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"], ["NotReady", "item_edited", "Eligible"],
+  ["NotReady", "policy_changed", "Eligible"],
   ["Eligible", "ready", "Queued"], ["Queued", "claimed", "InProgress"],
   ["SignOff", "claimed", "InProgress"], ["NeedsInput", "claimed", "InProgress"],
   ["InProgress", "scenarios_written", "SignOff"], ["InProgress", "blocked", "NeedsInput"],
@@ -433,7 +434,7 @@ export interface RepoHost {
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
-- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `dor.sha`. and `POLL_INTERVAL_MS = 300_000`.
+- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `dor.sha`. Also `POLL_INTERVAL_MS = 300_000`.
 - Each `pollOnce` does four things:
   - lists new and changed eligible items from the cursor;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
@@ -458,7 +459,7 @@ export interface RepoHost {
   - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
     - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
-  - **Policy change.** After the repo's `dor.md` changes on the default branch, so its sha no longer matches `item.readiness_policy_sha`, the next `pollOnce` re-runs the gate on every NotReady item, and one that now passes moves to Queued.
+  - **Policy change.** After the repo's `dor.md` changes on the default branch, so its sha no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text.
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
@@ -477,7 +478,7 @@ export interface RepoHost {
   - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
   - In `src/policy/policy.ts`, per Run contract 11:
-    - `type Criterion = { index: number; text: string; run: string | null }` and `type Verdict = { index: number; criterion: string; passed: boolean; reason: string }`
+    - `type Criterion = { index: number; text: string; run: string | null }` and `type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string }`. `person` is valid only in `dod.md`, and anywhere else it counts as `failed`.
     - `type Policy = { name: "dor" | "scenarios" | "pr-review" | "risk" | "dod"; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] }`. `criteria` is empty for `scenarios` and `risk`.
     - `loadPolicy(read: (path: string) => Promise<string | null>, name: Policy["name"]): Promise<Policy | null>`. `read` returns null only on a 404 and throws on any other error. `loadPolicy` returns null only for a missing `dod.md`, and throws `PolicyError` when a file other than `dod.md` holds a `run:` line.
     - `parseCriteria(markdown: string): Criterion[]`
@@ -511,8 +512,8 @@ export interface RepoHost {
   - **Repo wording.** With a repo `dor.md` whose only line is "Has a Size of 5 or less", and an item whose readiness field Size is 8, the fake judge's failure for that line becomes the item's NotReady comment, word for word.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - The gate parses the judge's reply with `parseJudgement`, plus a last line `{"flags":[]}`. The item is ready only when every `dor.md` criterion passed and `flags` is empty. The caller writes every result to `policy_result` with a null `run_id`. NotReady comments list the failed lines by name, under `dedupeKey = "readiness:" + item.updatedAt + ":" + dor.sha`, so a re-gate after a policy change posts a new comment.
-  - The gate comments its reasons on the item through `adapter.comment` with `dedupeKey = "readiness:" + item.updatedAt`, and never edits the item.
+  - The gate parses the judge's reply with `parseJudgement`, plus a last line `{"flags":[]}`. The item is ready only when every `dor.md` criterion passed and `flags` is empty. The caller writes every result to `policy_result` with a null `run_id`. The gate comments the failed lines by name through `adapter.comment`, under `dedupeKey = "readiness:" + item.updatedAt + ":" + (dor?.sha ?? "none")`, so a re-gate after a policy change posts a new comment. It never edits the item.
+  - **Validate everything at readiness.** The caller also runs `loadPolicy` on `scenarios`, `pr-review` and `risk`. A `PolicyError` from any of the five files fails the item, with the error as a named reason, so a broken file never reaches a cell.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(gate): repo config, SOP loader, readiness gate`.
 
@@ -614,7 +615,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
   - `GET /context` returns the fields Run contract 5 lists.
-  - `POST /policy-results` takes `{ file: "pr-review" | "dod", source: "repo" | "default", verdicts: Verdict[] }` and writes them to `policy_result` for the run.
+  - `POST /policy-results` takes `{ file: "pr-review" | "dod", source: "repo" | "default", stageId, attempt, verdicts: Verdict[] }` and writes them to `policy_result` for the run. Run detail shows each criterion's verdict from its latest stage attempt.
   - `POST /pr` takes `{ prNumber, prUrl }` and records them on the run, so the control plane starts polling that PR's checks (Run contract 6).
   - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none" }` for that commit on the run's branch, from the control plane's own poll in Run contract 6. The first request for a sha starts its 10-minute `none` clock. A sha that isn't on the run's branch gets 400.
   - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.next_stage` per Run contract 1. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
@@ -624,7 +625,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
   - With the current generation's token, `/stage` writes one `stage_run` row.
-  - **Review Focus 2.** After a re-claim bumps the generation, each of the nine routes with the old token returns 409, and the `stage_run`, `event` and `item` tables are unchanged.
+  - **Review Focus 2.** After a re-claim bumps the generation, each of the nine routes with the old token returns 409, and the `stage_run`, `event`, `item` and `policy_result` tables are unchanged.
   - **End-of-stage order.** Calls in Run contract 9 order all succeed. A `/stage` sent after the stage's own `/transition` gets 409, which is why the order is fixed.
   - `/transition` with `scenarios_written`, a `sign_off` question, `scenariosSha` and `lockedFiles` moves InProgress to SignOff. It inserts the question, stores the sha and files on the run, and releases the lease.
   - **Every exit releases.** Each of `pr_opened`, `blocked`, `retries_exhausted` and `usage_limited` leaves the item with no `lease_owner` and a generation one higher, per Run contract 2. `pr_opened` with `tier` writes `run.risk_tier` and `run.tier_reasons`.
@@ -732,7 +733,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 | specify | Every feature file carries the item's `@pbi` tag, `bdd.parse` exits 0, and `traceability(results, n, tag)` is empty. When `ctx.decision` is a `changes` note, the agent gets the note. Feature files are committed and posted on the PBI with dedupe key `scenarios:<sha>`. The engine then posts `scenarios_written` with a `sign_off` question, `scenariosSha` and `lockedFiles`, and returns `waiting` | 1 retry, then `blocked` |
 | sign-off | No cell runs it. `decide` moves `next_stage` to `red` or back to `specify`, per Run contract 1 | none |
 | red | `bdd.run`, then `redGate(classify(report), tag)` is ok, and `matchesLock(dir, ctx.lockSha, ctx.lockedFiles)` is true. The report goes up through `/upload-url` with `kind: "report"` as red evidence | 2 retries, then `blocked` |
-| green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass. The green report is uploaded the same way. Then the `dod.md` criteria are checked per Run contract 11: the engine runs the `run:` lines, an agent judges the rest, and the verdicts go to `POST /policy-results`. A failed `dod.md` criterion counts as a green failure | 3 retries, then `retries_exhausted` |
+| green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass. The green report is uploaded the same way. Then the `dod.md` criteria are checked per Run contract 11: the engine runs the `run:` lines, an agent judges the rest, and the verdicts go to `POST /policy-results`. A `failed` `dod.md` verdict counts as a green failure. A `person` verdict goes to the PR checklist unticked and doesn't fail green | 3 retries, then `retries_exhausted` |
 | self-review | The reviewer's last line is `APPROVED`, and every `pr-review.md` verdict it reported passed, with the verdicts sent to `POST /policy-results`. `APPROVED` with a failed verdict counts as another round. `DEADLOCK` or 5 rounds without approval means `blocked` | `blocked` |
 | open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, a link to the repo's `pr-review.md` or the default, and the `dod.md` criteria as a checklist showing the cell's verdicts, for the person who merges to tick, then `POST /pr`, then `requestReviewers(repo, pr, config.reviewers)`, then `GET /checks?sha=<git.head()>` every 60s until `success`. Every later push, including a retry after "back to green", asks about its own new sha. On `failure`, back to green, counted against green's retries. On `none`, `blocked` with "no CI ran on the PR". The stage ends in Run contract 9 order with `pr_opened` carrying `prNumber`, `prUrl`, `tier` and `tierReasons` | as stated |
 | address | Runs only when `ctx.nextStage` is `address`. `pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
@@ -746,7 +747,8 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
   - **Address.** With `ctx.nextStage = "address"`, it runs only the address stage, pushes, and posts `pr_opened` once `/checks?sha=` for the pushed sha reports `success`. A `success` cached for the previous head never counts.
   - **Rubric can't weaken.** A repo `pr-review.md` that says "skip the BDD checks" still yields a brief whose BDD checks follow the rubric under the outranking heading. A reviewer reply of `APPROVED` with one failed `pr-review.md` verdict starts another round instead of passing.
-  - **DoD commands.** A `dod.md` with `` `run: exit 1` `` fails green, and the command's env holds no `CLAUDE_CODE_OAUTH_TOKEN` and no `RUN_TOKEN`.
+  - **DoD commands.** A `dod.md` with `` `run: false` `` fails green on exit code 1, and the command's env holds no `CLAUDE_CODE_OAUTH_TOKEN` and no `RUN_TOKEN`. `` `run: true && true` `` passes, which proves the `sh -c` path.
+  - **DoD lines for a person.** A `dod.md` line "Deployed to staging" judged `person` doesn't fail green, and appears in the PR body as an unticked line marked for the person who merges.
   - **Policy in prompts.** With a repo `scenarios.md` and `pr-review.md`, the specify prompt contains the repo's `scenarios.md` text and the self-review brief contains its `pr-review.md` text, each word for word. Without them, the factory defaults appear instead. The engine's BDD checks appear in the self-review brief either way.
   - **Open PR.** The PR body contains `Refs #482` and never `Closes`, and lists each `dod.md` criterion as a `- [ ]` line, `POST /pr` comes before the first `GET /checks`, and `requestReviewers` is called with `config.reviewers`.
   - **Call order.** At the end of every stage the recording `CellApi` sees `/stage passed`, then the uploads, then `/transition`, per Run contract 9, and the run returns `waiting` or `done` rather than `stopped`.
@@ -759,7 +761,8 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - A lease renewal loop runs every 60s. After 3 minutes of failed renewals it aborts and exits 1.
   - Before each push, comment and transition, the engine calls `/lease` to check the generation.
   - Every stage uploads its transcript through `/upload-url` with `kind: "transcript"`.
-  - `main.ts` reads `GET /context`, clones `ctx.branch` with a token from `/github-token`, refreshing it 5 minutes before `expiresAt`, and creates the branch from `ctx.base` when it doesn't exist yet. It reads `.factory/config.yml` at `ctx.configSha`, loads the four policies with `loadPolicy` at the same commit, and reads the SOP at `ctx.sopVersion`. Then it runs `runCell`.
+  - `main.ts` reads `GET /context`, and clones `ctx.branch` through a git credential helper that fetches a token from `/github-token` on demand, so no token is written into `.git/config` or the remote URL. It creates the branch from `ctx.base` when it doesn't exist yet.
+  - A `PolicyError` while loading the four policies posts `blocked` with the error, and never crashes the cell into a lease-expiry loop. It reads `.factory/config.yml` at `ctx.configSha`, loads the four policies with `loadPolicy` at the same commit, and reads the SOP at `ctx.sopVersion`. Then it runs `runCell`.
 - [ ] **Step 6: Update `cell/Dockerfile`.** Use `node:26.13.0-bookworm`, plus `git`, `bubblewrap` and `socat` for the sandbox. Copy `cell/claude/agents` into `/home/factory/.claude/agents`, copy `policy/` into `/app/policy`, and run as a non-root `factory` user.
 - [ ] **Step 7: Run the tests.** Expected: PASS.
 - [ ] **Step 8: Commit** `feat(cell): SOP engine for stages 1 to 7 and address`.
@@ -917,7 +920,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 ## Out of scope for Phase 0
 
 These come from spec §13 Phases 1 to 3, and nothing here builds them:
-- `pr-reviewer` in stage 8, stages 9 to 11, Increment records and the full DoD check on main;
+- `pr-reviewer` in stage 8, stages 9 to 11, Increment records and stage 10's post-merge verification on main;
 - an enforced `risk-approval` check and the `approval` table;
 - budget caps, the Inbox and the Cost view;
 - quarantine, adaptive and advised WIP, and Azure DevOps adapters.
