@@ -688,7 +688,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
     <thead><tr><th>Topic</th><th>Decision</th><th>Where</th></tr></thead>
     <tbody>
       <tr><td>Hosting</td><td>Azure, compute in Australia East</td><td>§11</td></tr>
-      <tr><td>Agent runtime</td><td>Claude Agent SDK in your own containers</td><td>§11</td></tr>
+      <tr><td>Agent runtime</td><td>Claude Agent SDK in your own containers. If Phase 0 shows the SDK refuses the subscription's OAuth token, cells drive the headless <code>claude</code> CLI in the same containers.</td><td>§11</td></tr>
       <tr><td>Model billing</td><td>Your Claude Ultra subscription, with the Consumer Terms passages on record</td><td>§11</td></tr>
       <tr><td>Models</td><td>Opus 5.5 for building and review, Haiku 5.5 for readiness</td><td>§11</td></tr>
       <tr><td>Backlogs</td><td>GitHub first, behind adapters ready for Azure DevOps and others</td><td>§4</td></tr>
