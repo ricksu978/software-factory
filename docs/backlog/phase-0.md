@@ -1,15 +1,16 @@
 # Phase 0 backlog: draft
 
-The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBIs 21 and 22 are the first work the factory builds for itself. All of them become issues on the personal Project once approved.
+The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBI 21 is the first work the factory builds for itself, and the owner builds PBI 22 by hand. All of them become issues on the personal Project once approved.
 
 Until the factory can run, PBIs 1 to 18 go through their SOP by hand. Claude does Understand, Specify, Red, Green, self-review and the PR, and the owner signs off the scenarios and merges. "Takes over" says which manual step that PBI hands to the factory once it merges.
 
 Which PBIs carry the `factory` label:
-- **PBIs 21 and 22.** These are for the factory to build, so they carry it. Each names its plan task or spec section, has criteria a test can check, and fits one Sprint, per `.factory/dor.md`.
+- **PBI 21.** It's for the factory to build, so it carries the label. It names its plan task, has criteria a test can check, and fits one Sprint, per `.factory/dor.md`.
 - **PBIs 1 to 18.** They're closed before the factory runs, so the label changes nothing.
 - **PBIs 19 and 20.** They never carry it. They need the owner's Azure Owner rights, three real-account sign-ins and a cutover, which no cell can do and no test can check, so the owner runs them by hand.
+- **PBI 22.** It never carries it either. Its criteria need a real database, so its scenarios are `@db`, and Red fails any item with an `@db` scenario until PBI 22 itself merges (plan Task 4). The owner builds it through the SOP by hand, as for PBIs 1 to 18.
 
-The Phase 0b exit asks for 10 merged factory PRs. PBIs 21 and 22 are the first two, and the owner adds the rest to the board as they come up.
+The Phase 0b exit asks for 10 merged factory PRs. PBI 21 is the first, and the owner adds the rest to the board as they come up.
 
 ## PBI 1. Project skeleton with a BDD runner
 
@@ -204,7 +205,7 @@ Implements plan Task 18. This is Phase 0a's exit.
 - [ ] Each of the five Phase 0 overrides takes effect within 30 seconds, and the kill switch stops every cell container within a minute.
 - [ ] A restart of `aspire run` while a cell is in Green loses no item, event or transcript, and starts no second cell.
 
-Takes over: building. From here the local factory builds every factory-labelled PBI, starting with PBIs 21 and 22. The owner still runs PBIs 19 and 20.
+Takes over: building. From here the local factory builds every factory-labelled PBI, starting with PBI 21. The owner still runs PBIs 19, 20 and 22.
 
 ## PBI 19. Azure platform and the cloud platform tests
 
@@ -239,7 +240,7 @@ Implements plan Run contract 11 and Task 9. The factory builds it.
 
 ## PBI 22. A database for cells
 
-Implements plan Global Constraints and Task 4. The factory builds it.
+Implements plan Global Constraints and Task 4. No `factory` label: the owner builds it by hand.
 
 - [ ] A cell can run the database suites and the `@db` scenarios, so `.factory/dod.md` and `.factory/config.yml` drop `FACTORY_DB_TESTS=skip` and the `not @db` filter.
 - [ ] Two cells running the suites at once don't see each other's rows.
