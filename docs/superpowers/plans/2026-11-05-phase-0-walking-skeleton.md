@@ -2,7 +2,7 @@
 
 > **For agentic workers.** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal.** Build the Phase 0 walking skeleton from spec §13. One GitHub repo and project, fixed WIP of 1, and SOP stages 1 to 7. A person merges, the risk classifier runs in shadow mode, and the dashboard has Floor, Run detail and four overrides: pause, drain, stop a run and hold an item.
+**Goal.** Build the Phase 0 walking skeleton from spec §13. One GitHub repo and org-owned project, fixed WIP of 1, SOP stages 1 to 7 plus a thin stage 8 that addresses review feedback. A person merges and the item reaches Done once CI on main is green. The risk classifier runs in shadow mode, and the dashboard has Floor with its three strips, Run detail and five overrides: pause, drain, stop a run, hold an item and re-queue one.
 
 **Architecture.** One TypeScript codebase with two entry points. The control plane runs as a single always-on Container App with the watcher, scheduler, dashboard and cell API. A cell runs as one Container Apps job execution per PBI and drives the Claude Agent SDK through the SOP stages. Cells never touch Postgres. They talk to the control plane's cell API with a per-run token fenced by the lease generation. Postgres is the only state store, and every state change appends to the `event` table.
 
@@ -22,11 +22,14 @@
 - Eligibility label `factory`. Definition of Done path defaults to `DoD.md`. A repo with no DoD file fails readiness for every item.
 - Poll every 5 minutes on top of webhooks. Leases renew every 60 seconds and expire after 5 missed renewals. A cell stops itself after 3 minutes of failed renewals.
 - Each claim increments `lease_generation`. A cell checks its generation before every push, comment and state write.
-- NeedsInput and SignOff items move to Abandoned after 5 days with no answer.
+- NeedsInput and SignOff items get reminders at day 2 and day 4, and move to Abandoned after 5 days with no answer. An operator re-queue or a late answer brings an Abandoned item back.
+- The scheduler starts nothing new while the items waiting on a person (open questions, sign-offs and factory PRs awaiting review) reach `review_capacity`, default 3, or while the last reported usage utilization is at or above `usage_reserve_at`, default 0.7.
+- The factory owns board status. The project's built-in status workflows are off, factory PRs reference their item with `Refs #n`, and the factory closes the item at Done.
+- Sign-off (`/approve`, `/changes <note>`) and answers (`/answer <text>`) are accepted as item comments from GitHub logins mapped to allowlisted users, and in Run detail.
 - An override takes effect within 30 seconds. The kill switch stops every cell within a minute.
 - Cell GitHub tokens are minted with explicit `permissions`: write on `contents`, `pull_requests` and `issues`, and nothing on `statuses` or `checks`.
-- Phase 0 runs WIP fixed at 1, SOP stages 1 to 7, and the risk classifier in shadow mode. Shadow mode records a tier on every PR and posts no `risk-approval` check.
-- A merged item stops at Accepted. Stages 10 and 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
+- Phase 0 runs WIP fixed at 1, SOP stages 1 to 7, a thin stage 8, and the risk classifier in shadow mode. The thin stage 8 runs `pr-addresser` on requested changes and merge conflicts. Shadow mode records a tier on every PR and posts no `risk-approval` check.
+- A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI runs its scenarios. `pr-reviewer`, stage 10's full DoD check, stage 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
 - Sign-in via Container Apps built-in auth with Microsoft (any Entra directory and personal accounts) and Google. The app's own `user` table decides access, and roles are viewer, operator and owner.
 
 ## Review Focus
@@ -153,7 +156,7 @@ The spec says these tests come first, because their results can change §11. Thi
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "requeued"`
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "requeued" | "criteria_changed" | "withdrawn"`
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`, which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`, which always succeeds. The caller logs it as an override event.
 
@@ -170,13 +173,16 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Accepted", "dod_failed", "Failed"], ["InProgress", "retries_exhausted", "Failed"],
   ["NeedsInput", "timed_out", "Abandoned"], ["SignOff", "timed_out", "Abandoned"],
   ["InProgress", "lease_expired", "Queued"], ["Failed", "requeued", "Queued"],
+  ["Abandoned", "requeued", "Queued"],
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
+    [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
 test("answer alone does not move state", () => assert.equal(next("NeedsInput", "ready"), null));
 ```
 
-  The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, because a waiting item gave up its WIP slot and has to take one again. The answer itself is recorded on the `question` row.
+  `criteria_changed` goes to Queued rather than straight to Specify, because the item needs a slot again. The caller resets `run.last_stage` to `understand` and clears `features_lock_sha`, so the next cell re-runs Specify and asks for a new sign-off. The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, because a waiting item gave up its WIP slot and has to take one again. The answer itself is recorded on the `question` row.
 - [ ] **Step 2: Run `node --test src/core/states.test.ts`.** Expected: FAIL, module not found.
 - [ ] **Step 3: Implement `next` and `overrideTo`** in `src/core/states.ts` as a lookup table keyed `` `${from}:${event}` ``.
 - [ ] **Step 4: Run the test.** Expected: every case passes.
@@ -204,6 +210,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `item.held boolean default false`, for the hold override.
   - `item.priority int default 0`, for factory queue order.
   - `user.product_owner boolean default false`. Only product owners sign off scenarios.
+  - `user.github_login text unique`, which maps item comments to a user.
+  - `item.criteria_hash text`, the SHA-256 of the acceptance criteria the run started from.
+  - `question.reminders_sent int default 0`.
+  - `wip_policy.usage_reserve_at numeric default 0.7` and `wip_policy.usage_paused_until timestamptz`.
   - `run.last_stage text`, the checkpoint.
   - `run.resume_at timestamptz`, for usage-limit stalls.
   - `run.execution_name text`, the Container Apps execution.
@@ -259,10 +269,12 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 ```ts
 export type FactoryItem = { sourceId: string; externalId: string; title: string; body: string;
   acceptanceCriteria: string[]; labels: string[]; status: string; rank: number;
-  repo: string | null; size: number | null; updatedAt: string };
+  repo: string | null; size: number | null; closed: boolean; updatedAt: string };
 export type FactoryWebhookEvent =
-  | { kind: "item_changed"; externalId: string } | { kind: "pr_merged"; prNumber: number; repo: string }
+  | { kind: "item_changed"; externalId: string } | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
   | { kind: "pr_closed"; prNumber: number; repo: string } | { kind: "checks_completed"; sha: string; repo: string }
+  | { kind: "comment"; externalId: string; login: string; body: string; commentId: string }
+  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented" }
   | { kind: "ignored" };
 export interface BacklogAdapter {
   capabilities: { webhooks: boolean };
@@ -273,12 +285,17 @@ export interface BacklogAdapter {
   comment(externalId: string, body: string, dedupeKey: string): Promise<void>;
   setStatus(externalId: string, status: string): Promise<void>;
   linkPr(externalId: string, prUrl: string): Promise<void>;
+  close(externalId: string): Promise<void>;
   parseWebhook(headers: Record<string, string>, body: unknown): FactoryWebhookEvent;
 }
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
+  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
+  requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>; // CODEOWNERS first
+  prState(repo: string, prNumber: number): Promise<{ merged: boolean; open: boolean; mergeable: boolean | null }>;
+  closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
   defaultBranchSha(repo: string): Promise<string>;
 }
@@ -292,6 +309,7 @@ export interface RepoHost {
   - `claim` followed by `getItem` shows the factory's in-progress marker, and `release` clears it.
   - `setStatus("Done")` round-trips through `getItem().status`.
   - `parseWebhook` on an unknown payload returns `{ kind: "ignored" }` and never throws.
+  - `close` followed by `getItem` shows `closed: true`.
 - [ ] **Step 2: Write `fake.test.ts`**, which calls `backlogContract("fake", ...)`. Run it. Expected: FAIL.
 - [ ] **Step 3: Implement `fake.ts`** as an in-memory map. The claim marker is a `factory:in-progress` label. The Task 2 bot assignment probe decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
@@ -318,6 +336,8 @@ export interface RepoHost {
   - Calling `handleWebhook` twice with the same `X-GitHub-Delivery` stores one `webhook_delivery` row and one event. The second call returns 200 with no event.
   - `handleWebhook` with a bad signature returns 401 and writes nothing.
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
+  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
+  - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - `verifySignature` uses `crypto.createHmac` and `crypto.timingSafeEqual` after a length check.
@@ -338,7 +358,8 @@ export interface RepoHost {
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`.
-- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; sourceId: string }): Promise<{ seen: number; cursor: string }>` and `POLL_INTERVAL_MS = 300_000`.
+- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; sourceId: string }): Promise<{ seen: number; cursor: string }>` and `POLL_INTERVAL_MS = 300_000`.
+- Both moves below go through `transitionItem`, which bumps the lease generation, so a running cell gets 409 on its next cell API call and stops. That is the same fence as Review Focus 2.
 
 - [ ] **Step 1: Write failing tests** with the fake adapter:
   - A new labelled item becomes an `item` row in Eligible.
@@ -346,6 +367,9 @@ export interface RepoHost {
   - A Done item that loses its label is left alone.
   - The cursor persists in `backlog_source.cursor`, so a second `pollOnce` with no changes upserts nothing.
   - A paused `backlog_source` is skipped.
+  - **Criteria change.** An item in SignOff whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. Its `run.last_stage` resets to `understand`, `features_lock_sha` is cleared, the open sign-off question closes, and the item gets a comment saying the scenarios need a new sign-off.
+  - **Withdrawal.** An InReview item whose label was removed, or that is now `closed`, moves to Abandoned through `withdrawn`. Its PR is closed through `repoHost.closePr` with a comment naming the kept branch.
+  - **Conflict.** An InReview item whose PR reports `mergeable: false` moves to InProgress through `changes_requested`, with `run.last_stage` set so the cell resumes at `address`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
@@ -360,7 +384,7 @@ export interface RepoHost {
 
 **Interfaces:**
 - Produces:
-  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { definitionOfDone: string; sensitivePaths: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `definitionOfDone: "DoD.md"` and `sensitivePaths: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
+  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { definitionOfDone: string; sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `definitionOfDone: "DoD.md"`, `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
   - `gate(item: FactoryItem, ctx: { dodExists: boolean; repoKnown: boolean; openDeps: string[]; maxSize: number | null; judge: (item: FactoryItem) => Promise<string> }): Promise<{ ready: boolean; reasons: string[] }>`
   - Tests pass a fake `judge`. The real one, `haikuJudge`, comes in Task 11.
@@ -429,7 +453,8 @@ export interface RepoHost {
 
 ```ts
 export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
-  model: string; limit: { resetsAt: number } | null; transcript: string };
+  model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
+  transcript: string };
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; tools: boolean; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
@@ -441,6 +466,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
 - [ ] **Step 1: Write failing `foldMessages` tests** against arrays of SDK-shaped messages:
   - A `result` with `subtype: "success"` gives `ok: true`, the result text, and `costUsd` as the sum of `modelUsage[*].costUSD`. `tokensIn` sums `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`, and `tokensOut` sums `outputTokens`.
   - A `rate_limit_event` with `rate_limit_info.status: "rejected"` and `resetsAt: 1762400000` gives `limit.resetsAt = 1762400000` and `ok: false`.
+  - A `rate_limit_event` with `status: "allowed_warning"`, `utilization: 0.74` and a `resetsAt` gives `usage: { utilization: 0.74, resetsAt }`, leaves `limit` null and doesn't change `ok`. The last such event in the stream wins.
   - A `result` with `subtype: "error_max_turns"` gives `ok: false` and keeps the cost.
   - `transcript` is the JSONL of every message, for Blob upload.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
@@ -469,7 +495,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
-  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef? }`. It writes `stage_run` and, on `passed`, `run.last_stage`.
+  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.last_stage`. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
   - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string }, prUrl?: string, resumeAt?: string, lockSha?: string }`.
   - `POST /transcript-url` takes `{ stageId, attempt }` and returns a write-only SAS URL for `transcripts/<runId>/<stageId>-<attempt>.jsonl`, valid for 15 minutes.
 - `runToken(secret: string, runId: string, generation: number): string`
@@ -480,6 +506,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
   - `/transition` with `scenarios_written` and a `sign_off` question moves InProgress to SignOff, inserts the question, releases the lease, and so frees the WIP slot.
   - `/transition` with `retries_exhausted` moves to Failed, and the event payload lists every attempt from `stage_run`.
   - `/lease` returns `stop: true` while a factory `pause` override is active.
+  - `/stage` with `usage: { utilization: 0.72, resetsAt }` sets `usage_paused_until` to that reset time, and with `utilization: 0.5` leaves it unchanged.
   - **Status mirroring.** Every transition mirrors to the PBI through `adapter.setStatus`, using the source's field map, as spec §5 requires. SignOff, NeedsInput and Failed also post a comment that names what the item is waiting for. Assert this against the fake adapter.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement** the routes in `src/http/server.ts` and mount them first, so they work without a dashboard session. Ignore every `x-ms-client-principal*` header on these routes. Put the status mirroring in one `onTransition(itemId, from, to)` hook that the store calls after commit, so the watcher and the dashboard mirror the same way.
@@ -501,7 +528,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
     - It reads the execution name from the response, and `stop` calls `jobs.beginStopExecution`.
   - `tick(deps: { pool; launcher: Launcher; now: Date; killFlag: boolean }): Promise<{ started: string[]; stopped: string[]; expired: string[] }>`
   - `TICK_MS = 15_000`, half the 30-second override budget.
-  - `setOverride(c, o: { scope: "factory" | "item"; targetId: string | null; kind: "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "kill"; reason: string; createdBy: string; expiresAt: Date | null }): Promise<void>`. A blank `reason` throws.
+  - `setOverride(c, o: { scope: "factory" | "item"; targetId: string | null; kind: "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill"; reason: string; createdBy: string; expiresAt: Date | null }): Promise<void>`. A blank `reason` throws.
   - `activeOverrides(c, now: Date): Promise<Override[]>`
 
 - [ ] **Step 1: Write failing tests** with `fakeLauncher` and the test DB:
@@ -510,10 +537,15 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
   - **Kill switch.** A `kill` override, or `killFlag: true`, makes `tick` call `stop` for every execution with a live lease and start nothing.
   - **Drain and pause.** Neither starts anything. Under drain the running cell's `/lease` reply has `stop: false`, and under pause it has `stop: true`.
   - **Hold.** A `hold` item override keeps that item out of `claimNext`.
+  - **Stale branch.** The env passed to `start` includes `BASE`, the target repo's default branch, so the cell can merge it in at claim.
   - **Stop a run.** A `stop_run` override stops the execution, moves the item to Failed through `overrideTo`, sets `held = true`, and comments the branch name on the PBI.
   - **Usage limit.** An item with `run.resume_at` in the future is skipped, and nothing at all starts before the earliest `resume_at`, as spec §7 requires.
   - **Expiry.** Item overrides end when the item reaches Done, Failed or Abandoned.
   - **Timeouts.** SignOff and NeedsInput items whose open question is older than 5 days move to Abandoned through `timed_out`.
+  - **Reminders.** A question 2 days old with `reminders_sent = 0` gets a comment on the item and `reminders_sent = 1`. At 4 days it gets the second. A second `tick` the same hour sends nothing more.
+  - **Waiting on people.** With 3 open questions and sign-offs plus InReview PRs, and `review_capacity = 3`, `tick` starts nothing, although a slot is free. When one is answered, the next `tick` starts one item.
+  - **Usage reserve.** With `usage_paused_until` in the future, `tick` starts nothing, and running cells' `/lease` replies keep `stop: false`, so they finish.
+  - **Re-queue.** A `requeue` item override on a Failed or Abandoned item moves it to Queued through `requeued`. An Abandoned item whose question is still open goes back to waiting, with `asked_at` reset to now and `reminders_sent` reset to 0.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.** Right after a claim that opens a new run, the scheduler records:
   - `run.repo_id`;
@@ -531,17 +563,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
 
 ---
 
-### Task 14: Cell engine, stages 1 to 7
+### Task 14: Cell engine, stages 1 to 7 and the thin stage 8
 
 **Files:**
-- Create: `src/cell/engine.ts`, `src/cell/api-client.ts`, `src/cell/main.ts`, `src/cell/engine.test.ts`, `sop/default.yml`, `sop/prompts/understand.md`, `sop/prompts/specify.md`, `sop/prompts/red.md`, `sop/prompts/tdd.md`, `sop/prompts/self-review.md`, `sop/prompts/open-pr.md`, `cell/claude/agents/self-reviewer.md`
+- Create: `src/cell/engine.ts`, `src/cell/api-client.ts`, `src/cell/main.ts`, `src/cell/engine.test.ts`, `sop/default.yml`, `sop/prompts/understand.md`, `sop/prompts/specify.md`, `sop/prompts/red.md`, `sop/prompts/tdd.md`, `sop/prompts/self-review.md`, `sop/prompts/open-pr.md`, `sop/prompts/address.md`, `cell/claude/agents/self-reviewer.md`, `cell/claude/agents/pr-addresser.md`
 - Modify: `cell/Dockerfile`
 
 **Interfaces:**
 - Consumes: `runAgent`, `classify`, `redGate`, `greenGate`, `traceability`, `matchesLock`, `loadSop`, `parseRepoConfig`, and the cell API from Task 12 through `api-client.ts`.
 - Produces: `runCell(deps: { api: CellApi; agent: typeof runAgent; git: Git; sop: Sop; config: RepoConfig; resumeFrom: string | null; now: () => Date }): Promise<"done" | "waiting" | "failed" | "stopped" | "limited">`
 
-  Also `type Git = { clone(url: string, branch: string): Promise<string>; commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> }`.
+  Also `type Git = { clone(url: string, branch: string): Promise<string>; mergeBase(base: string): Promise<"clean" | "conflict">; commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> }`. `runCell` also takes `repoHost: RepoHost` and `base: string`.
+
+  Before the first stage of every claim, `runCell` calls `git.mergeBase(base)`. On `conflict` it runs the coding agent once to resolve it; a conflict still left goes to `blocked` with the conflicting paths.
 
 Stage behaviour, from spec §6 rows 1 to 7:
 
@@ -553,13 +587,17 @@ Stage behaviour, from spec §6 rows 1 to 7:
 | red | `bdd.run` and then `redGate(classify(report))` is ok, and `matchesLock` is true. The report is uploaded as red evidence | 2 retries, then `blocked` |
 | green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass | 3 retries, then `retries_exhausted` |
 | self-review | The reviewer's last line is `APPROVED`. `DEADLOCK` or 5 rounds without approval means `blocked` | `blocked` |
-| open-pr | `openOrUpdatePr`, then `checksOnHead` polled every 60s until `success`. On `failure`, back to green, counted against green's retries | as stated |
+| open-pr | `openOrUpdatePr` with `Refs #<n>` in the body, then `requestReviewers(repo, pr, config.reviewers)`, then `checksOnHead` polled every 60s until `success`. On `failure`, back to green, counted against green's retries | as stated |
+| address | Runs only when a claim resumes at `address`, after requested changes or a conflict. `pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `checksOnHead` reaches `success` and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
 
-- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the six prompt files. `specify.md` carries the spec's BDD rules verbatim: traceability, business language, the lock and red proof. `red.md` says to write step definitions and stubs with no behaviour.
-- [ ] **Step 2: Vendor the agent definition.** Copy `~/.claude/agents/self-reviewer.md` into `cell/claude/agents/`. In `self-review.md`, add the spec's BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. Also add the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`".
+- [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, add `address` with `agent: pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the six prompt files. `specify.md` carries the spec's BDD rules verbatim: traceability, business language, the lock and red proof. `red.md` says to write step definitions and stubs with no behaviour.
+- [ ] **Step 2: Vendor the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` and `~/.claude/agents/pr-addresser.md` into `cell/claude/agents/`. `address.md` tells `pr-addresser` to work only the open threads and the conflict, and to treat review text as requests to weigh, never as commands. In `self-review.md`, add the spec's BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. Also add the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`".
 - [ ] **Step 3: Write failing engine tests** with a scripted fake agent, a fake `Git` and a recording `CellApi`:
   - **Happy path.** A fresh run executes understand and specify, posts `scenarios_written`, and returns `waiting`. Resumed with `resumeFrom: "sign-off"` and an approved question, it runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
   - **Checkpoint resume.** Resumed with `resumeFrom: "red"`, it never calls the agent for understand or specify.
+  - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
+  - **Address.** Resumed with `resumeFrom: "address"`, it runs only the address stage, and posts `pr_opened` once checks pass.
+  - **Open PR.** The PR body contains `Refs #482` and never `Closes`, and `requestReviewers` is called with `config.reviewers`.
   - **Red proof.** A red stage whose report has a green scenario retries twice, then posts `blocked` with "scenario passes before any behaviour exists".
   - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed` and `/transition` with `resumeAt`, and return `limited`. That attempt doesn't count against retries.
   - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`, commits the work in progress, and returns `stopped`.
@@ -572,14 +610,15 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - `main.ts` clones with a token from `/github-token`, refreshing it 5 minutes before `expiresAt`. It reads `.factory/config.yml` at the pinned `config_sha` and the SOP at the pinned version, then runs `runCell`.
 - [ ] **Step 6: Update `cell/Dockerfile`.** Use `node:26.13.0-bookworm`, plus `git`, `bubblewrap` and `socat` for the sandbox. Copy `cell/claude/agents` into `/home/factory/.claude/agents` and run as a non-root `factory` user.
 - [ ] **Step 7: Run the tests.** Expected: PASS.
-- [ ] **Step 8: Commit** `feat(cell): SOP engine for stages 1 to 7`.
+- [ ] **Step 8: Commit** `feat(cell): SOP engine for stages 1 to 7 and address`.
 
 ---
 
 ### Task 15: Dashboard: sign-in, Floor, Run detail, controls
 
 **Files:**
-- Create: `src/http/server.ts`, `src/http/auth.ts`, `src/http/views.ts`, `src/http/routes.ts`, `src/http/auth.test.ts`, `src/http/routes.test.ts`, `src/main.ts`, `scripts/seed-owner.ts`
+- Create: `src/http/auth.ts`, `src/http/views.ts`, `src/http/routes.ts`, `src/http/auth.test.ts`, `src/http/routes.test.ts`, `src/control/decisions.ts`, `src/control/decisions.test.ts`, `src/main.ts`, `scripts/seed-owner.ts`
+- Modify: `src/http/server.ts` from Task 12
 - Modify: `Dockerfile`
 
 **Interfaces:**
@@ -592,11 +631,13 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - `GET /items/:id` is Run detail.
     - `GET /events` is SSE fed by `LISTEN factory_events`.
     - `POST /items/:id/signoff` takes `{ decision: "approve" | "changes", note }` and needs `product_owner`.
-    - `POST /items/:id/answer` takes `{ answer }` and needs operator.
+    - `POST /items/:id/answer` takes `{ answer }` and needs operator or product owner.
     - `POST /overrides` needs operator.
     - `POST /users` needs owner.
     - `GET /phase0` is the exit report.
-  - `scripts/seed-owner.ts` takes `--provider`, `--subject` and `--email`, and inserts the first owner.
+  - `scripts/seed-owner.ts` takes `--provider`, `--subject`, `--email` and `--github-login`, and inserts the first owner.
+  - `decide(c, d: { itemId: string; userId: string; kind: "approve" | "changes" | "answer"; text: string; via: "dashboard" | "comment" }): Promise<"applied" | "ignored" | "forbidden">`. The routes and the webhook's `comment` events both call it, so the two channels can't drift.
+  - `parseCommand(body: string): { kind: "approve" | "changes" | "answer"; text: string } | null`, which reads only a leading `/approve`, `/changes` or `/answer`.
 
 - [ ] **Step 1: Write failing tests:**
   - **Review Focus 4.**
@@ -612,6 +653,18 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - per stage: attempts, model, tokens, cost and a transcript link;
     - the shadow risk tier with its reasons.
   - **Token expiry.** A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
+  - **Comment decisions.**
+    - A `/approve` comment from a login mapped to a product owner signs off, exactly like the dashboard route.
+    - The same comment from an unmapped login, or from a user who isn't a product owner, returns `forbidden`. The item gets one reply saying who can sign off, and nothing changes.
+    - A comment with no leading command is `ignored`.
+    - `/answer` on an Abandoned item's open question answers it and moves the item to Queued through `requeued`.
+  - **Floor strips.** Floor shows:
+    - "Waiting on you", with every open question and sign-off oldest first, plus each InReview PR and how long it has waited;
+    - "Next up", the first five items `claimNext` would pick;
+    - "Not ready", each NotReady item with its readiness reasons;
+    - the waiting count beside the WIP number, as "3 of 3 waiting".
+  - **Sign-off view.** For a SignOff item, Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it, and marks a criterion with no scenario "no scenario".
+  - **Re-queue.** Failed and Abandoned items in Run detail show a Re-queue button that posts a `requeue` override, which needs a reason.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - The server is plain `node:http` with a route table and HTML from template literals through one `escapeHtml`.
@@ -647,11 +700,14 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
 ---
 
-### Task 17: Merge detection and the walking skeleton end to end
+### Task 17: Merge, Done and the walking skeleton end to end
 
 **Files:**
 - Create: `src/e2e.test.ts`
-- Modify: `src/watcher/webhook.ts`, so `pr_merged` moves InReview to Accepted and `pr_closed` without a merge moves InReview to InProgress through `changes_requested`
+- Modify: `src/watcher/webhook.ts` for these mappings:
+  - `pr_merged` moves InReview to Accepted and records `mergeSha`. When `checksOnSha(repo, mergeSha)` reaches `success`, through `checks_completed` or the poller, the item moves to Done through `dod_verified`. The board status becomes Done and the factory closes the item. On `failure` the item moves to Failed through `dod_failed`, with a comment linking the failed run. Phase 0 files no bug PBI.
+  - `review` with `changes_requested` moves InReview to InProgress through `changes_requested`, resuming at `address`.
+  - `pr_closed` without a merge, by anyone but the factory, moves the item to Abandoned through `withdrawn`.
 
 **Interfaces:**
 - Consumes everything above, with the fake adapter, the fake launcher running `runCell` in-process, and the scripted fake agent.
@@ -661,8 +717,10 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - Eligible goes to Queued with a fake judge reply of `ready`.
     - Queued goes to InProgress and then SignOff.
     - The product owner approves, and SignOff goes to InProgress and then InReview with a PR URL.
-    - A `pr_merged` webhook moves InReview to Accepted.
+    - A `review` webhook with `changes_requested` sends it to InProgress, and the address stage returns it to InReview.
+    - A `pr_merged` webhook moves InReview to Accepted, and green checks on the merge commit move it to Done. The fake adapter shows status Done and `closed: true`.
   - **Event trail.** The `event` table holds every transition in order, and `/phase0` reports 1 merged PR and its cost.
+  - **Sign-off by comment.** A copy of the full path signs off with a `/approve` comment instead of the dashboard, and reaches the same states.
   - **NotReady recovery.** A second item with no acceptance criteria goes to NotReady with a reasons comment. Editing it re-runs the gate.
 - [ ] **Step 2: Run the test.** Expected: FAIL, until the wiring gaps it exposes are closed.
 - [ ] **Step 3: Close the gaps** in the modules the failure names. Don't add new modules.
@@ -679,17 +737,19 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
 - [ ] **Step 1: Deploy through `deploy.yml`.** Then run `scripts/seed-owner.ts` once against the deployed database with your Microsoft identity, and mark yourself `product_owner`.
 - [ ] **Step 2: Create the Phase 0 target repo.**
-  - Add `DoD.md`, `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, and CI.
+  - Add `DoD.md`, `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, a CODEOWNERS file, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
+  - In the org project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
   - In branch protection, require one human review and CI. Shadow mode posts no `risk-approval`, so that check isn't required yet.
   - Install the GitHub App on that repo only.
 - [ ] **Step 3: Run one PBI live.** Add one small PBI with the `factory` label to the org project. Expected:
   - A readiness comment.
   - Scenarios posted on the PBI, and the sign-off question on Run detail.
   - After your approval, a PR with red and green results, the review rounds and a shadow tier.
-  - After your merge, the item at Accepted.
+  - A reviewer requested on the PR from CODEOWNERS.
+  - After your merge and green CI on main, the item at Done and the issue closed.
 
   Record the run id and cost in the runbook.
-- [ ] **Step 4: Test the four overrides live.** Hold a second item, pause, drain and stop a run. Record that each took effect within 30 seconds, using event timestamps against the moment of the click. Press the kill switch and record that every execution stopped within a minute.
+- [ ] **Step 4: Test the five overrides live.** Hold a second item, pause, drain, stop a run, and re-queue the stopped item. Record that each took effect within 30 seconds, using event timestamps against the moment of the click. Press the kill switch and record that every execution stopped within a minute.
 - [ ] **Step 5: Write `docs/superpowers/runbooks/phase-0.md`.** It covers how to seed users, rotate the GitHub App key and the Claude token, read `/phase0` toward the exit criteria (10 merged PRs, cost per item, your verdict on the shadow tiers), and use the kill switch.
 - [ ] **Step 6: Commit** `docs: phase 0 runbook and first live run`.
 
@@ -698,7 +758,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 ## Out of scope for Phase 0
 
 These come from spec §13 Phases 1 to 3, and nothing here builds them:
-- stages 8 to 11, Increment records and DoD verification on main;
+- `pr-reviewer` in stage 8, stages 9 to 11, Increment records and the full DoD check on main;
 - an enforced `risk-approval` check and the `approval` table;
 - budget caps, the Inbox and the Cost view;
 - quarantine, adaptive and advised WIP, and Azure DevOps adapters.
