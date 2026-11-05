@@ -2,7 +2,7 @@
 
 > **For agentic workers.** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal.** Build the Phase 0 walking skeleton from spec §13. One GitHub repo and org-owned project, fixed WIP of 1, SOP stages 1 to 7 plus a thin stage 8 that addresses review feedback. A person merges and the item reaches Done once CI on main is green. The risk classifier runs in shadow mode, and the dashboard has Floor with its three strips, Run detail and five overrides: pause, drain, stop a run, hold an item and re-queue one.
+**Goal.** Build the Phase 0 walking skeleton from spec §13, in two stages. Phase 0a, Tasks 1 to 18, runs it on the owner's machine under Aspire. Phase 0b, Tasks 19 and 20, moves it to Azure. One personal GitHub repo, which is this repo, and one personal Project as its backlog, fixed WIP of 1, SOP stages 1 to 7 plus a thin stage 8 that addresses review feedback. A person merges and the item reaches Done once CI on main is green. The risk classifier runs in shadow mode, and the dashboard has Floor with its three strips, Run detail and five overrides: pause, drain, stop a run, hold an item and re-queue one.
 
 **Architecture.** One TypeScript codebase with two entry points. The control plane runs as a single always-on Container App with the watcher, scheduler, dashboard and cell API. A cell runs as one Container Apps job execution per PBI and drives the Claude Agent SDK through the SOP stages. Cells never touch Postgres. They talk to the control plane's cell API with a per-run token fenced by the lease generation. Postgres is the only state store, and every state change appends to the `event` table.
 
@@ -12,13 +12,20 @@
 
 ## Global Constraints
 
-- Region australiaeast. Control plane is one Container App at 0.5 vCPU and 1 GiB with external ingress. Cells are a Container Apps job, manual trigger, 2 vCPU and 4 GiB per replica, retry limit at least 1.
+- Phase 0a runs locally. `aspire run` on `apphost.mts` starts:
+  - Postgres;
+  - the Azurite storage emulator;
+  - a one-shot `migrate` resource;
+  - the control plane as a Node process.
+
+  Cells run as Docker containers that the control plane starts from `factory-cell:local`, built for the machine's own architecture and never pushed. GitHub can't reach the machine, so the poller does all intake. Sign-in is a dev identity that only `FACTORY_ENV=local` accepts. Docker Desktop must be running.
+- Phase 0b, in Azure: region australiaeast. Control plane is one Container App at 0.5 vCPU and 1 GiB with external ingress. Cells are a Container Apps job, manual trigger, 2 vCPU and 4 GiB per replica, retry limit at least 1.
 - Images are `linux/amd64` and build in CI. Never build them natively on the ARM64 dev machine.
 - Postgres Flexible Server, Burstable B1ms, Microsoft Entra authentication with managed identities and no stored password.
 - Transcripts go to Blob Storage, Hot LRS, and `stage_run.transcript_ref` points at them. Container logs go to Log Analytics.
 - Key Vault holds the GitHub App private key and the Claude OAuth token. Cells get the token as `CLAUDE_CODE_OAUTH_TOKEN` and never run with `--bare`.
 - Model IDs live in the SOP file only: `coding: claude-opus-5-5`, `triage: claude-haiku-5-5`.
-- The Phase 0 backlog is a Project owned by a GitHub organization, and the target repo lives in that organization. A GitHub App can reach only organization-owned Projects. This was decided 2026-11-05.
+- Phase 0 dogfoods: the target repo is this repo, `ricksu978/software-factory`, owned by a personal account, and the backlog is a Project on that same account. The GitHub App, installed on the account, does all repo work. The board is reached with a classic token limited to the `project` scope, because GitHub documents Project access by GitHub Apps only for organizations. Board edits therefore show as the account owner, and board changes arrive only through the 5-minute poll, since `projects_v2_item` webhooks are organization-only. This is a Phase 0 exception to spec §9's one-bot-identity rule, decided 2026-11-06. An org-owned board can replace it later without code changes, through the adapter's `owner` setting.
 - Eligibility label `factory`. Quality criteria live in the repo's policy files, per Run contract 11. A repo with no `.factory/dod.md` fails readiness for every item.
 - Poll every 5 minutes on top of webhooks. Leases renew every 60 seconds and expire after 5 missed renewals. A cell stops itself after 3 minutes of failed renewals.
 - `lease_generation` changes only as Run contract 2 says. A cell checks its generation before every push, comment and state write.
@@ -37,7 +44,7 @@
 1. **Planted instructions in PBI text.** An item body that asks for secrets, CI changes or access outside the repo is flagged NotReady by the gate, and no cell token can post a status or check. Tests in Task 9 and Task 7.
 2. **Zombie cell after lease expiry.** An old cell whose lease was re-claimed gets 409 on every cell API write, so it can't push, comment or move state. Test in Task 12.
 3. **Duplicate or replayed webhook deliveries.** The same `X-GitHub-Delivery` id processed twice yields one event. A bad or missing signature yields 401 and no event. Tests in Task 7.
-4. **Spoofed identity headers.** A request that carries `X-MS-CLIENT-PRINCIPAL` on an auth-excluded path never authenticates a dashboard action, and an unknown signed-in subject gets the no-access page. Tests in Task 15, plus a live check in Task 2.
+4. **Spoofed identity headers.** A request that carries `X-MS-CLIENT-PRINCIPAL` on an auth-excluded path never authenticates a dashboard action, and an unknown signed-in subject gets the no-access page. Tests in Task 15, plus a live check in Task 19.
 5. **Control plane restart mid-run.** A fresh scheduler process sees the running cell's live lease and starts no second cell for that item. Test in Task 13.
 
 ## Run contract
@@ -154,61 +161,48 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
 
 ---
 
-### Task 2: Platform baseline and the three Phase 0 tests
+### Task 2: Local platform on Aspire
 
-The spec says these tests come first, because their results can change §11. This task builds no factory logic. It deploys the infrastructure and runs throwaway probes, then records what happened.
+Phase 0a runs the whole walking skeleton on the owner's machine before anything touches Azure. An Aspire AppHost starts every dependency, so `aspire run` brings up the factory. Azure comes in Task 19.
 
 **Files:**
-- Create: `infra/main.bicep`, `infra/main.bicepparam`, `.github/workflows/deploy.yml`, `spike/hello.ts`, `spike/sdk-oauth.ts`, `cell/Dockerfile`, `Dockerfile`, `docs/superpowers/spikes/2026-11-phase-0-platform.md`
+- Create: `apphost.mts` and the files `aspire init --language typescript` scaffolds beside it, `cell/Dockerfile`, `Dockerfile`, `spike/hello.ts`, `spike/sdk-oauth.ts`, `docs/superpowers/spikes/2026-11-local-platform.md`
 
 **Interfaces:**
-- Produces: deployed resources named below, which every later task deploys into. Produces the spike record, which Tasks 11, 15 and 16 read before they start.
+- Produces: the local resources below, which Tasks 4, 12, 13 and 15 run against, and the local spike record.
 
-- [ ] **Step 1: Write `infra/main.bicep`** with these resources in resource group `rg-software-factory-aue`:
-  - Log Analytics workspace `log-factory`.
-  - Container Apps environment `cae-factory`, Consumption only.
-  - ACR `acrfactory<uniqueString>`, Basic. The spec has not priced it, so record its monthly cost in the spike file.
-  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:<org>/software-factory:environment:production`. `deploy.yml` runs only from `main` into the `production` environment, which has required reviewers set in GitHub.
-  - Storage roles for `id-factory-control`: Storage Blob Data Contributor and Storage Blob Delegator on the storage account, so it can sign write-only SAS URLs with a user delegation key. No account key is used.
-  - Key Vault `kv-factory-<uniqueString>` with RBAC and three secrets: `github-app-key`, `claude-oauth-token` and `cell-secret`, a random 32-byte value for signing run tokens. The control identity reads all three. The cell identity reads only `claude-oauth-token`.
-  - Storage account with `transcripts` and `reports` containers, Hot LRS.
-  - Postgres Flexible Server `psql-factory-<uniqueString>`, B1ms, 32 GB, Entra auth only. Its firewall admits Azure services only, so no GitHub runner or laptop connects to it directly. The Entra admin is `id-factory-migrate`, a fourth identity attached only to `caj-factory-migrate`.
-  - Job `caj-factory-migrate`, manual trigger, running the control plane image in one container named `migrate`, with the command `node src/store/migrate-cli.ts`. That runs `migrate()` from Task 4, and with the dash-free first argument `seed-owner` it runs `scripts/seed-owner.ts`. This is the only migration path, and Step 4 sets its order in `deploy.yml`. The control identity maps to a role `factory_app`, which can read and write the factory's tables but can only `SELECT` and `INSERT` on `event`. That keeps the event log append-only for the identity the app runs as.
-  - Container App `ca-factory-control` at 0.5 vCPU and 1 GiB with external ingress. Its image comes from a `controlImage` parameter, which defaults to the public placeholder `mcr.microsoft.com/k8se/quickstart:latest`, so the Step 2b bootstrap works while ACR is still empty. The cell and migrate jobs take the same placeholder default. `deploy.yml` passes the real ACR images, the spike image first. Its env takes `CLAUDE_CODE_OAUTH_TOKEN` and `CELL_SECRET` from Key Vault references, and `CLAUDE_TOKEN_CREATED_AT` from `main.bicepparam`, set to the date you ran `claude setup-token`.
-  - Job `caj-factory-cell` with a manual trigger, 2 vCPU and 4 GiB, `replicaRetryLimit: 1`, and `CLAUDE_CODE_OAUTH_TOKEN` from a Key Vault secret reference.
-  - An `authConfigs` child on the app with the Microsoft provider (any Entra directory and personal accounts), the Google provider, `unauthenticatedClientAction: RedirectToLoginPage`, and `globalValidation.excludedPaths: ['/webhooks/github', '/internal/cells']`.
-  - A custom role on the job for the control identity, granting job start and execution stop. Find the exact action names with `az provider operation show --namespace Microsoft.App`.
-- [ ] **Step 2: Run `az bicep build --file infra/main.bicep`.** Expected: no errors. Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
-- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`. Every later deploy runs through `deploy.yml`.
-- [ ] **Step 3: Write `spike/hello.ts`**, a `node:http` server with three routes:
-  - `GET /`, which returns every request header that starts with `x-ms-client-principal`.
-  - `POST /webhooks/github`, which verifies `X-Hub-Signature-256` with `crypto.timingSafeEqual` and returns 204 or 401.
-  - `POST /internal/cells/ping`, which returns 204.
-- [ ] **Step 4: Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials, never a stored secret. It runs in this order, and each step waits for the one before:
-  1. Build both Dockerfiles with `docker buildx build --platform linux/amd64`, and push them to ACR with the commit sha as the tag.
-  2. Run the migrations on the new image: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --image <acr>/control:<sha> --command node src/store/migrate-cli.ts`. The container name and command are passed explicitly, in case a start override replaces the template's container instead of merging into it (Step 10b checks which). Wait until that execution reports Succeeded, and stop the workflow if it doesn't.
-  3. Run `az deployment group create` with the new image tags, which updates the app and the jobs.
+- [ ] **Step 1: Install Node 26.13.0 locally.** The plan pins Node 26, while the machine has v24.20.0 (`node --version`). Aspire's own prerequisite is "Node.js 20.19+, 22.13+, or 24+" ([aspire.dev](https://aspire.dev/get-started/prerequisites/)), so Node 26 meets both.
+- [ ] **Step 2: Scaffold the AppHost.** Run `aspire init --language typescript` at the repo root, which creates `apphost.mts` ([aspire.dev](https://aspire.dev/app-host/typescript-apphost/)). The TypeScript AppHost keeps the repo in one language. If it lacks an API this task needs, switch to the file-based C# AppHost `apphost.cs`, and record why in the spike file.
+- [ ] **Step 3: Declare the resources** in `apphost.mts`:
+  - Postgres with one database, `addPostgres("pg").addDatabase("factory")`.
+  - The storage emulator with blobs, `addAzureStorage("storage").runAsEmulator().addBlobs("blobs")`, which runs Azurite.
+  - Secret parameters: `claude-oauth-token`, `github-app-key`, `github-project-token` and `cell-secret`, each `addParameter(name, { secret: true })`. Values come from user secrets or from environment variables named `Parameters__<name>` ([aspire.dev](https://aspire.dev/fundamentals/external-parameters/)).
+  - A plain parameter `dev-login`, the owner's GitHub login.
+  - A `migrate` Node resource running `src/store/migrate-cli.ts`, which waits for the database and runs to completion.
+  - A `control` Node resource running `src/main.ts`, which waits for `migrate` to complete. Until Task 15 builds `src/main.ts`, it runs `spike/hello.ts` instead.
+- [ ] **Step 4: Wire the control resource's environment.**
+  - `FACTORY_ENV=local`.
+  - `FACTORY_DEV_LOGIN` from `dev-login`.
+  - `FACTORY_DB_URI` from the database's URI connection property. The Postgres page names the injected variables `[RESOURCE]_[PROPERTY]`, such as `<DB>_URI`, in the form `postgresql://{Username}:{Password}@{Host}:{Port}/{DatabaseName}`. Step 6 records the exact names.
+  - `FACTORY_BLOB` from the blob resource's connection.
+  - The four secrets.
+  - `FACTORY_POLICY_DIR=./policy`.
+  - `CELL_IMAGE=factory-cell:local`.
+  - `CELL_CONTROL_URL=http://host.docker.internal:<control port>`, so cell containers can reach the control plane through Docker Desktop.
+- [ ] **Step 5: Register the GitHub App and the project token.**
+  - Register the factory GitHub App on the personal account. Repository permissions: write on contents, pull requests and issues, read on checks, commit statuses and metadata. No organization permissions. Leave its webhook inactive for now, because GitHub can't reach a local machine. Phase 0a runs on the 5-minute poll, and Task 19 turns the webhook on.
+  - Install the App on this repo only.
+  - Create a classic personal access token with only the `project` scope. Classic is the token type GitHub's Projects API documents for a user ([GitHub](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects)).
+  - Run `claude setup-token` for the Claude token.
+  - Set all four secret parameters.
+- [ ] **Step 6: Run it.** `aspire run`. Expected:
+  - The Postgres and Azurite containers are healthy.
+  - `migrate` completed.
+  - `control` serves `spike/hello.ts`.
 
-  So the new app code never runs before its migration.
-- [ ] **Step 5: Sign-in test.** Sign in with a Google account, a personal Microsoft account and a work account from another tenant. Record each case's `x-ms-client-principal-idp` and `x-ms-client-principal-id`. Expected: all three reach `/` and show distinct ids.
-- [ ] **Step 6: Header spoofing test.** Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out. Expected: a redirect to login, not a 200. Then send the same header to `/internal/cells/ping` and confirm the response doesn't echo the forged value as an authenticated identity.
-- [ ] **Step 7a: Organization and App.** Create a free GitHub organization for Phase 0. Creating it is your step, because the API can't create organizations for a personal account. Then register the factory GitHub App with this setup:
-  - Repository permissions: write on contents, pull requests and issues, read on checks, commit statuses and metadata. Phase 1 raises commit statuses to write, when it starts posting `risk-approval`.
-  - Organization permissions: write on organization projects.
-  - App webhook events: issues, issue comment, pull request, pull request review, check suite and issue dependencies. Pull request review is a separate subscription from pull request, and "a GitHub App must have at least read-level access for the 'Pull requests' repository permission" to receive it ([GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)).
-
-  GitHub doesn't offer `projects_v2_item` to App webhooks, so also add an organization webhook for that event. It goes to the same `/webhooks/github` URL with the same secret. Install the App on the organization, scoped to the selected repos only. Store its private key in Key Vault as `github-app-key`.
-- [ ] **Step 7: Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery. Expected: 204 in the App's delivery log, and no login redirect. Change the secret on one side, then expect 401.
-- [ ] **Step 8: Write `spike/sdk-oauth.ts`.** It calls `query({ prompt: "Reply with the word ready.", options: { model: "claude-haiku-5-5", maxTurns: 1, settingSources: [] } })` and prints each message's `type`. It also prints the result's `subtype`, `is_error`, `total_cost_usd` and `modelUsage`. Run it as one execution of `caj-factory-cell`.
-  - Expected: `subtype: "success"`.
-  - If the SDK refuses the token, run `claude -p "Reply with the word ready." --output-format json` in the same image. Record which one works. §14 already names the headless CLI as the fallback.
-- [ ] **Step 9: Sandbox egress probe.** In the same job, run `query()` with `sandbox: { enabled: true, failIfUnavailable: true, network: { allowedDomains: ["api.github.com", "github.com", "registry.npmjs.org"], strictAllowlist: true } }`. Ask it to run `curl -sI https://example.com` and then `curl -sI https://api.github.com`.
-  - Expected: example.com blocked, api.github.com allowed.
-  - If the result is `error_during_execution` because bubblewrap can't start in Container Apps, record that. The egress allowlist then needs another mechanism, which is a pending decision.
-- [ ] **Step 10: Bot assignment probe.** Try to assign the GitHub App's bot user to an issue. Use `gh api repos/<o>/<r>/issues/<n>/assignees -f assignees[]=<app-slug>[bot]` with an installation token. Record whether GitHub accepts it.
-- [ ] **Step 10b: Job override probe.** Start one `caj-factory-migrate` execution with `--image` and `--args`, then read its resolved template with `az containerapp job execution show`. Record whether the job's env vars survived, such as the identity client id and the Postgres host. The az reference says only that `--image` starts "a job with different image and configurations" ([az containerapp job](https://learn.microsoft.com/en-us/cli/azure/containerapp/job)). If the env is dropped, add `--env-vars` for those values to both calls in Step 4 and Task 18.
-- [ ] **Step 11: Record results** in `docs/superpowers/spikes/2026-11-phase-0-platform.md`. Give each probe its expected result, its actual result and the evidence: a command, a screenshot path or a delivery id. If Step 5, 7 or 8 fails, stop and raise it, because the spec's §11 changes before Task 3 starts.
-- [ ] **Step 12: Commit** `chore: platform baseline and phase 0 platform tests`.
+  Record in the spike file: the exact env var names the control resource received for the database and blobs, and whether the TypeScript AppHost carried every resource above.
+- [ ] **Step 7: Local SDK and sandbox probe.** Build the cell image for this machine's own architecture: `docker build -f cell/Dockerfile -t factory-cell:local .`. That image stays local and is never pushed. Then run `spike/sdk-oauth.ts` in it with the Claude token. Expected: `subtype: "success"`. If the SDK refuses the token, try `claude -p` as the plan's runtime fallback, and record which works. Then repeat Task 19 Step 9's sandbox probe in the same container, and record whether bubblewrap starts under Docker Desktop.
+- [ ] **Step 8: Record and commit.** Write each probe's expected and actual result to `docs/superpowers/spikes/2026-11-local-platform.md`, then commit `chore: local platform on Aspire`.
 
 ---
 
@@ -265,7 +259,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 **Interfaces:**
 - Consumes: `next`, `ItemState`, `ItemEvent` from Task 3.
 - Produces:
-  - `createPool(url?: string): pg.Pool`. Without a URL it connects as the managed identity, using an Entra token from `@azure/identity` `DefaultAzureCredential` with scope `https://ossrdbms-aad.database.windows.net/.default`.
+  - `createPool(url?: string): pg.Pool`. Locally the caller passes `FACTORY_DB_URI` from Aspire. Without a URL it connects as the managed identity, using an Entra token from `@azure/identity` `DefaultAzureCredential` with scope `https://ossrdbms-aad.database.windows.net/.default`.
   - `migrate(pool): Promise<void>`, which applies `db/migrations/*.sql` in name order and tracks them in `schema_migrations`.
   - `withTx<T>(pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T>`
   - `appendEvent(c, e: { actor: "agent" | "human" | "system"; actorId: string; itemId: string | null; kind: string; payload: unknown }): Promise<void>`. It also runs `NOTIFY factory_events`.
@@ -292,7 +286,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
   - `item.readiness_policy_sha text`, for the re-gate in Run contract 11.
 
-  Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 2 names. Its `event` grant is `SELECT, INSERT` only.
+  Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 19 names. Locally the control plane connects as Aspire's database user, so the append-only grant is enforced only in Azure. The test below checks the grant itself. Its `event` grant is `SELECT, INSERT` only.
 - [ ] **Step 2: Write failing tests** in `items.test.ts` against `startTestDb()`:
   - `transitionItem` moves Eligible to Queued on `ready` and writes exactly one event with `kind = "transition"` and `payload = { from: "Eligible", to: "Queued", event: "ready" }`.
   - `transitionItem` on `Done` with `claimed` throws `IllegalTransition`, and both the item and the event table are unchanged.
@@ -387,7 +381,7 @@ export interface RepoHost {
   - `parseWebhook` on an unknown payload returns `{ kind: "ignored" }` and never throws.
   - `close` followed by `getItem` shows `closed: true`.
 - [ ] **Step 2: Write `fake.test.ts`**, which calls `backlogContract("fake", ...)`. Run it. Expected: FAIL.
-- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. The claim marker is a `factory:in-progress` label. The Task 2 bot assignment probe decides whether the GitHub adapter also assigns the App.
+- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. The claim marker is a `factory:in-progress` label. The Task 19 bot assignment probe decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(adapters): interfaces, fake adapter, contract suite`.
 
@@ -401,7 +395,10 @@ export interface RepoHost {
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `RepoHost` and `backlogContract` from Task 6, and `appendEvent` from Task 4.
 - Produces:
-  - `githubBacklog(cfg: { app: App; installationId: number; projectNodeId: string; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`. Issue, PR, check and dependency events come from the App webhook. Project item changes come from the organization's `projects_v2_item` webhook, and `parseWebhook` maps them to `item_changed`. That event is still in public preview, so the 5-minute poll stays the backstop.
+  - `githubBacklog(cfg: { app: App; installationId: number; owner: { type: "user" | "org"; login: string }; projectToken: string | null; projectNodeId: string; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`.
+    - **Events.** Issue, PR, check and dependency events come from the App webhook. Project item changes come from an organization's `projects_v2_item` webhook when `owner.type` is `org`. A user-owned project has no such webhook, so its changes come only through the 5-minute poll.
+    - **Tokens.** Board reads and writes use `projectToken` when `owner.type` is `user`, and the App's installation token when it's `org`. Issue comments, labels and closing go through the App in both cases.
+    - **Test.** A user-owned config with a null `projectToken` throws at construction, naming the missing secret.
   - `githubRepoHost(app: App, installationId: number): RepoHost`, used only in the control plane, which holds the App key.
   - `cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers">`, used in the cell with the token from `/github-token`. Checks reach the cell only through the cell API, per Run contract 6.
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
@@ -424,7 +421,7 @@ export interface RepoHost {
   - Dependencies come from `GET /repos/{o}/{r}/issues/{n}/dependencies/blocked_by`, filtered to open issues.
   - `comment` stores the `dedupeKey` as an HTML comment, `<!-- factory:KEY -->`, and checks for it before posting.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
-- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox org project, and only when `FACTORY_GH_CONTRACT=1` is set. Run it with that variable. Expected: every contract case passes.
+- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. Run it with that variable. Expected: every contract case passes.
 - [ ] **Step 6: Commit** `feat(github): backlog and repo host adapters, webhook intake`.
 
 ---
@@ -591,7 +588,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   In `cell` mode:
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
   - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
-  - `sandbox` from the Task 2 Step 9 result: the egress allowlist when the sandbox can start, otherwise omitted, with the pending decision recorded.
+  - `sandbox` from the sandbox probes, Task 2 Step 7 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted, with the pending decision recorded.
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
@@ -624,7 +621,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none" }` for that commit on the run's branch, from the control plane's own poll in Run contract 6. The first request for a sha starts its 10-minute `none` clock. A sha that isn't on the run's branch gets 400.
   - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.next_stage` per Run contract 1. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
   - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string }, scenariosSha?: string, lockedFiles?: string[], prNumber?: number, prUrl?: string, resumeAt?: string, tier?: "Low" | "Medium" | "High", tierReasons?: string[] }`. A cell may send only `scenarios_written`, `blocked`, `pr_opened`, `retries_exhausted` and `usage_limited`, and any other event gets 400.
-  - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
+  - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL, signed locally from the Azurite connection in `FACTORY_BLOB` and in Azure with a user delegation key, for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
 - `runToken(secret: string, runId: string, generation: number): string`
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
@@ -658,7 +655,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 **Interfaces:**
 - Consumes: `claimNext`, `expireLeases`, `runToken`, active overrides.
 - Produces:
-  - `interface Launcher { start(env: Record<string, string>): Promise<string>; stop(executionName: string): Promise<void>; }`, implemented by `containerAppsLauncher(cfg)` and `fakeLauncher()`.
+  - `interface Launcher { start(env: Record<string, string>): Promise<string>; stop(executionName: string): Promise<void>; }`, implemented by `dockerLauncher(cfg)` for Phase 0a, `containerAppsLauncher(cfg)` for Phase 0b, and `fakeLauncher()` for tests.
+    - `dockerLauncher` runs `docker run -d --rm` on `CELL_IMAGE` with the cell env, plus `CONTROL_URL=CELL_CONTROL_URL`. It returns the container id, and `stop` runs `docker stop`. A test with a stubbed `execFile` checks the exact argv, and that no secret beyond the cell's own env reaches the container.
     - `containerAppsLauncher` calls `ContainerAppsAPIClient.jobs.beginStart(rg, job, { containers: [{ name: "cell", image, env: [...] }] })`.
     - It reads the execution name from the response, and `stop` calls `jobs.beginStopExecution`.
   - `tick(deps: { pool; launcher: Launcher; now: Date; killFlag: boolean }): Promise<{ started: string[]; stopped: string[]; expired: string[] }>`
@@ -786,7 +784,8 @@ Stage behaviour, from spec §6 rows 1 to 7:
 **Interfaces:**
 - Consumes: the store, `setOverride`, `activeOverrides`, `handleWebhook`, the cell API and `pollOnce`.
 - Produces:
-  - `identify(headers): { provider: "google" | "microsoft"; subject: string; tenantId: string | null } | null`. It reads the principal headers recorded in the Task 2 spike file and returns null on any route under `/webhooks` or `/internal`.
+  - `identify(headers): { provider: "google" | "microsoft" | "dev"; subject: string; tenantId: string | null } | null`. In Azure it reads the principal headers recorded in the Task 19 spike file. Locally, where no sign-in sits in front of the app, it returns `{ provider: "dev", subject: FACTORY_DEV_LOGIN }` for every dashboard request. It returns null on any route under `/webhooks` or `/internal` either way.
+  - **Dev identity guard.** `main.ts` refuses to start when `FACTORY_DEV_LOGIN` is set and `FACTORY_ENV` isn't `local`, and Task 19's Bicep never sets `FACTORY_ENV=local`. So the dev identity can't reach a deployed factory.
   - `requireRole(user, role: "viewer" | "operator" | "owner")`
   - These routes:
     - `GET /` is Floor.
@@ -797,7 +796,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - `POST /overrides` needs operator.
     - `POST /users` needs owner.
     - `GET /phase0` is the exit report.
-  - `scripts/seed-owner.ts` takes dash-free words `provider=<p>`, `subject=<id>`, `email=<e>` and `github-login=<login>`, plus an optional bare `product-owner`, and inserts the first owner. It exits 1 on any other word. It runs only inside the migrate job (Task 2).
+  - `scripts/seed-owner.ts` takes dash-free words `provider=<p>`, `subject=<id>`, `email=<e>` and `github-login=<login>`, plus an optional bare `product-owner`, and inserts the first owner. `provider` is `google`, `microsoft` or `dev`. It exits 1 on any other word. It runs only inside the `migrate` resource locally (Task 2) or the migrate job in Azure (Task 19).
   - `decide(c, d: { itemId: string; userId: string; kind: "approve" | "changes" | "answer"; text: string; via: "dashboard" | "comment" }): Promise<"applied" | "ignored" | "forbidden">`. The routes and the webhook's `comment` events both call it, so the two channels can't drift.
     - **Roles.** `decide` owns the role rules. `approve` and `changes` need `product_owner`, and `answer` needs operator or product owner. The routes only check that the user is signed in and allowlisted.
     - **Effects.** It answers the open question and applies Run contract 1. On approve it copies `scenarios_sha` into `features_lock_sha`. On an Abandoned item it revives the item through `requeued`.
@@ -807,6 +806,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Review Focus 4.**
     - `identify` returns null for any request to `/webhooks/github` or `/internal/cells/x`, even with every principal header set.
     - A dashboard request whose subject isn't in `user` gets 403 and the page "You don't have access to this factory. Ask an owner to add you."
+    - With `FACTORY_DEV_LOGIN` set and `FACTORY_ENV` unset, `main.ts` exits non-zero at startup. With both set for local, every dashboard request is the dev user, and a request to `/internal/cells/x` still gets no identity.
   - **Roles.** A viewer posting `/overrides` gets 403. An operator posting `/overrides` with an empty reason gets 400.
   - **Sign-off.** A sign-off from a user without `product_owner` gets 403. A sign-off from a product owner answers the open `sign_off` question, comments the decision on the PBI, and logs an event with `actor: "human"` and the user id.
   - **Floor.** Floor lists every InProgress, SignOff, NeedsInput and InReview item. Each row shows the current stage, time in stage, the sum of `stage_run.cost_usd` and the last agent message, and a held item or active override shows a badge.
@@ -836,7 +836,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - [ ] **Step 3: Implement.**
   - The server is plain `node:http` with a route table and HTML from template literals through one `escapeHtml`.
   - `views.ts` defines its colours as CSS custom properties with a dark-mode override, and every form control has a label.
-  - `main.ts` wires the pool, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server. It never runs `migrate`, because it connects as `factory_app`, which has no DDL rights. Migrations run only in the migrate job from Task 2.
+  - `main.ts` wires the pool, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server. It never runs `migrate`, because it connects as `factory_app`, which has no DDL rights. Migrations run only in the `migrate` resource locally (Task 2) and the migrate job in Azure (Task 19).
   - The kill switch is `FACTORY_KILL=1` in the app's env or a `kill` override from the dashboard. Either one stops every cell on the next tick.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(dashboard): sign-in allowlist, Floor, Run detail, overrides`.
@@ -899,32 +899,104 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
 ---
 
-### Task 18: Deploy and run the first live item
+### Task 18: First live item, locally
+
+Phase 0a's exit. The factory runs under `aspire run` and builds one real PBI from this repo's own board, end to end.
 
 **Files:**
-- Modify: `infra/main.bicep`, swapping the spike image for the control plane image, `deploy.yml`
+- Modify: `apphost.mts`, so the `migrate` resource takes seed arguments
 - Create: `docs/superpowers/runbooks/phase-0.md`
 
-- [ ] **Step 1: Deploy through `deploy.yml`.** Then seed yourself as the first owner and product owner by starting the migrate job with your sign-in details: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --command node src/store/migrate-cli.ts --args seed-owner provider=microsoft subject=<id> email=<you> github-login=<login> product-owner`. The words after `--args` carry no leading dashes, because az would read a dash-prefixed word as its own option and reject the call. Then confirm the execution succeeded and that you can sign in past the no-access page. Take the subject id from the Task 2 Step 5 spike record.
-- [ ] **Step 2: Create the Phase 0 target repo.**
-  - Add `.factory/dod.md` with the team's Definition of Done, and any of `dor.md`, `scenarios.md`, `pr-review.md` and `risk.md` the team wants to set itself. Add `.factory/config.yml` with real `bdd` and `commands` entries, a Gherkin runner that writes Cucumber Messages to `bdd.report`, a CODEOWNERS file, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
-  - In the org project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
+- [ ] **Step 1: Seed the owner.** Set the AppHost's `dev-login` parameter to your GitHub login, and give the `migrate` resource the dash-free arguments `seed-owner provider=dev subject=<login> github-login=<login> product-owner` for one run. Then open the local dashboard. Expected: the dev identity gets past the no-access page as owner and product owner.
+- [ ] **Step 2: Ready this repo as the target.**
+  - This repo already holds `.factory/dod.md` and `.factory/dor.md` from the dogfood bootstrap.
+  - PBI 1 added `.factory/config.yml` with real `bdd` and `commands` entries, the Gherkin runner that writes Cucumber Messages to `bdd.report`, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
+  - Check all of these, and add a CODEOWNERS file.
+  - In the personal Project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
   - In branch protection, require one human review and CI. Shadow mode posts no `risk-approval`, so that check isn't required yet.
-  - Install the GitHub App on that repo only.
-- [ ] **Step 3: Run one PBI live.** Add one small PBI with the `factory` label to the org project. Expected:
-  - A readiness comment.
-  - Scenarios posted on the PBI, and the sign-off question on Run detail.
-  - After your approval, a PR with red and green results, the review rounds and a shadow tier.
+  - Confirm the GitHub App is installed on this repo only.
+- [ ] **Step 3: Run one PBI live, locally.** With `aspire run` up, take the next PBI from this repo's own backlog, labelled `factory` on the personal Project. Expected:
+  - A readiness comment within one poll, and no webhooks are needed.
+  - Scenarios posted on the PBI, and the sign-off question in the local dashboard's Run detail. Sign off there, because comment commands need the webhooks that arrive in Task 19.
+  - A cell container started from `factory-cell:local`, visible in `docker ps`.
+  - After your approval, a PR with red and green results, the review rounds, the `dod.md` checklist and a shadow tier.
   - A reviewer requested on the PR from CODEOWNERS.
   - After your merge and green CI on main, the item at Done and the issue closed.
 
-  Record the run id and cost in the runbook.
-- [ ] **Step 4: Test the five overrides live.** Hold a second item, pause, drain, stop a run, and re-queue the stopped item. Record that each took effect within 30 seconds, using event timestamps against the moment of the click. Press the kill switch and record that every execution stopped within a minute.
-- [ ] **Step 5: Write `docs/superpowers/runbooks/phase-0.md`.** It covers how to seed users, rotate the GitHub App key and the Claude token, read `/phase0` toward the exit criteria (10 merged PRs, cost per item, your verdict on the shadow tiers), and use the kill switch.
-- [ ] **Step 6: Commit** `docs: phase 0 runbook and first live run`.
+  Record the run id and cost in the runbook. From here the factory builds its own remaining PBIs, still running locally.
+- [ ] **Step 4: Test the five overrides locally.** Hold a second item, pause, drain, stop a run, and re-queue the stopped item. Record that each took effect within 30 seconds, using event timestamps against the moment of the click. Press the kill switch and record that every cell container stopped within a minute.
+- [ ] **Step 5: Write `docs/superpowers/runbooks/phase-0.md`.** It covers how to start the factory with `aspire run`, set its parameters, seed users, rotate the GitHub App key and the Claude token, and use the kill switch.
+- [ ] **Step 6: Commit** `docs: phase 0a runbook and first local live run`.
+
+---
+### Task 19: Azure platform and the cloud platform tests
+
+Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign-in, webhook and runtime tests below can still change §11. This task builds no factory logic. It deploys the infrastructure and runs throwaway probes, then records what happened.
+
+**Files:**
+- Create: `infra/main.bicep`, `infra/main.bicepparam`, `.github/workflows/deploy.yml`, `spike/hello.ts`, `spike/sdk-oauth.ts`, `cell/Dockerfile`, `Dockerfile`, `docs/superpowers/spikes/2026-11-phase-0-platform.md`
+
+**Interfaces:**
+- Produces: deployed resources named below, which every later task deploys into. Produces the spike record, which Tasks 11, 15 and 16 read before they start.
+
+- [ ] **Step 1: Write `infra/main.bicep`** with these resources in resource group `rg-software-factory-aue`:
+  - Log Analytics workspace `log-factory`.
+  - Container Apps environment `cae-factory`, Consumption only.
+  - ACR `acrfactory<uniqueString>`, Basic. The spec has not priced it, so record its monthly cost in the spike file.
+  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:<org>/software-factory:environment:production`. `deploy.yml` runs only from `main` into the `production` environment, which has required reviewers set in GitHub.
+  - Storage roles for `id-factory-control`: Storage Blob Data Contributor and Storage Blob Delegator on the storage account, so it can sign write-only SAS URLs with a user delegation key. No account key is used.
+  - Key Vault `kv-factory-<uniqueString>` with RBAC and four secrets: `github-app-key`, `github-project-token` (Step 7a), `claude-oauth-token` and `cell-secret`, a random 32-byte value for signing run tokens. The control identity reads all four. The cell identity reads only `claude-oauth-token`.
+  - Storage account with `transcripts` and `reports` containers, Hot LRS.
+  - Postgres Flexible Server `psql-factory-<uniqueString>`, B1ms, 32 GB, Entra auth only. Its firewall admits Azure services only, so no GitHub runner or laptop connects to it directly. The Entra admin is `id-factory-migrate`, a fourth identity attached only to `caj-factory-migrate`.
+  - Job `caj-factory-migrate`, manual trigger, running the control plane image in one container named `migrate`, with the command `node src/store/migrate-cli.ts`. That runs `migrate()` from Task 4, and with the dash-free first argument `seed-owner` it runs `scripts/seed-owner.ts`. This is the only migration path, and Step 4 sets its order in `deploy.yml`. The control identity maps to a role `factory_app`, which can read and write the factory's tables but can only `SELECT` and `INSERT` on `event`. That keeps the event log append-only for the identity the app runs as.
+  - Container App `ca-factory-control` at 0.5 vCPU and 1 GiB with external ingress. Its image comes from a `controlImage` parameter, which defaults to the public placeholder `mcr.microsoft.com/k8se/quickstart:latest`, so the Step 2b bootstrap works while ACR is still empty. The cell and migrate jobs take the same placeholder default. `deploy.yml` passes the real ACR images, the spike image first. Its env takes `CLAUDE_CODE_OAUTH_TOKEN` and `CELL_SECRET` from Key Vault references, and `CLAUDE_TOKEN_CREATED_AT` from `main.bicepparam`, set to the date you ran `claude setup-token`.
+  - Job `caj-factory-cell` with a manual trigger, 2 vCPU and 4 GiB, `replicaRetryLimit: 1`, and `CLAUDE_CODE_OAUTH_TOKEN` from a Key Vault secret reference.
+  - An `authConfigs` child on the app with the Microsoft provider (any Entra directory and personal accounts), the Google provider, `unauthenticatedClientAction: RedirectToLoginPage`, and `globalValidation.excludedPaths: ['/webhooks/github', '/internal/cells']`.
+  - A custom role on the job for the control identity, granting job start and execution stop. Find the exact action names with `az provider operation show --namespace Microsoft.App`.
+- [ ] **Step 2: Run `az bicep build --file infra/main.bicep`.** Expected: no errors. Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
+- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`. Every later deploy runs through `deploy.yml`.
+- [ ] **Step 3: Write `spike/hello.ts`**, a `node:http` server with three routes:
+  - `GET /`, which returns every request header that starts with `x-ms-client-principal`.
+  - `POST /webhooks/github`, which verifies `X-Hub-Signature-256` with `crypto.timingSafeEqual` and returns 204 or 401.
+  - `POST /internal/cells/ping`, which returns 204.
+- [ ] **Step 4: Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials, never a stored secret. It runs in this order, and each step waits for the one before:
+  1. Build both Dockerfiles with `docker buildx build --platform linux/amd64`, and push them to ACR with the commit sha as the tag.
+  2. Run the migrations on the new image: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --image <acr>/control:<sha> --command node src/store/migrate-cli.ts`. The container name and command are passed explicitly, in case a start override replaces the template's container instead of merging into it (Step 10b checks which). Wait until that execution reports Succeeded, and stop the workflow if it doesn't.
+  3. Run `az deployment group create` with the new image tags, which updates the app and the jobs.
+
+  So the new app code never runs before its migration.
+- [ ] **Step 5: Sign-in test.** Sign in with a Google account, a personal Microsoft account and a work account from another tenant. Record each case's `x-ms-client-principal-idp` and `x-ms-client-principal-id`. Expected: all three reach `/` and show distinct ids.
+- [ ] **Step 6: Header spoofing test.** Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out. Expected: a redirect to login, not a 200. Then send the same header to `/internal/cells/ping` and confirm the response doesn't echo the forged value as an authenticated identity.
+- [ ] **Step 7a: Turn on the App webhook.** The factory GitHub App was registered in Task 2 Step 5 with its webhook inactive. Point it at `https://<app>/webhooks/github`, set its secret, and subscribe it to issues, issue comment, pull request, pull request review, check suite and issue dependencies. Pull request review is a separate subscription from pull request, and "a GitHub App must have at least read-level access for the 'Pull requests' repository permission" to receive it ([GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)). Personal accounts get no `projects_v2_item` webhook, so board changes still come through the 5-minute poll.
+- [ ] **Step 7: Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery. Expected: 204 in the App's delivery log, and no login redirect. Change the secret on one side, then expect 401.
+- [ ] **Step 8: Write `spike/sdk-oauth.ts`.** It calls `query({ prompt: "Reply with the word ready.", options: { model: "claude-haiku-5-5", maxTurns: 1, settingSources: [] } })` and prints each message's `type`. It also prints the result's `subtype`, `is_error`, `total_cost_usd` and `modelUsage`. Run it as one execution of `caj-factory-cell`.
+  - Expected: `subtype: "success"`.
+  - If the SDK refuses the token, run `claude -p "Reply with the word ready." --output-format json` in the same image. Record which one works. §14 already names the headless CLI as the fallback.
+- [ ] **Step 9: Sandbox egress probe.** In the same job, run `query()` with `sandbox: { enabled: true, failIfUnavailable: true, network: { allowedDomains: ["api.github.com", "github.com", "registry.npmjs.org"], strictAllowlist: true } }`. Ask it to run `curl -sI https://example.com` and then `curl -sI https://api.github.com`.
+  - Expected: example.com blocked, api.github.com allowed.
+  - If the result is `error_during_execution` because bubblewrap can't start in Container Apps, record that. The egress allowlist then needs another mechanism, which is a pending decision.
+- [ ] **Step 10: Bot assignment probe.** Try to assign the GitHub App's bot user to an issue. Use `gh api repos/<o>/<r>/issues/<n>/assignees -f assignees[]=<app-slug>[bot]` with an installation token. Record whether GitHub accepts it.
+- [ ] **Step 10b: Job override probe.** Start one `caj-factory-migrate` execution with `--image` and `--args`, then read its resolved template with `az containerapp job execution show`. Record whether the job's env vars survived, such as the identity client id and the Postgres host. The az reference says only that `--image` starts "a job with different image and configurations" ([az containerapp job](https://learn.microsoft.com/en-us/cli/azure/containerapp/job)). If the env is dropped, add `--env-vars` for those values to both calls in Step 4 and Task 18.
+- [ ] **Step 11: Record results** in `docs/superpowers/spikes/2026-11-phase-0-platform.md`. Give each probe its expected result, its actual result and the evidence: a command, a screenshot path or a delivery id. If Step 5, 7 or 8 fails, stop and raise it, because the spec's §11 changes before Task 3 starts.
+- [ ] **Step 12: Commit** `chore: platform baseline and phase 0 platform tests`.
 
 ---
 
+### Task 20: Deploy to Azure and run live there
+
+Phase 0b's exit. The same factory, now on the platform Task 19 built.
+
+**Files:**
+- Modify: `infra/main.bicep`, swapping the spike image for the control plane image, and `deploy.yml`
+- Modify: `docs/superpowers/runbooks/phase-0.md`
+
+- [ ] **Step 1: Deploy through `deploy.yml`.** Then seed yourself as the first owner and product owner through the migrate job: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --command node src/store/migrate-cli.ts --args seed-owner provider=microsoft subject=<id> email=<you> github-login=<login> product-owner`. The words after `--args` carry no leading dashes, because az would read a dash-prefixed word as its own option and reject the call. Confirm the execution succeeded and that you can sign in past the no-access page. Take the subject id from the Task 19 Step 5 spike record.
+- [ ] **Step 2: Move the factory to Azure.** Stop the local run, and confirm no local item still holds a lease. Then let the deployed factory take the next PBI from the board. Expected: the same flow as Task 18 Step 3, plus sign-off by a `/approve` comment, now that the webhook is on.
+- [ ] **Step 3: Test the five overrides in Azure.** Repeat Task 18 Step 4 against the deployed factory. The kill switch must stop every job execution within a minute.
+- [ ] **Step 4: Extend the runbook** with the Azure deploy, the migrate job and the exit criteria: 10 merged factory PRs counted across both stages, cost per item, and your verdict on the shadow tiers from `/phase0`.
+- [ ] **Step 5: Commit** `docs: phase 0b runbook and first Azure live run`.
+
+---
 ## Out of scope for Phase 0
 
 These come from spec §13 Phases 1 to 3, and nothing here builds them:
