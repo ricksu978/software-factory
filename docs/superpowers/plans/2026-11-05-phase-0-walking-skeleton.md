@@ -51,7 +51,7 @@ These rules hold across every task. A task that touches one of them follows this
    - `changes_requested` sets it to `address`;
    - a new run starts it at `understand`.
 2. **Leases and generations.** `lease_generation` goes up by 1 exactly twice in a lease's life: when a claim moves an item into InProgress, and when any transition moves an item out of InProgress. The second bump fences the old cell, so its next cell API call gets 409. Leaving InProgress also clears `lease_owner` and `lease_expires`. `expireLeases` looks only at InProgress items. No other transition touches the generation.
-3. **Waiting on people.** The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered, plus every InReview item. Answered and Abandoned items don't count. The brake gates only claims of Queued items, which is new work. A SignOff or NeedsInput item with an answer can always be claimed, so answering never deadlocks the line.
+3. **Waiting on people.** The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered, plus every InReview item. Answered and Abandoned items don't count. The brake gates only claims that start new work: a Queued item with no open run, or whose open run has no `stage_run` row yet. Every other claim resumes work already in flight and is never gated. That covers an answered SignOff or NeedsInput item, and a Queued item back from `changes_requested`, `lease_expired`, `usage_limited` or a late answer. So answering never deadlocks the line, and an address run never waits behind the brake.
 4. **Item scope.** Specify tags every feature file it writes with `@pbi-<externalId>` at Feature level.
    - `redGate` and `traceability` consider only scenarios carrying that tag.
    - `greenGate` requires every scenario in the suite to be green, which keeps earlier items' scenarios as regression tests.
@@ -644,6 +644,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem) => Promise<string>; //
     - When the SignOff item is approved, the next `tick` claims that answered item, because answered items are always claimable and no longer count (Run contract 3).
     - With three answered SignOff items and nothing else waiting, `tick` claims one of them, so answering never deadlocks.
     - When an unanswered item times out to Abandoned instead, the count drops to 2, and a Queued item starts.
+    - With the count at 3 and two Queued items, a fresh one ranked first and one back from `changes_requested` with `next_stage = "address"`, `tick` claims the address item and leaves the fresh one waiting.
   - **Usage reserve.** With `usage_paused_until` in the future, `tick` starts nothing, and running cells' `/lease` replies keep `stop: false`, so they finish.
   - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Two variants:
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
