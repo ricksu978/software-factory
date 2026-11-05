@@ -1,8 +1,15 @@
 # Phase 0 backlog: draft
 
-The software factory builds itself, locally first. These are the Phase 0 plan's 20 tasks as PBIs, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. They are ready to become issues with the `factory` label on the personal Project once approved. Each one names the plan task it implements, so it meets this repo's `.factory/dor.md`.
+The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBIs 21 and 22 are the first work the factory builds for itself. All of them become issues on the personal Project once approved.
 
-Until the factory can run, each PBI goes through its SOP by hand. Claude does Understand, Specify, Red, Green, self-review and the PR, and the owner signs off the scenarios and merges. "Takes over" says which manual step that PBI hands to the factory once it merges.
+Until the factory can run, PBIs 1 to 18 go through their SOP by hand. Claude does Understand, Specify, Red, Green, self-review and the PR, and the owner signs off the scenarios and merges. "Takes over" says which manual step that PBI hands to the factory once it merges.
+
+Which PBIs carry the `factory` label:
+- **PBIs 21 and 22.** These are for the factory to build, so they carry it. Each names its plan task or spec section, has criteria a test can check, and fits one Sprint, per `.factory/dor.md`.
+- **PBIs 1 to 18.** They're closed before the factory runs, so the label changes nothing.
+- **PBIs 19 and 20.** They never carry it. They need the owner's Azure Owner rights, three real-account sign-ins and a cutover, which no cell can do and no test can check, so the owner runs them by hand.
+
+The Phase 0b exit asks for 10 merged factory PRs. PBIs 21 and 22 are the first two, and the owner adds the rest to the board as they come up.
 
 ## PBI 1. Project skeleton with a BDD runner
 
@@ -12,7 +19,8 @@ Implements plan Task 1, plus the Gherkin runner every later PBI needs.
 - [ ] `npm test` runs every `src/**/*.test.ts` with `node:test`.
 - [ ] `npm run bdd` runs every feature file and writes a Cucumber Messages report to `reports/bdd.ndjson`.
 - [ ] CI runs typecheck, tests and scenarios on every push and PR, beside the prose check.
-- [ ] `.factory/config.yml` names the `bdd` parse, run and report commands and the `test` and `lint` commands.
+- [ ] `.factory/config.yml` names the `bdd` parse, run and report commands and the `test` and `lint` commands, in the shape plan Task 9 reads.
+- [ ] With `FACTORY_DB_TESTS=skip`, a test file that uses `dbTest` is skipped, and without it the file runs.
 
 Takes over: nothing yet. It makes the first line of `.factory/dod.md` checkable.
 
@@ -20,10 +28,12 @@ Takes over: nothing yet. It makes the first line of `.factory/dod.md` checkable.
 
 Implements plan Task 2.
 
-- [ ] `aspire run` brings up Postgres, the Azurite storage emulator, a completed `migrate` resource and the control resource, all healthy.
+- [ ] `aspire run` brings up Postgres and the Azurite storage emulator, both with data volumes, a `migrate` resource that exits 0, and the control resource on port 7400.
+- [ ] After a stop and a second `aspire run`, `migrate` connects to the same database.
 - [ ] The control resource receives the database and blob connections and the four secret parameters as environment variables, and the spike record names them.
-- [ ] A cell container built from `factory-cell:local` runs the Agent SDK on the subscription token, or the spike record shows the CLI fallback working.
-- [ ] The spike record states whether bubblewrap starts in a local cell container.
+- [ ] From inside a `factory-cell:local` container, a ping to the control plane gets 204, and a PUT to a local upload URL gets 201.
+- [ ] A cell container runs the Agent SDK on the subscription token, or the spike record shows the CLI fallback working.
+- [ ] The spike record states whether bubblewrap starts in a local cell container, and whether GitHub lets the App's bot be assigned.
 
 Takes over: nothing. It gives every later PBI a place to run.
 
@@ -87,6 +97,8 @@ Implements plan Task 8.
 - [ ] A newly labelled item on the board becomes an Eligible item within one poll.
 - [ ] An item whose label is removed or that is closed during a run moves to Abandoned, and its PR closes.
 - [ ] Changing any readiness input re-gates every NotReady item.
+- [ ] An InReview item whose PR a person closed without merging moves to Abandoned within one poll.
+- [ ] A commit on `main` that belongs to no merged PR sets the kill switch within one poll.
 
 Takes over: watching the board, which the owner does by hand until then.
 
@@ -158,6 +170,7 @@ Takes over: Claude running the SOP by hand. From here, cells run PBIs.
 Implements plan Task 15.
 
 - [ ] A signed-in user who isn't on the allowlist sees the no-access page.
+- [ ] Locally, a request without the cookie from this start's sign-in link gets no identity, and a dashboard POST from another origin gets 403.
 - [ ] Floor shows what waits on the owner, the next five items and the not-ready items with their failed lines.
 - [ ] A `/approve` comment from a product owner signs off scenarios, exactly as the dashboard button does.
 
@@ -186,15 +199,16 @@ Takes over: nothing. It proves the parts fit.
 
 Implements plan Task 18. This is Phase 0a's exit.
 
-- [ ] Under `aspire run`, the factory takes the next PBI from this repo's own board and opens its PR from a local cell container.
+- [ ] Under `aspire run`, the factory takes PBI 21 from this repo's own board, opens its PR from a local cell container, and moves it to Done after the owner merges and CI on main is green.
 - [ ] Sign-off in the local dashboard moves the item on, and the dev identity works only with `FACTORY_ENV=local`.
 - [ ] Each of the five Phase 0 overrides takes effect within 30 seconds, and the kill switch stops every cell container within a minute.
+- [ ] A restart of `aspire run` while a cell is in Green loses no item, event or transcript, and starts no second cell.
 
-Takes over: everything left. From here the local factory builds its own remaining PBIs, including the two below.
+Takes over: building. From here the local factory builds every factory-labelled PBI, starting with PBIs 21 and 22. The owner still runs PBIs 19 and 20.
 
 ## PBI 19. Azure platform and the cloud platform tests
 
-Implements plan Task 19. This is where Phase 0b starts.
+Implements plan Task 19. This is where Phase 0b starts. No `factory` label: the owner runs it.
 
 - [ ] `az bicep build` on `infra/main.bicep` exits 0, and the bootstrap deploy creates every resource Step 1 names.
 - [ ] The spike record shows a Google account, a personal Microsoft account and a work account from another tenant each signed in, with distinct ids.
@@ -206,10 +220,27 @@ Takes over: nothing. It settles the cloud facts PBI 20 depends on.
 
 ## PBI 20. Deploy to Azure and run live there
 
-Implements plan Task 20. This is Phase 0b's exit.
+Implements plan Task 20. This is Phase 0b's exit. No `factory` label: the owner runs it.
 
-- [ ] The deployed factory takes the next PBI from the board, after the local run has stopped with no lease left.
+- [ ] The Azure factory deploys with its kill switch on and starts nothing until the local factory has drained, recorded its merged-PR count and stopped.
+- [ ] The deployed factory then takes the next factory-labelled PBI from the board, with no `factory/pbi-*` branch left over from the local run.
 - [ ] A `/approve` comment from a product owner signs off scenarios, now that webhooks reach the factory.
 - [ ] Each of the five overrides takes effect within 30 seconds in Azure, and the kill switch stops every job execution within a minute.
 
 Takes over: the owner's machine. The factory now runs in the cloud.
+
+## PBI 21. Length-prefixed readiness hash
+
+Implements plan Run contract 11 and Task 9. The factory builds it.
+
+- [ ] Two sets of readiness texts that join to the same string, such as `dor` = "ab" with `scenarios` = "c" and `dor` = "a" with `scenarios` = "bc", give different `readinessSha` values.
+- [ ] A null file and a file whose text is the word `absent` give different values.
+- [ ] Every existing `readinessSha` test still passes.
+
+## PBI 22. A database for cells
+
+Implements plan Global Constraints and Task 4. The factory builds it.
+
+- [ ] A cell can run the database suites, so `.factory/dod.md` no longer needs `FACTORY_DB_TESTS=skip`.
+- [ ] Two cells running the suites at once don't see each other's rows.
+- [ ] A cell can reach only its test database, never the factory's own.
