@@ -422,11 +422,13 @@ stages:
   - id: red
     agent: builder
     model: coding
+    prompt: sop/prompts/red.md      # step definitions and stubs, no behaviour
     exit:
       - bdd: fail_on_assertion      # not undefined steps, not crashes
       - matches_lock: features/**/*.feature
     keep_output: true               # red evidence for the Increment
     retries: 2
+    on_fail: needs_input
   - id: green
     agent: builder
     model: coding
