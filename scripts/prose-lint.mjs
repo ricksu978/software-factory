@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const blank = (m) => m.replace(/[^\n]/g, " "); // keep line numbers when stripping code
 
-export function lint(text, ext) {
+export function lint(text, ext, path = "") {
   const findings = [];
   const at = (src, i) => src.slice(0, i).split("\n").length;
   for (const m of text.matchAll(/[–—]/g)) findings.push([at(text, m.index), "en or em dash"]);
@@ -23,13 +23,16 @@ export function lint(text, ext) {
   // (nothing after the label) is fine, and so are the plan template's "Step N:" and the
   // reporting format's "My pick: X." labels. In Markdown a lead-in starts its line or list item.
   const leadIn = ext === ".html"
-    ? /<b>([^<\n]*:[^<\n]*)<\/b>[ \t]*(?!<\/)\S/g
-    : /^[ \t>]*(?:(?:[-*+]|\d+\.)[ \t]+)?(?:\[[ x]\][ \t]+)?\*\*([^*\n]*:[^*\n]*)\*\*[ \t]*\S/gm;
+    ? /<b>([^<\n]*(?<!\d):(?!\d)[^<\n]*)<\/b>[ \t]*(?!<\/)\S/g // a clock time such as 09:02 is not a label colon
+    : /^[ \t>]*(?:(?:[-*+]|\d+\.)[ \t]+)?(?:\[[ x]\][ \t]+)?\*\*([^*\n]*(?<!\d):(?!\d)[^*\n]*)\*\*[ \t]*\S/gm;
   for (const m of prose.matchAll(leadIn))
     if (!/^(Step \d+[a-z]?|My pick):/.test(m[1])) findings.push([at(prose, m.index), `bold lead-in has a colon before prose: ${m[0].trim()}`]);
   for (const m of prose.matchAll(/[a-z]\.[A-Z][a-z]/g)) findings.push([at(prose, m.index), `missing space after period: ${m[0]}`]);
 
-  if (ext === ".html" && /class="mermaid"/.test(text) && !/<script[^>]*>[^<]*mermaid/i.test(text))
+  // A standalone document (its own <html>, or a repo doc under docs/) needs its own Mermaid script.
+  // An Artifact page renders Mermaid natively.
+  const standalone = /<html[\s>]/i.test(text) || /(^|[\\/])docs[\\/]/.test(path);
+  if (ext === ".html" && standalone && /class="mermaid"/.test(text) && !/<script[^>]*>[^<]*mermaid/i.test(text))
     findings.push([at(text, text.indexOf('class="mermaid"')), "mermaid block with no mermaid script"]);
   return findings;
 }
@@ -48,7 +51,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   for (const f of files()) {
     const ext = extname(f).toLowerCase();
     if (![".md", ".html"].includes(ext) || !existsSync(f)) continue;
-    for (const [line, msg] of lint(readFileSync(f, "utf8"), ext)) {
+    for (const [line, msg] of lint(readFileSync(f, "utf8"), ext, f)) {
       console.error(`${f}:${line}: ${msg}`);
       failed = true;
     }
