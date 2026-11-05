@@ -294,7 +294,7 @@ stateDiagram-v2
   Done --> [*]
 </pre>
   <ul>
-    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. <span class="tag call">My call</span></li>
+    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. Each lease carries a generation number that goes up on every claim. A cell checks its generation before every push, comment and state write, and exits once it no longer holds the lease. It also stops itself after 3 minutes of failed renewals, before the 5-minute expiry, so an old cell is gone before a new one starts. <span class="tag call">My call</span></li>
     <li><b>Needs input.</b> The agent posts its question as a comment on the item and in the dashboard inbox. The item gives up its WIP slot while it waits, so one stuck item can't stall the line. <span class="tag call">My call</span></li>
     <li><b>Sign-off.</b> Scenarios wait for the Product Owner the same way, in the Inbox and as a comment on the item. The item gives up its WIP slot while it waits, and after 5 days with no answer it is Abandoned, as with Needs input.</li>
     <li><b>Assignment.</b> While an item is in the factory, it's assigned to the factory's bot account, so no person picks it up at the same time.</li>
@@ -651,7 +651,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       <tr><td>backlog_source</td><td>id, adapter (github first), url, field map (acceptance criteria, status values, opt-in label, sprint field), label filter, repo map, paused</td></tr>
       <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha, quarantined_at</td></tr>
       <tr><td>user</td><td>id, provider (google, microsoft), subject, tenant_id, email, role (viewer, operator, owner), added_by, added_at</td></tr>
-      <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, lease_owner, lease_expires</td></tr>
+      <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, lease_owner, lease_generation, lease_expires</td></tr>
       <tr><td>run</td><td>id, item_id, sop_version, started_at, ended_at, outcome, cost_usd, branch, pr_url, features_lock_sha, signed_off_by, signed_off_at, risk_tier, tier_reasons</td></tr>
       <tr><td>approval</td><td>id, run_id, reviewer (git host login), sha, approved_at, dismissed_at. A row counts only while its sha is the PR's head commit.</td></tr>
       <tr><td>question</td><td>id, item_id, stage_run_id, kind (needs_input, sign_off), body, asked_at, comment_url, answer, answered_by, answered_at. Open rows feed the Inbox.</td></tr>
