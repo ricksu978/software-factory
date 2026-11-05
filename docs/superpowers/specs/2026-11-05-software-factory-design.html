@@ -198,7 +198,7 @@ mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
     <thead><tr><th>Term</th><th>What it means in the factory</th></tr></thead>
     <tbody>
       <tr><td>PBI</td><td>One work item in a connected backlog, either a GitHub Projects item or an Azure DevOps work item. It is eligible only when it carries the opt-in label, <code>factory</code> by default. <span class="tag call">My call</span></td></tr>
-      <tr><td>Ready</td><td>The Scrum Guide has no formal "Ready". It says only that items which can be Done within one Sprint are "deemed ready for selection". The factory adds its own readiness check. An item needs testable acceptance criteria, meaning each one can become a Given/When/Then scenario. It also needs a size under the limit, no open dependency and a known repo. An item that fails gets a comment saying why and stays in the backlog. <span class="tag call">My call</span></td></tr>
+      <tr><td>Ready</td><td>The Scrum Guide has no formal "Ready". It says only that items which can be Done within one Sprint are "deemed ready for selection". The factory adds its own readiness check. An item needs testable acceptance criteria, meaning each one can become a Given/When/Then scenario. It also needs no open dependency and a known repo. When the backlog's field map names a size field and a <code>max_size</code>, the size must be at or under it; without them the factory skips the size check. An item that fails gets a comment saying why and stays in the backlog. <span class="tag call">My call</span></td></tr>
       <tr><td>Definition of Done</td><td>The repo's own <code>DoD.md</code>, so each repo can have a different one. The factory reads it from the repo and adds one line of its own: every scenario passes on main. The last SOP stage checks every line. <span class="tag yours">Yours</span></td></tr>
       <tr><td>Increment</td><td>The merged change and its evidence: PR link, DoD results, the scenario runs from before and after the code, and a release note line. Recorded per PBI, rolled up per Sprint. The feature files stay in the repo as living documentation of what the product does.</td></tr>
       <tr><td>Scenario</td><td>One Gherkin Example, tied to an acceptance criterion by a tag such as <code>@ac-2</code>. Scenarios are the contract between the Product Owner and the factory. Once signed off, the build can't change them. <span class="tag yours">Yours</span> for Gherkin, <span class="tag call">My call</span> for the lock.</td></tr>
@@ -255,8 +255,8 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Interface</th><th>Calls</th><th>First adapter</th></tr></thead>
     <tbody>
-      <tr><td>Backlog</td><td>List eligible items since a cursor, get one item, claim and release, comment, set status, link a PR, and turn a webhook payload into a factory event.</td><td>GitHub Projects</td></tr>
-      <tr><td>Repo host</td><td>Clone and push a branch, open and update a PR, post the <code>risk-approval</code> status check, read approvals with the commit each covers, and read branch protection.</td><td>GitHub</td></tr>
+      <tr><td>Backlog</td><td>List eligible items since a cursor, get one item, claim and release, comment, set status, link a PR, close an item, and turn a webhook payload into a factory event.</td><td>GitHub Projects</td></tr>
+      <tr><td>Repo host</td><td>Clone and push a branch, open, update and close a PR, request reviewers, read review state and mergeability, post the <code>risk-approval</code> status check, read approvals with the commit each covers, and read branch protection.</td><td>GitHub</td></tr>
     </tbody>
   </table></div>
   <ul>
@@ -282,22 +282,30 @@ stateDiagram-v2
   InProgress --> NeedsInput: agent blocked
   NeedsInput --> InProgress: human answers
   InProgress --> InReview: PR open, CI green
-  InReview --> InProgress: changes requested
-  InReview --> Accepted: approvals met
+  InReview --> Queued: changes requested, or a conflict
+  InReview --> Accepted: approvals met, or merged by a person
+  InProgress --> Accepted: merged during address
   Accepted --> Done: DoD verified after merge
   InProgress --> Failed: retry budget spent
   NeedsInput --> Abandoned: no answer in 5 days
   SignOff --> Abandoned: no answer in 5 days
-  InProgress --> Queued: lease expired
+  InProgress --> Queued: lease expired, or a usage limit
   Accepted --> Failed: DoD fails after merge, bug PBI filed
   Failed --> Queued: human re-queues
+  Abandoned --> Queued: re-queued, or a late answer
+  Abandoned --> SignOff: re-queued, sign-off still open
+  Abandoned --> NeedsInput: re-queued, question still open
   Done --> [*]
 </pre>
   <ul>
-    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. Each lease carries a generation number that goes up on every claim. A cell checks its generation before every push, comment and state write, and exits once it no longer holds the lease. It also stops itself after 3 minutes of failed renewals, before the 5-minute expiry, so an old cell is gone before a new one starts. <span class="tag call">My call</span></li>
-    <li><b>Needs input.</b> The agent posts its question as a comment on the item and in the dashboard inbox. The item gives up its WIP slot while it waits, so one stuck item can't stall the line. <span class="tag call">My call</span></li>
-    <li><b>Sign-off.</b> Scenarios wait for the Product Owner the same way, in the Inbox and as a comment on the item. The item gives up its WIP slot while it waits, and after 5 days with no answer it is Abandoned, as with Needs input.</li>
-    <li><b>Assignment.</b> While an item is in the factory, it's assigned to the factory's bot account, so no person picks it up at the same time.</li>
+    <li><b>Claiming.</b> The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact. Each lease carries a generation number that goes up on every claim, and again whenever the item leaves InProgress. A cell checks its generation before every push, comment and state write, and exits once it no longer holds the lease. It also stops itself after 3 minutes of failed renewals, before the 5-minute expiry, so an old cell is gone before a new one starts. <span class="tag call">My call</span></li>
+    <li><b>Needs input.</b> The agent posts its question as a comment on the item and in the dashboard. You answer in either place. On the item, a comment that starts with <code>/answer</code> counts, and only when its GitHub login maps to a user on the dashboard's allowlist, so ordinary discussion on the item is never taken as an answer. The item gives up its WIP slot while it waits, so one stuck item can't stall the line. The factory reminds on the item and on Floor at day 2 and day 4, and after 5 days with no answer the item is Abandoned. <span class="tag call">My call</span></li>
+    <li><b>Sign-off.</b> Scenarios wait for the Product Owner the same way. On the item, a product owner comments <code>/approve</code>, or <code>/changes</code> followed by a note. The sign-off view lists each acceptance criterion beside the scenarios tagged with it and flags any criterion with none. Reminders and the 5-day limit work as for Needs input.</li>
+    <li><b>Waiting on people.</b> An item that waits for a person holds no slot, so the WIP number alone doesn't bound the work landing on people. In every concurrency mode the scheduler starts no new item while the items waiting on a person reach <code>review_capacity</code>, default 3. Those are items whose question or sign-off is still unanswered, plus factory PRs waiting on a reviewer. An item whose answer has arrived can always resume, so answering never stalls the line. Floor shows the count beside the WIP number. <span class="tag call">My call</span></li>
+    <li><b>Coming back.</b> A Failed or Abandoned item returns to Queued when an operator re-queues it, and an Abandoned item also returns when its question gets a late answer. It resumes at its last checkpoint, except when its PR has already merged; then it starts a new run on a new branch. When a person closed its PR without merging, it resumes at Open PR, which opens a fresh PR from the same branch. An item re-queued while its question is still open goes back to waiting, with a fresh 5-day clock.</li>
+    <li><b>Backlog changes.</b> The watcher compares each item in the factory with the version the run started from. When the acceptance criteria change, the factory comments on the item, closes its PR if one is open, and starts a new run from Understand on a new branch from the base, which leads to a new sign-off. A fresh branch matters because the old one already holds code, so new scenarios would pass before Red. When the opt-in label is removed or the item is closed, the factory stops the run, frees the slot, closes the factory's PR with a comment, keeps the branch and moves the item to Abandoned. Both moves are logged as system events. <span class="tag call">My call</span></li>
+    <li><b>Board status.</b> The factory owns the status field of the items it holds. The project's built-in workflows that set status, such as item closed and pull request merged, stay off. A factory PR references its item with <code>Refs #n</code>, so a merge doesn't close it, and the factory closes the item when it reaches Done. <span class="tag yours">Yours</span></li>
+    <li><b>Assignment.</b> While an item is in the factory, it's assigned to the factory's bot account, so no person picks it up at the same time. Where the git host can't assign the bot, a <code>factory:in-progress</code> label does the same job.</li>
     <li><b>Overrides.</b> A dashboard override can move an item along paths the diagram doesn't draw, such as holding a queued item or sending a reviewed one back to Specify. Each such move is logged as an override event. See §8.</li>
   </ul>
 </section>
@@ -314,7 +322,7 @@ stateDiagram-v2
       <tr><td class="num">4</td><td>Red</td><td>Builder agent</td><td>Step definitions written, plus stubs for the entry points the When steps call. A stub returns an empty or default value and holds no behaviour, so the When runs and the Then fails. Every scenario runs and fails on an assertion, never on an undefined step or a crash. See "Reading runner results" below. The failing run is kept as evidence, and the feature files match the lock.</td><td>Retry up to 2 times, then Needs input</td></tr>
       <tr><td class="num">5</td><td>Green</td><td>Builder agent</td><td>TDD inside each scenario: a failing unit test, the least code that passes it, then refactor. Exits when every scenario and the full unit suite pass, lint and type check are clean, and the feature files still match the lock.</td><td>Retry up to 3 times</td></tr>
       <tr><td class="num">6</td><td>Self-review</td><td><code>self-reviewer</code></td><td>Reports <code>APPROVED</code>. Its brief adds BDD checks: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario from the run. The builder fixes or rebuts each finding and sends it back, the same loop your CLAUDE.md sets for every PR.</td><td>A finding still held after 2 rebuttals, or no <code>APPROVED</code> after 5 rounds, goes to Needs input</td></tr>
-      <tr><td class="num">7</td><td>Open PR</td><td>Builder agent</td><td>PR linked to the PBI. The body lists each scenario with its red and green result and states the review rounds. CI green.</td><td>CI failures go back to stage 5</td></tr>
+      <tr><td class="num">7</td><td>Open PR</td><td>Builder agent</td><td>PR references the PBI with <code>Refs #n</code> and requests reviewers. The body lists each scenario with its red and green result and states the review rounds. CI green.</td><td>CI failures go back to stage 5</td></tr>
       <tr><td class="num">8</td><td>PR review</td><td><code>pr-reviewer</code>, <code>pr-addresser</code></td><td>Threads resolved, branch current with base. Stage 9 counts human approvals once it has set the tier.</td><td>Back to stage 5, counted against the retry budget</td></tr>
       <tr><td class="num">9</td><td>Risk approval</td><td>Risk classifier, then people</td><td>The classifier sets the PR's tier to Low, Medium or High. The PR then needs 0, 1 or 2 human approvals on its current commit. See Risk tiers below. <span class="tag yours">Yours</span></td><td>Requested changes go back to stage 8</td></tr>
       <tr><td class="num">10</td><td>Merge and verify</td><td>Factory</td><td>Merged under the git host's branch protection, CI green on main, every scenario passing on main, every DoD line checked.</td><td>Item moves to Failed, the factory files a bug PBI and the dashboard flags it. No automatic revert in v1</td></tr>
@@ -350,7 +358,7 @@ Feature: Export invoices to CSV
         | 99.00  | USD      |</pre>
   <h3>BDD rules</h3>
   <ul>
-    <li><b>Traceability.</b> Every acceptance criterion gets a tag, and at least one scenario carries it. Stage 2 fails on any criterion without a scenario.</li>
+    <li><b>Traceability.</b> Every acceptance criterion gets a tag, and at least one scenario carries it. Stage 2 fails on any criterion without a scenario. Each feature file also carries its PBI's tag, such as <code>@pbi-482</code>. Red and the traceability check look only at that PBI's scenarios, and the lock covers only its files. Green runs the whole suite, so earlier Increments' scenarios keep guarding against regressions.</li>
     <li><b>Business language.</b> Scenarios describe behaviour the Product Owner can read, with no selectors, SQL or class names. Implementation detail belongs in step definitions.</li>
     <li><b>The lock.</b> At sign-off the factory records the commit of the feature files. After that the build may add step definitions and unit tests, but it may not edit, skip or tag out a locked scenario. Every later gate compares the feature files against the lock. A scenario that turns out wrong goes back to Specify and through sign-off again. <span class="tag call">My call</span></li>
     <li><b>Red proof.</b> A scenario that passes before any behaviour exists tests nothing new, or its steps don't assert. Stage 4 reports it as a finding and doesn't proceed.</li>
@@ -374,6 +382,7 @@ Feature: Export invoices to CSV
     <li><b>No directing person.</b> In the source, whoever prompted an agent counts as one of its reviewers. A factory item has no such person, so every required approval comes from a reviewer.</li>
     <li><b>One commit per approval.</b> An approval covers the commit it was given on. When the factory pushes after an approval, for example <code>pr-addresser</code> fixing a thread or resolving a conflict, the approval no longer counts and the factory asks again. One exception keeps stage 8's base syncs from adding review load. An approval still counts when every commit since it is a merge of the base that leaves the PR's diff unchanged. The factory checks that by comparing the patch-id of <code>git diff base...head</code> at the approved commit and at the new head.</li>
     <li><b>Enforcement.</b> Low needs zero approvals, so the git host can't require a fixed review count. The factory posts a required status check, <code>risk-approval</code>, that turns green only when the tier's approvals are met on the head commit. Branch protection requires that check with the factory's GitHub App as its expected source. GitHub then blocks the merge "if the status is set by any other person or integration" (<a href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches" target="_blank" rel="noopener">GitHub</a>). The App has no admin rights and is on no bypass list, so it can't change the protection that checks it.</li>
+    <li><b>Review requests.</b> When the PR opens, the factory requests reviewers from the repo's CODEOWNERS file, or from <code>reviewers</code> in <code>.factory/config.yml</code> when the repo has no CODEOWNERS. Floor shows how long each PR has waited. <span class="tag call">My call</span></li>
     <li><b>Visible tier.</b> The PR body and the dashboard show the tier and the classifier's reasons, so a reviewer can challenge them. An operator can raise a tier. Nothing lowers one, overrides included.</li>
   </ul>
   <h3>Repo config</h3>
@@ -383,6 +392,8 @@ definition_of_done: DoD.md      # the default; any path in this repo
 sensitive_paths:                # each match needs at least one person
   - "infra/**"
   - "src/billing/**"
+reviewers:                      # used when the repo has no CODEOWNERS
+  - your-org/payments-team
 bdd:                            # this repo's own runner commands
   parse: npm run bdd -- --dry-run
   run: npm run bdd
@@ -475,6 +486,8 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
     <li><b>Damping.</b> WIP moves by at most 1 per hour. Lowering it only stops new starts and never kills a running cell. A WIP override from the dashboard applies at once and skips the damping.</li>
     <li><b>Cold start.</b> Until 10 items have been accepted, the factory runs fixed at <code>wip_min</code>.</li>
     <li><b>Usage limits.</b> On a subscription, the five-hour and weekly limits bind before dollars do. When an agent hits one, its cell checkpoints and stops, and the scheduler starts nothing new until the reset time the limit message gives. Flow shows limit stalls next to the WIP line. <span class="tag call">My call</span></li>
+    <li><b>Usage reserve.</b> Those limits are shared with your own Claude use, so the factory stops early. When a usage-limit event reports utilization at or above <code>usage_reserve_at</code>, default 0.7, the scheduler starts nothing new until the reset time, and items already running finish. <span class="tag call">My call</span></li>
+    <li><b>Waiting on people.</b> The <code>review_capacity</code> brake in §5 applies in every mode, on top of the formula. The formula's own penalty only shapes the number between those bounds.</li>
   </ul>
   <p><b>Formula first.</b> A model choosing the number on its own can't be audited or reproduced, and that number sets the spend. The formula fits on one dashboard panel. The model still earns its place in advised mode, for things the formula can't see, like a holiday week or a release freeze noted in the backlog. <span class="tag call">My call</span></p>
 </section>
@@ -485,7 +498,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <div class="tbl"><table>
     <thead><tr><th>View</th><th>Shows</th></tr></thead>
     <tbody>
-      <tr><td>Floor</td><td>Every item in flight, with its stage, time in stage, cost so far and last agent message. Updates live from the event log.</td></tr>
+      <tr><td>Floor</td><td>Every item in flight, with its stage, time in stage, cost so far and last agent message. Above it, three strips: what waits on you, the next five items in the factory queue, and items the readiness gate turned away, with its reasons. Updates live from the event log.</td></tr>
       <tr><td>Inbox</td><td>Items at Needs input, scenarios waiting for sign-off and PRs waiting on a person, oldest first. You answer here, and the answer is also posted on the backlog item.</td></tr>
       <tr><td>Flow</td><td>Throughput per day, cycle time per stage, WIP over time, and the WIP formula's inputs next to its output.</td></tr>
       <tr><td>Quality</td><td>First-pass yield, meaning items merged with no human-requested changes. Self-review rounds per item, and bugs filed later against factory items. For BDD, scenarios per item, sign-offs that asked for changes, and locked scenarios reopened after sign-off. For risk, PRs per tier and bugs later traced to each tier, which shows whether the classifier puts too much in Low.</td></tr>
@@ -502,7 +515,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       <tr><td>Factory</td><td>Running</td><td>Pause, resume or drain. Drain finishes the items in flight and starts nothing new.</td></tr>
       <tr><td>Factory</td><td>WIP</td><td>Pin a number or switch mode. Approve or reject an advised-mode proposal. While a pin is active the formula keeps computing, and Flow shows the pinned and computed values side by side.</td></tr>
       <tr><td>Backlog</td><td>Intake</td><td>Pause one backlog or change its label filter.</td></tr>
-      <tr><td>Item</td><td>Selection</td><td>Start now, taking the next free slot ahead of backlog order. Hold, so the factory never picks it up. Move it up or down the factory queue without changing the backlog's own order.</td></tr>
+      <tr><td>Item</td><td>Selection</td><td>Start now, taking the next free slot ahead of backlog order. Hold, so the factory never picks it up. Move it up or down the factory queue without changing the backlog's own order. Re-queue a Failed or Abandoned item.</td></tr>
       <tr><td>Item</td><td>Readiness</td><td>Admit an item that failed the readiness check.</td></tr>
       <tr><td>Item</td><td>Stage</td><td>Rerun a stage, skip one, or send the item back to an earlier stage.</td></tr>
       <tr><td>Item</td><td>Risk tier</td><td>Raise a PR's tier, adding required approvals. No override lowers a tier.</td></tr>
@@ -537,6 +550,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <h2><span class="n">10</span>Failure and recovery</h2>
   <ul>
     <li><b>Checkpoints.</b> The branch is the checkpoint. Each stage commits its output and the state store records the last stage completed. A new cell picks up from there.</li>
+    <li><b>Stale branches.</b> At every claim, before the next stage runs, the cell merges the base branch into the item's branch, because other items may have merged while this one waited. A conflict the agent can't resolve goes to Needs input.</li>
     <li><b>Idempotent steps.</b> Opening a PR, commenting and setting status each check current state before acting, so a retry never creates duplicates.</li>
     <li><b>Retry budget.</b> Set per stage in the SOP, plus a total per item. When it runs out, the item moves to Failed with a summary of every attempt.</li>
     <li><b>Quarantine.</b> Three failures in a row on one repo pause that repo and raise a dashboard alert. A streak like that usually means a broken build or a bad SOP change, and the items themselves are fine.</li>
@@ -650,17 +664,17 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <div class="tbl"><table>
     <thead><tr><th>Table</th><th>Key fields</th></tr></thead>
     <tbody>
-      <tr><td>backlog_source</td><td>id, adapter (github first), url, field map (acceptance criteria, status values, opt-in label, sprint field), label filter, repo map, paused</td></tr>
+      <tr><td>backlog_source</td><td>id, adapter (github first), url, field map (acceptance criteria, status values, opt-in label, sprint field, size field and max_size), label filter, repo map, paused</td></tr>
       <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha, quarantined_at</td></tr>
-      <tr><td>user</td><td>id, provider (google, microsoft), subject, tenant_id, email, role (viewer, operator, owner), added_by, added_at</td></tr>
-      <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, lease_owner, lease_generation, lease_expires</td></tr>
+      <tr><td>user</td><td>id, provider (google, microsoft), subject, tenant_id, email, github_login, role (viewer, operator, owner), product_owner, added_by, added_at</td></tr>
+      <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, criteria_hash, lease_owner, lease_generation, lease_expires</td></tr>
       <tr><td>run</td><td>id, item_id, repo_id, sop_version, config_sha, started_at, ended_at, outcome, cost_usd, branch, pr_url, features_lock_sha, signed_off_by, signed_off_at, risk_tier, tier_reasons</td></tr>
       <tr><td>approval</td><td>id, run_id, reviewer (git host login), sha, approved_at, dismissed_at. A row counts only while its sha is the PR's head commit, or every commit after it is a base merge that leaves the PR's diff unchanged (§6).</td></tr>
-      <tr><td>question</td><td>id, item_id, stage_run_id, kind (needs_input, sign_off), body, asked_at, comment_url, answer, answered_by, answered_at. Open rows feed the Inbox.</td></tr>
+      <tr><td>question</td><td>id, item_id, stage_run_id, kind (needs_input, sign_off), body, asked_at, reminders_sent, comment_url, answer, answered_by, answered_at. Open rows feed the Inbox and Floor's waiting strip.</td></tr>
       <tr><td>stage_run</td><td>id, run_id, stage_id, attempt, model, status, started_at, ended_at, tokens_in, tokens_out, cost_usd, transcript_ref</td></tr>
       <tr><td>event</td><td>id, at, actor (agent, human, system), actor_id (a user id for a human, the agent name for an agent), item_id, kind, payload. Append only.</td></tr>
       <tr><td>increment</td><td>id, item_id, sprint (read from the item's sprint field at merge), merged_sha, dod_results, scenario_results, red_run_ref, release_note</td></tr>
-      <tr><td>wip_policy</td><td>id, mode, wip_min, wip_max, review_capacity, daily_budget, current_wip, computed_at, inputs</td></tr>
+      <tr><td>wip_policy</td><td>id, mode, wip_min, wip_max, review_capacity, usage_reserve_at, daily_budget, current_wip, computed_at, inputs</td></tr>
       <tr><td>override</td><td>id, scope (factory, backlog, item), target_id, kind, value, reason, created_by, created_at, expires_at, cleared_at, cleared_by</td></tr>
     </tbody>
   </table></div>
@@ -672,13 +686,13 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <div class="tbl"><table>
     <thead><tr><th>Phase</th><th>Scope</th><th>Exit when</th></tr></thead>
     <tbody>
-      <tr><td>0. Walking skeleton</td><td>Three tests come first, because their results can change §11: dashboard sign-in with a Google account, a personal Microsoft account and a work account from another tenant; the Agent SDK running on the subscription's OAuth token; and a GitHub webhook reaching the excluded path. Then one GitHub repo and project. Fixed WIP of 1. SOP stages 1 to 7, so Gherkin, sign-off and red before green run from the first item, and a person merges. A merged item stops at Accepted, since stages 10 and 11 arrive in Phase 1. The risk classifier runs in shadow mode, recording a tier on every PR while a person still approves each one. Dashboard with Floor and Run detail, plus the first overrides: pause, drain, stop a run and hold an item.</td><td>10 factory PRs merged by a person, cost per item is measured, and you agree with the shadow tiers.</td></tr>
-      <tr><td>1. Full SOP</td><td>Stages 8 to 11 with risk tiers enforced, budget caps, Inbox, Cost view, and the full override set in §8.</td><td>Two Sprints with a first-pass yield you're happy with.</td></tr>
+      <tr><td>0. Walking skeleton</td><td>Three tests come first, because their results can change §11: dashboard sign-in with a Google account, a personal Microsoft account and a work account from another tenant; the Agent SDK running on the subscription's OAuth token; and a GitHub webhook reaching the excluded path. Then one GitHub repo and an org-owned project. Fixed WIP of 1, with the waiting-on-people brake and the usage reserve. SOP stages 1 to 7, so Gherkin, sign-off and red before green run from the first item, plus a thin stage 8: <code>pr-addresser</code> acts on requested changes and merge conflicts, and <code>pr-reviewer</code> waits for Phase 1. Sign-off and answers work on the item or in Run detail. The factory requests reviewers and a person merges. A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI must run its scenarios. Stage 10's full DoD check arrives in Phase 1. The risk classifier runs in shadow mode, recording a tier on every PR while a person still approves each one. Dashboard with Floor, its three strips and Run detail, plus the first overrides: pause, drain, stop a run, hold an item and re-queue one.</td><td>10 factory PRs merged by a person, cost per item is measured, and you agree with the shadow tiers.</td></tr>
+      <tr><td>1. Full SOP</td><td><code>pr-reviewer</code> in stage 8, stages 9 to 11 with risk tiers enforced and the full DoD check, budget caps, Inbox, Cost view, and the full override set in §8.</td><td>Two Sprints with a first-pass yield you're happy with.</td></tr>
       <tr><td>2. Adaptive WIP</td><td>Adaptive mode, then advised mode. Flow view shows the formula.</td><td>A full Sprint where WIP follows the review queue with no manual tuning.</td></tr>
       <tr><td>3. More backlogs</td><td>Azure DevOps Boards and Repos adapters, each passing the shared contract tests. More repos.</td><td>A team on Azure DevOps runs a full Sprint.</td></tr>
     </tbody>
   </table></div>
-  <p>Phase 0 leaves out adaptive WIP, Azure DevOps and the human-gate switch on purpose. Each arrives once the phase before it has data to justify it. <span class="tag call">My call</span></p>
+  <p>Phase 0 leaves out adaptive WIP and Azure DevOps on purpose. Each arrives once the phase before it has data to justify it. <span class="tag call">My call</span></p>
 </section>
 
 <section id="decisions">
@@ -701,6 +715,8 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       <tr><td>Overrides</td><td>Any orchestration decision, from the dashboard</td><td>§8</td></tr>
       <tr><td>Dashboard sign-in</td><td>Google, personal Microsoft and work or school Microsoft accounts</td><td>§8, §11</td></tr>
       <tr><td>Concurrency</td><td>Fixed, adaptive or advised, set per factory</td><td>§7</td></tr>
+      <tr><td>Board status</td><td>The factory owns status on the items it holds, and the project's built-in status workflows stay off</td><td>§5</td></tr>
+      <tr><td>Flow review</td><td>All 14 fixes from the Product Owner walk-through, including a thin stage 8 and Done on merge in Phase 0</td><td>§5, §13</td></tr>
     </tbody>
   </table></div>
 </section>
