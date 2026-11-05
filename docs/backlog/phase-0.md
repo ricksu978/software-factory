@@ -20,7 +20,6 @@ Implements plan Task 1, plus the Gherkin runner every later PBI needs.
 - [ ] `npm run bdd` runs every feature file and writes a Cucumber Messages report to `reports/bdd.ndjson`.
 - [ ] CI runs typecheck, tests and scenarios on every push and PR, beside the prose check.
 - [ ] `.factory/config.yml` names the `bdd` parse, run and report commands and the `test` and `lint` commands, in the shape plan Task 9 reads.
-- [ ] With `FACTORY_DB_TESTS=skip`, a test file that uses `dbTest` is skipped, and without it the file runs.
 
 Takes over: nothing yet. It makes the first line of `.factory/dod.md` checkable.
 
@@ -55,6 +54,7 @@ Implements plan Task 4.
 - [ ] An illegal transition throws and leaves the item and the event table unchanged.
 - [ ] Leaving InProgress raises the lease generation by 1 and clears the lease.
 - [ ] Connected as `factory_app`, an `UPDATE` on `event` fails.
+- [ ] With `FACTORY_DB_TESTS=skip`, a test file that uses `dbTest` is skipped, and without it the file runs.
 
 Takes over: nothing yet.
 
@@ -222,7 +222,7 @@ Takes over: nothing. It settles the cloud facts PBI 20 depends on.
 
 Implements plan Task 20. This is Phase 0b's exit. No `factory` label: the owner runs it.
 
-- [ ] The Azure factory deploys with its kill switch on and starts nothing until the local factory has drained, recorded its merged-PR count and stopped.
+- [ ] The Azure control plane neither polls the board nor starts a cell until the local factory has drained, recorded its merged-PR count and stopped.
 - [ ] The deployed factory then takes the next factory-labelled PBI from the board, with no `factory/pbi-*` branch left over from the local run.
 - [ ] A `/approve` comment from a product owner signs off scenarios, now that webhooks reach the factory.
 - [ ] Each of the five overrides takes effect within 30 seconds in Azure, and the kill switch stops every job execution within a minute.
@@ -241,6 +241,6 @@ Implements plan Run contract 11 and Task 9. The factory builds it.
 
 Implements plan Global Constraints and Task 4. The factory builds it.
 
-- [ ] A cell can run the database suites, so `.factory/dod.md` no longer needs `FACTORY_DB_TESTS=skip`.
+- [ ] A cell can run the database suites and the `@db` scenarios, so `.factory/dod.md` and `.factory/config.yml` drop `FACTORY_DB_TESTS=skip` and the `not @db` filter.
 - [ ] Two cells running the suites at once don't see each other's rows.
 - [ ] A cell can reach only its test database, never the factory's own.
