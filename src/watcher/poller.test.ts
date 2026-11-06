@@ -212,6 +212,24 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 2);
   });
 
+  test("a criteria comment that fails leaves the item and its PR for the next poll, which posts it and restarts", async () => {
+    const { ext, id, pr } = await held("InReview", { pr: true, criteriaHash: criteriaHash(["old criterion"]) });
+    const comment = fake.adapter.comment;
+    let fail = true;
+    fake.adapter.comment = async (...args) => {
+      if (fail) throw new Error("GitHub 403 rate limit");
+      return comment(...args);
+    };
+    await poll();
+    assert.equal((await row(ext)).state, "InReview");
+    assert.equal(host.prs.find((p) => p.number === pr)?.open, true);
+    fail = false;
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    assert.match((await fake.comments(ext))[0], /new sign-off/);
+    assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 2);
+  });
+
   test("changed criteria on an InProgress item fence its cell and start a new run", async () => {
     const { ext } = await held("InProgress", { criteriaHash: criteriaHash(["old criterion"]) });
     await db.pool.query("update item set lease_generation = 3, lease_owner = 'cell-a', lease_expires = now() where source_id = $1 and external_id = $2", [sourceId, ext]);

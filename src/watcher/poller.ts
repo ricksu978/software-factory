@@ -192,9 +192,11 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     if (!fi) return;
     const hash = criteriaHash(fi.acceptanceCriteria);
     if (row.criteria_hash !== null && row.criteria_hash !== hash) {
+      // The comment and the close are idempotent and go before the move, so the next poll retries a failed one. The
+      // comment goes first because step 2 withdraws an InReview item whose PR closed while the item stayed put.
+      await adapter.comment(fi.externalId, "This item's acceptance criteria changed, so its scenarios need a new sign-off.", `criteria:${hash}`);
       await closeOpenPr(repoHost, fi.repo, row, "This item's acceptance criteria changed, so the factory starts a new run.");
       await restart(pool, row, fi, hash);
-      await adapter.comment(fi.externalId, "This item's acceptance criteria changed, so its scenarios need a new sign-off.", `criteria:${hash}`);
       return;
     }
     if (row.state === "Queued" || row.state === "SignOff" || row.state === "NeedsInput") {
