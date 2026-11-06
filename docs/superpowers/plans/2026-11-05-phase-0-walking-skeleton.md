@@ -932,6 +932,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
 **Interfaces:**
 - Consumes: the store, `setOverride`, `activeOverrides`, `ensureEgress`, `handleWebhook`, the cell API and `pollOnce`.
+- **Split.** PBI 15 builds the parts that don't need Task 13: sign-in, the no-access page, Floor, Run detail, sign-off and answers from both channels, `POST /users`, `GET /events` and the token banner. The parts that consume Task 13 wait for it: `POST /overrides`, the Re-queue button, Floor's override badge through `activeOverrides`, and `main.ts` with the dev identity guard, the dev login link, `ensureEgress` and the `tick` and `pollOnce` timers. The AppHost and Dockerfile changes, `scripts/seed-owner.ts`, `GET /phase0`, Run detail's red and green verdicts from the stored reports, its transcript links, which need a route that serves blobs, and Floor's last agent message wait with them. Until then Run detail shows the transcript's blob path. Until then Floor reads the `override` table directly for its badge.
 - Produces:
   - `identify(path, headers): { provider: "google" | "microsoft" | "dev"; subject: string; tenantId: string | null } | null`. It returns null on any route under `/webhooks` or `/internal` in both modes.
     - **In Azure** it reads the `x-ms-client-principal-idp` and `x-ms-client-principal-id` headers. Task 19 Step 5 records them on live sign-ins, and Task 20 fixes `identify` if the live names differ.
@@ -953,6 +954,17 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - **Roles.** `decide` owns the role rules. `approve` and `changes` need `product_owner`, and `answer` needs operator or product owner. The routes only check that the user is signed in and allowlisted.
     - **Effects.** It answers the open question and applies Run contract 1. On approve it copies `scenarios_sha` into `features_lock_sha`. On an Abandoned item it revives the item through `requeued`.
   - `parseCommand(body: string): { kind: "approve" | "changes" | "answer"; text: string } | null`, which reads only a leading `/approve`, `/changes` or `/answer`.
+  - **As built in PBI 15.**
+    - `createAuth(cfg: { mode: "local" | "azure"; devLogin?: string })` returns `identify`, this start's `devToken` and `devLoginCookie(token)`, the `Set-Cookie` value for `GET /dev-login`. `devIdentityProblem(env)` returns why the dev identity guard refuses to start, for `main.ts` to call.
+    - `decide` leaves an approved SignOff item in SignOff with its question answered, since `claimNext` takes it from there (Run contract 3). Only an Abandoned item moves, through `requeued`. `decideAndAnnounce` runs `decide` in its own transaction and comments the decision on the PBI. `applyComment(deps, { externalId, login, body, commentId })` maps the login to a user and calls it, and a refused command gets one reply keyed on the comment id.
+    - `handleWebhook` takes an optional `onComment`, called once a new `comment` event has committed, which the control plane points at `applyComment`.
+    - `nextUp(c, limit, { resumeOnly })` in `src/store/items.ts` returns the items `claimNext` would pick, in order, from the same query, without locking them. Floor passes `resumeOnly` when the waiting count is at `review_capacity`, the same brake `tick` applies, so "Next up" never shows a fresh item the scheduler wouldn't start.
+    - `dashboardRoutes(deps)` is one handler for every dashboard route, and leaves `/webhooks`, `/internal` and `/probe` to the other handlers. It checks those prefixes, and signs people in, on the raw path. A path whose dot segments or encoded slashes or dots normalise to something else gets 400, so a request can't pass a proxy as a webhook and land on a dashboard route (Review Focus 4).
+    - Every open `/events` stream shares one `LISTEN factory_events` client, so open tabs hold one pool connection, and `close()` releases it. If that connection drops, the client is discarded and the open streams end, so each browser reconnects and LISTENs again, and the process never crashes on the dropped connection. Floor reloads itself a second after the last event.
+    - `decide` revives an Abandoned item only when it got there through `timed_out`. A withdrawn item stays gone, and Run detail shows it no form.
+    - The `comment` webhook event carries the repo, and `applyComment` ignores a comment that isn't on the item's own repo, since the same issue number exists in every installed repo. `onComment` runs after the delivery's client is back in the pool, and doesn't hold up the 204.
+    - Migration `004` makes `github_login` unique whatever its case, so a comment maps to at most one user, and `POST /users` answers 400 for a login another user holds.
+    - Run detail shows the signed-off feature files at `features_lock_sha`.
 
 - [ ] **Step 1: Write failing tests:**
   - **Review Focus 4.**
