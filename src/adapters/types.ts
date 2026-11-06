@@ -30,7 +30,23 @@ export interface BacklogAdapter {
   parseWebhook(headers: Record<string, string>, body: unknown): FactoryWebhookEvent;
 }
 
-export type ReviewComment = { threadId: string; path: string; line: number | null; author: string; body: string };
+/** A line comment in a review thread, or a review's top-level summary, which has no path and the review's id as threadId. */
+export type ReviewComment = { threadId: string; path: string | null; line: number | null; author: string; body: string };
+
+export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
+
+/**
+ * The summaries that still stand, from a PR's reviews in the order they were submitted. A summary can't be resolved,
+ * so it counts while its reviewer's latest review requests changes. As in GitHub's own reviewer state, a review that
+ * only comments changes nothing, and an approval, a dismissal or a newer review replaces the summary (issue #28).
+ */
+export function standingSummaries(reviews: Review[]): ReviewComment[] {
+  const latest = new Map<string, Review>();
+  for (const r of reviews) if (r.state !== "commented") latest.set(r.author.toLowerCase(), r);
+  return [...latest.values()]
+    .filter((r) => r.state === "changes_requested" && r.body.trim() !== "")
+    .map((r) => ({ threadId: r.id, path: null, line: null, author: r.author, body: r.body }));
+}
 
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
@@ -48,6 +64,6 @@ export interface RepoHost {
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
   defaultBranchSha(repo: string): Promise<string>;
-  /** Every comment in the PR's unresolved review threads. */
+  /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
 }

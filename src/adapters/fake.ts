@@ -1,13 +1,14 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import type { FactoryItem, RepoHost, ReviewComment } from "./types.ts";
+import { standingSummaries, type FactoryItem, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
  * last cursor. It has no webhooks, so parseWebhook ignores everything.
  */
-export function fakeBacklog(): ContractTarget {
+export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void } {
   const items = new Map<string, FactoryItem & { seq: number }>();
   const comments = new Map<string, { body: string; key: string }[]>();
+  const dependencies = new Map<string, string[]>();
   let seq = 0;
 
   const get = (id: string) => {
@@ -42,8 +43,8 @@ export function fakeBacklog(): ContractTarget {
         const item = items.get(id);
         return item ? copy(item) : null;
       },
-      async openDependencies() {
-        return [];
+      async openDependencies(id) {
+        return [...(dependencies.get(id) ?? [])];
       },
       async claim(id) {
         touch(id, (i) => {
@@ -93,13 +94,16 @@ export function fakeBacklog(): ContractTarget {
     async comments(id) {
       return (comments.get(id) ?? []).map((c) => c.body);
     },
+    setDependencies(id, open) {
+      dependencies.set(id, [...open]);
+    },
   };
 }
 
 type FakePr = {
   number: number; repo: string; branch: string; base: string; title: string; body: string; headSha: string | null;
   open: boolean; merged: boolean; mergeSha: string | null; mergeable: boolean | null; reviewers: string[]; comments: string[];
-  reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }[];
+  reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body?: string }[];
 };
 type Status = "pending" | "success" | "failure";
 
@@ -181,7 +185,11 @@ export function fakeRepoHost(): RepoHost & {
       return head;
     },
     async openReviewComments(repo, n) {
-      return (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
+      const comments = (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
+      const reviews = [...(prs.find((p) => p.repo === repo && p.number === n)?.reviews ?? [])]
+        .sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
+        .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));
+      return [...comments, ...standingSummaries(reviews)];
     },
   };
 }
