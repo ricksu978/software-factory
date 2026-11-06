@@ -99,6 +99,8 @@ Implements plan Task 8.
 - [ ] An item whose label is removed or that is closed during a run moves to Abandoned, and its PR closes.
 - [ ] Changing any readiness input re-gates every NotReady item.
 - [ ] An InReview item whose PR a person closed without merging moves to Abandoned within one poll.
+- [ ] A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview.
+
 Takes over: watching the board, which the owner does by hand until then.
 
 ## PBI 9. Repo config, policy files and readiness gate
