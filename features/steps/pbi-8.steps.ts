@@ -241,7 +241,7 @@ Then("its test is reported as skipped", function () {
 
 Then("its test runs and passes", function () {
   const c = ctx(this);
-  assert.equal(c.status, 0, c.out);
+  assert.equal(c.status, 0, c.out ?? "");
   assert.match(c.out ?? "", /^# pass 1$/m, `didn't pass:\n${c.out}`);
   assert.match(c.out ?? "", /^# skip 0$/m);
 });
