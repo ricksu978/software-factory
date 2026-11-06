@@ -72,6 +72,24 @@ export const LEASE_EXPIRY_MS = 300_000;
 
 const system = (actorId: string): Actor => ({ actor: "system", actorId });
 
+// The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
+// `resumeOnly`, the waiting-count brake.
+const CLAIMABLE = `from item i
+     where not i.held and cardinality(i.blocked_by) = 0
+       and ((i.state = 'Queued'
+           and (not $1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
+         or (i.state in ('SignOff', 'NeedsInput')
+           and exists (select from question q where q.item_id = i.id and q.answer is not null)
+           and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
+     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id`;
+
+/** The first `limit` items claimNext would pick with the same `resumeOnly`, in order, without claiming or locking. */
+export async function nextUp(
+  c: pg.Pool | pg.PoolClient, limit: number, opts: { resumeOnly?: boolean } = {},
+): Promise<{ id: string; title: string; state: ItemState }[]> {
+  return (await c.query<{ id: string; title: string; state: ItemState }>(`select i.id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
+}
+
 /**
  * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. Answered SignOff and NeedsInput items
  * come before Queued ones, then highest priority, then lowest backlog rank. Held items and items with an open
@@ -83,19 +101,7 @@ const system = (actorId: string): Actor => ({ actor: "system", actorId });
 export async function claimNext(
   c: pg.PoolClient, owner: string, now: Date, opts: { resumeOnly?: boolean } = {},
 ): Promise<{ itemId: string; runId: string; generation: number } | null> {
-  const pick = await c.query<{ id: string }>(
-    `select i.id from item i
-     where not i.held and cardinality(i.blocked_by) = 0
-       and ((i.state = 'Queued'
-           and (not $1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
-         or (i.state in ('SignOff', 'NeedsInput')
-           and exists (select from question q where q.item_id = i.id and q.answer is not null)
-           and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
-     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id
-     limit 1
-     for update of i skip locked`,
-    [opts.resumeOnly ?? false],
-  );
+  const pick = await c.query<{ id: string }>(`select i.id ${CLAIMABLE} limit 1 for update of i skip locked`, [opts.resumeOnly ?? false]);
   if (pick.rowCount === 0) return null;
   const itemId = pick.rows[0].id;
   await transitionItem(c, itemId, "claimed", system(owner));

@@ -12,7 +12,7 @@ export type FactoryWebhookEvent =
   | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
   | { kind: "pr_closed"; prNumber: number; repo: string }
   | { kind: "checks_completed"; sha: string; repo: string }
-  | { kind: "comment"; externalId: string; login: string; body: string; commentId: string }
+  | { kind: "comment"; externalId: string; repo: string; login: string; body: string; commentId: string }
   | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }
   | { kind: "ignored" };
 
