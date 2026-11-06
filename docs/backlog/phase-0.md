@@ -1,6 +1,6 @@
-# Phase 0 backlog: draft
+# Phase 0 backlog
 
-The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBI 21 is the first work the factory builds for itself, and the owner builds PBI 22 by hand. All of them become issues on the personal Project once approved.
+The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBI 21 is the first work the factory builds for itself, and the owner builds PBI 22 by hand. The owner approved them on 2026-11-06, and PBI n is issue #(n + 4) on the personal Project, so PBI 1 is #5 and PBI 22 is #26.
 
 Until the factory can run, PBIs 1 to 18 go through their SOP by hand. Claude does Understand, Specify, Red, Green, self-review and the PR, and the owner signs off the scenarios and merges. "Takes over" says which manual step that PBI hands to the factory once it merges.
 
@@ -99,7 +99,7 @@ Implements plan Task 8.
 - [ ] An item whose label is removed or that is closed during a run moves to Abandoned, and its PR closes.
 - [ ] Changing any readiness input re-gates every NotReady item.
 - [ ] An InReview item whose PR a person closed without merging moves to Abandoned within one poll.
-- [ ] A commit on `main` that belongs to no merged PR sets the kill switch within one poll.
+- [ ] A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview.
 
 Takes over: watching the board, which the owner does by hand until then.
 
