@@ -411,7 +411,7 @@ export interface RepoHost {
 export type ReviewComment = { threadId: string; path: string; line: number | null; author: string; body: string };
 ```
 
-  `contract.ts` exports `backlogContract(name: string, make: () => Promise<{ adapter: BacklogAdapter; seed(item: Partial<FactoryItem>): Promise<string> }>)`. It registers `node:test` cases.
+  `contract.ts` exports `backlogContract(name: string, make: () => Promise<ContractTarget>)`, where `ContractTarget` is `{ adapter: BacklogAdapter; seed(item: Partial<FactoryItem>): Promise<string>; comments(externalId: string): Promise<string[]> }`. `BacklogAdapter` has no method that lists comments, so `comments` is how the dedupe case reads them, and Task 7's GitHub `make` reads the issue's comments. It registers `node:test` cases under the names the PBI 6 scenarios check, so a renamed or missing case fails the scenario. It also exports `OPT_IN_LABEL = "factory"` and `CLAIM_MARKER = "factory:in-progress"`.
 
 - [ ] **Step 1: Write the contract suite.** Each case runs against the adapter that `make` returns:
   - `listEligible` returns only open items carrying the opt-in label. A closed item, such as one the factory closed at Done, never comes back as new work.
@@ -421,7 +421,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - `parseWebhook` on an unknown payload returns `{ kind: "ignored" }` and never throws.
   - `close` followed by `getItem` shows `closed: true`.
 - [ ] **Step 2: Write `fake.test.ts`**, which calls `backlogContract("fake", ...)`. Run it. Expected: FAIL.
-- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. It also exports `fakeRepoHost()`, an in-memory `RepoHost` holding PRs, checks, files and review comments, which the tests in Tasks 7 to 17 use. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
+- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. `fakeBacklog()` returns a `ContractTarget`, so `fake.test.ts` passes it straight to `backlogContract`. Its cursor is a change counter, so a `listEligible` from the returned cursor sees only items changed since. Its `openDependencies` returns an empty list, and Task 8 adds a way to seed dependencies when its tests need one. It also exports `fakeRepoHost()`, an in-memory `RepoHost` holding PRs, checks, files and review comments, which the tests in Tasks 7 to 17 use. Tests set its state directly: `prs`, `checks` by `repo@sha`, `files` by `repo@ref:path`, `heads` by repo and `reviewComments` by `repo#number`. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(adapters): interfaces, fake adapter, contract suite`.
 
