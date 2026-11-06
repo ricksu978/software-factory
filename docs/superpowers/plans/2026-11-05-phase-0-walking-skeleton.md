@@ -39,7 +39,7 @@
 - A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI runs its scenarios. `pr-reviewer`, stage 10's post-merge verification, stage 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
 - In Phase 0b, sign-in goes through Container Apps built-in auth with Microsoft (any Entra directory and personal accounts) and Google. Phase 0a uses the dev identity from Task 15. In both, the app's own `user` table decides access, and roles are viewer, operator and owner.
 - A cell has no Docker daemon, so it skips what needs one. Test files that need Docker use `dbTest` from `src/store/test-db.ts`, which skips them when `FACTORY_DB_TESTS=skip`, and scenarios that need a database carry `@db`, which this repo's `bdd.run` filters out (Task 4). Only this repo's `.factory/dod.md` and `.factory/config.yml` set the variable or the filter. CI uses neither, so the database suites and scenarios still gate every PR through its checks (Run contract 6).
-- Branch protection and rulesets need GitHub Pro or a public repo. This repo is private on the Free plan, and both `gh api repos/ricksu978/software-factory/branches/main/protection` and `.../rulesets` return 403 with "Upgrade to GitHub Pro or make this repository public to enable this feature." Until that changes, Task 8's main-head check stands in. A commit on `main` that belongs to no merged PR sets the kill switch. Deployment environments are missing too: "Users with GitHub Free plans can only configure environments for public repositories", and required reviewers on Free, Pro and Team "are only available for public repositories" ([GitHub](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)). So `deploy.yml` runs only when the owner starts it (Task 19 Steps 1 and 4).
+- This repo is public, decided 2026-11-06. On the Free plan that's what makes branch protection and deployment environments with required reviewers available ([GitHub](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)). `main` takes changes only through a PR with one approving review and a green `lint` check, and refuses force pushes and deletions. Admins bypass every one of those rules, because `enforce_admins` is off and "the restrictions of a branch protection rule do not apply to people with admin permissions" by default ([GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)). That lets the owner merge their own PRs, which GitHub won't let them approve. The factory's App holds no admin or bypass rights, so a cell's push token can't write to `main`. Task 1 adds its CI job to the required checks, and Task 19 adds the `production` environment.
 
 ## Review Focus
 
@@ -73,7 +73,8 @@ These rules hold across every task. A task that touches one of them follows this
    - `lockSha` and `lockedFiles`;
    - `prNumber`, `repo`, `base` and `branch`;
    - `configSha` and `sopVersion`;
-   - `dodVerdicts`, the latest `dod.md` verdicts from `policy_result`, so a cell resumed at open-pr still gives the classifier the `person` lines, and `dodCheckedSha`, the commit they were checked at.
+   - `dodVerdicts`, the latest `dod.md` verdicts from `policy_result`, so a cell resumed at open-pr still gives the classifier the `person` lines, and `dodCheckedSha`, the commit they were checked at;
+   - `trustedComments`, for an address run, under Run contract 10.
 6. **CI status.** Only the control plane reads checks, with the App's own `RepoHost`. The cell reports its PR through `POST /pr` as soon as the PR exists. After every push, the cell asks about the exact commit it pushed with `GET /internal/cells/:runId/checks?sha=<sha>`. The control plane polls the checks on each sha it has been asked about, and on every merge commit. A sha with no checks reported 10 minutes after the control plane first saw it returns `none`. The engine treats `none` as `blocked`, with "no CI ran on the PR". Phase 0 requires CI on the target repo. Cell tokens keep the permissions in Global Constraints. The cell's own repo calls go through `cellRepoHost`, which opens PRs and requests reviewers with the token from `/github-token`.
 7. **Branches and runs.** A run's branch is `factory/pbi-<externalId>-r<runNumber>`. These start a new run on a new branch from the base:
    - `criteria_changed`;
@@ -91,6 +92,8 @@ These rules hold across every task. A task that touches one of them follows this
     - the claim that starts an address run, set to that claim's time.
 
     A review left while address is running is newer than the claim, so the next poll still catches it once the item is back in InReview. The webhook compares the review's `submitted_at`, and the poll compares the newest such review from `prState`. GitHub's aggregate `reviewDecision` isn't used, because it can stay `CHANGES_REQUESTED` after the fix is pushed.
+
+    **Trusted reviewers.** The repo is public, and "Anyone with read access can review and comment on proposed changes" ([GitHub](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/about-pull-request-reviews)). So a review, and each review comment, counts only when its author's login is the `github_login` of an allowlisted user, the same rule item comments follow. Trust is per comment, because anyone can reply inside a thread a trusted reviewer opened. An untrusted review requeues nothing. `GET /context` gives an address run `trustedComments`, the comments in unresolved threads written by trusted authors or by the App's own bot user, with their thread, path, line and body. The bot's comments are the addresser's earlier replies. They came from a brief that held only trusted text, and without them a second round would see a reviewer's follow-up but not the reply it answers. The engine gives the addresser that list and nothing else from the PR, so an untrusted comment never reaches its brief.
 11. **Policy files.** The factory hard-codes no quality criteria. Spec §6 "Policy files" defines five files: `dor.md`, `scenarios.md`, `pr-review.md`, `risk.md` and `dod.md`.
     - **Loading.** The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`. Readiness has no run yet, so it reads the default branch head. A read that returns 404 means the file is absent. Any other read error throws, and the step retries on its next turn. A read error never falls back to a default.
     - **Defaults.** An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`, except `dod.md`, which has no default. A `Policy.sha` is the SHA-256 of its raw text, whether it came from the repo or a default, so a changed default counts as a policy change. Both images copy the factory's `policy/` folder to `/app/policy`, which is the default value of `FACTORY_POLICY_DIR`. A repo file replaces its default whole.
@@ -164,7 +167,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
 - [ ] **Step 4: Write the item's scenarios.** PBI 1's own feature file, `features/pbi-5-project-skeleton.feature`, holds one scenario per acceptance criterion, and `features/steps/pbi-5.steps.ts` defines their steps. One of them runs `npm run bdd` in a scratch copy of the project and checks its report, so no separate smoke scenario is needed. Run `npm run bdd`. Expected: every scenario passes, and `reports/bdd.ndjson` holds a `testCaseFinished` message for each. cucumber-js 13.3.0 loads the `.ts` step files through Node 26's type stripping with no loader.
 - [ ] **Step 5: Run `npm run typecheck`.** Expected: exit 0.
 - [ ] **Step 6: Write `.factory/config.yml`** in the shape Task 9's `parseRepoConfig` reads. `bdd.parse` is `npm run bdd -- --dry-run`, which writes the same report and doesn't fail on undefined steps ([cucumber-js](https://raw.githubusercontent.com/cucumber/cucumber-js/main/docs/dry_run.md)), `bdd.run` is `npm run bdd -- --tags "not @db"` (Task 4), `bdd.report` is `reports/bdd.ndjson`, `commands.test` is `FACTORY_DB_TESTS=skip npm test`, and `commands.lint` is the prose lint line from `.factory/dod.md`.
-- [ ] **Step 7: Write `ci.yml`** to run on push and PR with `actions/setup-node` at `26.13.0`, `npm ci`, `npm run typecheck`, `npm test` and `npm run bdd`. Docker must be available on the runner for Testcontainers, so use `ubuntu-latest`. Add `reports/` to `.gitignore`.
+- [ ] **Step 7: Write `ci.yml`** to run on push and PR with `actions/setup-node` at `26.13.0`, `npm ci`, `npm run typecheck`, `npm test` and `npm run bdd`. Docker must be available on the runner for Testcontainers, so use `ubuntu-latest`. Add `reports/` to `.gitignore`. Once `ci.yml` is on `main`, add its job to `main`'s required status checks beside `lint`.
 - [ ] **Step 8: Commit** `chore: project skeleton with a Gherkin runner`.
 
 ---
@@ -277,7 +280,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 
 **Files:**
 - Modify: `apphost.mts`, so `migrate` runs `src/store/migrate-cli.ts` in place of `spike/db-probe.ts`
-- Create: `db/migrations/001_init.sql`, `src/store/db.ts`, `src/store/items.ts`, `src/store/events.ts`, `src/store/runs.ts`, `src/store/migrate-cli.ts`, `src/store/test-db.ts`, `src/store/items.test.ts`. `migrate-cli.ts` is the migrate entry point, for the `migrate` resource locally and the migrate job in Azure. It runs `migrate()`, then upserts one `repo` row and one `backlog_source` row for each entry in the YAML file at `FACTORY_SOURCES`, default `config/sources.yml`, and skips that step when the file is absent. Each entry names `repo`, `installationId`, `owner`, `projectNumber` and `fieldMap`, so a fresh database knows its board without a manual insert. When `FACTORY_ENV=local` it also upserts the dev owner from `FACTORY_DEV_LOGIN`, with provider `dev`, the owner role and `product_owner`, so the local dashboard works after every start. When its first argument is the word `seed-owner`, it hands the remaining `key=value` words to `scripts/seed-owner.ts` from Task 15. Arguments carry no leading dashes, because `az containerapp job start --args` reads any dash-prefixed word as one of its own options. It exits 1 on any word it doesn't recognise, so a mistyped seed never passes as a plain migration.
+- Create: `db/migrations/001_init.sql`, `src/store/db.ts`, `src/store/items.ts`, `src/store/events.ts`, `src/store/runs.ts`, `src/store/migrate-cli.ts`, `src/store/test-db.ts`, `src/store/items.test.ts`. `migrate-cli.ts` is the migrate entry point, for the `migrate` resource locally and the migrate job in Azure. It runs `migrate()`, then upserts one `repo` row and one `backlog_source` row for each entry in the YAML file at `FACTORY_SOURCES`, default `config/sources.yml`, and skips that step when the file is absent. Each entry names `repo`, `installationId`, `owner`, `projectNumber` and `fieldMap`, so a fresh database knows its board without a manual insert. When `FACTORY_ENV=local` it also upserts the dev owner from `FACTORY_DEV_LOGIN`, with provider `dev`, the owner role, `product_owner` and `github_login` set to the same login, so the local dashboard works after every start and the owner's own PR reviews count under Run contract 10. When its first argument is the word `seed-owner`, it hands the remaining `key=value` words to `scripts/seed-owner.ts` from Task 15. Arguments carry no leading dashes, because `az containerapp job start --args` reads any dash-prefixed word as one of its own options. It exits 1 on any word it doesn't recognise, so a mistyped seed never passes as a plain migration.
 
 **Interfaces:**
 - Consumes: `next`, `ItemState`, `ItemEvent` from Task 3.
@@ -310,7 +313,6 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `stage_run.report_ref text`, the BDD report a red or green stage uploaded.
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
   - `item.readiness_policy_sha text`, for the re-gate in Run contract 11.
-  - `repo.main_checked_sha text`, the default branch head that Task 8's main-head check last cleared.
 
   Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 19 names. Locally the control plane connects as Aspire's database user, so the append-only grant is enforced only in Azure. The test below checks the grant itself. Its `event` grant is `SELECT, INSERT` only.
 - [ ] **Step 2: Write failing tests** in `items.test.ts` against `startTestDb()`:
@@ -319,7 +321,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `upsertItem` called twice with the same `(source_id, external_id)` returns the same id.
   - **Generations.** A transition out of InProgress raises `lease_generation` by 1 and clears `lease_owner` and `lease_expires`. A transition between two non-InProgress states leaves all three untouched.
   - **Append-only.** Connected as `factory_app`, an `UPDATE event` fails with a permission error.
-  - **Migrate entry point.** Running `migrate-cli.ts` twice with `FACTORY_ENV=local`, `FACTORY_DEV_LOGIN=octo` and a sources file with one entry leaves one `repo` row, one `backlog_source` row and one owner `octo` with `product_owner`. Without `FACTORY_ENV`, it seeds no user.
+  - **Migrate entry point.** Running `migrate-cli.ts` twice with `FACTORY_ENV=local`, `FACTORY_DEV_LOGIN=octo` and a sources file with one entry leaves one `repo` row, one `backlog_source` row and one owner `octo` with `product_owner` and `github_login = 'octo'`. Without `FACTORY_ENV`, it seeds no user.
 - [ ] **Step 3: Run `node --test src/store/items.test.ts`.** Expected: FAIL.
 - [ ] **Step 4: Implement** `db.ts`, `events.ts`, the item functions in `items.ts`, and the empty `runs.ts` exports used later.
 - [ ] **Step 5: Run the tests.** Expected: PASS.
@@ -371,7 +373,7 @@ export type FactoryWebhookEvent =
   | { kind: "item_changed"; externalId: string } | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
   | { kind: "pr_closed"; prNumber: number; repo: string } | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; login: string; body: string; commentId: string }
-  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string }
+  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }
   | { kind: "ignored" };
 export interface BacklogAdapter {
   capabilities: { webhooks: boolean };
@@ -391,12 +393,13 @@ export interface RepoHost {
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>; // CODEOWNERS first
-  prState(repo: string, prNumber: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
+  prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
   defaultBranchSha(repo: string): Promise<string>;
-  commitsWithoutMergedPr(repo: string, fromSha: string, toSha: string): Promise<string[]>; // commits on the default branch after fromSha that no merged PR contains
+  openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>; // every comment in the PR's unresolved review threads
 }
+export type ReviewComment = { threadId: string; path: string; line: number | null; author: string; body: string };
 ```
 
   `contract.ts` exports `backlogContract(name: string, make: () => Promise<{ adapter: BacklogAdapter; seed(item: Partial<FactoryItem>): Promise<string> }>)`. It registers `node:test` cases.
@@ -409,7 +412,7 @@ export interface RepoHost {
   - `parseWebhook` on an unknown payload returns `{ kind: "ignored" }` and never throws.
   - `close` followed by `getItem` shows `closed: true`.
 - [ ] **Step 2: Write `fake.test.ts`**, which calls `backlogContract("fake", ...)`. Run it. Expected: FAIL.
-- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
+- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. It also exports `fakeRepoHost()`, an in-memory `RepoHost` holding PRs, checks, files and review comments, which the tests in Tasks 7 to 17 use. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(adapters): interfaces, fake adapter, contract suite`.
 
@@ -438,10 +441,10 @@ export interface RepoHost {
   - Calling `handleWebhook` twice with the same `X-GitHub-Delivery` stores one `webhook_delivery` row and one event. The second call returns 200 with no event.
   - `handleWebhook` with a bad signature returns 401 and writes nothing.
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
-  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
+  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased and its author's login. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
   - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
-  - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED`, and null when there is none. That is the poller's backstop for a missed review webhook, under Run contract 10.
-  - `commitsWithoutMergedPr` lists the commits between the two shas through the compare API, and returns each one for which `GET /repos/{o}/{r}/commits/{sha}/pulls` holds no PR with `merged_at` set. A stubbed history of one merged-PR commit and one direct push returns only the direct push.
+  - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED` whose author is in `trustedLogins`, and null when there is none. A newer `CHANGES_REQUESTED` review from a login outside the list leaves it unchanged (Run contract 10). That is the poller's backstop for a missed review webhook, under Run contract 10.
+  - `openReviewComments` returns every comment, with its author, from the PR's unresolved review threads, and none from resolved ones. Assert this against a stubbed GraphQL `reviewThreads` reply that has one resolved and one unresolved thread. `fakeRepoHost` from Task 6 passes the same case. The control plane uses it to build `/context`'s `trustedComments` (Task 12).
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - `verifySignature` uses `crypto.createHmac` and `crypto.timingSafeEqual` after a length check.
@@ -463,12 +466,11 @@ export interface RepoHost {
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
 - Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts (Run contract 11), which it also passes to `gate` as `ctx.readinessSha`. Also `POLL_INTERVAL_MS = 300_000`.
-- Each `pollOnce` does five things:
+- Each `pollOnce` does four things:
   - lists new and changed eligible items from the cursor;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
   - runs `gate` on every Eligible item;
-  - reads `prState` for every InReview item;
-  - checks the default branch head of each repo, as below.
+  - reads `prState` for every InReview item.
 - The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
 
 - [ ] **Step 1: Write failing tests** with the fake adapter:
@@ -488,10 +490,10 @@ export interface RepoHost {
   - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
     - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
+    - **Stranger's review.** A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview, because the poller passes only allowlisted `github_login` values to `prState`. The same review from the dev owner's login requeues the item to address.
   - **Policy change.** After any readiness input changes on the default branch, so `readinessSha` no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text. Adding a missing `dod.md`, or fixing a `pr-review.md` that held a `run:` line, re-gates too, and posts a fresh comment.
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
   - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
-  - **Main-head check.** When `defaultBranchSha` differs from `repo.main_checked_sha`, the poller calls `commitsWithoutMergedPr` between them. An empty list moves `main_checked_sha` forward. Any commit in the list sets a factory `kill` override with the reason "commit <sha> on main belongs to no merged PR" and comments nothing on items. This stands in for the branch protection this repo can't have (Global Constraints). A null `main_checked_sha` just records the head.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
@@ -644,7 +646,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 - Modify: `src/store/runs.ts`
 
 **Interfaces:**
-- Consumes: `renewLease`, `releaseLease`, `transitionItem`, `appendEvent` and `RepoHost.cellToken`.
+- Consumes: `renewLease`, `releaseLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken` and `RepoHost.openReviewComments`.
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
@@ -664,6 +666,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `/transition` with `scenarios_written`, a `sign_off` question, `scenariosSha` and `lockedFiles` moves InProgress to SignOff. It inserts the question, stores the sha and files on the run, and releases the lease.
   - **Every exit releases.** Each of `pr_opened`, `blocked`, `retries_exhausted` and `usage_limited` leaves the item with no `lease_owner` and a generation one higher, per Run contract 2. `pr_opened` with `tier` writes `run.risk_tier` and `run.tier_reasons`.
   - `/context` after an approved sign-off returns `nextStage: "red"`, the `lockSha` and the `lockedFiles`.
+  - **Trusted comments.** For an address run on a PR whose one unresolved thread holds a comment by an allowlisted user's `github_login`, a reply by the App's bot user and a reply by a stranger, `/context` returns `trustedComments` with the first two comments only.
   - `/transition` with `retries_exhausted` moves to Failed, and the event payload lists every attempt from `stage_run`.
   - `/lease` returns `stop: true` while a factory `pause` override is active.
   - `/stage` with `usage: { utilization: 0.72, resetsAt }` sets `usage_paused_until` to that reset time, and with `utilization: 0.5` leaves it unchanged.
@@ -750,7 +753,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 type CellContext = { externalId: string; title: string; acceptanceCriteria: string[]; nextStage: string;
   decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
-  configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null };   // the body of GET /context (Run contract 5)
+  configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null;
+  trustedComments: ReviewComment[] };   // the body of GET /context (Run contract 5)
 type Git = { clone(url: string, branch: string): Promise<string>; mergeBase(base: string): Promise<"clean" | "conflict">;
   commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> };
 function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent; git: Git;
@@ -772,16 +776,22 @@ Stage behaviour, from spec §6 rows 1 to 7:
 | green | `greenGate`, `commands.test`, `commands.lint` and `matchesLock` all pass. The green report is uploaded the same way. Then the `dod.md` criteria are checked per Run contract 11: the engine runs the `run:` lines, an agent judges the rest, and the verdicts go to `POST /policy-results`. A `failed` `dod.md` verdict counts as a green failure. A `person` verdict goes to the PR checklist unticked and doesn't fail green | 3 retries, then `retries_exhausted` |
 | self-review | The reviewer's last line is `APPROVED`, and every `pr-review.md` verdict it reported passed, with the verdicts sent to `POST /policy-results`. `APPROVED` with a failed verdict counts as another round. `DEADLOCK` or 5 rounds without approval means `blocked` | `blocked` |
 | open-pr | `dod.md` checked again when HEAD moved since `ctx.dodCheckedSha` (Run contract 11). Then `openOrUpdatePr` with `Refs #<n>` in the body, a link to the repo's `pr-review.md` or the default, and the `dod.md` criteria as a checklist showing the cell's verdicts, for the person who merges to tick, then `POST /pr`, then `requestReviewers(repo, pr, config.reviewers)`, then `GET /checks?sha=<git.head()>` every 60s until `success`. Every later push, including a retry after "back to green", asks about its own new sha. On `failure`, back to green, counted against green's retries. On `none`, `blocked` with "no CI ran on the PR". The stage ends in Run contract 9 order with `pr_opened` carrying `prNumber`, `prUrl`, `tier` and `tierReasons` | as stated |
-| address | Runs only when `ctx.nextStage` is `address`. `factory-pr-addresser` replies to or fixes each open thread, and the branch merges cleanly with the base. Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, `dod.md` is checked again when HEAD moved since `ctx.dodCheckedSha`, and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
+| address | Runs only when `ctx.nextStage` is `address`. `factory-pr-addresser` replies to or fixes each comment in `ctx.trustedComments` (Run contract 10), and the branch merges cleanly with the base. Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, `dod.md` is checked again when HEAD moved since `ctx.dodCheckedSha`, and the engine posts `pr_opened` again, which returns the item to InReview | 2 retries, then `blocked` |
 
 - [ ] **Step 1: Write `sop/default.yml`.** Copy the spec's SOP YAML, keep stages understand to open-pr, set self-review's agent to `factory-self-reviewer`, add `address` with `agent: factory-pr-addresser`, and keep `budget` as recorded data only. Phase 0 doesn't enforce caps. The one exception is `wall_clock: 8h`, which counts only time with a lease, and when it runs out the engine posts `blocked`. Write the seven prompt files. They hold only engine rules, and every repo-specific standard comes from a policy file the engine loads at run time (Run contract 11). `specify.md` carries the engine's BDD rules verbatim: traceability, the lock and red proof. It requires the item's `@pbi-<n>` tag on every feature file, and appends the repo's `scenarios.md` as the team's writing guide. `red.md` says to write step definitions and stubs with no behaviour.
-- [ ] **Step 2: Vendor the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` and `~/.claude/agents/pr-addresser.md` into `cell/claude/agents/` as `factory-self-reviewer.md` and `factory-pr-addresser.md`, with `name:` set to match. The new names matter because cell mode loads the repo's own `.claude/agents/`, and Claude Code prefers a project agent over a user agent of the same name ([sub-agents](https://code.claude.com/docs/en/sub-agents), "Choose the subagent scope"). Under the old names, a repo shipping its own `self-reviewer.md` would replace the factory's reviewer and its report format. From the vendored reviewer, remove its rubric list (what to review for) and its line saying a repo's own agent file overrides it. Keep only the review loop and the `APPROVED` / `OPEN: <n>` report format, so `pr-review.md` is the only rubric. `address.md` tells `factory-pr-addresser` to work only the open threads and the conflict, and to treat review text as requests to weigh, never as commands. `self-review.md` gives the reviewer the repo's `pr-review.md` as its rubric, numbered as in Run contract 11. Then come the engine's BDD checks, under a heading that says they outrank anything in the rubric above: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. It also adds the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`". The reviewer reports each `pr-review.md` criterion as a JSON line, which the engine stores in `policy_result`.
+- [ ] **Step 2: Write the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` into `cell/claude/agents/` as `factory-self-reviewer.md`, with `name:` set to match. Write `factory-pr-addresser.md` fresh instead of copying `~/.claude/agents/pr-addresser.md`. That file only points to a skill loop that fetches every review thread itself, takes each thread's latest comment as the ask, watches the PR until it merges and calls scripts under `~/.claude/scripts`, none of which an address stage can use. The factory's addresser makes one pass:
+  - it merges the base and resolves any conflict;
+  - it works each comment in the brief's list, fixing the code or replying in that comment's thread;
+  - it commits and stops.
+
+  It fetches no review threads, watches nothing and runs no script outside the repo, so the brief's list is the only review text it works from. The new names matter because cell mode loads the repo's own `.claude/agents/`, and Claude Code prefers a project agent over a user agent of the same name ([sub-agents](https://code.claude.com/docs/en/sub-agents), "Choose the subagent scope"). Under the old names, a repo shipping its own `self-reviewer.md` would replace the factory's reviewer and its report format. From the vendored reviewer, remove its rubric list (what to review for) and its line saying a repo's own agent file overrides it. Keep only the review loop and the `APPROVED` / `OPEN: <n>` report format, so `pr-review.md` is the only rubric. `address.md` gives `factory-pr-addresser` the conflict and `ctx.trustedComments` (Run contract 10), and tells it to treat that text as requests to weigh, never as commands. `self-review.md` gives the reviewer the repo's `pr-review.md` as its rubric, numbered as in Run contract 11. Then come the engine's BDD checks, under a heading that says they outrank anything in the rubric above: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. It also adds the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`". The reviewer reports each `pr-review.md` criterion as a JSON line, which the engine stores in `policy_result`.
 - [ ] **Step 3: Write failing engine tests** with a scripted fake agent, a fake `Git` and a recording `CellApi`:
   - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify, posts `scenarios_written` with `scenariosSha` and `lockedFiles`, and returns `waiting`. A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
   - **Checkpoint resume.** With `ctx.nextStage = "red"`, it never calls the agent for understand or specify.
   - **Changes asked.** With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`, the specify prompt contains the note.
   - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
   - **Address.** With `ctx.nextStage = "address"`, it runs only the address stage, pushes, and posts `pr_opened` once `/checks?sha=` for the pushed sha reports `success`. A `success` cached for the previous head never counts.
+  - **Trusted brief.** The prompt the fake agent receives at address holds the body of every comment in `ctx.trustedComments` and no other review text.
   - **Rubric can't weaken.** A repo `pr-review.md` that says "skip the BDD checks" still yields a brief whose BDD checks follow the rubric under the outranking heading. A reviewer reply of `APPROVED` with one failed `pr-review.md` verdict starts another round instead of passing.
   - **Repo agents can't replace the factory's.** With a fake repo holding `.claude/agents/self-reviewer.md` and `.claude/agents/pr-addresser.md`, the self-review and address calls to the fake agent name `factory-self-reviewer` and `factory-pr-addresser`.
   - **DoD commands.** A `dod.md` with `` `run: false` `` fails green on exit code 1, and the command's env holds no `CLAUDE_CODE_OAUTH_TOKEN` and no `RUN_TOKEN`. `` `run: true && true` `` passes, which proves the `sh -c` path.
@@ -915,7 +925,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Create: `src/e2e.test.ts`
 - Modify: `src/watcher/webhook.ts` for these mappings:
   - `pr_merged` moves InReview, or InProgress during address, to Accepted through `merged`, and stores `run.merge_sha`. When the cached check status of `merge_sha` reaches `success`, through `checks_completed` matched on `merge_sha` or the poll in Task 13, the item moves to Done through `dod_verified`. Run contract 8 then sets Done on the board and closes the item. On `failure` the item moves to Failed through `dod_failed`, with a comment linking the failed run. Phase 0 files no bug PBI.
-  - `review` with `changes_requested` and a `submittedAt` after `run.reviews_seen_at` moves InReview to Queued through `changes_requested`, with `next_stage = "address"`, per Run contract 10. An older review is ignored.
+  - `review` with `changes_requested` and a `submittedAt` after `run.reviews_seen_at` moves InReview to Queued through `changes_requested`, with `next_stage = "address"`, per Run contract 10. An older review, or one whose `author` is no allowlisted user's `github_login`, is ignored.
   - `pr_closed` without a merge, by anyone but the factory, moves the item to Abandoned through `withdrawn`.
 
 **Interfaces:**
@@ -952,7 +962,7 @@ Phase 0a's exit. The factory runs under `aspire run` and builds one real PBI fro
   - Task 1 added `.factory/config.yml` with real `bdd` and `commands` entries, the Gherkin runner that writes Cucumber Messages to `reports/bdd.ndjson`, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
   - Check all of these, and add a CODEOWNERS file.
   - In the personal Project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
-  - **Branch protection.** If the repo is public or on GitHub Pro by now, require one human review and CI on `main`. Shadow mode posts no `risk-approval`, so that check isn't required yet. Otherwise GitHub refuses protection (Global Constraints), so record in the runbook that Task 8's main-head check stands in, and push to `main` only through PRs, because a direct push trips the kill switch.
+  - **Branch protection.** Confirm `main` still requires a PR, one approving review, `lint` and Task 1's CI job (Global Constraints). Shadow mode posts no `risk-approval`, so that check isn't required yet.
   - Confirm the GitHub App is installed on this repo only.
 - [ ] **Step 3: Run one PBI live, locally.** With `aspire run` up, take the next PBI from this repo's own backlog, labelled `factory` on the personal Project. Expected:
   - A readiness comment within one poll, and no webhooks are needed.
@@ -984,7 +994,7 @@ Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign
   - Log Analytics workspace `log-factory`.
   - Container Apps environment `cae-factory`, Consumption only.
   - ACR `acrfactory<uniqueString>`, Basic. The spec has not priced it, so record its monthly cost in the spike file.
-  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:ricksu978/software-factory:ref:refs/heads/main`. This private Free-plan repo can't have environments (Global Constraints), so `deploy.yml` has only a `workflow_dispatch` trigger and no `push` trigger. Starting it needs `actions: write`, which no cell token carries, so only the owner deploys, and a merge never deploys by itself. If the repo goes public, add a `production` environment with required reviewers and move the subject to `environment:production`.
+  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:ricksu978/software-factory:environment:production`. `deploy.yml` runs only into the `production` environment, whose required reviewer is the owner, and it has only a `workflow_dispatch` trigger, so a merge never deploys by itself. Starting it needs `actions: write`, which no cell token carries.
   - Storage roles for `id-factory-control`: Storage Blob Data Contributor and Storage Blob Delegator on the storage account, so it can sign write-only SAS URLs with a user delegation key. No account key is used.
   - Key Vault `kv-factory-<uniqueString>` with RBAC and four secrets: `github-app-key`, `github-project-token` (Task 2 Step 5), `claude-oauth-token` and `cell-secret`, a random 32-byte value for signing run tokens. The control identity reads all four. The cell identity reads only `claude-oauth-token`.
   - Storage account with `transcripts` and `reports` containers, Hot LRS.
@@ -995,9 +1005,9 @@ Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign
   - An `authConfigs` child on the app with the Microsoft provider (any Entra directory and personal accounts), the Google provider, `unauthenticatedClientAction: RedirectToLoginPage`, and `globalValidation.excludedPaths: ['/webhooks/github', '/internal/cells']`.
   - A custom role on the job for the control identity, granting job start and execution stop. Find the exact action names with `az provider operation show --namespace Microsoft.App`.
 - [ ] **Step 2: Run `az bicep build --file infra/main.bicep`.** Expected: no errors. Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
-- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`. Every later deploy runs through `deploy.yml`.
+- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`, and create the repo's `production` environment with yourself as its required reviewer and `main` as its only deployment branch. Every later deploy runs through `deploy.yml`.
 - [ ] **Step 3: Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials, never a stored secret. It runs in this order, and each step waits for the one before:
-  Its only trigger is `workflow_dispatch`, per the identity bullet in Step 1.
+  Its only trigger is `workflow_dispatch`, and its job runs in the `production` environment, per the identity bullet in Step 1.
   1. Build both Dockerfiles with `docker buildx build --platform linux/amd64`, and push them to ACR with the commit sha as the tag. Build `spike/Dockerfile` the same way and push it as `control-spike:<sha>`. It starts from `node:26.13.0-bookworm`, installs the repo's dependencies and runs `node spike/hello.ts`.
   2. Run the migrations on the new image: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --image <acr>/control:<sha> --command node src/store/migrate-cli.ts`. The container name and command are passed explicitly, in case a start override replaces the template's container instead of merging into it (Step 10 checks which). Wait until that execution reports Succeeded, and stop the workflow if it doesn't.
   3. Run `az deployment group create` with the new image tags, which updates the app and the jobs. A `workflow_dispatch` input `control_image` overrides the control app's image only. When it's empty, the app gets `control-spike:<sha>`. The real control image polls the board that the local factory is still claiming from, so no Task 19 run deploys it. Task 20 Step 2 changes that default.
