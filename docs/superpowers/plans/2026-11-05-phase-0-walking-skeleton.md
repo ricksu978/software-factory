@@ -579,13 +579,16 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - `traceability(results, criteriaCount: number, pbiTag: string): string[]`, which lists every `@ac-N` with no scenario tagged `pbiTag`.
   - `matchesLock(repoDir: string, lockSha: string, files: string[]): Promise<boolean>`, which diffs only the locked files.
 
-- [ ] **Step 1: Write fixtures.** Hand-write small Cucumber Messages streams covering:
-  - a Then step `FAILED`, which is red;
+- [ ] **Step 1: Write fixtures.** `fixtures/verdicts.ndjson` is a real cucumber-js run, trimmed to the `pickle`, `testCase`, `testCaseStarted` and `testStepFinished` messages, with each error message cut to its first line so no local path is committed. Its scenarios cover:
+  - a Then step `FAILED`, which is red, and an `And` after a Then `FAILED`, which is red too;
   - all steps `PASSED`, which is green;
   - an `UNDEFINED` step, which is a crash;
+  - an `AMBIGUOUS` step, which is a crash;
   - a When step `FAILED`, which is a crash;
   - a Given `PENDING`, which is a crash;
-  - an empty file, which is a crash for every scenario.
+  - a failed `Before` hook ahead of a failing Then, which is a crash.
+
+  An empty report gives no results at all. Red then fails every expected scenario with "not run in the cell: <name>", the owner's call at PBI 10's sign-off.
 
   Statuses come from `TestStepResult.status` (`UNKNOWN`, `PASSED`, `SKIPPED`, `PENDING`, `UNDEFINED`, `AMBIGUOUS`, `FAILED`). Step kind comes from the pickle step `type` (`Context`, `Action` or `Outcome`). Both are defined in `cucumber/messages` `jsonschema/messages.schema.json`.
 - [ ] **Step 2: Write failing tests.** Each fixture maps to the verdict above.
@@ -596,8 +599,10 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - `matchesLock` returns false after a test commit edits a locked `.feature` file. It returns true after a commit that only adds a step definition, and true after a merge that adds another item's feature file.
 - [ ] **Step 3: Run the tests.** Expected: FAIL.
 - [ ] **Step 4: Implement.**
-  - **`classify`.** Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`. A scenario is red when its first non-`PASSED` step is `FAILED` and of type `Outcome`.
-  - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`.
+  - **`classify`.** Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`. A scenario is red when its first non-`PASSED` step is `FAILED` and of type `Outcome`. A hook step has no pickle step, so a failed hook is a crash. A retried scenario counts from its last attempt. A step with no result, as when a killed runner leaves the report cut short, is a crash, so a truncated report never yields a false red or green.
+  - **`redGate`.** Besides its two findings above, a crashed scenario of the item fails Red with "scenario crashed instead of failing on a Then: <name>: <reason>". It counts names rather than only matching them, because a Scenario Outline's rows share one name and an Examples-level `@db` tag can keep some rows out of the cell. An item with no scenarios in either list fails with "no scenario carries <tag>".
+  - **`greenGate`.** A report with no scenarios fails with "the report holds no scenarios".
+  - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`. Exit 1 means a locked file changed or was deleted. It throws on any other git error, such as an unknown `lockSha`, and on an empty file list, which would diff the whole tree.
 - [ ] **Step 5: Run the tests.** Expected: PASS.
 - [ ] **Step 6: Commit** `feat(bdd): red and green from Cucumber Messages, lock check`.
 
