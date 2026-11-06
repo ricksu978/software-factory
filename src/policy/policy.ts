@@ -83,9 +83,17 @@ export function parseJudgement(reply: string, policy: Policy): Verdict[] {
 
 export type ReadinessTexts = Record<"dor" | "scenarios" | "pr-review" | "risk" | "dod" | "config", string | null>;
 
-/** SHA-256 over every file the readiness check reads, in a fixed order, with `absent` for a missing one. */
+/**
+ * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its
+ * UTF-8 byte length, a colon and the text, so no text can slide across into the next file. A missing file goes in
+ * as `-;`, which no length prefix starts with, so it never matches a file whose text is `absent` or anything else.
+ */
 export function readinessSha(texts: ReadinessTexts): string {
   const hash = createHash("sha256");
-  for (const key of ["dor", "scenarios", "pr-review", "risk", "dod", "config"] as const) hash.update(texts[key] ?? "absent");
+  for (const key of ["dor", "scenarios", "pr-review", "risk", "dod", "config"] as const) {
+    const text = texts[key];
+    if (text === null) hash.update("-;");
+    else hash.update(`${Buffer.byteLength(text, "utf8")}:`).update(text, "utf8");
+  }
   return hash.digest("hex");
 }

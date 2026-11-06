@@ -118,4 +118,13 @@ describe("readinessSha", () => {
   test("a missing dod.md and an empty one give different hashes", () => {
     assert.notEqual(readinessSha({ ...texts, dod: null }), readinessSha({ ...texts, dod: "" }));
   });
+
+  test("text moved across a file boundary changes the hash, including multi-byte text", () => {
+    assert.notEqual(readinessSha({ ...texts, dor: "ab", scenarios: "c" }), readinessSha({ ...texts, dor: "a", scenarios: "bc" }));
+    assert.notEqual(readinessSha({ ...texts, dor: "é", scenarios: "" }), readinessSha({ ...texts, dor: "", scenarios: "é" }));
+  });
+
+  test("a missing file and one holding the word absent give different hashes", () => {
+    for (const key of ["dod", "config"] as const) assert.notEqual(readinessSha({ ...texts, [key]: null }), readinessSha({ ...texts, [key]: "absent" }), key);
+  });
 });
