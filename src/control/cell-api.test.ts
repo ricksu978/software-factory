@@ -25,6 +25,7 @@ describe("cell API", dbTest, () => {
   let off: () => void;
   let sourceId: string;
   let configReads = 0;
+  let killed = false;
 
   before(async () => {
     db = await startTestDb();
@@ -44,6 +45,7 @@ describe("cell API", dbTest, () => {
         if (text === null) throw new Error("no .factory/config.yml");
         return text.includes("WebSearch") ? ["WebSearch"] : [];
       },
+      killSwitch: () => killed,
       now: () => clock,
     });
     server = await startServer([api], { port: 0 });
@@ -65,6 +67,7 @@ describe("cell API", dbTest, () => {
   beforeEach(async () => {
     seen = [];
     clock = at;
+    killed = false;
     board = fakeBacklog();
     host = fakeRepoHost();
     await db.pool.query(`truncate item, override, "user" cascade; update wip_policy set usage_paused_until = null, usage_reserve_at = 0.7`);
@@ -236,6 +239,43 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
   });
 
+  test("lease says stop while the kill switch's env flag is on", async () => {
+    const cell = await claimed();
+    killed = true;
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
+  });
+
+  test("a body over 1 MiB gets 413 and writes nothing", async () => {
+    const cell = await claimed();
+    const port = (server.address() as AddressInfo).port;
+    const r = await fetch(`http://127.0.0.1:${port}/internal/cells/${cell.runId}/stage`, {
+      method: "POST", headers: { authorization: `Bearer ${cell.token}` }, body: JSON.stringify({ stageId: "green", attempt: 1, status: "started", pad: "x".repeat(2 * 1024 * 1024) }),
+    });
+    assert.equal(r.status, 413);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run")).rows[0].n, 0);
+  });
+
+  test("a PR URL that isn't the run's repo PR gets 400, so the board never links it", async () => {
+    const cell = await claimed();
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened", prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened", prNumber: 9 })).status, 200);
+    assert.equal((await runRow(cell.runId)).pr_url, `https://github.com/${repo}/pull/9`);
+  });
+
+  test("a usage reset time that isn't a time gets 400 and keeps no stage row", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started", usage: { utilization: 0.9, resetsAt: "soon" } });
+    assert.equal(r.status, 400);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run where run_id = $1", [cell.runId])).rows[0].n, 0);
+  });
+
+  test("context leaves out a decision on a question from before this run started", async () => {
+    const cell = await claimed("specify");
+    await db.pool.query("insert into question (item_id, kind, body, answer, decision, asked_at, answered_at) values ($1, 'sign_off', 'old', 'redo it', 'changes', '2026-01-01', '2026-01-02')", [cell.itemId]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.decision, null);
+  });
+
   test("usage at the reserve pauses new work until the reset, and usage below it changes nothing", async () => {
     const cell = await claimed();
     const paused = async () => (await db.pool.query("select usage_paused_until from wip_policy")).rows[0].usage_paused_until;
@@ -285,6 +325,11 @@ describe("cell API", dbTest, () => {
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
     assert.equal(host.prs[0].open, false);
     assert.match(host.prs[0].comments[0], /factory\/pbi-7-r1/);
+    assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "Abandoned didn't release the marker");
+    // A revived item's re-claim puts the marker back.
+    await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "requeued", { actor: "human", actorId: "operator" }));
+    await withTx(db.pool, (c) => claimNext(c, "cell-b", at));
+    assert.ok((await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "the re-claim didn't claim the board item");
 
     await board.seed({ externalId: "8" });
     const done = await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '8', 'x', 'Accepted') returning id", [sourceId]);

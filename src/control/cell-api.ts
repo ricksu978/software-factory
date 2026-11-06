@@ -29,6 +29,8 @@ export type CellApiDeps = {
   gateway: { upstream: string; ownerToken: () => string };
   /** The web tools a repo config allows: `(text) => parseRepoConfig(text).webTools` from Task 9. Throws on a bad config. */
   webToolsOf: (configYaml: string | null) => WebTool[];
+  /** True while the kill switch's env flag is on. Defaults to reading FACTORY_KILL=1. */
+  killSwitch?: () => boolean;
   now?: () => Date;
 };
 
@@ -41,7 +43,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
   run_id: string; item_id: string; generation: number; state: string; source_id: string; external_id: string; title: string;
-  run_number: number; next_stage: string | null; branch: string | null; pr_number: number | null; locked_files: string[] | null;
+  run_number: number; started_at: Date; next_stage: string | null; branch: string | null; pr_number: number | null; locked_files: string[] | null;
   features_lock_sha: string | null; config_sha: string | null; sop_version: string | null; repo_url: string | null; trusted_bot: string | null;
 };
 type Call = { c: pg.PoolClient; run: Run; body: Record<string, unknown>; query: URLSearchParams; now: Date };
@@ -59,7 +61,7 @@ class Fenced extends Error {}
 async function lockRun(c: pg.PoolClient, runId: string): Promise<Run | null> {
   const r = await c.query<Run>(
     `select r.id as run_id, i.id as item_id, i.lease_generation as generation, i.state, i.source_id, i.external_id, i.title,
-       r.run_number, r.next_stage, r.branch, r.pr_number, r.locked_files, r.features_lock_sha, r.config_sha, r.sop_version,
+       r.run_number, r.started_at, r.next_stage, r.branch, r.pr_number, r.locked_files, r.features_lock_sha, r.config_sha, r.sop_version,
        repo.url as repo_url, repo.trusted_bot
      from run r join item i on i.id = r.item_id left join repo on repo.id = r.repo_id
      where r.id = $1 for update of i`,
@@ -96,6 +98,17 @@ function repoOf(run: Run): string {
   return repoName(run.repo_url);
 }
 
+/**
+ * The PR's URL, built from the run's repo, never taken from the cell, because the board links it from a public item.
+ * A `prUrl` the cell sends must be that same URL.
+ */
+function prUrlFor(run: Run, prNumber: number, sent: unknown): string {
+  if (!run.repo_url) throw new BadRequest("the run has no repo yet");
+  const url = `${run.repo_url.replace(/\/$/, "")}/pull/${prNumber}`;
+  if (sent !== undefined && sent !== null && sent !== url) throw new BadRequest(`prUrl must be ${url}`);
+  return url;
+}
+
 function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   const q = v as { kind?: unknown; body?: unknown } | undefined;
   oneOf(q?.kind, "question.kind", [kind]);
@@ -103,8 +116,10 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
 }
 
 const routes: Record<string, Route> = {
-  "POST lease": async (_deps, { c, run, now }) => {
+  "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
+    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13). Either one tells every cell to stop.
+    if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) return { ok: true, stop: true };
     const r = await c.query<{ stop: boolean }>(
       `select exists (select from override o
          where o.cleared_at is null and (o.expires_at is null or o.expires_at > $3)
@@ -122,8 +137,10 @@ const routes: Record<string, Route> = {
     const repo = repoOf(run);
     const item = await deps.backlogFor(run.source_id).getItem(run.external_id);
     const decision = await c.query<{ decision: "approve" | "changes" | "answer"; answer: string | null }>(
-      "select decision, answer from question where item_id = $1 and decision is not null order by answered_at desc nulls last limit 1",
-      [run.item_id],
+      // Only this run's questions: a run that criteria_changed started never sees the last run's decision (Run contract 7).
+      `select decision, answer from question where item_id = $1 and decision is not null and asked_at >= $2
+       order by answered_at desc nulls last limit 1`,
+      [run.item_id, run.started_at],
     );
     const dod = await c.query<{ criterion_index: number; criterion: string; status: string; reason: string | null; checked_sha: string | null }>(
       `select criterion_index, criterion, status, reason, checked_sha from policy_result
@@ -178,7 +195,8 @@ const routes: Record<string, Route> = {
   },
 
   "POST pr": async (_deps, { c, run, body }) => {
-    await c.query("update run set pr_number = $2, pr_url = $3 where id = $1", [run.run_id, int(body.prNumber, "prNumber"), str(body.prUrl, "prUrl")]);
+    const prNumber = int(body.prNumber, "prNumber");
+    await c.query("update run set pr_number = $2, pr_url = $3 where id = $1", [run.run_id, prNumber, prUrlFor(run, prNumber, body.prUrl)]);
     return { ok: true };
   },
 
@@ -227,6 +245,7 @@ const routes: Record<string, Route> = {
     const usage = body.usage as { utilization?: unknown; resetsAt?: unknown } | undefined;
     if (typeof usage?.utilization === "number") {
       const resetsAt = typeof usage.resetsAt === "string" ? new Date(usage.resetsAt) : new Date(now.getTime() + USAGE_PAUSE_MS);
+      if (Number.isNaN(resetsAt.getTime())) throw new BadRequest("usage.resetsAt must be a time");
       await c.query("update wip_policy set usage_paused_until = $2 where usage_reserve_at <= $1", [usage.utilization, resetsAt]);
     }
     return { ok: true };
@@ -250,9 +269,9 @@ const routes: Record<string, Route> = {
       const tier = optional(body.tier, (v) => oneOf(v, "tier", ["Low", "Medium", "High"] as const));
       // Run contract 10: the first pr_opened starts the review clock.
       await c.query(
-        `update run set pr_number = $2, pr_url = coalesce($3, pr_url), risk_tier = coalesce($4, risk_tier),
+        `update run set pr_number = $2, pr_url = $3, risk_tier = coalesce($4, risk_tier),
            tier_reasons = coalesce($5, tier_reasons), reviews_seen_at = coalesce(reviews_seen_at, $6) where id = $1`,
-        [run.run_id, prNumber, optional(body.prUrl, (v) => str(v, "prUrl")), tier, optional(body.tierReasons, (v) => strings(v, "tierReasons")), now],
+        [run.run_id, prNumber, prUrlFor(run, prNumber, body.prUrl), tier, optional(body.tierReasons, (v) => strings(v, "tierReasons")), now],
       );
     } else if (event === "retries_exhausted") {
       const attempts = await c.query("select stage_id, attempt, status from stage_run where run_id = $1 order by started_at, attempt", [run.run_id]);
