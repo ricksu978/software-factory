@@ -430,19 +430,20 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 ### Task 7: GitHub adapters and webhook intake
 
 **Files:**
-- Create: `src/adapters/github/app.ts`, `src/adapters/github/backlog.ts`, `src/adapters/github/repo-host.ts`, `src/adapters/github/backlog.contract.test.ts`, `src/watcher/webhook.ts`, `src/watcher/webhook.test.ts`, `src/adapters/github/app.test.ts`
+- Create: `src/adapters/github/backlog.ts`, `src/adapters/github/backlog.test.ts`, `src/adapters/github/repo-host.ts`, `src/adapters/github/repo-host.test.ts`, `src/adapters/github/backlog.contract.test.ts`, `src/watcher/webhook.ts`, `src/watcher/webhook.test.ts`. Callers build the App with `new App({ appId, privateKey })` from `@octokit/app`, so there's no wrapper module.
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `RepoHost` and `backlogContract` from Task 6, and `appendEvent` from Task 4.
 - Produces:
   - `githubBacklog(cfg: { app: App; installationId: number; owner: { type: "user" | "org"; login: string }; projectToken: string | null; projectNumber: number; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`. It resolves the project's node id once, through GraphQL `user(login:)` or `organization(login:)` and `projectV2(number:)`, so `config/sources.yml` holds only the number the board's URL shows.
-    - **Events.** Issue, PR, check and dependency events come from the App webhook. Project item changes come from an organization's `projects_v2_item` webhook when `owner.type` is `org`. A user-owned project has no such webhook, so its changes come only through the 5-minute poll.
+    - **Events.** Issue, PR, check and dependency events come from the App webhook. Project item changes come only through the 5-minute poll. A user-owned project has no `projects_v2_item` webhook, and an organization's names an item node rather than an issue number, so `parseWebhook` maps it to `ignored` and the next poll picks the change up.
     - **Tokens.** Board reads and writes use `projectToken` when `owner.type` is `user`, and the App's installation token when it's `org`. Issue comments, labels and closing go through the App in both cases.
     - **Test.** A user-owned config with a null `projectToken` throws at construction, naming the missing secret.
   - `githubRepoHost(app: App, installationId: number): RepoHost`, used only in the control plane, which holds the App key.
   - `cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers">`, used in the cell with the token from `/github-token`. Checks reach the cell only through the cell API, per Run contract 6.
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
-  - `handleWebhook(deps, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 }>`
+  - `handleWebhook(deps: { pool; secret: string; parse: BacklogAdapter["parseWebhook"] }, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 | 400 }>`. A bad signature, or an empty secret, gets 401 with nothing written. A signed body with no delivery id or no JSON gets 400. Otherwise the delivery id and one event of kind `webhook`, with payload `{ deliveryId, githubEvent, event }` where `event` is `parse`'s `FactoryWebhookEvent`, go in one transaction: 204 the first time, 200 and no event for a redelivery.
+  - A `comment` dedupe marker counts only in a comment by a bot user, so a person can't post a guessable key first and suppress the factory's comment.
 - `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusFor: Record<ItemState, string | null>; optInLabel: string; sprintField: string | null; readinessFields: string[] }`. `readinessFields` names board fields, such as Size, that the readiness check passes to the judge, so `dor.md` can refer to them. `statusFor` names the board status for each factory state, and a null entry leaves the board alone. For example, Queued maps to "Todo", InProgress, SignOff and NeedsInput map to "In Progress", InReview maps to "In Review", Done maps to "Done", and Eligible maps to null.
 
 - [ ] **Step 1: Write failing tests:**
@@ -450,8 +451,8 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - Calling `handleWebhook` twice with the same `X-GitHub-Delivery` stores one `webhook_delivery` row and one event. The second call returns 200 with no event.
   - `handleWebhook` with a bad signature returns 401 and writes nothing.
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
-  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased and its author's login. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
-  - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
+  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased and its author's login. A comment or review by any bot user, the App's own included, maps to `ignored`, so the factory never reacts to its own posts.
+  - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` when it has none or names nobody but the PR author.
   - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED` whose author is in `trustedLogins`, and null when there is none. A newer `CHANGES_REQUESTED` review from a login outside the list leaves it unchanged (Run contract 10). That is the poller's backstop for a missed review webhook, under Run contract 10.
   - `openReviewComments` returns every comment, with its author, from the PR's unresolved review threads, and none from resolved ones. Assert this against a stubbed GraphQL `reviewThreads` reply that has one resolved and one unresolved thread. `fakeRepoHost` from Task 6 passes the same case. The control plane uses it to build `/context`'s `trustedComments` (Task 12).
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
@@ -462,7 +463,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - Dependencies come from `GET /repos/{o}/{r}/issues/{n}/dependencies/blocked_by`, filtered to open issues.
   - `comment` stores the `dedupeKey` as an HTML comment, `<!-- factory:KEY -->`, and checks for it before posting.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
-- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. Run it with that variable. Expected: every contract case passes.
+- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. It seeds issues in `FACTORY_GH_REPO`, a sandbox repo the App is installed on, `ricksu978/factory-sandbox`. It refuses a repo with a `.factory/config.yml`, because the live board auto-adds this repo's `factory` issues, and a poller could take test issues as real work. Run it with that variable. Expected: every contract case passes.
 - [ ] **Step 6: Commit** `feat(github): backlog and repo host adapters, webhook intake`.
 
 ---
@@ -507,7 +508,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
   - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
+- [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event, which Task 7's intake stores as an event of kind `webhook` whose `payload.event.kind` is `item_changed`.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(watcher): polling with cursor`.
 
