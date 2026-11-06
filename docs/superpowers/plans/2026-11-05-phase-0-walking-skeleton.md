@@ -698,8 +698,9 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `interface Launcher { start(env: Record<string, string>): Promise<string>; stop(executionName: string): Promise<void>; }`, implemented by `dockerLauncher(cfg)` for Phase 0a, `containerAppsLauncher(cfg)` for Phase 0b, and `fakeLauncher()` for tests.
     - `dockerLauncher` runs `docker run -d --rm` on `CELL_IMAGE` with one `-e NAME=value` per cell variable, `CONTROL_URL` set to `CELL_CONTROL_URL`, and a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Docker copies a bare name's value from the launching process, so the token comes from the control plane's own env and never appears in the argv or in `ps`. It returns the container id, and `stop` runs `docker stop`. A test with a stubbed `execFile` checks the exact argv: the six cell variables, the bare token name, `--network factory-cells`, the egress variables below, and no argv word containing the token's value or any other control plane secret.
     - **Egress.** The owner chose this on 2026-11-06, because bubblewrap can't start in a local cell (Task 2 Step 8).
-      - **Network.** At control plane boot in local mode, never in Azure and never per cell, `main.ts` makes sure the Docker network `factory-cells` exists, created with `--internal`. An "already exists" answer counts as success. Containers on it reach no other network and get no outside DNS. Docker's docs say they can still reach the network's gateway and "appropriately configured host services", which is why the egress test probes the gateway.
-      - **Proxy.** At the same boot, it makes sure a container `factory-egress` runs on that network and on the default bridge network. That container is an allowlisting HTTP proxy that admits only `api.anthropic.com`, `github.com`, `api.github.com`, `registry.npmjs.org`, and `host.docker.internal` on the two ports it reads at boot: the control plane's from `CELL_CONTROL_URL`, and Azurite's from `FACTORY_BLOB`. The proxy carries a SHA-256 of its whole configuration, the allowed hosts and both ports, in a container label. Aspire picks Azurite's port anew on each run, and the allowlist can grow, so when the label differs from the boot's configuration, the proxy is rebuilt, and an old port or host list is never reused. When the label matches, the running proxy stays, because rebuilding it would cut every live cell's open connections, the agent's model stream included.
+      - **Boot step.** `ensureEgress(cfg): Promise<void>`, exported from `src/scheduler/launcher.ts`, sets up the network and the proxy below. Task 15's `main.ts` awaits it once at control plane boot in local mode, before the first `tick`. It never runs in Azure and never per cell.
+      - **Network.** `ensureEgress` makes sure the Docker network `factory-cells` exists, created with `--internal`. An "already exists" answer counts as success. Containers on it reach no other network and get no outside DNS. Docker's docs say they can still reach the network's gateway and "appropriately configured host services", which is why the egress test probes the gateway.
+      - **Proxy.** It also makes sure a container `factory-egress` runs on that network and on the default bridge network. That container is an allowlisting HTTP proxy that admits only `api.anthropic.com`, `github.com`, `api.github.com`, `registry.npmjs.org`, and `host.docker.internal` on the two ports it reads at boot: the control plane's from `CELL_CONTROL_URL`, and Azurite's from `FACTORY_BLOB`. The proxy carries a SHA-256 of its whole configuration, the allowed hosts and both ports, in a container label. Aspire picks Azurite's port anew on each run, and the allowlist can grow, so when the label differs from the boot's configuration, the proxy is rebuilt, and an old port or host list is never reused. When the label matches, the running proxy stays, because rebuilding it would cut every live cell's open connections, the agent's model stream included.
       - **Cell variables.** Cells run with `--network factory-cells`. Both cases of each proxy variable, `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY` and `http_proxy`, are set to `http://factory-egress:3128`, because curl, and so git and its credential helper, reads `http_proxy` only in lower case. The control plane and Azurite are plain `http`. Cells also get `NODE_USE_ENV_PROXY=1` for the cell's own `fetch` calls, plus two variables from Claude Code's network docs. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off telemetry, and `ENABLE_CLAUDEAI_MCP_SERVERS=false` keeps the owner's claude.ai connectors out of a cell that holds the owner's token.
     - **First run.** Check these, and record the results in `docs/superpowers/spikes/2026-11-local-platform.md`:
       - Pick the proxy, either tinyproxy with a default-deny filter or a small Node CONNECT proxy, and record why.
@@ -746,6 +747,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - A Failed item whose PR already merged starts a new run on a new branch, per Run contract 7.
     - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1.
   - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
+  - **Egress boot.** `ensureEgress` with a stubbed `execFile`, in three cases:
+    - `docker network create` answers "already exists", and `ensureEgress` still succeeds;
+    - the running `factory-egress` carries the label for this boot's configuration, and nothing is removed or started;
+    - the label differs, and the old proxy is removed and a new one starts with the new label.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.** A run can be created by a claim, by `criteria_changed` in Task 8, or by a re-queue after a merge. So the scheduler pins on the first claim of any run whose `config_sha` is still null, and records:
   - `run.repo_id` and `run.run_number`;
@@ -848,7 +853,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Modify: `Dockerfile`, which also copies `policy/` into `/app/policy` for the readiness gate's defaults, and `config/` into `/app/config` for the migrate job's sources file
 
 **Interfaces:**
-- Consumes: the store, `setOverride`, `activeOverrides`, `handleWebhook`, the cell API and `pollOnce`.
+- Consumes: the store, `setOverride`, `activeOverrides`, `ensureEgress`, `handleWebhook`, the cell API and `pollOnce`.
 - Produces:
   - `identify(path, headers): { provider: "google" | "microsoft" | "dev"; subject: string; tenantId: string | null } | null`. It returns null on any route under `/webhooks` or `/internal` in both modes.
     - **In Azure** it reads the `x-ms-client-principal-idp` and `x-ms-client-principal-id` headers. Task 19 Step 5 records them on live sign-ins, and Task 20 fixes `identify` if the live names differ.
@@ -907,6 +912,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - [ ] **Step 3: Implement.**
   - The server is plain `node:http` with a route table and HTML from template literals through one `escapeHtml`.
   - `views.ts` defines its colours as CSS custom properties with a dark-mode override, and every form control has a label.
+  - In local mode `main.ts` first awaits `ensureEgress(cfg)` from Task 13, so `factory-cells` and `factory-egress` exist before any cell launches.
   - `main.ts` wires the pool, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server. It never runs `migrate`, because in Azure it connects as `factory_app`, which has no DDL rights. Migrations run only in the `migrate` resource locally (Task 2) and the migrate job in Azure (Task 19).
   - The kill switch is `FACTORY_KILL=1` in the app's env or a `kill` override from the dashboard. Either one stops every cell on the next tick.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
