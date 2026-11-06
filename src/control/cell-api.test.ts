@@ -224,6 +224,7 @@ describe("cell API", dbTest, () => {
        values ($1, $2, 'dod', 'repo', 'abc1234', 1, 'Deployed to staging', 'person', 'after merge')`,
       [cell.itemId, cell.runId],
     );
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'specify', 1, 'failed'), ($1, 'specify', 2, 'passed')", [cell.runId]);
     const { status, body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.equal(status, 200);
     assert.deepEqual(body, {
@@ -232,6 +233,7 @@ describe("cell API", dbTest, () => {
       configSha: "cfg1", sopVersion: "default@1",
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       trustedComments: [],
+      stageAttempts: { specify: 2 },
     });
   });
 
@@ -256,6 +258,17 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await item(cell.itemId)).lease_expires, new Date(clock.getTime() + 300_000));
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'maintenance')");
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
+  });
+
+  // Plan Task 13: drain and the usage reserve let a running cell finish, and a kill override stops it.
+  test("lease says carry on under a drain or the usage reserve, and stop under a kill override", async () => {
+    const cell = await claimed();
+    const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'release')");
+    await db.pool.query("update wip_policy set usage_paused_until = $1", [new Date(at.getTime() + 3_600_000)]);
+    assert.deepEqual(await lease(), { ok: true, stop: false });
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'kill', 'incident')");
+    assert.deepEqual(await lease(), { ok: true, stop: true });
   });
 
   test("lease says stop while the kill switch's env flag is on", async () => {

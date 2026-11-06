@@ -21,7 +21,7 @@ type Row = {
 };
 
 /** Mirrors one committed transition onto the item's board, and closes its open PR when the item is withdrawn. */
-export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, event: ItemEvent): Promise<void> {
+export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, event: ItemEvent | "override"): Promise<void> {
   const r = await deps.pool.query<Row>(
     `select i.external_id, i.source_id, i.lease_generation, s.field_map, r.run_number, r.branch, r.pr_number, r.pr_url, repo.url as repo_url,
        (select q.body from question q where q.item_id = i.id and q.answer is null and q.closed_at is null order by q.asked_at desc limit 1) as question

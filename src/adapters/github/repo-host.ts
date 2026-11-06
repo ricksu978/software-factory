@@ -26,8 +26,21 @@ const split = (repo: string) => {
 };
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
-function prMethods(client: () => Promise<GitHubClient>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers"> {
+type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr">;
+
+const REPLY = `mutation($thread: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
+
+function prMethods(client: () => Promise<GitHubClient>): PrMethods {
   return {
+    async replyToThread(_repo, threadId, body) {
+      await (await client()).graphql(REPLY, { thread: threadId, body });
+    },
+
+    async commentOnPr(repo, prNumber, body) {
+      await (await client()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...split(repo), issue_number: prNumber, body });
+    },
+
     async openOrUpdatePr({ repo, branch, base, title, body }) {
       const gh = await client();
       const r = split(repo);
@@ -120,8 +133,16 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
-    id isResolved path line comments(first: 100) { nodes { author { login } body } } } }
-  reviews(first: 100) { nodes { id state body author { login } } } } } }`;
+    id isResolved path line comments(first: 100) { nodes { author { __typename login } body } } } }
+  reviews(first: 100) { nodes { id state body author { __typename login } } } } } }`;
+
+type Author = { __typename: string; login: string } | null;
+
+/** GraphQL names a bot without the "[bot]" suffix REST adds. Adding it back keeps a user with the same name apart (issue #79). */
+function authorLogin(a: Author): string {
+  if (!a) return "ghost";
+  return a.__typename === "Bot" ? `${a.login}[bot]` : a.login;
+}
 
 /** RepoHost on the App's installation token. The control plane alone holds the App key. */
 export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
@@ -194,20 +215,20 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
     async openReviewComments(repo, prNumber) {
       const r = split(repo);
       const res = await (await client()).graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber });
-      const threads = res.repository.pullRequest.reviewThreads.nodes as { id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { author: { login: string } | null; body: string }[] } }[];
+      const threads = res.repository.pullRequest.reviewThreads.nodes as { id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { author: Author; body: string }[] } }[];
       const comments = threads.filter((t) => !t.isResolved).flatMap((t) =>
-        t.comments.nodes.map((c): ReviewComment => ({ threadId: t.id, path: t.path, line: t.line, author: c.author?.login ?? "ghost", body: c.body })),
+        t.comments.nodes.map((c): ReviewComment => ({ threadId: t.id, path: t.path, line: t.line, author: authorLogin(c.author), body: c.body })),
       );
       // ponytail: one page of 100 reviews, oldest first, as in prState; a PR with more would miss the newest summaries.
-      const reviews = (res.repository.pullRequest.reviews.nodes as { id: string; state: string; body: string; author: { login: string } | null }[])
+      const reviews = (res.repository.pullRequest.reviews.nodes as { id: string; state: string; body: string; author: Author }[])
         .filter((v) => v.state !== "PENDING")
-        .map((v): Review => ({ id: v.id, author: v.author?.login ?? "ghost", state: v.state.toLowerCase() as Review["state"], body: v.body }));
+        .map((v): Review => ({ id: v.id, author: authorLogin(v.author), state: v.state.toLowerCase() as Review["state"], body: v.body }));
       return [...comments, ...standingSummaries(reviews)];
     },
   };
 }
 
 /** What a cell may do on GitHub, on the token the control plane minted for its run. Checks come through the cell API. */
-export function cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers"> {
+export function cellRepoHost(getToken: () => Promise<string>): PrMethods {
   return prMethods(async () => new Octokit({ auth: await getToken() }) as unknown as GitHubClient);
 }

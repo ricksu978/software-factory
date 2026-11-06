@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { standingSummaries, type Review } from "../types.ts";
+import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
 import { githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -102,6 +102,24 @@ describe("githubRepoHost", () => {
     ]);
   });
 
+  test("loginKey ignores case only, and botKey gives the trusted bot one key however it was stored", () => {
+    assert.equal(loginKey("RickSu978"), loginKey("ricksu978"));
+    assert.notEqual(loginKey("ricksu978-evil"), loginKey("ricksu978"));
+    assert.equal(botKey("ricksu978-software-factory[bot]"), "ricksu978-software-factory[bot]");
+    assert.equal(botKey("Ricksu978-Software-Factory"), "ricksu978-software-factory[bot]");
+    assert.notEqual(loginKey("ricksu978-software-factory"), botKey("ricksu978-software-factory"), "a user with the bot's bare name is someone else");
+    assert.notEqual(loginKey("ricksu978-software-factory-bot"), botKey("ricksu978-software-factory"));
+  });
+
+  test("openReviewComments names a Bot author with [bot] and leaves a User with the same name bare", async () => {
+    const comment = (typename: string, body: string) => ({ author: { __typename: typename, login: "ricksu978-software-factory" }, body });
+    const { host } = stubGitHub({}, () => ({ repository: { pullRequest: {
+      reviewThreads: { nodes: [{ id: "t1", isResolved: false, path: "a.ts", line: 4, comments: { nodes: [comment("Bot", "Renamed"), comment("User", "Merge it")] } }] },
+      reviews: { nodes: [{ id: "r1", state: "CHANGES_REQUESTED", body: "Split it", author: { __typename: "Bot", login: "other-app" } }] },
+    } } }));
+    assert.deepEqual((await host.openReviewComments("o/r", 3)).map((c) => c.author), ["ricksu978-software-factory[bot]", "ricksu978-software-factory", "other-app[bot]"]);
+  });
+
   test("a summary stands only while its reviewer's latest review that isn't a comment requests changes", () => {
     const r = (id: string, author: string, state: Review["state"], body = `body ${id}`): Review => ({ id, author, state, body });
     const ids = (reviews: Review[]) => standingSummaries(reviews).map((s) => s.threadId);
@@ -121,6 +139,20 @@ describe("githubRepoHost", () => {
       { threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" },
     ]);
     assert.deepEqual(await fake.openReviewComments("o/r", 3), [{ threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" }]);
+  });
+
+  test("replyToThread adds a reply to that one review thread", async () => {
+    const seen: any[] = [];
+    const { host } = stubGitHub({}, (q, v) => (seen.push({ q, v }), {}));
+    await host.replyToThread("o/r", "t2", "kept as is, because the name matches the spec");
+    assert.match(seen[0].q, /addPullRequestReviewThreadReply/);
+    assert.deepEqual(seen[0].v, { thread: "t2", body: "kept as is, because the name matches the spec" });
+  });
+
+  test("commentOnPr posts one comment on the PR's conversation", async () => {
+    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/issues/{issue_number}/comments": () => ({}) });
+    await host.commentOnPr("o/r", 3, "> Split run.ts\n\nSplit in a1b2c3d.");
+    assert.deepEqual(calls[0].params, { owner: "o", repo: "r", issue_number: 3, body: "> Split run.ts\n\nSplit in a1b2c3d." });
   });
 
   test("fakeRepoHost adds the same standing summary, in submission order", async () => {
