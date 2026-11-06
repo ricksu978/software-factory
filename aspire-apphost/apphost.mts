@@ -1,9 +1,13 @@
 // The software factory's local platform (plan Task 2). `aspire run` from the repo root starts it.
-import { createBuilder } from './.aspire/modules/aspire.mjs';
+import { createBuilder, EndpointProperty, refExpr } from './.aspire/modules/aspire.mjs';
 
 const builder = await createBuilder();
 const runMode = await builder.executionContext().isRunMode();
 const repo = '..';
+// The factory pins control to 7400 and Azurite's blobs to 7410, so the egress proxy's allowlisted ports and its label
+// survive restarts (Task 13). Pinned ports are machine-wide, though, and `aspire start --isolated` doesn't move them,
+// so a test run sets FACTORY_FLOAT_PORTS=1 to let Aspire pick both, and two sessions' AppHosts then never clash.
+const floatPorts = process.env.FACTORY_FLOAT_PORTS === '1';
 
 const postgres = await builder.addPostgres('pg').withDataVolume();
 const db = await postgres.addDatabase('factory-db', { databaseName: 'factory' });
@@ -12,8 +16,7 @@ const dbUri = await db.uriExpression();
 const storage = await builder.addAzureStorage('storage').runAsEmulator({
   configureContainer: async (azurite) => {
     await azurite.withDataVolume();
-    // Pinned, as control is to 7400, so the egress proxy's allowlisted port and its label survive restarts (Task 13).
-    await azurite.withBlobPort(7410);
+    if (!floatPorts) await azurite.withBlobPort(7410);
   },
 });
 const blobs = await storage.addBlobs('blobs');
@@ -36,7 +39,7 @@ const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli
 // Both apps share the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
 const control = await builder.addNodeApp('control', repo, 'spike/hello.ts')
   .withNpm({ install: false })
-  .withHttpEndpoint({ port: 7400, env: 'PORT' })
+  .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7400, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
@@ -48,9 +51,11 @@ const control = await builder.addNodeApp('control', repo, 'spike/hello.ts')
   .withEnvironment('CLAUDE_TOKEN_CREATED_AT', tokenCreatedAt)
   .withEnvironment('FACTORY_POLICY_DIR', './policy')
   .withEnvironment('CELL_IMAGE', 'factory-cell:local')
-  .withEnvironment('CELL_CONTROL_URL', 'http://host.docker.internal:7400')
   .withEnvironment('CELL_BLOB_HOST', 'host.docker.internal')
   .waitForCompletion(migrate, { exitCode: 0 });
+// From control's own endpoint, so it follows the port whether pinned or picked by Aspire.
+const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
+await control.withEnvironment('CELL_CONTROL_URL', refExpr`http://host.docker.internal:${controlPort}`);
 
 // The dev identity exists only under `aspire run`, so nothing published from this AppHost carries it.
 if (runMode) {
