@@ -35,7 +35,6 @@ export type ControlDeps = {
   origin: string;
   sources: Source[];
   repoHost: RepoHost;
-  sopVersion: string;
   /** Signs each cell's run token (CELL_SECRET). */
   secret: string;
   webhookSecret: string;
@@ -47,6 +46,8 @@ export type ControlDeps = {
 
 // GitHub caps a webhook payload at 25 MB.
 const MAX_WEBHOOK = 25 * 1024 * 1024;
+// The SOP this image carries. A run's first claim pins its version, and the cell API moves runs along its stages.
+const sop = loadSop(readFileSync(join(import.meta.dirname, "..", "sop", "default.yml"), "utf8"));
 
 /** Stands in for a board or repo host that isn't configured yet. It answers every call with an error naming why. */
 function missing<T extends object>(why: string): T {
@@ -58,7 +59,6 @@ function missing<T extends object>(why: string): T {
  * Locally the PBI 2 probes stay, so its scenarios keep passing against this process.
  */
 export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close(): Promise<void> } {
-  const sop = loadSop(readFileSync(join(import.meta.dirname, "..", "sop", "default.yml"), "utf8"));
   const backlogFor = (sourceId: string) => d.sources.find((s) => s.id === sourceId)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${sourceId}`);
   const cells = cellApi({
     pool: d.pool, secret: d.secret, repoHost: d.repoHost, backlogFor,
@@ -177,7 +177,6 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
-  const sop = loadSop(readFileSync(join(import.meta.dirname, "..", "sop", "default.yml"), "utf8"));
   const backlogFor = (id: string) => sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
 
   // Cells reach nothing but GitHub, npm and this process, through the egress proxy (Task 13).
@@ -185,7 +184,7 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
   const launcher = dockerLauncher({ image });
 
   const control = controlHandlers({
-    pool, local: true, auth, origin, sources, repoHost, sopVersion: sop.version, secret, webhookSecret, claudeToken,
+    pool, local: true, auth, origin, sources, repoHost, secret, webhookSecret, claudeToken,
     uploadUrl: blobUploadUrl(blob, env.CELL_BLOB_HOST), readBlob: blobReader(blob),
   });
   mirrorBoard({ pool, backlogFor, repoHost });

@@ -84,8 +84,11 @@ ${f.active.map((a) => `<tr><td>${link(a.id, a.title)} ${a.badges.map((b) => `<sp
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
 ${controls}
 <script>
-// Floor updates live from the event log: reload a second after the last event, so a burst reloads once.
-let reload; new EventSource("/events").onmessage = () => { clearTimeout(reload); reload = setTimeout(() => location.reload(), 1000); };
+// Floor updates live from the event log: reload a second after the last event, so a burst reloads once. While an
+// operator is filling in a form, it waits, so a half-typed reason isn't lost.
+const busy = () => document.activeElement?.form || [...document.querySelectorAll("form input:not([type=hidden])")].some((i) => i.value);
+let reload; const later = () => { clearTimeout(reload); reload = setTimeout(() => (busy() ? later() : location.reload()), 1000); };
+new EventSource("/events").onmessage = later;
 </script>`, banner);
 }
 

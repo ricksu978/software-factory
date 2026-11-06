@@ -27,6 +27,8 @@ Feature: Dashboard wiring, overrides and the rest of Task 15
 
   @ac-2 @local
   Scenario: aspire run starts the control plane from src/main.ts
+    # The control plane starts the egress proxy from the cell image, so the image comes first.
+    Given the image "factory-cell:local" is built
     When I start "aspire run" and wait until the control resource answers
     Then the control resource's console shows a dashboard sign-in link
     And PBI 2's @local scenarios pass

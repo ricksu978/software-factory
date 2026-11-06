@@ -127,7 +127,7 @@ Given("the control plane is running with a fake board", long, async function () 
   c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
   const control = controlHandlers({
     pool: pool(), local: false, auth: createAuth({ mode: "azure" }), origin: c.origin,
-    sources: [{ id: c.sourceId, adapter: c.fake.adapter }], repoHost: c.host, sopVersion: "0.1.0", secret: CELL_SECRET,
+    sources: [{ id: c.sourceId, adapter: c.fake.adapter }], repoHost: c.host, secret: CELL_SECRET,
     webhookSecret: WEBHOOK_SECRET, claudeToken: "unused", uploadUrl: async (path) => `http://blob.test/${path}`,
     readBlob: async (path) => c.blobs!.get(path) ?? null,
   });

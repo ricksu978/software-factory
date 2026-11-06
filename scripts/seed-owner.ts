@@ -19,8 +19,9 @@ export async function seedOwner(pool: pg.Pool, words: string[]): Promise<void> {
   if (!v.subject) throw new Error("seed-owner needs subject=<the sign-in subject id>");
   await pool.query(
     `insert into "user" (provider, subject, email, github_login, role, product_owner) values ($1, $2, $3, $4, 'owner', $5)
-     on conflict (provider, subject) do update set email = excluded.email, github_login = excluded.github_login, role = 'owner',
-       product_owner = excluded.product_owner`,
+     on conflict (provider, subject) do update set email = coalesce(excluded.email, "user".email),
+       github_login = coalesce(excluded.github_login, "user".github_login), role = 'owner',
+       product_owner = "user".product_owner or excluded.product_owner`,
     [v.provider, v.subject, v.email ?? null, v["github-login"] ?? null, productOwner],
   );
 }

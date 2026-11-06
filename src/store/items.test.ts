@@ -149,6 +149,11 @@ describe("store", dbTest, () => {
     assert.equal(ok.status, 0, ok.stderr);
     const rows = (await db.pool.query(`select provider, subject, email, github_login, role, product_owner from "user" where subject like 's-%'`)).rows;
     assert.deepEqual(rows, [{ provider: "microsoft", subject: "s-1", email: "me@example.com", github_login: "Octo", role: "owner", product_owner: true }]);
+    // Promoting the same person again with only their sign-in keeps what they already had.
+    await db.pool.query(`update "user" set role = 'viewer' where subject = 's-1'`);
+    assert.equal(seed("provider=microsoft", "subject=s-1").status, 0);
+    const again = (await db.pool.query(`select email, github_login, role, product_owner from "user" where subject = 's-1'`)).rows;
+    assert.deepEqual(again, [{ email: "me@example.com", github_login: "Octo", role: "owner", product_owner: true }]);
     await db.pool.query(`delete from "user" where subject like 's-%'`);
   });
 

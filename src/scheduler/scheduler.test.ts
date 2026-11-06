@@ -303,6 +303,13 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(rows, [{ kind: "pause", reason: "unit", cleared_by: operator }, { kind: "resume", reason: "fixed", cleared_by: operator }]);
   });
 
+  test("resume lifts a kill override too, so the factory starts work again", async () => {
+    await override("kill");
+    await setOverride(db.pool, { scope: "factory", targetId: null, kind: "resume", reason: "all clear", createdBy: operator, expiresAt: null });
+    const kills = (await db.pool.query("select cleared_by from override where kind = 'kill'")).rows;
+    assert.deepEqual(kills, [{ cleared_by: operator }]);
+  });
+
   test("an override with a blank reason is refused", async () => {
     await assert.rejects(setOverride(db.pool, { scope: "factory", targetId: null, kind: "pause", reason: " ", createdBy: operator, expiresAt: null }), /needs a reason/);
   });

@@ -57,7 +57,7 @@ describe("control plane handlers", dbTest, () => {
     sourceId = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'main') returning id")).rows[0].id;
     control = controlHandlers({
       pool: db.pool, local: true, auth: createAuth({ mode: "local", devLogin: "octo" }), origin: "http://localhost:7400",
-      sources: [{ id: sourceId, adapter: fake.adapter }], repoHost: fakeRepoHost(), sopVersion: "0.1.0", secret: "cell-secret",
+      sources: [{ id: sourceId, adapter: fake.adapter }], repoHost: fakeRepoHost(), secret: "cell-secret",
       webhookSecret: secret, claudeToken: "unused", uploadUrl: async (path) => `http://blob.test/${path}`, readBlob: async () => null,
     });
     server = await startServer(control.handlers, { port: 0 });
