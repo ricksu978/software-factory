@@ -14,6 +14,7 @@ const repo = process.cwd();
 const long = { timeout: 300_000 };
 const network = "pbi33-gateway";
 const gatewayName = "pbi33-gateway";
+const cellName = "pbi33-cell";
 const standIn = "run-credential-ok";
 
 type Gateway = {
@@ -48,7 +49,7 @@ After({ tags: "@pbi-33" }, async function () {
   await new Promise((r) => (c.gateway ? c.gateway.close(r) : r(undefined)));
   await new Promise((r) => (c.upstream ? c.upstream.close(r) : r(undefined)));
   if (c.containers) {
-    sh(["rm", "-f", gatewayName]);
+    sh(["rm", "-f", cellName, gatewayName]);
     sh(["network", "rm", network]);
   }
 });
@@ -131,12 +132,19 @@ async function runCell(c: Ctx, command: string[]): Promise<void> {
     { ...process.env, OWNER_TOKEN: owner },
   );
   assert.equal(gw.status, 0, gw.out);
-  await new Promise((r) => setTimeout(r, 2000));
+  // Ready when an uncredentialed request gets the gateway's 401. Asked from inside, since nothing is published.
+  const probe = `fetch("http://127.0.0.1:7499/v1/messages", { method: "POST" }).then((r) => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))`;
+  let ready = false;
+  for (let i = 0; i < 40 && !ready; i++) {
+    ready = sh(["exec", gatewayName, "node", "-e", probe]).status === 0;
+    if (!ready) await new Promise((r) => setTimeout(r, 500));
+  }
+  assert.ok(ready, `the gateway never answered:\n${sh(["logs", gatewayName]).out}`);
   const env = mod.cellModelEnv({ gatewayUrl: `http://${gatewayName}:7499`, credential: standIn });
-  const args = ["run", "--rm", "--network", network];
+  const args = ["run", "--rm", "--name", cellName, "--network", network];
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
   // The owner's token must not reach the cell, so the cell's environment is built from scratch here.
-  const r = spawnSync("docker", [...args, "factory-cell:local", ...command], { encoding: "utf8", env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot } });
+  const r = spawnSync("docker", [...args, "factory-cell:local", ...command], { encoding: "utf8", timeout: 280_000, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot } });
   c.out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
 }
 
