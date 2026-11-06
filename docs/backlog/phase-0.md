@@ -1,16 +1,17 @@
 # Phase 0 backlog
 
-The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBI 21 is the first work the factory builds for itself, and the owner builds PBI 22 by hand. The owner approved them on 2026-11-06, and PBI n is issue #(n + 4) on the personal Project, so PBI 1 is #5 and PBI 22 is #26.
+The software factory builds itself, locally first. PBIs 1 to 20 are the Phase 0 plan's 20 tasks, in backlog order. PBIs 1 to 18 are Phase 0a, run on the owner's machine under Aspire, and PBIs 19 and 20 are Phase 0b, in Azure. PBI 21 was planned as the first work the factory builds for itself, but it was built by hand and merged in #78 on 2026-11-06, so PBI 18 takes another `factory`-labelled PBI that a cell can build. The owner builds PBI 22 by hand. The owner approved them on 2026-11-06, and PBI n is issue #(n + 4) on the personal Project, so PBI 1 is #5 and PBI 22 is #26.
 
 Until the factory can run, PBIs 1 to 18 go through their SOP by hand. Claude does Understand, Specify, Red, Green, self-review and the PR, and the owner signs off the scenarios and merges. "Takes over" says which manual step that PBI hands to the factory once it merges.
 
 Which PBIs carry the `factory` label:
-- **PBI 21.** It's for the factory to build, so it carries the label. It names its plan task, has criteria a test can check, and fits one Sprint, per `.factory/dor.md`.
-- **PBIs 1 to 18.** They're closed before the factory runs, so the label changes nothing.
+- **PBI 21.** It carried the label as the factory's first build, and it met `.factory/dor.md`. It was built by hand in #78 instead, so it no longer waits on the factory.
+- **PBIs 1 to 17.** They're closed before the factory runs, so the label changes nothing.
+- **PBI 18.** It stays open while the factory runs for it, so the owner takes its label off before `aspire run`, and the factory never takes the PBI that tests it.
 - **PBIs 19 and 20.** They never carry it. They need the owner's Azure Owner rights, three real-account sign-ins and a cutover, which no cell can do and no test can check, so the owner runs them by hand.
 - **PBI 22.** It never carries it either. Its criteria need a real database, so its scenarios are `@db`, and Red fails any item with an `@db` scenario until PBI 22 itself merges (plan Task 4). The owner builds it through the SOP by hand, as for PBIs 1 to 18.
 
-The Phase 0b exit asks for 10 merged factory PRs. PBI 21 is the first, and the owner adds the rest to the board as they come up.
+The Phase 0b exit asks for 10 merged factory PRs. The PBI that PBI 18 takes is the first, and the owner adds the rest to the board as they come up.
 
 ## PBI 1. Project skeleton with a BDD runner
 
@@ -28,7 +29,7 @@ Takes over: nothing yet. It makes the first line of `.factory/dod.md` checkable.
 
 Implements plan Task 2.
 
-- [ ] `aspire run` brings up Postgres and the Azurite storage emulator, both with data volumes, a `migrate` resource that exits 0, and the control resource on port 7400.
+- [ ] `aspire run` brings up Postgres and the Azurite storage emulator, both with data volumes, a `migrate` resource that exits 0, and the control resource answering, with the URL it gives cells naming the port it answers on.
 - [ ] After a stop and a second `aspire run`, `migrate` connects to the same database.
 - [ ] The control resource receives the database and blob connections and the four secret parameters as environment variables, and the spike record names them.
 - [ ] From inside a `factory-cell:local` container, a ping to the control plane gets 204, and a PUT to a local upload URL gets 201.
@@ -198,14 +199,14 @@ Takes over: nothing. It proves the parts fit.
 
 ## PBI 18. First live item, locally
 
-Implements plan Task 18. This is Phase 0a's exit.
+Implements plan Task 18. This is Phase 0a's exit. It waits on PBI 15b (#89), because nothing starts the control plane under `aspire run` until `src/main.ts` exists.
 
-- [ ] Under `aspire run`, the factory takes PBI 21 from this repo's own board, opens its PR from a local cell container, and moves it to Done after the owner merges and CI on main is green.
+- [ ] Under `aspire run`, the factory takes a `factory`-labelled PBI from this repo's own board, opens its PR from a local cell container, and moves it to Done after the owner merges and CI on main is green. Before the run, the owner puts on the board a PBI whose criteria need neither the owner's machine nor, until PBI 22 merges, a database, so none of its scenarios is `@local` or `@db`. The owner takes the `factory` label off every other open item a cell can't build, such as this PBI, so that PBI is the one the factory takes. The poller lists only labelled items, so this works before the factory has seen them, which a hold can't.
 - [ ] Sign-off in the local dashboard moves the item on, and the dev identity works only with `FACTORY_ENV=local`.
 - [ ] Each of the five Phase 0 overrides takes effect within 30 seconds, and the kill switch stops every cell container within a minute.
 - [ ] A restart of `aspire run` while a cell is in Green loses no item, event or transcript, and starts no second cell.
 
-Takes over: building. From here the local factory builds every factory-labelled PBI, starting with PBI 21. The owner still runs PBIs 19, 20 and 22.
+Takes over: building. From here the local factory builds every factory-labelled PBI, starting with the one it takes for this PBI. The owner still runs PBIs 19, 20 and 22.
 
 ## PBI 19. Azure platform and the cloud platform tests
 
@@ -232,7 +233,7 @@ Takes over: the owner's machine. The factory now runs in the cloud.
 
 ## PBI 21. Length-prefixed readiness hash
 
-Implements plan Run contract 11 and Task 9. The factory builds it.
+Implements plan Run contract 11 and Task 9. It was built by hand in #78.
 
 - [ ] Two sets of readiness texts that join to the same string, such as `dor` = "ab" with `scenarios` = "c" and `dor` = "a" with `scenarios` = "bc", give different `readinessSha` values.
 - [ ] A null file and a file whose text is the word `absent` give different values.

@@ -5,4 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY spike ./spike
+# The migrate job runs src/store/migrate-cli.ts on this image, and migrate() reads db/migrations (Task 19 Step 3).
+COPY src ./src
+COPY db ./db
 CMD ["node", "spike/hello.ts"]
