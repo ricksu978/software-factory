@@ -18,8 +18,10 @@ Feature: Address a trusted review that has only a top-level body
     Given item "Totals" is being addressed on PR 9
     And "ricksu978", an allowlisted user, requested changes on PR 9 with only the summary "Split run.ts into two files"
     And "ricksu978" later approved PR 9
+    And "octo-lead", an allowlisted user, requested changes on PR 9 with only the summary "Name the retry limit"
     When the address run asks for its context
-    Then its trusted comments hold nothing
+    Then its trusted comments hold "Name the retry limit" by "octo-lead"
+    And no trusted comment holds "Split run.ts into two files"
 
   @ac-2
   Scenario: A stranger's summary never reaches the address run
