@@ -463,7 +463,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - Dependencies come from `GET /repos/{o}/{r}/issues/{n}/dependencies/blocked_by`, filtered to open issues.
   - `comment` stores the `dedupeKey` as an HTML comment, `<!-- factory:KEY -->`, and checks for it before posting.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
-- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. Run it with that variable. Expected: every contract case passes.
+- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. It seeds issues in `FACTORY_GH_REPO`, a sandbox repo the App is installed on, `ricksu978/factory-sandbox`. It refuses a repo with a `.factory/config.yml`, because the live board auto-adds this repo's `factory` issues, and a poller could take test issues as real work. Run it with that variable. Expected: every contract case passes.
 - [ ] **Step 6: Commit** `feat(github): backlog and repo host adapters, webhook intake`.
 
 ---

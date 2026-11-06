@@ -1,5 +1,6 @@
 // The shared backlog contract against real GitHub: a sandbox Project on the owner's personal account, with issues
-// seeded in FACTORY_GH_REPO. It runs only with FACTORY_GH_CONTRACT=1, and closes every issue it created when done.
+// seeded in FACTORY_GH_REPO, a sandbox repo the App is installed on. It runs only with FACTORY_GH_CONTRACT=1, and
+// closes every issue it created when done.
 import { App } from "@octokit/app";
 import { Octokit } from "@octokit/core";
 import { after, test } from "node:test";
@@ -31,6 +32,18 @@ if (process.env.FACTORY_GH_CONTRACT !== "1") {
       .graphql<any>("query($login: String!, $n: Int!) { user(login: $login) { projectV2(number: $n) { id } } }", { login: env.FACTORY_GH_OWNER, n: Number(env.FACTORY_GH_PROJECT) })
       .then((r) => r.user.projectV2.id as string));
 
+  // A repo the factory works on would put labelled test issues where a poller, or a board's auto-add, can take
+  // them as real work. So the run refuses any repo that carries a factory config.
+  const guard = gh().then(async (client) => {
+    try {
+      await client.request("GET /repos/{owner}/{repo}/contents/{path}", { owner, repo, path: ".factory/config.yml" });
+    } catch (e) {
+      if ((e as { status?: number }).status === 404) return;
+      throw e;
+    }
+    throw new Error(`${env.FACTORY_GH_REPO} has a .factory/config.yml, so the factory works on it; point FACTORY_GH_REPO at a sandbox repo`);
+  });
+
   after(async () => {
     const client = await gh();
     for (const n of created) await client.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { owner, repo, issue_number: n, state: "closed", state_reason: "not_planned" });
@@ -44,6 +57,7 @@ if (process.env.FACTORY_GH_CONTRACT !== "1") {
     return {
     adapter,
     async seed(item) {
+      await guard;
       const client = await gh();
       const issue = (await client.request("POST /repos/{owner}/{repo}/issues", {
         owner, repo, title: `[contract test] ${item.title ?? "backlog adapter"}`,
