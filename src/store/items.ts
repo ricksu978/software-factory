@@ -109,9 +109,15 @@ export async function expireLeases(c: pg.PoolClient, now: Date): Promise<string[
   return r.rows.map((row) => row.id);
 }
 
-/** Clears the lease while `generation` is current. It leaves the generation as it is (Run contract 2). */
+/**
+ * Clears the lease while `generation` is current. It leaves the generation as it is (Run contract 2). An InProgress
+ * item keeps its lease: without lease_expires, expireLeases would never send it back to Queued.
+ */
 export async function releaseLease(c: pg.PoolClient, itemId: string, generation: number): Promise<void> {
-  await c.query("update item set lease_owner = null, lease_expires = null where id = $1 and lease_generation = $2", [itemId, generation]);
+  await c.query(
+    "update item set lease_owner = null, lease_expires = null where id = $1 and lease_generation = $2 and state <> 'InProgress'",
+    [itemId, generation],
+  );
 }
 
 export type NewItem = { sourceId: string; externalId: string; title: string };
