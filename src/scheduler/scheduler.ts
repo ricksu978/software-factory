@@ -2,7 +2,6 @@
 // and reminds questions nobody answered, polls CI on merged items, and starts at most one cell while a slot under the
 // WIP limit is free. Everything it decides comes from the database, so a restarted process picks up where the old
 // one stopped and never starts a second cell for an item with a live lease (Review Focus 5).
-import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
@@ -12,6 +11,8 @@ import type { Actor } from "../store/events.ts";
 import { claimNext, expireLeases, overrideItem, transitionItem } from "../store/items.ts";
 import { activeOverrides, clearItemOverrides } from "../store/overrides.ts";
 import { repoName, runBranch } from "../store/runs.ts";
+// The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
+import { criteriaHash } from "../watcher/poller.ts";
 import type { Launcher } from "./launcher.ts";
 
 export const TICK_MS = 15_000;
@@ -38,11 +39,6 @@ export type TickDeps = {
 export type TickResult = { started: string[]; stopped: string[]; expired: string[] };
 
 const system: Actor = { actor: "system", actorId: "scheduler" };
-
-// ponytail: copy of criteriaHash from src/watcher/poller.ts (PBI 8, PR #76), which isn't on main yet. Import it once it is.
-function criteriaHash(criteria: string[]): string {
-  return createHash("sha256").update(JSON.stringify(criteria)).digest("hex");
-}
 
 export async function tick(d: TickDeps): Promise<TickResult> {
   const result: TickResult = { started: [], stopped: [], expired: [] };
