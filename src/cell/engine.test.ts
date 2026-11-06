@@ -106,12 +106,12 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       policyResults: async (b) => rec("/policy-results", b),
       pr: async (b) => rec("/pr", b),
       checks: async (sha) => (rec("/checks", { sha }), "success"),
-      upload: async (b) => rec("/upload-url", { kind: b.kind, stageId: b.stageId }),
+      upload: async (b) => rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }),
     },
     ctx: {
       externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds"], nextStage: o.nextStage ?? "red",
       decision: null, lockSha, lockedFiles: signedOff ? [FEATURE] : [], prNumber: 7, repo: "acme/app", base: "main", branch: BRANCH,
-      configSha: "c0ffee", sopVersion: SOP.version, dodVerdicts: [], dodCheckedSha: null, trustedComments: [], ...o.ctx,
+      configSha: "c0ffee", sopVersion: SOP.version, dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: {}, ...o.ctx,
     },
     agent: async (a) => {
       agentCalls.push({ ...a, stage });
@@ -371,6 +371,17 @@ describe("runCell", () => {
     assert.deepEqual(of("self-review"), [1, 2]);
     assert.deepEqual(of("open-pr"), [1, 2]);
     assert.deepEqual(of("green"), [1, 2]);
+  });
+
+  test("a later claim numbers each stage on from the run's highest attempt, so it writes over no earlier row or blob", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment], stageAttempts: { address: 1, green: 4 } } });
+    assert.equal(await h.run(), "done");
+    const address = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "address");
+    assert.ok(address.length > 0 && address.every((c) => c.body.attempt === 2));
+    const r = harness({ nextStage: "green", ctx: { stageAttempts: { green: 4, "open-pr": 1 } } });
+    assert.equal(await r.run(), "done");
+    const started = (id: string) => r.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started").map((c) => c.body.attempt);
+    assert.deepEqual([started("green"), started("self-review"), started("open-pr")], [[5], [1], [2]]);
   });
 
   test("a green @regression scenario beside a red one passes Red", async () => {

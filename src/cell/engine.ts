@@ -23,6 +23,8 @@ export type CellContext = {
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
   configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null;
   trustedComments: ReviewComment[];
+  /** The highest attempt this run has recorded per stage, across every earlier claim. */
+  stageAttempts: Record<string, number>;
 };
 
 export type Policies = { scenarios: Policy; prReview: Policy; risk: Policy; dod: Policy };
@@ -159,9 +161,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   let current: { stageId: StageId; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string; report: string | null; usage?: AgentResult["usage"] } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
-  // Counted across the run, so a second pass after "back to green" writes new stage attempts, not over the first.
-  let selfReviewTries = 0;
-  let openPrTries = 0;
+  // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
+  // attempt rows and blobs, never over an earlier one's.
+  const lastAttempt = new Map(Object.entries(ctx.stageAttempts));
   let reviewRounds = 0;
   // The item's scenarios with their verdicts, for the PR body.
   const redResults = new Map<string, string>();
@@ -184,11 +186,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await git.push();
   };
 
-  const begin = async (stageId: StageId, attempt: number) => {
+  /** Starts the stage's next attempt and returns its number. */
+  const begin = async (stageId: StageId): Promise<number> => {
     // ponytail: wall_clock counts this cell's own time, not the item's across claims; a run-level clock needs the control plane.
     if (d.now().getTime() - started > WALL_CLOCK_MS) throw new Blocked("the run used up its 8h wall clock");
+    const attempt = (lastAttempt.get(stageId) ?? 0) + 1;
+    lastAttempt.set(stageId, attempt);
     current = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", report: null };
     await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0 });
+    return attempt;
   };
   // Run contract 9: /stage, then every upload. The caller sends /pr and the transition after.
   const end = async (status: "passed" | "failed") => {
@@ -242,11 +248,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const brief = (...parts: string[]) => parts.filter(Boolean).join("\n\n");
 
   // Runs a stage until an attempt has no findings or its retries run out. Returns the last findings, empty on a pass.
-  const attempts = async (stageId: StageId, tries: number, first: number, body: (attempt: number, findings: string[]) => Promise<string[]>) => {
+  const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>) => {
     let findings: string[] = [];
-    for (let attempt = first; attempt < first + tries; attempt++) {
-      await begin(stageId, attempt);
-      findings = await body(attempt, findings);
+    for (let i = 0; i < tries; i++) {
+      findings = await body(await begin(stageId), findings);
       if (findings.length === 0) return [];
       await end("failed");
     }
@@ -297,7 +302,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // ---- the stages ----
 
   const understand = async () => {
-    await begin("understand", 1);
+    await begin("understand");
     const r = await ask("understand", brief(await promptOf("understand"), item()));
     const missing = ctx.acceptanceCriteria.map((_, i) => `@ac-${i + 1}`).filter((t) => !new RegExp(`${t}(?!\\d)`).test(r.text));
     if (!r.ok || missing.length) {
@@ -312,7 +317,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let locked: string[] = [];
     const note = ctx.decision?.kind === "changes" ? `## The owner asked for changes at sign-off\n\n${fenced(ctx.decision.text)}` : "";
     const guide = `## The team's guide to writing scenarios\n\n${policies.scenarios.text}`;
-    const findings = await attempts("specify", retriesOf("specify") + 1, 1, async (_attempt, last) => {
+    const findings = await attempts("specify", retriesOf("specify") + 1, async (_attempt, last) => {
       const before = await features(dir);
       const r = await ask("specify", brief(await promptOf("specify"), item(), note, guide, retryNote(last)));
       await git.commitAll(`specify(${tag}): scenarios`);
@@ -339,7 +344,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   const red = async () => {
-    const findings = await attempts("red", retriesOf("red") + 1, 1, async (_attempt, last) => {
+    const findings = await attempts("red", retriesOf("red") + 1, async (_attempt, last) => {
       await ask("red", brief(await promptOf("red"), item(), `The locked feature files: ${ctx.lockedFiles.join(", ")}.`, retryNote(last)));
       if (!(await lockHolds(`red(${tag}): step definitions`))) return [lockFinding()];
       const parse = await bdd("parse");
@@ -361,8 +366,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const max = retriesOf("green") + 1;
     const dodText = `## The team's Definition of Done\n\n${fenced(policies.dod.text, "markdown")}`;
     if (greenTries >= max) throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
-    const findings = await attempts("green", max - greenTries, greenTries + 1, async (attempt, last) => {
-      greenTries = attempt;
+    const findings = await attempts("green", max - greenTries, async (attempt, last) => {
+      greenTries++;
       await ask("green", brief(await promptOf("green"), item(), dodText, retryNote(last.length ? last : carried)));
       if (!(await lockHolds(`green(${tag}): implementation`))) return [lockFinding()];
       const run = await bdd("run");
@@ -392,7 +397,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       "- Every step definition asserts something.\n- No scenario is pending or skipped.\n- No tag hides a scenario from the run.",
     );
     const rounds = Number(stageOf("self-review").max_rounds ?? 5);
-    await begin("self-review", ++selfReviewTries);
+    await begin("self-review");
     // Every earlier round goes back to the reviewer, so it can see a finding rebutted twice and answer DEADLOCK.
     let history = "";
     for (let round = 1; round <= rounds; round++) {
@@ -440,8 +445,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Returns findings that send the item back to green, or null once the PR is open and CI passed.
   const openPr = async (): Promise<string[] | null> => {
-    const attempt = ++openPrTries;
-    await begin("open-pr", attempt);
+    const attempt = await begin("open-pr");
     const summary = await ask("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`));
     if (!(await lockHolds(`open-pr(${tag}): summary`))) throw new Blocked(lockFinding());
     // After the summary's commit, so the checklist always names the head the PR is opened at.
@@ -472,7 +476,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!comments.length && !mergedConflict) throw new Blocked("no trusted review text to address");
     const byThread = new Map(comments.map((c) => [c.threadId, c]));
     let replies: { threadId: string; body: string }[] = [];
-    const findings = await attempts("address", retriesOf("address") + 1, 1, async (attempt, last) => {
+    const findings = await attempts("address", retriesOf("address") + 1, async (attempt, last) => {
       const replyFile = join(tmpdir(), `factory-replies-${process.pid}-${attempt}.jsonl`);
       // A summary has no path: it's the reviewer's top-level summary, not a line comment (Run contract 10).
       const data = JSON.stringify(comments.map(({ threadId, path, line, author, body }) =>

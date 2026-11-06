@@ -258,6 +258,7 @@ When("the cell runs", { timeout: 60_000 }, async function () {
         dodVerdicts: [], dodCheckedSha: null,
         // The control plane's filter (Run contract 10): only trusted authors reach the cell's context.
         trustedComments: comments.filter((x) => x.author === "owner"),
+        stageAttempts: {},
       },
       agent: agent(c),
       git: shellGit(c.dir, BRANCH),

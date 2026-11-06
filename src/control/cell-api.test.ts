@@ -224,6 +224,7 @@ describe("cell API", dbTest, () => {
        values ($1, $2, 'dod', 'repo', 'abc1234', 1, 'Deployed to staging', 'person', 'after merge')`,
       [cell.itemId, cell.runId],
     );
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'specify', 1, 'failed'), ($1, 'specify', 2, 'passed')", [cell.runId]);
     const { status, body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.equal(status, 200);
     assert.deepEqual(body, {
@@ -232,6 +233,7 @@ describe("cell API", dbTest, () => {
       configSha: "cfg1", sopVersion: "default@1",
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       trustedComments: [],
+      stageAttempts: { specify: 2 },
     });
   });
 
