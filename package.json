@@ -10,7 +10,10 @@
     "typecheck": "tsc --noEmit",
     "bdd": "cucumber-js --import \"features/steps/**/*.ts\" --format message:reports/bdd.ndjson",
     "start:control": "node src/main.ts",
-    "start:cell": "node src/cell/main.ts"
+    "start:cell": "node src/cell/main.ts",
+    "aspire:start": "npm --prefix aspire-apphost run aspire:start",
+    "aspire:build": "npm --prefix aspire-apphost run aspire:build",
+    "aspire:dev": "npm --prefix aspire-apphost run aspire:dev"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.318",
@@ -25,6 +28,7 @@
     "@cucumber/cucumber": "13.3.0",
     "@testcontainers/postgresql": "12.2.1",
     "@types/node": "26.6.6",
+    "@types/pg": "8.23.1",
     "typescript": "7.0.2"
   }
 }

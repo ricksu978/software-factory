@@ -16,4 +16,4 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run bdd
+      - run: npm run bdd -- --tags "not @local"
