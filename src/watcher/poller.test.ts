@@ -230,6 +230,23 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 2);
   });
 
+  test("a poll that overlaps another poll's restart doesn't restart the item again", async () => {
+    const { ext, id } = await held("InReview", { criteriaHash: criteriaHash(["old criterion"]) });
+    const comment = fake.adapter.comment;
+    let nested = false;
+    fake.adapter.comment = async (...args) => {
+      // The outer poll has read the old hash. A second poll runs to completion before the outer one moves the item.
+      if (!nested) {
+        nested = true;
+        await poll();
+      }
+      return comment(...args);
+    };
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 2);
+  });
+
   test("changed criteria on an InProgress item fence its cell and start a new run", async () => {
     const { ext } = await held("InProgress", { criteriaHash: criteriaHash(["old criterion"]) });
     await db.pool.query("update item set lease_generation = 3, lease_owner = 'cell-a', lease_expires = now() where source_id = $1 and external_id = $2", [sourceId, ext]);

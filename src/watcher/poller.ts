@@ -253,9 +253,16 @@ function newer(review: string | null, seen: Date | null): boolean {
   return seen === null || new Date(review).getTime() > seen.getTime();
 }
 
-/** Run contract 7: criteria changed, so the item goes back to Queued with a new run on a new branch. */
+/**
+ * Run contract 7: criteria changed, so the item goes back to Queued with a new run on a new branch. Queued has a
+ * criteria_changed edge to itself, so IllegalTransition can't stop a second poll that read the old hash. The locked
+ * re-read does.
+ */
 async function restart(pool: pg.Pool, row: Row, fi: FactoryItem, hash: string): Promise<void> {
-  await move(pool, row.id, "criteria_changed", async (c) => {
+  await withTx(pool, async (c) => {
+    const cur = (await c.query<{ criteria_hash: string | null }>("select criteria_hash from item where id = $1 for update", [row.id])).rows[0];
+    if (cur.criteria_hash === hash) return;
+    await transitionItem(c, row.id, "criteria_changed", system);
     await c.query("update item set criteria_hash = $2 where id = $1", [row.id, hash]);
     await c.query("update run set ended_at = now(), outcome = 'criteria_changed' where item_id = $1 and ended_at is null", [row.id]);
     const n = (await c.query<{ n: number }>("select coalesce(max(run_number), 0) + 1 as n from run where item_id = $1", [row.id])).rows[0].n;
