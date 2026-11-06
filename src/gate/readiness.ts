@@ -12,6 +12,8 @@ export type GateContext = {
   openDeps: string[];
   judge: (item: FactoryItem, dor: Policy) => Promise<string>;
   adapter: BacklogAdapter;
+  /** Each PolicyError the caller hit loading the five policy files, such as a run: line outside dod.md. */
+  policyErrors?: string[];
 };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
@@ -19,7 +21,10 @@ const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule
 /** The rules no policy file can weaken (spec §6). Any failure here means the judge is never asked. */
 function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
   const failed: Verdict[] = [];
-  if (!ctx.repoKnown || !ctx.dor) failed.push(engine("The factory doesn't know this item's repo"));
+  const policyErrors = ctx.policyErrors ?? [];
+  if (!ctx.repoKnown) failed.push(engine("The factory doesn't know this item's repo"));
+  for (const e of policyErrors) failed.push(engine(e));
+  if (ctx.repoKnown && !ctx.dor && policyErrors.length === 0) failed.push(engine("dor.md couldn't be loaded"));
   if (!ctx.dodExists) failed.push(engine("No .factory/dod.md in this repo"));
   if (!ctx.configValid) failed.push(engine("No valid .factory/config.yml in this repo"));
   if (item.acceptanceCriteria.length === 0) failed.push(engine("The item has no acceptance criteria"));
@@ -37,11 +42,16 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<{ ready
   if (results.length === 0 && ctx.dor) {
     const dor = ctx.dor;
     const reply = await ctx.judge(item, dor);
-    const flagsLine = jsonLines(reply).find((o) => Array.isArray(o.flags));
-    if (!flagsLine) {
-      results = dor.criteria.map((c) => ({ index: c.index, criterion: c.text, status: "failed", reason: "readiness check output unreadable" }));
+    // Every flags line counts, so an early or echoed {"flags":[]} can't cancel a real flag later in the reply.
+    const flagLines = jsonLines(reply).filter((o) => Array.isArray(o.flags));
+    if (flagLines.length === 0) {
+      // The engine verdict fails the item even when dor.md has no criteria, so the flag check can't be skipped.
+      results = [
+        engine("readiness check output unreadable"),
+        ...dor.criteria.map((c): Verdict => ({ index: c.index, criterion: c.text, status: "failed", reason: "readiness check output unreadable" })),
+      ];
     } else {
-      const flags = (flagsLine.flags as unknown[]).map(String);
+      const flags = [...new Set(flagLines.flatMap((o) => (o.flags as unknown[]).map(String)))];
       results = [...parseJudgement(reply, dor), ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))];
     }
   }

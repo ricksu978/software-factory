@@ -31,6 +31,12 @@ describe("parseRepoConfig", () => {
     assert.deepEqual(set.commands, { test: "npm test", lint: "npm run lint" });
   });
 
+  test("web_tools defaults to none, takes the two known tools, and refuses anything else", () => {
+    assert.deepEqual(parseRepoConfig(valid).webTools, []);
+    assert.deepEqual(parseRepoConfig(`${valid}web_tools: [WebSearch]\n`).webTools, ["WebSearch"]);
+    assert.throws(() => parseRepoConfig(`${valid}web_tools: [Bash]\n`), (e: unknown) => e instanceof ConfigError && e.key === "web_tools");
+  });
+
   test("this repo's own .factory/config.yml parses", () => {
     const c = parseRepoConfig(readFileSync(join(import.meta.dirname, "..", "..", ".factory", "config.yml"), "utf8"));
     assert.equal(c.bdd.report, "reports/bdd.ndjson");

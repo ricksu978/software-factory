@@ -27,4 +27,8 @@ describe("loadSop", () => {
   test("a stage model must name a key in models", () => {
     assert.throws(() => loadSop(sop("  - id: green\n    model: claude-opus-5-5\n")), /isn't in models/);
   });
+
+  test("a stage model that only an inherited property matches is refused", () => {
+    assert.throws(() => loadSop(sop("  - id: green\n    model: constructor\n")), /isn't in models/);
+  });
 });

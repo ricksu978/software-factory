@@ -41,7 +41,7 @@ export function loadSop(yamlText: string): Sop {
     if (typeof id !== "string" || !(STAGE_IDS as readonly string[]).includes(id)) throw new SopError(`unknown stage id ${String(id)}`);
     if (seen.has(id)) throw new SopError(`stage ${id} appears twice`);
     seen.add(id);
-    if (stage.model !== undefined && !(typeof stage.model === "string" && stage.model in models)) {
+    if (stage.model !== undefined && !(typeof stage.model === "string" && Object.hasOwn(models, stage.model))) {
       throw new SopError(`stage ${id} names model ${String(stage.model)}, which isn't in models`);
     }
   }

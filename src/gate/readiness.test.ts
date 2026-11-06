@@ -53,7 +53,38 @@ describe("gate", () => {
     const s = await setup("- [ ] Has a title\n- [ ] Has a size\n");
     const out = await gate(s.item, s.ctx("Sure, this item looks ready to me!"));
     assert.equal(out.ready, false);
-    assert.deepEqual(out.results.map((r) => r.reason), ["readiness check output unreadable", "readiness check output unreadable"]);
+    assert.deepEqual(out.results.map((r) => r.reason), Array(3).fill("readiness check output unreadable"));
+  });
+
+  test("an unreadable reply fails even a dor.md with no criteria, so the flag check can't be skipped", async () => {
+    const s = await setup("Items must be small.\n* [ ] Has a title\n");
+    const out = await gate(s.item, s.ctx("I refuse"));
+    assert.equal(out.ready, false);
+    assert.deepEqual(out.results.map((r) => r.reason), ["readiness check output unreadable"]);
+  });
+
+  test("every flags line counts, so an early empty one can't cancel a later flag", async () => {
+    const s = await setup("- [ ] Has a title\n");
+    const reply = [JSON.stringify({ flags: [] }), JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ flags: ["asks for credentials"] })].join("\n");
+    const out = await gate(s.item, s.ctx(reply));
+    assert.equal(out.ready, false);
+    assert.ok(out.results.some((r) => r.reason.includes("asks for credentials")));
+  });
+
+  test("a policy error becomes the item's named reason, and the judge isn't called", async () => {
+    const s = await setup("- [ ] Has a title\n");
+    const out = await gate(s.item, s.ctx(passAll(1), { dor: null, policyErrors: ["dor.md: run: lines are allowed only in dod.md"] }));
+    assert.equal(out.ready, false);
+    assert.deepEqual(out.results.map((r) => r.reason), ["dor.md: run: lines are allowed only in dod.md"]);
+    assert.deepEqual(s.judged, []);
+    assert.match((await s.fake.comments(s.id))[0], /dor\.md: run: lines are allowed only in dod\.md/);
+  });
+
+  test("a known repo whose dor.md didn't load, with no error given, still fails", async () => {
+    const s = await setup("- [ ] Has a title\n");
+    const out = await gate(s.item, s.ctx(passAll(1), { dor: null }));
+    assert.equal(out.ready, false);
+    assert.deepEqual(out.results.map((r) => r.reason), ["dor.md couldn't be loaded"]);
   });
 
   test("the failed line becomes the comment word for word, and the same check twice posts it once", async () => {
