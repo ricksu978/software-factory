@@ -39,9 +39,12 @@ export function criteriaHash(criteria: string[]): string {
   return sha256(criteria);
 }
 
-/** SHA-256 of what the readiness check judges. Only a change here counts as a person editing a NotReady item. */
-export function readinessItemHash(fi: FactoryItem): string {
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo });
+/**
+ * SHA-256 of what the readiness check judges about the item itself, open dependencies included. A NotReady item is
+ * re-gated when this changes, whether a person edited it or a dependency closed.
+ */
+export function readinessItemHash(fi: FactoryItem, openDeps: string[]): string {
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo, openDeps: [...openDeps].sort() });
 }
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
@@ -68,17 +71,20 @@ async function items(pool: pg.Pool, sourceId: string, states: ItemState[]): Prom
 
 /**
  * Runs `fn` for each entry, so one item's failure never stops the rest of the poll. An IllegalTransition means
- * another poll or a webhook moved the item first, which counts as done.
+ * another poll or a webhook moved the item first, which counts as done. Returns how many entries failed.
  */
-async function each<T>(list: T[], what: (t: T) => string, fn: (t: T) => Promise<void>): Promise<void> {
+async function each<T>(list: T[], what: (t: T) => string, fn: (t: T) => Promise<void>): Promise<number> {
+  let failed = 0;
   for (const t of list) {
     try {
       await fn(t);
     } catch (e) {
       if (e instanceof IllegalTransition) continue;
+      failed++;
       console.error(`poller: ${what(t)} failed, retrying next poll:`, e);
     }
   }
+  return failed;
 }
 
 /** Closes a run's PR if it's still open, with a comment that names the branch the factory keeps. */
@@ -151,14 +157,11 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     return fetched.get(ext)!;
   };
 
-  // 1. New and changed items. A NotReady item goes back to Eligible only when what the gate judges changed, so
-  //    the factory's own board writes don't re-gate it.
+  // 1. New and changed items. If any of them fails to go in, the cursor stays put so the next poll lists it again.
   const listed = await adapter.listEligible(src.cursor);
-  await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
+  const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
-    const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
-    const r = (await pool.query<{ state: ItemState; readiness_item_hash: string | null }>("select state, readiness_item_hash from item where id = $1", [id])).rows[0];
-    if (r.state === "NotReady" && r.readiness_item_hash !== readinessItemHash(fi)) await move(pool, id, "item_edited");
+    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
   });
 
   // 2. PRs of InReview items, before withdrawal, so a merge just before the item closes still counts as a merge.
@@ -199,7 +202,8 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     }
   });
 
-  // 4. Readiness. A NotReady item checked against older inputs is re-gated, then every Eligible item is gated.
+  // 4. Readiness. A NotReady item is re-gated when the item itself changed, open dependencies included, or when a
+  //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: it has no withdrawn edge, and it must never reach Queued.
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
@@ -209,19 +213,22 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
   };
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
-    if (fi && eligible(fi) && (await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
+    if (!fi || !eligible(fi)) return;
+    if (readinessItemHash(fi, await adapter.openDependencies(fi.externalId)) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
+    else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
   // Most often a failure here is the judge on a usage limit. The item stays Eligible and the next poll tries again.
   await each(await items(pool, sourceId, ["Eligible"]), (row) => `the readiness check for item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
     const r = await readinessOf(fi);
+    const openDeps = await adapter.openDependencies(fi.externalId);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
-      openDeps: r.repoKnown ? await adapter.openDependencies(fi.externalId) : [], judge, adapter, policyErrors: r.policyErrors,
+      openDeps, judge, adapter, policyErrors: r.policyErrors,
     });
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi)]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi, openDeps)]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)
@@ -232,6 +239,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     });
   });
 
+  if (unlisted > 0) return { seen: listed.items.length, cursor: src.cursor ?? "" };
   await pool.query("update backlog_source set cursor = $2 where id = $1", [sourceId, listed.cursor]);
   return { seen: listed.items.length, cursor: listed.cursor };
 }

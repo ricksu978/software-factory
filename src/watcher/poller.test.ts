@@ -131,6 +131,27 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(judged, []);
   });
 
+  test("an item NotReady only on an open dependency is re-gated once the dependency closes", async () => {
+    const ext = await seed();
+    fake.setDependencies(ext, ["#7"]);
+    await poll();
+    assert.equal((await row(ext)).state, "NotReady");
+    assert.match((await fake.comments(ext))[0], /depends on #7/);
+    fake.setDependencies(ext, []);
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+  });
+
+  test("a listed item that fails to go in keeps the cursor, so the next poll lists it again", async () => {
+    const before = (await db.pool.query("select cursor from backlog_source where id = $1", [sourceId])).rows[0].cursor;
+    const fine = await seed();
+    // Postgres refuses a NUL in a text column, so this one item can't be stored.
+    await seed({ externalId: `bad${String.fromCharCode(0)}id` });
+    await poll();
+    assert.equal((await db.pool.query("select cursor from backlog_source where id = $1", [sourceId])).rows[0].cursor, before);
+    assert.equal((await row(fine)).state, "Queued");
+  });
+
   test("the opt-in label comes from the source's field map", async () => {
     await db.pool.query(`update backlog_source set field_map = '{"optInLabel": "ready-for-factory"}' where id = $1`, [sourceId]);
     const { ext } = await held("Queued");
