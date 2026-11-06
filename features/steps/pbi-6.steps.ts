@@ -114,7 +114,8 @@ Then("the control resource tells cells the port it answers on", function () {
   assert.ok(ctx(this).up, "the AppHost never came up");
   const res = describe("control").doc?.resources[0];
   const told = res?.environment?.CELL_CONTROL_URL;
-  assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL: ${JSON.stringify(res?.environment)}`);
+  // Names only: describe shows values, and FACTORY_DB_URI carries the database password.
+  assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL among ${JSON.stringify(Object.keys(res?.environment ?? {}))}`);
   assert.equal(new URL(told).hostname, "host.docker.internal");
   assert.equal(new URL(told).port, new URL(control).port, `CELL_CONTROL_URL ${told} doesn't name control's port, ${control}`);
 });
@@ -141,7 +142,8 @@ Then("the {string} resource has exited with code {int}", function (resource: str
   assert.ok(ctx(this).up, "the AppHost never came up");
   const r = describe(resource);
   assert.ok(r.doc, `aspire describe gave no JSON:\n${r.out}`);
-  assert.equal(findKey(r.doc, /^exit_?code$/i), code, `exit code of "${resource}" in:\n${r.out}`);
+  // The resource's state, never the whole describe output, which shows environment values such as FACTORY_DB_URI.
+  assert.equal(findKey(r.doc, /^exit_?code$/i), code, `exit code of "${resource}", in state ${String(r.doc.resources[0]?.state)}`);
 });
 
 Given('{string} has run once and the migrate probe recorded its run count', long, async function (_cmd: string) {
