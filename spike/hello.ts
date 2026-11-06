@@ -3,8 +3,16 @@ import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import pg from "pg";
+import { handleModelRequest } from "../src/control/model-gateway.ts";
 
 const local = process.env.FACTORY_ENV === "local";
+
+// Task 19 Step 8: the gateway accepts only the MODEL_PROBE_CREDENTIAL stand-in, and refuses everything while it's unset.
+function probeGrant(credential: string): { webTools: [] } | null {
+  const want = Buffer.from(process.env.MODEL_PROBE_CREDENTIAL ?? "");
+  const got = Buffer.from(credential);
+  return want.length > 0 && want.length === got.length && timingSafeEqual(want, got) ? { webTools: [] } : null;
+}
 
 function json(res: import("node:http").ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
@@ -55,6 +63,10 @@ createServer(async (req, res) => {
       return res.writeHead(ok ? 204 : 401).end();
     }
     if (req.method === "POST" && path === "/internal/cells/ping") return res.writeHead(204).end();
+    if (path.startsWith("/internal/model/")) {
+      const cfg = { upstream: "https://api.anthropic.com", ownerToken: () => process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "", verify: probeGrant };
+      return handleModelRequest(cfg, req, res, (req.url ?? "/").slice("/internal/model".length));
+    }
     if (local && req.method === "GET" && path === "/probe/sas") return json(res, 200, { url: await sasUrl() });
     if (local && req.method === "GET" && path === "/probe/env") return json(res, 200, Object.keys(process.env).sort());
     if (local && req.method === "GET" && path === "/probe/runs") return json(res, 200, { count: await runCount() });
