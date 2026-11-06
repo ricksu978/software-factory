@@ -1,0 +1,80 @@
+# Deploys the factory to Azure (plan Task 19 Step 3). Only a person starts it, and only into the production
+# environment, whose required reviewer is the owner. It signs in as id-factory-deploy through OIDC, never a stored
+# secret. The production environment's variables AZURE_CLIENT_ID (the deploy output deployClientId),
+# AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID are ids, not secrets.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      control_image:
+        description: Image for ca-factory-control. Empty gives it control-spike:<sha> until Task 20.
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency: deploy
+
+env:
+  RG: rg-software-factory-aue
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      # Built-in auth deploys only with both client ids, and the bootstrap never runs this workflow. So a param
+      # file still on its bootstrap values would ship the app without sign-in, which this step refuses.
+      - name: Refuse bootstrap params
+        run: |
+          if grep -nE "ClientId = ''|<yyyy-mm-dd>" infra/main.bicepparam; then
+            echo "infra/main.bicepparam on this commit still has bootstrap values. Merge the client ids and the token date first."
+            exit 1
+          fi
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push linux/amd64 images
+        run: |
+          acr=$(az acr list -g "$RG" --query "[0].loginServer" -o tsv)
+          az acr login --name "${acr%%.*}"
+          docker buildx build --platform linux/amd64 --push -t "$acr/control:$GITHUB_SHA" -f Dockerfile .
+          docker buildx build --platform linux/amd64 --push -t "$acr/cell:$GITHUB_SHA" -f cell/Dockerfile .
+          docker buildx build --platform linux/amd64 --push -t "$acr/control-spike:$GITHUB_SHA" -f spike/Dockerfile .
+          echo "ACR=$acr" >> "$GITHUB_ENV"
+
+      # The container name and command are explicit in case a start override replaces the template's container
+      # instead of merging into it (Step 10 checks which). The app's new code never runs before its migration.
+      - name: Migrate on the new image
+        run: |
+          az extension add --name containerapp --upgrade --only-show-errors
+          exec=$(az containerapp job start -n caj-factory-migrate -g "$RG" --container-name migrate \
+            --image "$ACR/control:$GITHUB_SHA" --command node src/store/migrate-cli.ts --query name -o tsv)
+          echo "execution $exec"
+          for _ in $(seq 120); do
+            status=$(az containerapp job execution show -n caj-factory-migrate -g "$RG" --job-execution-name "$exec" --query properties.status -o tsv)
+            echo "$status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded) exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "migration still running after 20 minutes"
+          exit 1
+
+      - name: Deploy infrastructure and images
+        env:
+          CONTROL_IMAGE: ${{ inputs.control_image }}
+        run: |
+          az deployment group create -g "$RG" -f infra/main.bicep -p infra/main.bicepparam \
+            -p controlImage="${CONTROL_IMAGE:-$ACR/control-spike:$GITHUB_SHA}" \
+               cellImage="$ACR/cell:$GITHUB_SHA" migrateImage="$ACR/control:$GITHUB_SHA"
