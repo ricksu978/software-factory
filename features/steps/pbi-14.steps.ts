@@ -115,7 +115,7 @@ Then("Red fails with the finding {string}", function (finding: string) {
 const lockedFile = "features/pbi-482-totals.feature";
 
 function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-c", "user.name=factory", "-c", "user.email=factory@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
+  return execFileSync("git", ["-c", "user.name=factory", "-c", "user.email=factory@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", ...args], { cwd: dir, encoding: "utf8" }).trim();
 }
 
 function write(dir: string, path: string, text: string) {
