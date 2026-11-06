@@ -18,6 +18,8 @@ export type WebhookDeps = {
   pool: pg.Pool;
   secret: string;
   parse: (headers: Record<string, string>, body: unknown) => FactoryWebhookEvent;
+  /** Runs once a new `comment` event has committed, so /approve and /answer comments reach `applyComment` (Task 15). */
+  onComment?: (e: Extract<FactoryWebhookEvent, { kind: "comment" }>) => Promise<unknown>;
 };
 
 /**
@@ -43,11 +45,21 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
       await c.query("rollback");
       return { status: 200 };
     }
+    const event = deps.parse(headers, body);
     await appendEvent(c, {
       actor: "system", actorId: "github", itemId: null, kind: "webhook",
-      payload: { deliveryId, githubEvent: headers["x-github-event"] ?? null, event: deps.parse(headers, body) },
+      payload: { deliveryId, githubEvent: headers["x-github-event"] ?? null, event },
     });
     await c.query("commit");
+    // After the commit, so a failed decision never loses the stored delivery. A redelivery returns above and never
+    // applies the same comment twice.
+    if (event.kind === "comment" && deps.onComment) {
+      try {
+        await deps.onComment(event);
+      } catch (e) {
+        console.error(`applying comment ${event.commentId} failed:`, e);
+      }
+    }
     return { status: 204 };
   } catch (e) {
     await c.query("rollback");

@@ -56,18 +56,22 @@ const system = (actorId: string): Actor => ({ actor: "system", actorId });
  * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
  */
-export async function claimNext(c: pg.PoolClient, owner: string, now: Date): Promise<{ itemId: string; runId: string; generation: number } | null> {
-  const pick = await c.query<{ id: string }>(
-    `select i.id from item i
+// The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed.
+const CLAIMABLE = `from item i
      where not i.held and cardinality(i.blocked_by) = 0
        and (i.state = 'Queued'
          or (i.state in ('SignOff', 'NeedsInput')
            and exists (select from question q where q.item_id = i.id and q.answer is not null)
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
-     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id
-     limit 1
-     for update of i skip locked`,
-  );
+     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id`;
+
+/** The first `limit` items claimNext would pick, in order, without claiming or locking anything. */
+export async function nextUp(c: pg.Pool | pg.PoolClient, limit: number): Promise<{ id: string; title: string; state: ItemState }[]> {
+  return (await c.query<{ id: string; title: string; state: ItemState }>(`select i.id, i.title, i.state ${CLAIMABLE} limit $1`, [limit])).rows;
+}
+
+export async function claimNext(c: pg.PoolClient, owner: string, now: Date): Promise<{ itemId: string; runId: string; generation: number } | null> {
+  const pick = await c.query<{ id: string }>(`select i.id ${CLAIMABLE} limit 1 for update of i skip locked`);
   if (pick.rowCount === 0) return null;
   const itemId = pick.rows[0].id;
   await transitionItem(c, itemId, "claimed", system(owner));

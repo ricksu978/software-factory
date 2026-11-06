@@ -42,6 +42,20 @@ describe("handleWebhook", dbTest, () => {
     events: (await db.pool.query("select payload from event where payload->>'deliveryId' = $1", [id])).rows,
   });
 
+  test("a new comment delivery reaches onComment once, after it's stored, and a redelivery doesn't", async () => {
+    const seen: string[] = [];
+    const commentDeps = {
+      pool: db.pool, secret,
+      parse: () => ({ kind: "comment" as const, externalId: "11", login: "octo", body: "/approve", commentId: "c42" }),
+      onComment: async (e: { commentId: string }) => {
+        seen.push(`${e.commentId}:${(await count("d-comment")).events.length}`);
+      },
+    };
+    assert.equal((await handleWebhook(commentDeps, { headers: headers("d-comment", sign("sha256", body)), rawBody: body })).status, 204);
+    assert.equal((await handleWebhook(commentDeps, { headers: headers("d-comment", sign("sha256", body)), rawBody: body })).status, 200);
+    assert.deepEqual(seen, ["c42:1"]);
+  });
+
   test("the same delivery id twice stores one row and one event, and the second call returns 200", async () => {
     assert.deepEqual(await handleWebhook(deps(), { headers: headers("d-1", sign("sha256", body)), rawBody: body }), { status: 204 });
     assert.deepEqual(await handleWebhook(deps(), { headers: headers("d-1", sign("sha256", body)), rawBody: body }), { status: 200 });
