@@ -6,7 +6,8 @@ const runMode = await builder.executionContext().isRunMode();
 const repo = '..';
 // The factory pins control to 7400 and Azurite's blobs to 7410, so the egress proxy's allowlisted ports and its label
 // survive restarts (Task 13). Pinned ports are machine-wide, though, and `aspire start --isolated` doesn't move them,
-// so a test run sets FACTORY_FLOAT_PORTS=1 to let Aspire pick both, and two sessions' AppHosts then never clash.
+// so a test run sets FACTORY_FLOAT_PORTS=1 to let Aspire pick both, and AppHosts in different worktrees then never
+// clash. Two from the same worktree still share its named data volumes.
 const floatPorts = process.env.FACTORY_FLOAT_PORTS === '1';
 
 const postgres = await builder.addPostgres('pg').withDataVolume();

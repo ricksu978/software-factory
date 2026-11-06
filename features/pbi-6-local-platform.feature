@@ -6,7 +6,8 @@ Feature: Local platform on Aspire
   @ac-1 @local
   Scenario: aspire run brings up the local platform
     When I start "aspire run" and wait until the control resource answers
-    Then the "pg" and "storage" containers are running, each with a data volume
+    Then the control resource tells cells the port it answers on
+    And the "pg" and "storage" containers are running, each with a data volume
     And the "migrate" resource has exited with code 0
 
   @ac-2 @local

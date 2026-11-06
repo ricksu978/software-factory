@@ -5,9 +5,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Steps record what they observe and assert only in Then, so a missing AppHost or image shows as red, not as a crash.
-// The AppHost runs with `--isolated` and FACTORY_FLOAT_PORTS=1, so Aspire picks control's and Azurite's ports and two
-// sessions' runs never clash on 7400 or 7410. Every aspire command names this AppHost with --apphost, and control's
-// URLs come from `aspire describe` once it's up.
+// The AppHost runs with `--isolated` and FACTORY_FLOAT_PORTS=1, so Aspire picks control's and Azurite's ports, and
+// sessions in different worktrees never clash on 7400 or 7410. Two runs from the SAME worktree still share its named
+// data volumes, so run these scenarios once per worktree at a time. Every aspire command names this AppHost with
+// --apphost, and control's URLs come from `aspire describe` once it's up.
 const repo = process.cwd();
 const APPHOST = "--apphost . --non-interactive --nologo";
 let control = "";
@@ -64,7 +65,7 @@ async function startAspire(c: Ctx): Promise<void> {
   c.started = true;
   control = "";
   cellControl = "";
-  sh("aspire start --isolated --non-interactive --nologo");
+  sh(`aspire start --isolated ${APPHOST}`);
   const waited = sh(`aspire wait control --status up --timeout 300 ${APPHOST}`);
   const url = describe("control").doc?.resources[0]?.urls?.[0]?.url;
   if (waited.status === 0 && typeof url === "string") {
@@ -105,6 +106,17 @@ After({ tags: "@local" }, function () {
 
 When("I start {string} and wait until the control resource answers", long, async function (_cmd: string) {
   await startAspire(ctx(this));
+});
+
+// CELL_CONTROL_URL is what the launcher hands each cell, so it must name the port control really answers on, pinned or
+// floated. Read from `aspire describe`, which shows the resource's environment values.
+Then("the control resource tells cells the port it answers on", function () {
+  assert.ok(ctx(this).up, "the AppHost never came up");
+  const res = describe("control").doc?.resources[0];
+  const told = res?.environment?.CELL_CONTROL_URL;
+  assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL: ${JSON.stringify(res?.environment)}`);
+  assert.equal(new URL(told).hostname, "host.docker.internal");
+  assert.equal(new URL(told).port, new URL(control).port, `CELL_CONTROL_URL ${told} doesn't name control's port, ${control}`);
 });
 
 // Asks Aspire which container and named volume belong to this AppHost's resource, then checks that exact
