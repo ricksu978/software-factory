@@ -26,8 +26,8 @@ const devLogin = await builder.addParameter('dev-login');
 const appId = await builder.addParameter('github-app-id');
 const tokenCreatedAt = await builder.addParameter('claude-token-created-at');
 
-// Task 4 swaps in src/store/migrate-cli.ts, and Task 15 swaps in src/main.ts.
-const migrate = await builder.addNodeApp('migrate', repo, 'spike/db-probe.ts')
+// Task 15 swaps in src/main.ts for control. migrate-cli still adds a probe_runs row locally, for PBI 2's restart scenario.
+const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli.ts')
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .waitFor(db);
 

@@ -290,12 +290,12 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 - Produces:
   - `createPool(url?: string): pg.Pool`. Locally the caller passes `FACTORY_DB_URI` from Aspire. Without a URL it connects as the managed identity, using an Entra token from `@azure/identity` `DefaultAzureCredential` with scope `https://ossrdbms-aad.database.windows.net/.default`.
   - `migrate(pool): Promise<void>`, which applies `db/migrations/*.sql` in name order and tracks them in `schema_migrations`.
-  - `withTx<T>(pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T>`
+  - `withTx<T>(pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T>`, plus `runAfterCommit(c, fn)`, which queues work that runs only once that transaction commits and is dropped on rollback. `transitionItem` uses it for `onTransition` hooks.
   - `appendEvent(c, e: { actor: "agent" | "human" | "system"; actorId: string; itemId: string | null; kind: string; payload: unknown }): Promise<void>`. It also runs `NOTIFY factory_events`.
   - `transitionItem(c, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState>`. It throws `IllegalTransition` when `next` returns null. It writes `item.state` and the event row in one transaction, and applies Run contract 2 to the lease columns.
   - `onTransition(hook: (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>): void` registers the hook that runs after each committed transition. Task 12 registers the board mirroring from Run contract 8.
-  - `upsertItem(c, item: FactoryItem): Promise<string>`, keyed on `(source_id, external_id)`.
-  - `startTestDb(): Promise<{ pool: pg.Pool; stop(): Promise<void> }>`, which uses `@testcontainers/postgresql` with image `postgres:17` and runs `migrate`.
+  - `upsertItem(c, item: { sourceId; externalId; title }): Promise<string>`, keyed on `(source_id, external_id)`, which inserts a new item as Eligible. Task 6 widens the input to `FactoryItem`, which doesn't exist before it.
+  - `startTestDb(): Promise<{ pool: pg.Pool; url: string; stop(): Promise<void> }>`, which uses `@testcontainers/postgresql` with image `postgres:17` and runs `migrate`.
   - `dbTest`, the options object every `describe` that calls `startTestDb` passes: `{ skip: process.env.FACTORY_DB_TESTS === "skip" && "no Docker daemon here" }`.
   - A scenario whose steps need a database is tagged `@db`. This repo's `bdd.run` passes `--tags "not @db and not @local"`, so a cell never runs it, and CI runs every scenario except `@local` ones.
   - A scenario that needs Docker, the Aspire CLI and the owner's secrets is tagged `@local`, such as PBI 2's `aspire run` scenarios. Neither a cell nor CI can run it, so only the owner's machine does. The owner runs every `@local` scenario, and the PR records that run, whenever a PR adds or changes one or touches `aspire-apphost/`, `spike/`, `cell/`, `Dockerfile`, `src/main.ts` or `src/store/migrate-cli.ts`, which they exercise. An item with an `@local` scenario of its own fails Red in a cell for the same reason as below, so the owner builds it by hand. `greenGate` reads the cell's report, so it needs every scenario the cell ran to be green, and the `@db` ones gate the PR through CI's checks. An item with any `@db` scenario of its own fails Red with "not run in the cell" (Task 10), so it waits for PBI 22, which gives cells a test database. Red proof never skips a scenario.
@@ -316,6 +316,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `run.execution_name text`, the Container Apps execution.
   - `stage_run.report_ref text`, the BDD report a red or green stage uploaded.
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
+  - `backlog_source.owner_type`, `owner_login`, `project_number` and a unique `url`, and `repo.installation_id` with a unique `url`, which `migrate-cli.ts` upserts from the sources file. `backlog_source.cursor` holds Task 8's poll cursor.
+  - `wip_policy` starts with one row, `mode = 'fixed'` and `current_wip = 1`, which Task 13 reads.
   - `item.readiness_policy_sha text`, for the re-gate in Run contract 11.
 
   Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 19 names. Locally the control plane connects as Aspire's database user, so the append-only grant is enforced only in Azure. The test below checks the grant itself. Its `event` grant is `SELECT, INSERT` only.

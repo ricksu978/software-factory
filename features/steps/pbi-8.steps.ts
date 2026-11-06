@@ -46,7 +46,7 @@ function need(): TestDb {
 async function newItem(state: string, generation = 0, owner: string | null = null): Promise<string | undefined> {
   const d = await testDb();
   if (!d) return undefined;
-  const source = await d.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test') returning id");
+  const source = await d.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:' || gen_random_uuid()) returning id");
   const item = await d.pool.query<{ id: string }>(
     `insert into item (source_id, external_id, title, state, lease_generation, lease_owner, lease_expires)
      values ($1, gen_random_uuid()::text, 'test item', $2, $3, $4, case when $4::text is null then null else now() + interval '5 minutes' end)
@@ -233,9 +233,11 @@ When("I run the same test file without that variable", long, function () {
   runProbe(ctx(this), false);
 });
 
+// dbTest skips the whole describe, which TAP reports as "ok N - db probe # SKIP <reason>". The "# skipped"
+// summary counts skipped tests, not suites, so it stays 0 and can't be the check.
 Then("its test is reported as skipped", function () {
   const c = ctx(this);
-  assert.match(c.out ?? "", /^# skip 1$/m, `not skipped:\n${c.out}`);
+  assert.match(c.out ?? "", /^ok \d+ - db probe # SKIP/m, `not skipped:\n${c.out}`);
   assert.match(c.out ?? "", /^# pass 0$/m);
 });
 
@@ -243,5 +245,5 @@ Then("its test runs and passes", function () {
   const c = ctx(this);
   assert.equal(c.status, 0, c.out ?? "");
   assert.match(c.out ?? "", /^# pass 1$/m, `didn't pass:\n${c.out}`);
-  assert.match(c.out ?? "", /^# skip 0$/m);
+  assert.doesNotMatch(c.out ?? "", /# SKIP/);
 });
