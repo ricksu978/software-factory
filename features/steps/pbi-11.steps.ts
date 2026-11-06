@@ -11,7 +11,7 @@ const repo = process.cwd();
 
 type Headers = Record<string, string>;
 type Webhook = {
-  handleWebhook: (deps: { pool: unknown; secret: string }, req: { headers: Headers; rawBody: Buffer }) => Promise<{ status: number }>;
+  handleWebhook: (deps: { pool: unknown; secret: string; parse: () => { kind: "ignored" } }, req: { headers: Headers; rawBody: Buffer }) => Promise<{ status: number }>;
 };
 type Request = { route: string; params: Record<string, unknown> };
 type RepoHostMod = {
@@ -36,7 +36,9 @@ async function deliver(c: Ctx, delivery: string, body: Buffer, signature: string
   c.ran = true;
   const headers: Headers = { "x-github-delivery": delivery, "x-github-event": "issue_comment", "content-type": "application/json" };
   if (signature) headers["x-hub-signature-256"] = signature;
-  c.statuses.push((await mod.handleWebhook({ pool: d.pool, secret: c.secret ?? "" }, { headers, rawBody: body })).status);
+  // The adapter's parseWebhook is the GitHub backlog's job, so a stub stands in for it here.
+  const parse = () => ({ kind: "ignored" as const });
+  c.statuses.push((await mod.handleWebhook({ pool: d.pool, secret: c.secret ?? "", parse }, { headers, rawBody: body })).status);
 }
 
 function ran(c: Ctx): void {
