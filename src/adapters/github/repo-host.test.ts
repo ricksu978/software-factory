@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { standingSummaries, type Review } from "../types.ts";
+import { loginKey, standingSummaries, type Review } from "../types.ts";
 import { githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -100,6 +100,15 @@ describe("githubRepoHost", () => {
       { threadId: "t1", path: "a.ts", line: 4, author: "dev", body: "fix this" },
       { threadId: "r1", path: null, line: null, author: "dev", body: "Split run.ts" },
     ]);
+  });
+
+  test("loginKey matches a login across case and the bot suffix, and nothing that only resembles it", () => {
+    assert.equal(loginKey("RickSu978"), loginKey("ricksu978"));
+    assert.equal(loginKey("ricksu978-software-factory[bot]"), loginKey("ricksu978-software-factory"), "REST and GraphQL forms of the App's bot");
+    assert.equal(loginKey("ricksu978-software-factory"), "ricksu978-software-factory", "a bot stored without the suffix is unchanged");
+    assert.notEqual(loginKey("ricksu978-evil"), loginKey("ricksu978"));
+    assert.notEqual(loginKey("ricksu978-software-factory-bot"), loginKey("ricksu978-software-factory[bot]"));
+    assert.notEqual(loginKey("[bot]x"), loginKey("x"), "only a trailing suffix is dropped");
   });
 
   test("a summary stands only while its reviewer's latest review that isn't a comment requests changes", () => {

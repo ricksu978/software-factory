@@ -4,7 +4,7 @@
 import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import type { BacklogAdapter, RepoHost, ReviewComment } from "../adapters/types.ts";
+import { loginKey, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
@@ -154,9 +154,9 @@ const routes: Record<string, Route> = {
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief.
     if (run.next_stage === "address" && run.pr_number !== null) {
       const users = await c.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`);
-      const trusted = new Set(users.rows.map((u) => u.github_login));
-      if (run.trusted_bot) trusted.add(run.trusted_bot);
-      trustedComments = (await deps.repoHost.openReviewComments(repo, run.pr_number)).filter((x) => trusted.has(x.author));
+      const trusted = new Set(users.rows.map((u) => loginKey(u.github_login)));
+      if (run.trusted_bot) trusted.add(loginKey(run.trusted_bot));
+      trustedComments = (await deps.repoHost.openReviewComments(repo, run.pr_number)).filter((x) => trusted.has(loginKey(x.author)));
     }
     return {
       externalId: run.external_id, title: item?.title ?? run.title, acceptanceCriteria: item?.acceptanceCriteria ?? [],

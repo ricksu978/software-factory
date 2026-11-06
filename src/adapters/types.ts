@@ -33,6 +33,14 @@ export interface BacklogAdapter {
 /** A line comment in a review thread, or a review's top-level summary, which has no path and the review's id as threadId. */
 export type ReviewComment = { threadId: string; path: string | null; line: number | null; author: string; body: string };
 
+/**
+ * A login as GitHub compares it. Logins ignore case, and GraphQL names an App's bot without the "[bot]" suffix REST
+ * adds, so both forms give one key (issue #79). Callers compare whole keys, never prefixes.
+ */
+export function loginKey(login: string): string {
+  return login.toLowerCase().replace(/\[bot\]$/, "");
+}
+
 export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
 
 /**
@@ -42,7 +50,7 @@ export type Review = { id: string; author: string; state: "changes_requested" | 
  */
 export function standingSummaries(reviews: Review[]): ReviewComment[] {
   const latest = new Map<string, Review>();
-  for (const r of reviews) if (r.state !== "commented") latest.set(r.author.toLowerCase(), r);
+  for (const r of reviews) if (r.state !== "commented") latest.set(loginKey(r.author), r);
   return [...latest.values()]
     .filter((r) => r.state === "changes_requested" && r.body.trim() !== "")
     .map((r) => ({ threadId: r.id, path: null, line: null, author: r.author, body: r.body }));
