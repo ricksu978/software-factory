@@ -293,6 +293,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Fresh DoD (Run contract 11): checked again unless the verdicts at this very commit all held.
   const freshDod = async (stageId: StageId, attempt: number) =>
     (await git.head()) === dodSha && dodFindings(dodVerdicts).length === 0 ? [] : dodFindings(await checkDod(stageId, attempt));
+  // The DoD judge runs with every tool, so whatever it changed is committed here and fails the attempt. The push that
+  // follows then carries the head the verdicts were checked at, and the lock check before it still holds.
+  const dodHeadHeld = async (msg: string) => {
+    const head = await git.commitAll(msg);
+    return head === dodSha ? [] : [`the Definition of Done check changed the branch: ${dodSha} became ${head}`];
+  };
 
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
     for (;;) {
@@ -383,7 +389,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         if (r.code !== 0) out.push(`commands.${k} exited ${r.code}: ${r.out.trim()}`);
       }
       if (out.length) return out;
-      return dodFindings(await checkDod("green", attempt));
+      const dod = dodFindings(await checkDod("green", attempt));
+      return dod.length ? dod : dodHeadHeld(`green(${tag}): Definition of Done check`);
     });
     if (findings.length) throw new Exhausted(`Green failed after ${max} attempts:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
@@ -454,7 +461,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!(await lockHolds(`open-pr(${tag}): summary`))) throw new Blocked(lockFinding());
     // After the summary's commit, so the checklist always names the head the PR is opened at.
     const stale = await freshDod("open-pr", attempt);
-    if (stale.length) { await end("failed"); return stale; }
+    const moved = stale.length ? stale : await dodHeadHeld(`open-pr(${tag}): Definition of Done check`);
+    if (moved.length) { await end("failed"); return moved; }
     // A cell resumed after green has no green report of its own, so the table lists the names and points at the evidence.
     if (!greenResults.size) {
       const parse = await bdd("parse");
