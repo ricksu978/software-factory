@@ -856,7 +856,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Create: `src/http/auth.ts`, `src/http/views.ts`, `src/http/routes.ts`, `src/http/auth.test.ts`, `src/http/routes.test.ts`, `src/control/decisions.ts`, `src/control/decisions.test.ts`, `src/main.ts`, `scripts/seed-owner.ts`
 - Modify: `src/http/server.ts` from Task 12
 - Modify: `aspire-apphost/apphost.mts`, so `control` runs `src/main.ts` in place of `spike/hello.ts`. In local mode `main.ts` keeps `/internal/cells/ping` and the three `/probe/*` routes from `spike/hello.ts`, so PBI 2's scenarios keep passing.
-- Modify: `Dockerfile`, which also copies `policy/` into `/app/policy` for the readiness gate's defaults, and `config/` into `/app/config` for the migrate job's sources file
+- Modify: `Dockerfile`, which also copies `src/` for `main.ts` and `migrate-cli.ts`, `db/` into `/app/db` for the migrate job's SQL files, `policy/` into `/app/policy` for the readiness gate's defaults, and `config/` into `/app/config` for the migrate job's sources file. Without `db/`, `migrate()` can't find `db/migrations` and the first Azure migration fails.
 
 **Interfaces:**
 - Consumes: the store, `setOverride`, `activeOverrides`, `ensureEgress`, `handleWebhook`, the cell API and `pollOnce`.
