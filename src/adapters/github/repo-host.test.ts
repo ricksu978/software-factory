@@ -120,4 +120,11 @@ describe("ownersOf", () => {
     assert.deepEqual(ownersOf(rules, "lib/src/billing/pay.ts"), ["@all"]);
     assert.deepEqual(ownersOf(rules, "x/apps/y.ts"), ["@apps"]);
   });
+
+  test("a rule matches dotfiles and paths under dot directories, as gitignore rules do", () => {
+    assert.deepEqual(ownersOf(rules, ".github/workflows/ci.yml"), ["@all"]);
+    assert.deepEqual(ownersOf(rules, ".env"), ["@all"]);
+    assert.deepEqual(ownersOf([{ pattern: "/docs/", owners: ["@docs"] }], "docs/.x"), ["@docs"]);
+    assert.deepEqual(ownersOf([{ pattern: ".factory/", owners: ["@ops"] }], "a/.factory/config.yml"), ["@ops"]);
+  });
 });
