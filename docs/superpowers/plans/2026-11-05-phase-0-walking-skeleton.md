@@ -1043,8 +1043,9 @@ Stage behaviour, from spec §6 rows 1 to 7:
 ### Task 17: Merge, Done and the walking skeleton end to end
 
 **Files:**
-- Create: `src/e2e.test.ts`
-- Modify: `src/watcher/webhook.ts` for these mappings:
+- Create: `src/e2e.test.ts`, and `src/e2e.ts`, the harness it and the PBI 17 scenarios share, since a step file can't import a `node:test` file. The harness backs the fake repo host with a real bare git origin, runs each cell the way `src/cell/main.ts` does through the real cell API, and merges a PR by merging its branch into the origin's main.
+- Modify: `src/scheduler/scheduler.ts`, so the Failed comment links the failed run as `https://github.com/<repo>/commit/<merge_sha>/checks`. Modify `src/adapters/github/backlog.ts`, so `pr_closed` carries `by`, the sender's login. The webhook ignores a close only when `by` is the repo's `trusted_bot`, the factory's own App, which moved the item already. Any other close, another App's included, withdraws the item.
+- Modify: `src/watcher/webhook.ts` for these mappings, applied once the delivery has committed. Each matches the open run that holds the PR in that repo. A failed move is logged, not thrown, because the delivery is already recorded and GitHub's redelivery would be dropped. The poller's next pass catches the same merge, close or review from the PR's state.
   - `pr_merged` moves InReview, or InProgress during address, to Accepted through `merged`, and stores `run.merge_sha`. When the cached check status of `merge_sha` reaches `success`, through `checks_completed` matched on `merge_sha` or the poll in Task 13, the item moves to Done through `dod_verified`. Run contract 8 then sets Done on the board and closes the item. On `failure` the item moves to Failed through `dod_failed`, with a comment linking the failed run. Phase 0 files no bug PBI.
   - `review` with `changes_requested` and a `submittedAt` after `run.reviews_seen_at` moves InReview to Queued through `changes_requested`, with `next_stage = "address"`, per Run contract 10. An older review, or one whose `author` is no allowlisted user's `github_login`, is ignored.
   - `pr_closed` without a merge, by anyone but the factory, moves the item to Abandoned through `withdrawn`.
@@ -1060,7 +1061,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - A `review` webhook with `changes_requested` sends it to Queued. The next claim runs the address stage, which returns it to InReview.
     - **Second item.** A second item is then taken through the same path to Done, so its Red stage runs with the first item's scenarios already green on main.
     - A `pr_merged` webhook moves InReview to Accepted, and green checks on the merge commit move it to Done. The fake adapter shows status Done and `closed: true`.
-  - **Event trail.** The `event` table holds every transition in order, and once both items are Done, `/phase0` reports 2 merged PRs, each with its own cost.
+  - **Event trail.** The `event` table holds every transition in order, and once both items are Done, `/phase0` reports 2 merged PRs, each with its own cost. `/phase0` waits for PBI 15b (#89), so until then the test checks the rows it will read: 2 runs with a `merge_sha`, oldest first, each with a cost summed from its `stage_run` rows.
   - **Sign-off by comment.** A copy of the full path signs off with a `/approve` comment instead of the dashboard, and reaches the same states.
   - **NotReady recovery.** A second item with no acceptance criteria goes to NotReady with a reasons comment. Editing it re-runs the gate.
 - [ ] **Step 2: Run the test.** Expected: FAIL, until the wiring gaps it exposes are closed.
