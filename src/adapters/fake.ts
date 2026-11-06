@@ -191,5 +191,14 @@ export function fakeRepoHost(): RepoHost & {
         .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));
       return [...comments, ...standingSummaries(reviews)];
     },
+    async replyToThread(repo, threadId, body) {
+      const key = [...reviewComments.keys()].find((k) => k.startsWith(`${repo}#`) && reviewComments.get(k)!.some((c) => c.threadId === threadId));
+      if (!key) throw new Error(`no review thread ${threadId} in ${repo}`);
+      const thread = reviewComments.get(key)!.find((c) => c.threadId === threadId)!;
+      reviewComments.get(key)!.push({ threadId, path: thread.path, line: thread.line, author: "factory[bot]", body });
+    },
+    async commentOnPr(repo, n, body) {
+      pr(repo, n).comments.push(body);
+    },
   };
 }

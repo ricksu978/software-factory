@@ -232,7 +232,7 @@ async function pollMergedCi(d: TickDeps) {
         await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_failed", system));
         const body = silent
           ? `No CI ran on main for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`
-          : `CI failed on main for the merge commit ${row.merge_sha}, so the item failed its Definition of Done.`;
+          : `CI failed on main for the merge commit ${row.merge_sha}, so the item failed its Definition of Done. The failed run: https://github.com/${repoName(row.repo_url)}/commit/${row.merge_sha}/checks`;
         await isolated(`commenting CI on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`));
       }
     });

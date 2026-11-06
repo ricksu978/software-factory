@@ -10,7 +10,7 @@ export type FactoryItem = {
 export type FactoryWebhookEvent =
   | { kind: "item_changed"; externalId: string }
   | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
-  | { kind: "pr_closed"; prNumber: number; repo: string }
+  | { kind: "pr_closed"; prNumber: number; repo: string; by: string } // `by`: the login that closed it
   | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; repo: string; login: string; body: string; commentId: string }
   | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }
@@ -80,4 +80,8 @@ export interface RepoHost {
   defaultBranchSha(repo: string): Promise<string>;
   /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
+  /** Adds a reply to one review thread, as the address stage does when it answers a comment instead of changing code. */
+  replyToThread(repo: string, threadId: string, body: string): Promise<void>;
+  /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */
+  commentOnPr(repo: string, prNumber: number, body: string): Promise<void>;
 }

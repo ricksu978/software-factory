@@ -83,9 +83,11 @@ export function parseGitHubWebhook(headers: Record<string, string>, body: unknow
       return { kind: "comment", externalId: str(b.issue.number), repo, login: str(b.comment.user?.login), body: str(b.comment.body), commentId: str(b.comment.id) };
     }
     if (event === "pull_request" && b.action === "closed" && b.pull_request?.number && repo) {
+      // `by` lets the webhook tell the factory's own close, which already moved the item, from anyone else's,
+      // another App's included (repo.trusted_bot names the factory's).
       return b.pull_request.merged
         ? { kind: "pr_merged", prNumber: b.pull_request.number, repo, mergeSha: str(b.pull_request.merge_commit_sha) }
-        : { kind: "pr_closed", prNumber: b.pull_request.number, repo };
+        : { kind: "pr_closed", prNumber: b.pull_request.number, repo, by: str(b.sender?.login) };
     }
     if (event === "pull_request_review" && b.action === "submitted" && b.review && b.pull_request?.number && repo) {
       if (bot(b.review.user)) return { kind: "ignored" };

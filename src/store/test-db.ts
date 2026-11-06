@@ -8,22 +8,23 @@ import { createPool, migrate } from "./db.ts";
 
 const run = promisify(execFile);
 
+type TestDb = { pool: pg.Pool; url: string; stop(opts?: { beforeContainerStop?: () => void }): Promise<void> };
+
 /**
  * A throwaway, migrated Postgres for tests, one server per call. With FACTORY_PG_BIN set, as in a cell (PBI 22), it
  * starts its own server from those binaries in a temp directory, listening on a Unix socket only. Otherwise it needs a
  * Docker daemon and starts a Testcontainers Postgres, as CI does.
  */
-export async function startTestDb(): Promise<{ pool: pg.Pool; url: string; stop(): Promise<void> }> {
+export async function startTestDb(): Promise<TestDb> {
   const bin = process.env.FACTORY_PG_BIN;
   if (bin) return localServer(bin);
   // Loaded only here, so a cell image without dev dependencies can still import this file.
   const { PostgreSqlContainer } = await import("@testcontainers/postgresql");
   const container = await new PostgreSqlContainer("postgres:17").start();
-  const url = container.getConnectionUri();
-  return started(url, () => container.stop().then(() => undefined));
+  return started(container.getConnectionUri(), () => container.stop().then(() => undefined));
 }
 
-async function localServer(bin: string) {
+async function localServer(bin: string): Promise<TestDb> {
   const dir = await mkdtemp(join(tmpdir(), "pg-"));
   const data = join(dir, "data");
   const user = userInfo().username;
@@ -44,8 +45,19 @@ async function localServer(bin: string) {
   return started(url, stop);
 }
 
-async function started(url: string, shutdown: () => Promise<void>) {
+async function started(url: string, shutdown: () => Promise<void>): Promise<TestDb> {
   const pool = createPool(url);
+  // Every client that connected and hasn't yet closed its socket (issue #88). pool.end() resolves once each idle
+  // client is told to end, before its socket closes, and the pool emits `remove` only from client.end()'s callback.
+  // Tracked by identity from the start, so a client still closing from earlier counts, a client that emits `remove`
+  // twice does no harm, and one whose connect failed, which never emits `connect`, is never waited for.
+  const live = new Set<pg.PoolClient>();
+  let drained: (() => void) | null = null;
+  pool.on("connect", (c) => live.add(c));
+  pool.on("remove", (c) => {
+    live.delete(c);
+    if (live.size === 0) drained?.();
+  });
   try {
     await migrate(pool);
   } catch (e) {
@@ -57,8 +69,11 @@ async function started(url: string, shutdown: () => Promise<void>) {
   return {
     pool,
     url,
-    async stop() {
+    async stop(opts = {}) {
+      const closed = new Promise<void>((resolve) => (drained = resolve));
       await pool.end();
+      if (live.size > 0) await closed;
+      opts.beforeContainerStop?.();
       await shutdown();
     },
   };
