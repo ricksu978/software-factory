@@ -39,7 +39,7 @@
 - A merged item reaches Done once CI on main is green for the merge commit, so the target repo's CI runs its scenarios. `pr-reviewer`, stage 10's post-merge verification, stage 11, budget caps, Inbox, Cost view and quarantine belong to Phase 1.
 - In Phase 0b, sign-in goes through Container Apps built-in auth with Microsoft (any Entra directory and personal accounts) and Google. Phase 0a uses the dev identity from Task 15. In both, the app's own `user` table decides access, and roles are viewer, operator and owner.
 - A cell has no Docker daemon, so it skips what needs one. Test files that need Docker use `dbTest` from `src/store/test-db.ts`, which skips them when `FACTORY_DB_TESTS=skip`, and scenarios that need a database carry `@db`, which this repo's `bdd.run` filters out (Task 4). Only this repo's `.factory/dod.md` and `.factory/config.yml` set the variable or the filter. CI uses neither, so the database suites and scenarios still gate every PR through its checks (Run contract 6).
-- Branch protection and rulesets need GitHub Pro or a public repo. This repo is private on the Free plan, and both `gh api repos/ricksu978/software-factory/branches/main/protection` and `.../rulesets` return 403 with "Upgrade to GitHub Pro or make this repository public to enable this feature." Until that changes, Task 8's main-head check stands in. A commit on `main` that belongs to no merged PR sets the kill switch. Deployment environments are missing too: "Users with GitHub Free plans can only configure environments for public repositories", and required reviewers on Free, Pro and Team "are only available for public repositories" ([GitHub](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)). So `deploy.yml` runs only when the owner starts it (Task 19 Steps 1 and 4).
+- This repo is public, decided 2026-11-06. On the Free plan that's what makes branch protection and deployment environments with required reviewers available ([GitHub](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)). `main` takes changes only through a PR with one approving review and a green `lint` check, and refuses force pushes and deletions. Admins can bypass the review, because GitHub won't let the owner approve their own PR. The factory's App holds no admin or bypass rights, so a cell's push token can't write to `main`. Task 1 adds its CI job to the required checks, and Task 19 adds the `production` environment.
 
 ## Review Focus
 
@@ -164,7 +164,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
 - [ ] **Step 4: Write one smoke scenario.** `features/smoke.feature` holds one scenario, and `features/steps/smoke.steps.ts` defines its steps. Run `npm run bdd`. Expected: 1 scenario passed, and `reports/bdd.ndjson` holds a `testCaseFinished` message. If cucumber-js can't load `.ts` step files through Node's type stripping, record the error and switch the `--import` to a loader that can, before going on.
 - [ ] **Step 5: Run `npm run typecheck`.** Expected: exit 0.
 - [ ] **Step 6: Write `.factory/config.yml`** in the shape Task 9's `parseRepoConfig` reads. `bdd.parse` is `npm run bdd -- --dry-run`, which writes the same report and doesn't fail on undefined steps ([cucumber-js](https://raw.githubusercontent.com/cucumber/cucumber-js/main/docs/dry_run.md)), `bdd.run` is `npm run bdd -- --tags "not @db"` (Task 4), `bdd.report` is `reports/bdd.ndjson`, `commands.test` is `FACTORY_DB_TESTS=skip npm test`, and `commands.lint` is the prose lint line from `.factory/dod.md`.
-- [ ] **Step 7: Write `ci.yml`** to run on push and PR with `actions/setup-node` at `26.13.0`, `npm ci`, `npm run typecheck`, `npm test` and `npm run bdd`. Docker must be available on the runner for Testcontainers, so use `ubuntu-latest`. Add `reports/` to `.gitignore`.
+- [ ] **Step 7: Write `ci.yml`** to run on push and PR with `actions/setup-node` at `26.13.0`, `npm ci`, `npm run typecheck`, `npm test` and `npm run bdd`. Docker must be available on the runner for Testcontainers, so use `ubuntu-latest`. Add `reports/` to `.gitignore`. Once `ci.yml` is on `main`, add its job to `main`'s required status checks beside `lint`.
 - [ ] **Step 8: Commit** `chore: project skeleton with a Gherkin runner`.
 
 ---
@@ -310,7 +310,6 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `stage_run.report_ref text`, the BDD report a red or green stage uploaded.
   - `webhook_delivery(id text primary key, received_at timestamptz)`, for dedupe.
   - `item.readiness_policy_sha text`, for the re-gate in Run contract 11.
-  - `repo.main_checked_sha text`, the default branch head that Task 8's main-head check last cleared.
 
   Skip `increment` and `approval`, which belong to Phase 1. The migration also creates role `factory_app` with the grants Task 19 names. Locally the control plane connects as Aspire's database user, so the append-only grant is enforced only in Azure. The test below checks the grant itself. Its `event` grant is `SELECT, INSERT` only.
 - [ ] **Step 2: Write failing tests** in `items.test.ts` against `startTestDb()`:
@@ -394,9 +393,7 @@ export interface RepoHost {
   prState(repo: string, prNumber: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
-  defaultBranchSha(repo: string): Promise<string>;
-  commitsWithoutMergedPr(repo: string, fromSha: string, toSha: string): Promise<string[]>; // commits on the default branch after fromSha that no merged PR contains
-}
+  defaultBranchSha(repo: string): Promise<string>;}
 ```
 
   `contract.ts` exports `backlogContract(name: string, make: () => Promise<{ adapter: BacklogAdapter; seed(item: Partial<FactoryItem>): Promise<string> }>)`. It registers `node:test` cases.
@@ -440,9 +437,7 @@ export interface RepoHost {
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
   - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
   - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
-  - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED`, and null when there is none. That is the poller's backstop for a missed review webhook, under Run contract 10.
-  - `commitsWithoutMergedPr` lists the commits between the two shas through the compare API, and returns each one for which `GET /repos/{o}/{r}/commits/{sha}/pulls` holds no PR with `merged_at` set. A stubbed history of one merged-PR commit and one direct push returns only the direct push.
-- [ ] **Step 2: Run the tests.** Expected: FAIL.
+  - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED`, and null when there is none. That is the poller's backstop for a missed review webhook, under Run contract 10.- [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - `verifySignature` uses `crypto.createHmac` and `crypto.timingSafeEqual` after a length check.
   - The backlog adapter reads Project v2 items through GraphQL `node(id:) { ... on ProjectV2 { items } }`.
@@ -463,12 +458,11 @@ export interface RepoHost {
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
 - Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts (Run contract 11), which it also passes to `gate` as `ctx.readinessSha`. Also `POLL_INTERVAL_MS = 300_000`.
-- Each `pollOnce` does five things:
+- Each `pollOnce` does four things:
   - lists new and changed eligible items from the cursor;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
   - runs `gate` on every Eligible item;
-  - reads `prState` for every InReview item;
-  - checks the default branch head of each repo, as below.
+  - reads `prState` for every InReview item.
 - The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
 
 - [ ] **Step 1: Write failing tests** with the fake adapter:
@@ -490,9 +484,7 @@ export interface RepoHost {
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
   - **Policy change.** After any readiness input changes on the default branch, so `readinessSha` no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text. Adding a missing `dod.md`, or fixing a `pr-review.md` that held a `run:` line, re-gates too, and posts a fresh comment.
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
-  - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
-  - **Main-head check.** When `defaultBranchSha` differs from `repo.main_checked_sha`, the poller calls `commitsWithoutMergedPr` between them. An empty list moves `main_checked_sha` forward. Any commit in the list sets a factory `kill` override with the reason "commit <sha> on main belongs to no merged PR" and comments nothing on items. This stands in for the branch protection this repo can't have (Global Constraints). A null `main_checked_sha` just records the head.
-- [ ] **Step 2: Run the tests.** Expected: FAIL.
+  - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.- [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(watcher): polling with cursor`.
@@ -952,7 +944,7 @@ Phase 0a's exit. The factory runs under `aspire run` and builds one real PBI fro
   - Task 1 added `.factory/config.yml` with real `bdd` and `commands` entries, the Gherkin runner that writes Cucumber Messages to `reports/bdd.ndjson`, and CI that runs the scenarios as well as the unit tests. Done on merge depends on that CI.
   - Check all of these, and add a CODEOWNERS file.
   - In the personal Project's Workflows settings, turn off the built-in workflows that set status, including "Item closed" and "Pull request merged". The factory owns status.
-  - **Branch protection.** If the repo is public or on GitHub Pro by now, require one human review and CI on `main`. Shadow mode posts no `risk-approval`, so that check isn't required yet. Otherwise GitHub refuses protection (Global Constraints), so record in the runbook that Task 8's main-head check stands in, and push to `main` only through PRs, because a direct push trips the kill switch.
+  - **Branch protection.** Confirm `main` still requires a PR, one approving review, `lint` and Task 1's CI job (Global Constraints). Shadow mode posts no `risk-approval`, so that check isn't required yet.
   - Confirm the GitHub App is installed on this repo only.
 - [ ] **Step 3: Run one PBI live, locally.** With `aspire run` up, take the next PBI from this repo's own backlog, labelled `factory` on the personal Project. Expected:
   - A readiness comment within one poll, and no webhooks are needed.
@@ -984,7 +976,7 @@ Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign
   - Log Analytics workspace `log-factory`.
   - Container Apps environment `cae-factory`, Consumption only.
   - ACR `acrfactory<uniqueString>`, Basic. The spec has not priced it, so record its monthly cost in the spike file.
-  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:ricksu978/software-factory:ref:refs/heads/main`. This private Free-plan repo can't have environments (Global Constraints), so `deploy.yml` has only a `workflow_dispatch` trigger and no `push` trigger. Starting it needs `actions: write`, which no cell token carries, so only the owner deploys, and a merge never deploys by itself. If the repo goes public, add a `production` environment with required reviewers and move the subject to `environment:production`.
+  - User-assigned identities `id-factory-control`, `id-factory-cell`, `id-factory-deploy` and `id-factory-migrate`. The deploy identity is the one `deploy.yml` signs in as through OIDC. Its rights stop at the resource group: Owner on `rg-software-factory-aue` only, which it needs for the role assignments below. Its federated credential trusts one subject, `repo:ricksu978/software-factory:environment:production`. `deploy.yml` runs only into the `production` environment, whose required reviewer is the owner, and it has only a `workflow_dispatch` trigger, so a merge never deploys by itself. Starting it needs `actions: write`, which no cell token carries.
   - Storage roles for `id-factory-control`: Storage Blob Data Contributor and Storage Blob Delegator on the storage account, so it can sign write-only SAS URLs with a user delegation key. No account key is used.
   - Key Vault `kv-factory-<uniqueString>` with RBAC and four secrets: `github-app-key`, `github-project-token` (Task 2 Step 5), `claude-oauth-token` and `cell-secret`, a random 32-byte value for signing run tokens. The control identity reads all four. The cell identity reads only `claude-oauth-token`.
   - Storage account with `transcripts` and `reports` containers, Hot LRS.
@@ -995,9 +987,9 @@ Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign
   - An `authConfigs` child on the app with the Microsoft provider (any Entra directory and personal accounts), the Google provider, `unauthenticatedClientAction: RedirectToLoginPage`, and `globalValidation.excludedPaths: ['/webhooks/github', '/internal/cells']`.
   - A custom role on the job for the control identity, granting job start and execution stop. Find the exact action names with `az provider operation show --namespace Microsoft.App`.
 - [ ] **Step 2: Run `az bicep build --file infra/main.bicep`.** Expected: no errors. Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
-- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`. Every later deploy runs through `deploy.yml`.
+- [ ] **Step 2b: Bootstrap once.** The deploy identity can't create itself. So the first deploy is yours, from your own `az login`: `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`. Then add the federated credential above to `id-factory-deploy`, and create the repo's `production` environment with yourself as its required reviewer and `main` as its only deployment branch. Every later deploy runs through `deploy.yml`.
 - [ ] **Step 3: Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials, never a stored secret. It runs in this order, and each step waits for the one before:
-  Its only trigger is `workflow_dispatch`, per the identity bullet in Step 1.
+  Its only trigger is `workflow_dispatch`, and its job runs in the `production` environment, per the identity bullet in Step 1.
   1. Build both Dockerfiles with `docker buildx build --platform linux/amd64`, and push them to ACR with the commit sha as the tag. Build `spike/Dockerfile` the same way and push it as `control-spike:<sha>`. It starts from `node:26.13.0-bookworm`, installs the repo's dependencies and runs `node spike/hello.ts`.
   2. Run the migrations on the new image: `az containerapp job start -n caj-factory-migrate -g rg-software-factory-aue --container-name migrate --image <acr>/control:<sha> --command node src/store/migrate-cli.ts`. The container name and command are passed explicitly, in case a start override replaces the template's container instead of merging into it (Step 10 checks which). Wait until that execution reports Succeeded, and stop the workflow if it doesn't.
   3. Run `az deployment group create` with the new image tags, which updates the app and the jobs. A `workflow_dispatch` input `control_image` overrides the control app's image only. When it's empty, the app gets `control-spike:<sha>`. The real control image polls the board that the local factory is still claiming from, so no Task 19 run deploys it. Task 20 Step 2 changes that default.
