@@ -39,9 +39,16 @@ test("a rejected usage limit stops the run with its reset time", async () => {
   assert.deepEqual(r.limit, { resetsAt: 1762400000 });
 });
 
-test("a rejected usage limit stops the run even when the result says success", async () => {
-  const r = await fold(rateLimit({ status: "rejected", resetsAt: 1762400000 }), result("success", false, {}));
+test("a rejection the run got past, ending in a clean success, doesn't park it", async () => {
+  const r = await fold(rateLimit({ status: "rejected", resetsAt: 1762400000, overageStatus: "allowed" }), result("success", false, {}));
+  assert.equal(r.ok, true);
+  assert.equal(r.limit, null);
+});
+
+test("a rejection with no result keeps its reset time", async () => {
+  const r = await fold(rateLimit({ status: "rejected", resetsAt: 1762400000 }));
   assert.equal(r.ok, false);
+  assert.deepEqual(r.limit, { resetsAt: 1762400000 });
 });
 
 test("a rejected usage limit with no reset time waits 5 hours", async () => {

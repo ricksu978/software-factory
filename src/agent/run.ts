@@ -57,7 +57,8 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omi
       r.tokensOut = models.reduce((s, u) => s + u.outputTokens, 0);
     }
   }
-  if (r.limit) r.ok = false;
+  // A clean success means the run got past any rejection, such as on overage, so it isn't parked until the reset.
+  if (r.ok) r.limit = null;
   r.transcript = lines.map((l) => l + "\n").join("");
   return r;
 }
