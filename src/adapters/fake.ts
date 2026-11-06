@@ -21,7 +21,14 @@ export function fakeBacklog(): ContractTarget {
     item.seq = ++seq;
     item.updatedAt = new Date().toISOString();
   };
-  const copy = ({ seq: _, ...item }: FactoryItem & { seq: number }): FactoryItem => ({ ...item, labels: [...item.labels] });
+  // Items go in and out as deep copies, so neither a caller's arrays nor a returned item can reach the stored state.
+  const copy = ({ seq: _, ...item }: FactoryItem & { seq: number }): FactoryItem => structuredClone(item);
+  let lastAutoId = 0;
+  const autoId = () => {
+    do lastAutoId++;
+    while (items.has(String(lastAutoId)));
+    return String(lastAutoId);
+  };
 
   return {
     adapter: {
@@ -74,11 +81,12 @@ export function fakeBacklog(): ContractTarget {
       },
     },
     async seed(partial) {
-      const externalId = partial.externalId ?? String(items.size + 1);
+      // Seeding an explicit id that exists replaces that item, which is how a test edits one.
+      const externalId = partial.externalId ?? autoId();
       items.set(externalId, {
         sourceId: "fake", title: `item ${externalId}`, body: "", acceptanceCriteria: ["it works"], labels: [OPT_IN_LABEL],
         status: "Backlog", rank: items.size + 1, repo: null, fields: {}, closed: false, updatedAt: new Date().toISOString(),
-        ...partial, externalId, seq: ++seq,
+        ...structuredClone(partial), externalId, seq: ++seq,
       });
       return externalId;
     },
@@ -97,20 +105,21 @@ type Status = "pending" | "success" | "failure";
 
 /**
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
- * `repo@sha`, files by `repo@ref:path`, default branch heads and review comments by `repo#number`.
+ * `repo@sha`, files by `repo@ref:path`, default branch heads and review comments by `repo#number`. A comment marked
+ * `resolved` sits in a resolved thread, and openReviewComments leaves it out.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
   files: Map<string, string>;
   heads: Map<string, string>;
-  reviewComments: Map<string, ReviewComment[]>;
+  reviewComments: Map<string, (ReviewComment & { resolved?: boolean })[]>;
 } {
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
-  const reviewComments = new Map<string, ReviewComment[]>();
+  const reviewComments = new Map<string, (ReviewComment & { resolved?: boolean })[]>();
   const pr = (repo: string, n: number) => {
     const found = prs.find((p) => p.repo === repo && p.number === n);
     if (!found) throw new Error(`no PR ${repo}#${n}`);
@@ -166,7 +175,7 @@ export function fakeRepoHost(): RepoHost & {
       return head;
     },
     async openReviewComments(repo, n) {
-      return reviewComments.get(`${repo}#${n}`) ?? [];
+      return (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
     },
   };
 }
