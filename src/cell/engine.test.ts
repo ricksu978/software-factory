@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
+import { changedFiles, loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -154,6 +154,32 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   return { deps, calls, agentCalls, prs, routes, transitions, started, dir, origin, root, lockSha, run: () => runCell(deps) };
 }
 
+describe("changedFiles", () => {
+  test("lists both sides of a rename and non-ASCII paths verbatim, so the risk floor sees them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "changed-"));
+    try {
+      const g = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+      g("init", "-q", "-b", "main");
+      g("config", "user.email", "t@example.com");
+      g("config", "user.name", "t");
+      mkdirSync(join(dir, ".factory"));
+      writeFileSync(join(dir, ".factory", "dod.md"), "- [ ] Tests pass\n");
+      g("add", "-A");
+      g("commit", "-q", "-m", "base");
+      g("checkout", "-q", "-b", "work");
+      mkdirSync(join(dir, "docs"));
+      g("mv", ".factory/dod.md", "docs/dod.md");
+      mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+      writeFileSync(join(dir, ".github", "workflows", "dé.yml"), "on: push\n");
+      g("add", "-A");
+      g("commit", "-q", "-m", "move and add");
+      assert.deepEqual((await changedFiles(dir, "main...HEAD")).sort(), [".factory/dod.md", ".github/workflows/dé.yml", "docs/dod.md"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runCell", () => {
   test("every cell-mode agent call carries the repo's web tools", async () => {
     const h = harness();
@@ -186,6 +212,13 @@ describe("runCell", () => {
     assert.equal(await h.run(), "done");
     assert.match(h.prs.at(-1)!.body, /## Shadow risk tier\n\n\*\*Medium\*\*[\s\S]*\.factory\/config\.yml/);
     assert.equal(h.transitions().find((t) => t.event === "pr_opened")!.tier, "Medium");
+  });
+
+  test("a classifier failure that isn't a usage limit opens the PR at High with the cause, instead of crashing", async () => {
+    const h = harness({ script: async (a) => (a.mode === "judge" ? { ok: false, text: "API error 529" } : {}) });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs.at(-1)!.body, /## Shadow risk tier\n\n\*\*High\*\*[\s\S]*- classifier run failed: API error 529$/m);
+    assert.equal(h.transitions().find((t) => t.event === "pr_opened")!.tier, "High");
   });
 
   test("a usage limit while classifying parks the run like any other stage's limit", async () => {

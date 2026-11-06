@@ -95,6 +95,16 @@ export function featureTags(text: string): string[] {
   return tags;
 }
 
+/**
+ * Every path the change touches between `range`'s ends, both sides of a rename included and verbatim. Without
+ * --no-renames, `git mv .factory/dod.md docs/dod.md` lists only `docs/dod.md`; without -z, git quotes a non-ASCII path,
+ * so `.github/workflows/dé.yml` starts with `".github`. Either way the risk floor would miss it.
+ */
+export async function changedFiles(dir: string, range: string): Promise<string[]> {
+  const { stdout } = await run("git", ["diff", "--name-only", "-z", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
+  return [...new Set(stdout.split("\0").filter(Boolean))];
+}
+
 /** Every tracked or new .feature file in the checkout, by repo-relative path. */
 async function features(dir: string): Promise<Map<string, string>> {
   const { stdout } = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.feature"], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
@@ -442,13 +452,20 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // written, so the body can show it. Shadow mode: it's recorded, and a person still approves every PR.
   const shadowTier = async (): Promise<{ tier: Tier; reasons: string[] }> => {
     const range = `origin/${ctx.base}...HEAD`;
-    const gitOut = async (...args: string[]) => (await run("git", args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
-    const files = (await gitOut("diff", "--name-only", range)).split("\n").filter(Boolean);
-    const diff = await gitOut("diff", range);
-    return classifyRisk(diff, files, {
-      sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal,
-      agent: async (a) => settle(await d.agent(a)),
-    });
+    try {
+      const files = await changedFiles(dir, range);
+      const diff = (await run("git", ["diff", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
+      return await classifyRisk(diff, files, {
+        sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal,
+        agent: async (a) => settle(await d.agent(a)),
+      });
+    } catch (e) {
+      // A limit or a stop leaves the run as any stage's does. Any other failure, an API error, a timeout or a diff too
+      // big to read, raises the tier instead of crashing the cell after its push, so the PR still opens.
+      if (e instanceof Limited || abort.signal.aborted) throw e;
+      const m = e instanceof Error ? e.message : String(e);
+      return { tier: "High", reasons: [m.startsWith("classifier run failed") ? m : `classifier run failed: ${m}`] };
+    }
   };
 
   const prBody = (summary: string, risk: { tier: Tier; reasons: string[] }) => {
