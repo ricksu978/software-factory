@@ -36,11 +36,13 @@ if (process.env.FACTORY_GH_CONTRACT !== "1") {
     for (const n of created) await client.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { owner, repo, issue_number: n, state: "closed", state_reason: "not_planned" });
   });
 
-  backlogContract("github", async () => ({
-    adapter: githubBacklog({
+  backlogContract("github", async () => {
+    const adapter = githubBacklog({
       app, installationId, owner: { type: "user", login: env.FACTORY_GH_OWNER }, projectToken: env.GITHUB_PROJECT_TOKEN,
       projectNumber: Number(env.FACTORY_GH_PROJECT), fieldMap,
-    }),
+    });
+    return {
+    adapter,
     async seed(item) {
       const client = await gh();
       const issue = (await client.request("POST /repos/{owner}/{repo}/issues", {
@@ -50,11 +52,15 @@ if (process.env.FACTORY_GH_CONTRACT !== "1") {
       created.push(issue.number);
       if (item.closed) await client.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { owner, repo, issue_number: issue.number, state: "closed" });
       await board.graphql("mutation($p: ID!, $c: ID!) { addProjectV2ItemById(input: { projectId: $p, contentId: $c }) { item { id } } }", { p: await project(), c: issue.node_id });
-      return String(issue.number);
+      // A Project's item list lags a new item by a moment, so seeding waits until the board shows it.
+      const id = String(issue.number);
+      for (let i = 0; i < 20 && !(await adapter.getItem(id)); i++) await new Promise((r) => setTimeout(r, 1000));
+      return id;
     },
     async comments(externalId) {
       const list = (await (await gh()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { owner, repo, issue_number: Number(externalId), per_page: 100 })).data as { body: string }[];
       return list.map((c) => c.body);
     },
-  }));
+    };
+  });
 }
