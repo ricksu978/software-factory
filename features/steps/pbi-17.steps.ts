@@ -10,12 +10,24 @@ import { load, long, need, testDb } from "./pbi-8.steps.ts";
 const NOW = new Date("2026-11-06T10:00:00Z");
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 
+const REPO = "ricksu978/software-factory";
+
 type Launcher = { start(env: Record<string, string>): Promise<string>; stop(executionName: string): Promise<void> };
-type Tick = (deps: { pool: pg.Pool; launcher: Launcher; now: Date; killFlag: boolean; repoHost: unknown }) => Promise<unknown>;
+type Tick = (deps: {
+  pool: pg.Pool; launcher: Launcher; now: Date; killFlag: boolean; repoHost: unknown;
+  backlogFor: (sourceId: string) => unknown; secret: string; controlUrl: string; sopVersion: string;
+}) => Promise<unknown>;
+type Fakes = {
+  fakeBacklog: () => { adapter: unknown; seed(item: { externalId: string; repo: string }): Promise<string> };
+  fakeRepoHost: () => { heads: Map<string, string> };
+};
 type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill";
 type SetOverride = (c: pg.PoolClient, o: { scope: "factory" | "item"; targetId: string | null; kind: OverrideKind; reason: string; createdBy: string; expiresAt: Date | null }) => Promise<void>;
 
-type Ctx = { items: Record<string, string>; operator?: string; started: Record<string, string>[]; stopped: string[]; ticked: boolean; ranks: number };
+type Ctx = {
+  items: Record<string, string>; operator?: string; started: Record<string, string>[]; stopped: string[]; ticked: boolean; ranks: number;
+  backlog?: ReturnType<Fakes["fakeBacklog"]>; repoHost?: ReturnType<Fakes["fakeRepoHost"]>;
+};
 
 function ctx(world: object): Ctx {
   const w = world as { pbi17?: Ctx };
@@ -37,11 +49,14 @@ function recorder(c: Ctx): Launcher {
 
 async function tick(c: Ctx, killFlag = false) {
   const scheduler = await load<{ tick: Tick }>("src/scheduler/scheduler.ts");
-  const fake = await load<{ fakeRepoHost: () => unknown }>("src/adapters/fake.ts");
-  if (!scheduler || !fake) return;
+  if (!scheduler || !c.backlog || !c.repoHost) return;
   c.started = [];
   c.stopped = [];
-  await scheduler.tick({ pool: need().pool, launcher: recorder(c), now: NOW, killFlag, repoHost: fake.fakeRepoHost() });
+  const backlog = c.backlog.adapter;
+  await scheduler.tick({
+    pool: need().pool, launcher: recorder(c), now: NOW, killFlag, repoHost: c.repoHost, backlogFor: () => backlog,
+    secret: "scenario-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
+  });
   c.ticked = true;
 }
 
@@ -66,6 +81,7 @@ async function newItem(c: Ctx, name: string, state: string, extra: { rank?: numb
     [source.rows[0].id, name, `item ${name}`, state, extra.rank ?? 100 + ++c.ranks, extra.owner ? 1 : 0, extra.owner ?? null, extra.expires ?? null],
   );
   c.items[name] = r.rows[0].id;
+  await c.backlog?.seed({ externalId: name, repo: REPO });
   return r.rows[0].id;
 }
 
@@ -92,10 +108,19 @@ function ran(c: Ctx) {
 Given("a fresh factory database with WIP 1 and a review capacity of 3", long, async function () {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
-  await d.pool.query("truncate item, override, \"user\" cascade");
+  await d.pool.query("truncate item, override, \"user\", repo cascade");
   await d.pool.query("update wip_policy set mode = 'fixed', current_wip = 1, review_capacity = 3, usage_paused_until = null");
+  await d.pool.query("insert into repo (host_adapter, url) values ('github', $1)", [`https://github.com/${REPO}`]);
   const u = await d.pool.query<{ id: string }>("insert into \"user\" (provider, subject, role) values ('dev', 'operator', 'operator') returning id");
-  ctx(this).operator = u.rows[0].id;
+  const c = ctx(this);
+  c.operator = u.rows[0].id;
+  // The backlog and repo host the scheduler reads, as Task 6's in-memory fakes. Absent fakes leave the tick unrun.
+  const fakes = await load<Fakes>("src/adapters/fake.ts");
+  if (fakes) {
+    c.backlog = fakes.fakeBacklog();
+    c.repoHost = fakes.fakeRepoHost();
+    c.repoHost.heads.set(REPO, "c0ffee0");
+  }
 });
 
 Given("item {string} is running in cell {string} with a live lease", long, async function (name: string, cell: string) {
@@ -212,10 +237,13 @@ Then("item {string} is {string}", long, async function (name: string, expected: 
   assert.equal((await state(c.items[name])).state, expected);
 });
 
+// The tick may claim the same item again straight after, so its current state proves nothing. The event log shows
+// whether it left: a transition out of that state on this tick.
 Then("item {string} has left {string}", long, async function (name: string, left: string) {
   const c = ctx(this);
   ran(c);
-  assert.notEqual((await state(c.items[name])).state, left);
+  const moves = await need().pool.query("select 1 from event where item_id = $1 and kind = 'transition' and payload->>'from' = $2", [c.items[name], left]);
+  assert.ok(moves.rowCount, `item ${name} never left ${left}`);
 });
 
 Then("cells {string} and {string} are stopped", function (a: string, b: string) {
