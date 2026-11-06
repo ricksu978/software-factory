@@ -5,9 +5,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Steps record what they observe and assert only in Then, so a missing AppHost or image shows as red, not as a crash.
+// The AppHost runs with `--isolated` and FACTORY_FLOAT_PORTS=1, so Aspire picks control's and Azurite's ports, and
+// sessions in different worktrees never clash on 7400 or 7410. Two runs from the SAME worktree still share its named
+// data volumes, so run these scenarios once per worktree at a time. Every aspire command names this AppHost with
+// --apphost, and control's URLs come from `aspire describe` once it's up.
 const repo = process.cwd();
-const control = "http://localhost:7400";
-const cellControl = "http://host.docker.internal:7400";
+const APPHOST = "--apphost . --non-interactive --nologo";
+let control = "";
+let cellControl = "";
 const long = { timeout: 600_000 };
 
 type Ctx = {
@@ -27,13 +32,14 @@ function ctx(world: object): Ctx {
   return w.pbi6;
 }
 
-function sh(command: string, input?: string): { status: number | null; out: string; stdout: string } {
-  const r = spawnSync(command, { cwd: repo, shell: true, encoding: "utf8", input });
-  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
+function sh(command: string, input?: string): { status: number | null; out: string; stdout: string; stderr: string } {
+  const r = spawnSync(command, { cwd: repo, shell: true, encoding: "utf8", input, env: { ...process.env, FACTORY_FLOAT_PORTS: "1" } });
+  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
 // Retries because a restart leaves fetch holding a dead keep-alive socket to the old process.
 async function get(path: string): Promise<{ status: number; body: string } | null> {
+  if (!control) return null;
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
       const r = await fetch(`${control}${path}`, { signal: AbortSignal.timeout(5_000) });
@@ -45,15 +51,35 @@ async function get(path: string): Promise<{ status: number; body: string } | nul
   return null;
 }
 
+/**
+ * `aspire describe` for one resource, or every resource when none is named, parsed from the JSON on stdout. It hands
+ * back the exit status and stderr, never stdout, because stdout shows environment values such as FACTORY_DB_URI.
+ */
+function describe(resource = ""): { status: number | null; stderr: string; doc: { resources: Record<string, any>[] } | null } {
+  const r = sh(`aspire describe ${resource} --format Json ${APPHOST}`);
+  try {
+    return { status: r.status, stderr: r.stderr, doc: JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) };
+  } catch {
+    return { status: r.status, stderr: r.stderr, doc: null };
+  }
+}
+
 async function startAspire(c: Ctx): Promise<void> {
   c.started = true;
-  sh("aspire start --non-interactive --nologo");
-  const waited = sh("aspire wait control --status up --timeout 300 --non-interactive --nologo");
-  c.up = waited.status === 0 && (await get("/")) !== null;
+  control = "";
+  cellControl = "";
+  sh(`aspire start --isolated ${APPHOST}`);
+  const waited = sh(`aspire wait control --status up --timeout 300 ${APPHOST}`);
+  const url = describe("control").doc?.resources[0]?.urls?.[0]?.url;
+  if (waited.status === 0 && typeof url === "string") {
+    control = url.replace(/\/$/, "");
+    cellControl = control.replace("localhost", "host.docker.internal");
+  }
+  c.up = (await get("/")) !== null;
 }
 
 function stopAspire(): void {
-  sh("aspire stop --non-interactive --nologo");
+  sh(`aspire stop ${APPHOST}`);
 }
 
 async function runCount(): Promise<number | null> {
@@ -81,8 +107,20 @@ After({ tags: "@local" }, function () {
   if (ctx(this).started) stopAspire();
 });
 
-When("I start {string} and wait until the control resource answers on port {int}", long, async function (_cmd: string, _port: number) {
+When("I start {string} and wait until the control resource answers", long, async function (_cmd: string) {
   await startAspire(ctx(this));
+});
+
+// CELL_CONTROL_URL is what the launcher hands each cell, so it must name the port control really answers on, pinned or
+// floated. Read from `aspire describe`, which shows the resource's environment values.
+Then("the control resource tells cells the port it answers on", function () {
+  assert.ok(ctx(this).up, "the AppHost never came up");
+  const res = describe("control").doc?.resources[0];
+  const told = res?.environment?.CELL_CONTROL_URL;
+  // Names only: describe shows values, and FACTORY_DB_URI carries the database password.
+  assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL among ${JSON.stringify(Object.keys(res?.environment ?? {}))}`);
+  assert.equal(new URL(told).hostname, "host.docker.internal");
+  assert.equal(new URL(told).port, new URL(control).port, `CELL_CONTROL_URL ${told} doesn't name control's port, ${control}`);
 });
 
 // Asks Aspire which container and named volume belong to this AppHost's resource, then checks that exact
@@ -91,12 +129,10 @@ When("I start {string} and wait until the control resource answers on port {int}
 Then("the {string} and {string} containers are running, each with a data volume", function (a: string, b: string) {
   assert.ok(ctx(this).up, "the AppHost never came up");
   for (const resource of [a, b]) {
-    const r = sh(`aspire describe ${resource} --format Json --non-interactive --nologo`);
-    const doc = JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) as { resources: { properties?: Record<string, unknown>; volumes?: unknown }[] };
-    const res = doc.resources[0];
+    const res = describe(resource).doc?.resources[0];
     const id = res?.properties?.["container.id"];
     assert.ok(typeof id === "string" && id, `aspire describe gave no container for "${resource}"`);
-    const volumes = ([] as { source?: string; mountType?: string }[]).concat((res.volumes ?? []) as never);
+    const volumes = ([] as { source?: string; mountType?: string }[]).concat((res?.volumes ?? []) as never);
     const named = volumes.find((v) => v.mountType === "volume" && v.source?.endsWith("-data"));
     assert.ok(named?.source, `"${resource}" has no named data volume in ${JSON.stringify(res.volumes)}`);
     const state = sh(`docker inspect --format "{{.State.Running}} {{range .Mounts}}{{.Name}} {{end}}" ${id}`).out;
@@ -107,14 +143,10 @@ Then("the {string} and {string} containers are running, each with a data volume"
 
 Then("the {string} resource has exited with code {int}", function (resource: string, code: number) {
   assert.ok(ctx(this).up, "the AppHost never came up");
-  const r = sh(`aspire describe ${resource} --format Json --non-interactive --nologo`);
-  let doc: unknown = null;
-  try {
-    doc = JSON.parse(r.stdout.slice(r.stdout.indexOf("{")));
-  } catch {
-    assert.fail(`aspire describe gave no JSON:\n${r.out}`);
-  }
-  assert.equal(findKey(doc, /^exit_?code$/i), code, `exit code of "${resource}" in:\n${r.out}`);
+  const r = describe(resource);
+  assert.ok(r.doc, `aspire describe gave no JSON, exit status ${r.status}, stderr:\n${r.stderr}`);
+  // The resource's state, never the whole describe output, which shows environment values such as FACTORY_DB_URI.
+  assert.equal(findKey(r.doc, /^exit_?code$/i), code, `exit code of "${resource}", in state ${String(r.doc.resources[0]?.state)}`);
 });
 
 Given('{string} has run once and the migrate probe recorded its run count', long, async function (_cmd: string) {
