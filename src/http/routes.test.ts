@@ -107,6 +107,21 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!next.includes("fresh item<"), "a fresh item shows as next while the brake is on");
   });
 
+  test("Not ready shows an engine rule's reason and a dor.md line's criterion", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("NotReady", "held back");
+    await db.pool.query(
+      `insert into policy_result (item_id, file, source, criterion_index, criterion, status, reason) values
+       ($1, 'dor', 'repo', 0, 'engine rule', 'failed', 'The item depends on #7, which is still open'),
+       ($1, 'dor', 'repo', 1, 'Has a Size of 5 or less', 'failed', 'Size is 8')`, [id],
+    );
+    const { html } = await get("/", "octo");
+    const view = html.slice(html.indexOf(">Not ready<"), html.indexOf("<h2", html.indexOf(">Not ready<")));
+    assert.ok(view.includes("The item depends on #7, which is still open"), view);
+    assert.ok(view.includes("Has a Size of 5 or less"), view);
+    assert.ok(!view.includes("engine rule"), view);
+  });
+
   test("an item with two open questions counts and lists once", async () => {
     await person("octo", "viewer");
     const { id } = await item("NeedsInput", "two questions");

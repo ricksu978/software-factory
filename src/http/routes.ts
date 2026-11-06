@@ -65,8 +65,10 @@ async function floor(pool: pg.Pool) {
      from item i where i.state = 'InReview' order by since nulls last, i.title`,
   )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
+  // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
   const notReady = (await pool.query<{ id: string; title: string; failed: string[] }>(
-    `select i.id, i.title, coalesce(array_agg(p.criterion order by p.criterion_index) filter (where p.id is not null), '{}') as failed
+    `select i.id, i.title, coalesce(array_agg(case when p.criterion_index > 0 then p.criterion else p.reason end order by p.criterion_index)
+       filter (where p.id is not null), '{}') as failed
      from item i left join policy_result p on p.item_id = i.id and p.file = 'dor' and p.status = 'failed'
        and p.at = (select max(at) from policy_result where item_id = i.id and file = 'dor')
      where i.state = 'NotReady' group by i.id, i.title order by i.title`,
