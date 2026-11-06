@@ -273,14 +273,20 @@ describe("scheduler", dbTest, () => {
   });
 
   test("after a re-queue reopens a question, its reminders come again", async () => {
-    const id = await item("1", "Abandoned");
+    const id = await item("1", "SignOff");
     await openRun(id, "next_stage = 'sign-off'");
-    await db.pool.query("insert into question (item_id, kind, body, asked_at, reminders_sent) values ($1, 'sign_off', 'q', $2, 2)", [id, ago(5 * DAY)]);
-    await backlog.adapter.comment("1", "first round", `reminder:x`);
+    await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'sign_off', 'q', $2)", [id, ago(4 * DAY + 1)]);
+    const reminders = async () => (await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length;
+    await run(); // the first round's reminder, posted at 4 days
+    assert.equal(await reminders(), 1);
+    // An operator abandons it, then re-queues it, which resets the clock.
+    await db.pool.query("update item set state = 'Abandoned' where id = $1", [id]);
+    await db.pool.query("update wip_policy set current_wip = 0");
     await override("requeue", id);
     await run();
-    await run(new Date(NOW.getTime() + 2 * DAY + 1));
-    assert.equal((await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length, 1);
+    // 4 days on, the same reminder count is due again. A key without asked_at would match the first round's and be skipped.
+    await run(new Date(NOW.getTime() + 4 * DAY + 1));
+    assert.equal(await reminders(), 2);
   });
 
   test("resume records who lifted the pause, and why", async () => {

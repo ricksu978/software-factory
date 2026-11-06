@@ -3,7 +3,8 @@
 //   tls   a CONNECT tunnel, for the HTTPS hosts. Nothing else may tunnel, because a tunnel can't be inspected.
 //   http  plain HTTP forwarding, for the control plane, whose every route checks the run token itself.
 //   sas   plain HTTP forwarding for Azurite, only for a request that carries a SAS `sig=` and no Authorization
-//         header, so a cell can use the write-only URLs it's handed but can't sign requests with the emulator's key.
+//         header, so no shared-key request gets through. That does not stop a forged SAS: Azurite's default
+//         account key is public, so a steered cell can sign its own. The plan records that residual risk.
 // Everything else gets 403. Built-in modules only.
 import { createServer, request } from "node:http";
 import { connect } from "node:net";
