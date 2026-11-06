@@ -94,14 +94,16 @@ export function redGate(results: Results, pbiTag: string, expected: string[]): G
     if (r.verdict === "green") findings.push(`scenario passes before any behaviour exists: ${r.name}`);
     if (r.verdict === "crash") findings.push(`scenario crashed instead of failing on a Then: ${r.name}: ${r.reason}`);
   }
-  if (mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
   // Counted, not just named: a Scenario Outline's rows share one name, and a tag on one Examples block
   // can keep some rows out of the cell while the others run.
   const ran = new Map<string, number>();
   for (const r of mine) ran.set(r.name, (ran.get(r.name) ?? 0) + 1);
   const want = new Map<string, number>();
   for (const name of expected) want.set(name, (want.get(name) ?? 0) + 1);
-  for (const [name, n] of want) if ((ran.get(name) ?? 0) < n) findings.push(`not run in the cell: ${name}`);
+  const notRun = [...want].filter(([name, n]) => (ran.get(name) ?? 0) < n).map(([name]) => name);
+  // Only when every expected scenario ran: if some didn't, the ones that did don't show the item is all @regression.
+  if (notRun.length === 0 && mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
+  for (const name of notRun) findings.push(`not run in the cell: ${name}`);
   if (mine.length === 0 && expected.length === 0) findings.push(`no scenario carries ${pbiTag}`);
   return { ok: findings.length === 0, findings };
 }

@@ -90,6 +90,12 @@ test("a crashed @regression scenario's finding carries the crash reason", () => 
   assert.deepEqual(redGate(r, "@pbi-482", ["broken", "new"]).findings, ['regression scenario doesn\'t pass before the build: broken: crash: UNDEFINED at "the hash is stable"']);
 });
 
+test("an item whose new-behaviour scenarios were filtered out gets only the not-run finding", () => {
+  // `not @db` kept "new" out of the cell, so only the @regression scenario ran.
+  const r = results([["still passes", ["@pbi-482", "@regression"], "green"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["still passes", "new"]).findings, ["not run in the cell: new"]);
+});
+
 test("red fails an item whose every scenario is @regression", () => {
   const r = results([["still passes", ["@pbi-482", "@regression"], "green"]]);
   assert.deepEqual(redGate(r, "@pbi-482", ["still passes"]).findings, ["every scenario carrying @pbi-482 is @regression, so Red proves nothing"]);
