@@ -676,10 +676,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - a `Content-Encoding` other than `identity`;
     - a body that `JSON.parse` rejects;
     - an `mcp_servers` key;
-    - a `tools` entry whose `type` is neither absent nor `custom`, unless the type starts with `web_search_` and `webTools` holds `WebSearch`, or starts with `web_fetch_` and `webTools` holds `WebFetch`;
+    - a `tools` entry whose `type` is neither absent nor `custom`, unless the type starts with `web_search_` and `webTools` holds `WebSearch`. A `web_fetch_*` tool is always refused: the API fetches its URLs from Anthropic's servers ([web fetch tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)), while Claude Code's WebFetch fetches in the cell and never sends it, so `WebFetch` in `webTools` only lifts the agent's deny list;
     - an object anywhere in the body whose `source` is an object with a `type` other than `base64`, `text` or `content`. A `url` source makes Anthropic's servers fetch that URL ([vision](https://platform.claude.com/docs/en/build-with-claude/vision), [PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support)), which is another way past the egress allowlist.
 
-    Claude Code sends its own tools as custom tools and its images as base64, so its requests pass. What goes upstream is `JSON.stringify` of the object the gateway checked, with `content-length` reset, so a parser that reads the original bytes differently, such as one keeping the first of two `tools` keys, never sees them.
+    Claude Code sends its own tools as custom tools and its images as base64, so its requests pass. What goes upstream is `JSON.stringify` of the object the gateway checked, with `content-length` reset and `transfer-encoding` dropped, so a parser that reads the original bytes differently, such as one keeping the first of two `tools` keys, never sees them.
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
   - **Model gateway.** With a fake upstream, a stand-in for the current generation reaches it with the owner's token. A forged stand-in, one from the previous generation after a re-claim, and a malformed one (no dots, a non-numeric generation) each get 401, and the fake upstream receives nothing.
@@ -687,7 +687,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - a body whose `tools` holds a custom tool and whose messages hold a base64 image reaches the upstream;
     - each of these gets 400 and the upstream receives nothing: a `tools` entry of type `web_search_20250305`, `web_fetch_20250910` or `code_execution_20250522`; an `mcp_servers` key; an image with `source: { type: "url" }` in a message; a document with a `url` source inside a `tool_result`; a body that isn't JSON; a body with `Content-Encoding: gzip`;
     - a body with two `tools` keys, a web search one first and a custom one last, reaches the upstream holding only the custom one;
-    - with `webTools: ["WebSearch"]`, the web search body reaches the upstream and the web fetch one still gets 400;
+    - with `webTools: ["WebSearch", "WebFetch"]`, the web search body reaches the upstream and the web fetch one still gets 400;
+    - a chunked request reaches the upstream with a `content-length` and no `transfer-encoding`;
     - a 33 MiB body gets 413.
 
     In `cell-api.test.ts`, the run's config is read once across two model requests, and a failed read gets 503. The streaming and abort tests still pass, since only the request body is buffered.
