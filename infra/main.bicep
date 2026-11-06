@@ -224,7 +224,9 @@ resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   }
 }
 
-// 0.0.0.0 to 0.0.0.0 admits Azure services only, so no GitHub runner or laptop connects directly.
+// 0.0.0.0 to 0.0.0.0 admits every Azure IP, other customers' included, so a GitHub-hosted runner reaches port 5432.
+// Entra-only auth is the boundary. Only id-factory-migrate and id-factory-control ever get a Postgres principal.
+// https://learn.microsoft.com/en-us/azure/postgresql/security/security-firewall-rules
 resource pgAzureOnly 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
   parent: pg
   name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
