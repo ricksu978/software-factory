@@ -6,7 +6,7 @@
 
 **Architecture.** One TypeScript codebase with two entry points. The control plane runs the watcher, scheduler, dashboard and cell API in one process: a Node process under Aspire in Phase 0a, and a single always-on Container App in Phase 0b. A cell runs once per PBI, as a local Docker container in Phase 0a and a Container Apps job execution in Phase 0b, and drives the Claude Agent SDK through the SOP stages. Cells never touch Postgres. They talk to the control plane's cell API with a per-run token fenced by the lease generation. Postgres is the only state store, and every state change appends to the `event` table.
 
-**Tech Stack.** Node 26.13.0 LTS running `.ts` files directly through type stripping, `node:test`, TypeScript 7.0.2 for type checks only, `pg` 8.23.1, `yaml` 2.9.1, `@anthropic-ai/claude-agent-sdk` 0.3.318, `@octokit/app` 16.1.4, `@azure/identity` 4.14.1, `@azure/arm-appcontainers` 4.0.0, `@azure/storage-blob` 12.34.0, `@testcontainers/postgresql` 12.2.1, `@cucumber/cucumber` 13.3.0 for the Gherkin runner, Bicep for infrastructure.
+**Tech Stack.** Node 26.13.0 LTS running `.ts` files directly through type stripping, `node:test`, TypeScript 7.0.2 for type checks only, `pg` 8.23.1, `yaml` 2.9.1, `@anthropic-ai/claude-agent-sdk` 0.3.318, `@octokit/app` 16.1.4, `@azure/identity` 4.14.1, `@azure/arm-appcontainers` 4.0.0, `@azure/storage-blob` 12.34.0, `@testcontainers/postgresql` 12.2.1, `@cucumber/cucumber` 13.3.0 for the Gherkin runner, `@types/node` 26.6.6 for the type check, Bicep for infrastructure.
 
 **Spec.** `docs/superpowers/specs/2026-11-05-software-factory-design.html`, as revised on this plan's branch with the 14 flow-review fixes. §13's Phase 0 row is the scope. §14 lists the settled decisions this plan does not reopen.
 
@@ -156,7 +156,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
 ### Task 1: Project skeleton
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `.github/workflows/ci.yml`, `.gitignore`, `src/core/smoke.test.ts`, `features/smoke.feature`, `features/steps/smoke.steps.ts`, `.factory/config.yml`
+- Create: `package.json`, `tsconfig.json`, `.github/workflows/ci.yml`, `.gitignore`, `src/core/smoke.test.ts`, `features/pbi-5-project-skeleton.feature`, `features/steps/pbi-5.steps.ts`, `.factory/config.yml`
 
 **Interfaces:**
 - Produces: `npm test` runs `node --test "src/**/*.test.ts"`. `npm run typecheck` runs `tsc --noEmit`. `npm run bdd` runs every feature file with cucumber-js and writes Cucumber Messages to `reports/bdd.ndjson`, the report Task 10 reads. Imports use explicit `.ts` extensions.
@@ -164,7 +164,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
 - [ ] **Step 1: Write `package.json`** with `"type": "module"`, `"engines": {"node": ">=26.13.0"}`, the exact versions from the Tech Stack line, and scripts `test`, `typecheck`, `bdd` (`cucumber-js --import "features/steps/**/*.ts" --format message:reports/bdd.ndjson`), `start:control` (`node src/main.ts`) and `start:cell` (`node src/cell/main.ts`).
 - [ ] **Step 2: Write `tsconfig.json`** with `strict`, `noEmit`, `module: nodenext`, `erasableSyntaxOnly`, `verbatimModuleSyntax` and `allowImportingTsExtensions`. Erasable syntax means no `enum`, `namespace` or parameter properties anywhere in the codebase.
 - [ ] **Step 3: Write one smoke test** `src/core/smoke.test.ts` that asserts `1 + 1 === 2`, then run `npm test`. Expected: 1 pass.
-- [ ] **Step 4: Write one smoke scenario.** `features/smoke.feature` holds one scenario, and `features/steps/smoke.steps.ts` defines its steps. Run `npm run bdd`. Expected: 1 scenario passed, and `reports/bdd.ndjson` holds a `testCaseFinished` message. If cucumber-js can't load `.ts` step files through Node's type stripping, record the error and switch the `--import` to a loader that can, before going on.
+- [ ] **Step 4: Write the item's scenarios.** PBI 1's own feature file, `features/pbi-5-project-skeleton.feature`, holds one scenario per acceptance criterion, and `features/steps/pbi-5.steps.ts` defines their steps. One of them runs `npm run bdd` in a scratch copy of the project and checks its report, so no separate smoke scenario is needed. Run `npm run bdd`. Expected: every scenario passes, and `reports/bdd.ndjson` holds a `testCaseFinished` message for each. cucumber-js 13.3.0 loads the `.ts` step files through Node 26's type stripping with no loader.
 - [ ] **Step 5: Run `npm run typecheck`.** Expected: exit 0.
 - [ ] **Step 6: Write `.factory/config.yml`** in the shape Task 9's `parseRepoConfig` reads. `bdd.parse` is `npm run bdd -- --dry-run`, which writes the same report and doesn't fail on undefined steps ([cucumber-js](https://raw.githubusercontent.com/cucumber/cucumber-js/main/docs/dry_run.md)), `bdd.run` is `npm run bdd -- --tags "not @db"` (Task 4), `bdd.report` is `reports/bdd.ndjson`, `commands.test` is `FACTORY_DB_TESTS=skip npm test`, and `commands.lint` is the prose lint line from `.factory/dod.md`.
 - [ ] **Step 7: Write `ci.yml`** to run on push and PR with `actions/setup-node` at `26.13.0`, `npm ci`, `npm run typecheck`, `npm test` and `npm run bdd`. Docker must be available on the runner for Testcontainers, so use `ubuntu-latest`. Add `reports/` to `.gitignore`. Once `ci.yml` is on `main`, add its job to `main`'s required status checks beside `lint`.
