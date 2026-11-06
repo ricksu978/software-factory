@@ -66,7 +66,7 @@ These rules hold across every task. A task that touches one of them follows this
    - `redGate` and `traceability` consider only scenarios carrying that tag.
    - `greenGate` requires every scenario in the suite to be green, which keeps earlier items' scenarios as regression tests.
    - At sign-off, `run.locked_files` records the files carrying the tag, and `matchesLock` diffs only those files. So other items merged into the base never trip the lock.
-5. **Cell context.** The cell's env holds only `RUN_ID`, `ITEM_ID`, `GENERATION`, `RUN_TOKEN`, `CONTROL_URL` and `RESUME_FROM`, plus `CLAUDE_CODE_OAUTH_TOKEN`. The scheduler passes the six. The token comes from the platform: a Key Vault reference on the job in Azure, and `dockerLauncher` locally (Task 13). Everything else comes from `GET /internal/cells/:runId/context`:
+5. **Cell context.** The cell's env holds only `RUN_ID`, `ITEM_ID`, `GENERATION`, `RUN_TOKEN`, `CONTROL_URL` and `RESUME_FROM`, plus `CLAUDE_CODE_OAUTH_TOKEN`. The scheduler passes the six. The token comes from the platform: a Key Vault reference on the job in Azure, and `dockerLauncher` locally (Task 13). Locally `dockerLauncher` also adds the egress variables from Task 13: the proxy variables in both cases, `NODE_USE_ENV_PROXY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `ENABLE_CLAUDEAI_MCP_SERVERS`. None of them carries a secret. Everything else comes from `GET /internal/cells/:runId/context`:
    - the item's external id, title and acceptance criteria;
    - `nextStage`;
    - the latest decision or answer, with its note;
@@ -98,7 +98,7 @@ These rules hold across every task. A task that touches one of them follows this
     - **Loading.** The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`. Readiness has no run yet, so it reads the default branch head. A read that returns 404 means the file is absent. Any other read error throws, and the step retries on its next turn. A read error never falls back to a default.
     - **Defaults.** An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`, except `dod.md`, which has no default. A `Policy.sha` is the SHA-256 of its raw text, whether it came from the repo or a default, so a changed default counts as a policy change. Both images copy the factory's `policy/` folder to `/app/policy`, which is the default value of `FACTORY_POLICY_DIR`. A repo file replaces its default whole.
     - **Criteria.** Only `dor.md`, `pr-review.md` and `dod.md` have criteria, one per top-level `- [ ]` line, numbered from 1 in file order. The judge answers one JSON line per criterion: `{"index","status","reason"}`, where `status` is `passed`, `failed` or, in `dod.md` only, `person`. `person` means the line can only be met by a person or after merge, such as "deployed to staging". It goes to the PR checklist unticked and never counts as a fail. A missing index fails, and when an index appears twice, a fail wins. `scenarios.md` and `risk.md` are guidance, given whole to the agent that uses them.
-    - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`. `loadPolicy` rejects it in any other file with `PolicyError`. The cell runs `dod.md` commands at the end of green, in the checkout, as `execFile("sh", ["-c", command], { cwd, timeout: 900_000, env: { PATH, HOME, CI: "true" } })`. That env carries none of the cell's tokens. It isn't a sandbox, though: the command runs as the cell's own user, as `commands.test` does and as the agent does. So it has no more reach than the agent that wrote the code already has. The `bdd.*` and `commands.*` lines in `config.yml` run the same way, through `sh -c` in the checkout, so they may use shell syntax such as `VAR=value` and `$(...)`.
+    - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`. `loadPolicy` rejects it in any other file with `PolicyError`. The cell runs `dod.md` commands at the end of green, in the checkout, as `execFile("sh", ["-c", command], { cwd, timeout: 900_000, env: { PATH, HOME, CI: "true", ...proxy } })`, where `proxy` is the four proxy variables when the cell has them (Run contract 5). Without them a command that needs the network, such as `npm ci`, fails locally. That env carries none of the cell's tokens. It isn't a sandbox, though: the command runs as the cell's own user, as `commands.test` does and as the agent does. So it has no more reach than the agent that wrote the code already has. The `bdd.*` and `commands.*` lines in `config.yml` run the same way, through `sh -c` in the checkout, so they may use shell syntax such as `VAR=value` and `$(...)`.
     - **Fresh DoD.** Self-review and address can push code after green, and CI may not run a `run:` line such as `run: npm run e2e`. So each `dod.md` verdict records the commit it was checked at, in `policy_result.checked_sha`. Open-pr, and address before it posts `pr_opened`, check `dod.md` again whenever `git.head()` differs from `ctx.dodCheckedSha`. A failed line found there sends open-pr back to green, counted against green's retries, and counts as a failed address attempt. The PR checklist names the commit its verdicts were checked at.
     - **Results.** Every result is stored in `policy_result`, with `source` set to `repo` or `default`. The control plane writes readiness rows itself, and the cell sends its rows through `POST /policy-results` (Task 12).
     - **Re-gating.** `readinessSha(texts)` (Task 9) is the SHA-256 over every file the readiness check reads: the five policy files and `.factory/config.yml`. Each file contributes its raw text as read, the default's text when the repo has none, or the word `absent` for a missing `dod.md` or `config.yml`. Raw text means a file that fails to load, such as a `pr-review.md` with a `run:` line, still counts, and fixing it changes the hash. `item.readiness_policy_sha` records the value from the item's last check. When it changes, because a team fixed any of those files or a deploy changed a default, the poller re-runs the gate on the item.
@@ -229,7 +229,7 @@ Phase 0a runs the whole walking skeleton on the owner's machine before anything 
   - `curl -fsS -X POST $CELL_CONTROL_URL/internal/cells/ping`. Expected: 204.
   - Fetch `/probe/sas` from the control plane, then `curl -fsS -X PUT -H "x-ms-blob-type: BlockBlob" --data hi "<url>"`. Expected: 201. A SAS signature covers the account, container and blob, and not the host, so the swapped host should still verify. That's an inference this probe checks.
   - `spike/sdk-oauth.ts` with `CLAUDE_CODE_OAUTH_TOKEN` passed as `-e CLAUDE_CODE_OAUTH_TOKEN`. Expected: `subtype: "success"`. If the SDK refuses the token, run `claude -p "Reply with the word ready." --output-format json` in the same image, which §14 names as the fallback, and record which one works.
-  - `spike/sdk-oauth.ts sandbox`. Expected: example.com blocked, api.github.com allowed. If the result is `error_during_execution` because bubblewrap can't start under Docker Desktop, record that. The egress allowlist then needs another mechanism, which is a pending decision. A direct `bwrap --ro-bind / / --dev /dev true` in the container already fails with "Creating new namespace failed: Operation not permitted", under the default `docker run` and with `--security-opt seccomp=unconfined` too.
+  - `spike/sdk-oauth.ts sandbox`. Expected: example.com blocked, api.github.com allowed. If the result is `error_during_execution` because bubblewrap can't start under Docker Desktop, record that. The egress allowlist then needs another mechanism, and locally the owner chose Task 13's egress proxy. A direct `bwrap --ro-bind / / --dev /dev true` in the container already fails with "Creating new namespace failed: Operation not permitted", under the default `docker run` and with `--security-opt seccomp=unconfined` too.
 - [ ] **Step 9: Record and commit.** Write each probe's expected and actual result to `docs/superpowers/spikes/2026-11-local-platform.md`, then commit `chore: local platform on Aspire`.
 
 ---
@@ -630,7 +630,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   In `cell` mode:
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
   - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
-  - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted, with the pending decision recorded.
+  - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted. Locally it's omitted, because bubblewrap can't start under Docker Desktop, and Task 13's egress proxy enforces the allowlist instead. In Azure, Task 19 Step 9 decides.
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
@@ -694,13 +694,32 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 
 **Files:**
 - Create: `src/scheduler/scheduler.ts`, `src/scheduler/launcher.ts`, `src/store/overrides.ts`, `src/scheduler/scheduler.test.ts`
+- Modify: `aspire-apphost/apphost.mts`, which pins Azurite's blob port with `await azurite.withBlobPort(7410)` inside `configureContainer`, as Task 2 pins `control` to 7400. Then the egress proxy's label stays the same across `aspire run` restarts.
 
 **Interfaces:**
 - Consumes: `claimNext`, `expireLeases`, `runToken`, active overrides.
 - Produces:
   - `interface Launcher { start(env: Record<string, string>): Promise<string>; stop(executionName: string): Promise<void>; }`, implemented by `dockerLauncher(cfg)` for Phase 0a, `containerAppsLauncher(cfg)` for Phase 0b, and `fakeLauncher()` for tests.
-    - `dockerLauncher` runs `docker run -d --rm` on `CELL_IMAGE` with one `-e NAME=value` per cell variable, `CONTROL_URL` set to `CELL_CONTROL_URL`, and a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Docker copies a bare name's value from the launching process, so the token comes from the control plane's own env and never appears in the argv or in `ps`. It returns the container id, and `stop` runs `docker stop`. A test with a stubbed `execFile` checks the exact argv: the six cell variables, the bare token name, and no argv word containing the token's value or any other control plane secret.
-    - A cell outlives an `aspire run` that stops, and stops itself after 3 minutes of failed lease renewals. A restart within that window finds it renewing, as Review Focus 5 expects.
+    - `dockerLauncher` runs `docker run -d --rm` on `CELL_IMAGE` with one `-e NAME=value` per cell variable, `CONTROL_URL` set to `CELL_CONTROL_URL`, and a bare `-e CLAUDE_CODE_OAUTH_TOKEN`. Docker copies a bare name's value from the launching process, so the token comes from the control plane's own env and never appears in the argv or in `ps`. It returns the container id, and `stop` runs `docker stop`. A test with a stubbed `execFile` checks the exact argv: the six cell variables, the bare token name, `--network factory-cells`, the egress variables below, and no argv word containing the token's value or any other control plane secret.
+    - **Egress.** The owner chose this on 2026-11-06, because bubblewrap can't start in a local cell (Task 2 Step 8).
+      - **Boot step.** `ensureEgress(cfg): Promise<void>`, exported from `src/scheduler/launcher.ts`, sets up the network and the proxy below. Task 15's `main.ts` awaits it once at control plane boot in local mode, before the first `tick`. It never runs in Azure and never per cell.
+      - **Network.** `ensureEgress` makes sure the Docker network `factory-cells` exists, created with `--internal`. An "already exists" answer counts as success. Containers on it reach no other network and get no outside DNS. Docker's docs say they can still reach the network's gateway and "appropriately configured host services", which is why the egress test probes the gateway.
+      - **Proxy.** It also makes sure a container `factory-egress` runs on that network and on the default bridge network. That container is an allowlisting HTTP proxy that admits only `api.anthropic.com`, `github.com`, `api.github.com`, `registry.npmjs.org`, and `host.docker.internal` on the two ports it reads at boot: the control plane's from `CELL_CONTROL_URL`, and Azurite's from `FACTORY_BLOB`. The proxy carries a SHA-256 of its whole configuration, the allowed hosts and both ports, in a container label. Both ports are pinned, so the label changes only when the allowlist grows or someone changes a pinned port. When the label differs from the boot's configuration, the proxy is rebuilt, and an old port or host list is never reused. When the label matches, the running proxy stays, because rebuilding it would cut every live cell's open connections, the agent's model stream included.
+      - **Cell variables.** Cells run with `--network factory-cells`. Both cases of each proxy variable, `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY` and `http_proxy`, are set to `http://factory-egress:3128`, because curl, and so git and its credential helper, reads `http_proxy` only in lower case. The control plane and Azurite are plain `http`. Cells also get `NODE_USE_ENV_PROXY=1` for the cell's own `fetch` calls, plus two variables from Claude Code's network docs. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off telemetry, and `ENABLE_CLAUDEAI_MCP_SERVERS=false` keeps the owner's claude.ai connectors out of a cell that holds the owner's token.
+    - **First run.** Check these, and record the results in `docs/superpowers/spikes/2026-11-local-platform.md`:
+      - Pick the proxy, either tinyproxy with a default-deny filter or a small Node CONNECT proxy, and record why.
+      - A cell resolves `factory-egress` by name on the internal network.
+      - Node 26 sends `fetch` through the proxy under `NODE_USE_ENV_PROXY=1`. If it doesn't, the cell's API client takes an explicit proxy agent.
+      - The agent needs no Anthropic host besides `api.anthropic.com`. Add `platform.claude.com`, which Claude Code's docs name for OAuth token exchange, only if the agent probe below needs it.
+    - **Egress test.** From a cell container on `factory-cells`, with the egress variables set:
+      - `curl https://api.github.com` succeeds;
+      - `curl -X POST $CONTROL_URL/internal/cells/ping` gets 204;
+      - a PUT to a `/probe/sas` URL gets 201;
+      - `spike/sdk-oauth.ts` returns `subtype` "success";
+      - `curl https://example.com` fails, and so does `host.docker.internal` on a port outside the allowlist, such as Postgres's.
+
+      With the proxy variables unset, `curl https://api.github.com` fails. On the network's gateway IP, nothing answers. The Postgres and Azurite ports refuse the connection, because Aspire binds them to `127.0.0.1`. A port another container publishes on every interface, when one is running, times out.
+    - A cell outlives an `aspire run` that stops, and stops itself after 3 minutes of failed lease renewals. A restart within that window finds it renewing, as Review Focus 5 expects. The restart finds the proxy's label unchanged and keeps `factory-egress` running, so a cell in the middle of a stage keeps its model stream.
     - `containerAppsLauncher` calls `ContainerAppsAPIClient.jobs.beginStart(rg, job, { containers: [{ name: "cell", image, env: [...] }] })`.
     - It reads the execution name from the response, and `stop` calls `jobs.beginStopExecution`.
   - `tick(deps: { pool; launcher: Launcher; now: Date; killFlag: boolean }): Promise<{ started: string[]; stopped: string[]; expired: string[] }>`
@@ -732,6 +751,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - A Failed item whose PR already merged starts a new run on a new branch, per Run contract 7.
     - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1.
   - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
+  - **Egress boot.** `ensureEgress` with a stubbed `execFile`, in three cases:
+    - `docker network create` answers "already exists", and `ensureEgress` still succeeds;
+    - the running `factory-egress` carries the label for this boot's configuration, and nothing is removed or started;
+    - the label differs, and the old proxy is removed and a new one starts with the new label.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.** A run can be created by a claim, by `criteria_changed` in Task 8, or by a re-queue after a merge. So the scheduler pins on the first claim of any run whose `config_sha` is still null, and records:
   - `run.repo_id` and `run.run_number`;
@@ -834,7 +857,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - Modify: `Dockerfile`, which also copies `policy/` into `/app/policy` for the readiness gate's defaults, and `config/` into `/app/config` for the migrate job's sources file
 
 **Interfaces:**
-- Consumes: the store, `setOverride`, `activeOverrides`, `handleWebhook`, the cell API and `pollOnce`.
+- Consumes: the store, `setOverride`, `activeOverrides`, `ensureEgress`, `handleWebhook`, the cell API and `pollOnce`.
 - Produces:
   - `identify(path, headers): { provider: "google" | "microsoft" | "dev"; subject: string; tenantId: string | null } | null`. It returns null on any route under `/webhooks` or `/internal` in both modes.
     - **In Azure** it reads the `x-ms-client-principal-idp` and `x-ms-client-principal-id` headers. Task 19 Step 5 records them on live sign-ins, and Task 20 fixes `identify` if the live names differ.
@@ -893,6 +916,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 - [ ] **Step 3: Implement.**
   - The server is plain `node:http` with a route table and HTML from template literals through one `escapeHtml`.
   - `views.ts` defines its colours as CSS custom properties with a dark-mode override, and every form control has a label.
+  - In local mode `main.ts` first awaits `ensureEgress(cfg)` from Task 13, so `factory-cells` and `factory-egress` exist before any cell launches.
   - `main.ts` wires the pool, the scheduler `tick` every `TICK_MS`, `pollOnce` every `POLL_INTERVAL_MS`, and the HTTP server. It never runs `migrate`, because in Azure it connects as `factory_app`, which has no DDL rights. Migrations run only in the `migrate` resource locally (Task 2) and the migrate job in Azure (Task 19).
   - The kill switch is `FACTORY_KILL=1` in the app's env or a `kill` override from the dashboard. Either one stops every cell on the next tick.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
