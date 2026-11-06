@@ -16,10 +16,15 @@ describe("store", dbTest, () => {
   let db: Awaited<ReturnType<typeof startTestDb>>;
   let source: string;
   const hookCalls: string[] = [];
+  const failingHook = new Set<string>();
 
   before(async () => {
     db = await startTestDb();
     source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
+    // Registered first, so the recording hook below proves later hooks still run after one throws.
+    onTransition(async (itemId) => {
+      if (failingHook.has(itemId)) throw new Error("hook failure");
+    });
     onTransition(async (itemId, from, to, event) => {
       hookCalls.push(`${itemId}:${from}:${to}:${event}`);
     });
@@ -86,6 +91,26 @@ describe("store", dbTest, () => {
       throw new Error("abort");
     }));
     assert.ok(!hookCalls.some((h) => h.startsWith(rolledBack)));
+  });
+
+  test("a failing hook neither rejects the committed move nor stops later hooks", async () => {
+    const id = await item("Eligible");
+    failingHook.add(id);
+    assert.equal(await withTx(db.pool, (c) => transitionItem(c, id, "ready", system)), "Queued");
+    assert.equal((await row(id)).state, "Queued");
+    assert.ok(hookCalls.includes(`${id}:Eligible:Queued:ready`));
+  });
+
+  test("transitionItem outside withTx refuses before writing", async () => {
+    const id = await item("Eligible");
+    const c = await db.pool.connect();
+    try {
+      await assert.rejects(transitionItem(c, id, "ready", system), /inside withTx/);
+    } finally {
+      c.release();
+    }
+    assert.equal((await row(id)).state, "Eligible");
+    assert.deepEqual(await events(id), []);
   });
 
   test("factory_app can't UPDATE event", async () => {

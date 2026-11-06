@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { next, type ItemEvent, type ItemState } from "../core/states.ts";
-import { runAfterCommit } from "./db.ts";
+import { inTx, runAfterCommit } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
 
 export class IllegalTransition extends Error {
@@ -19,10 +19,12 @@ export function onTransition(hook: Hook): void {
 }
 
 /**
- * Moves an item along one state-machine edge. It writes the state and its event on the caller's transaction,
- * so both commit or neither does, and leaving InProgress fences the old cell (Run contract 2).
+ * Moves an item along one state-machine edge. It writes the state and its event on the caller's withTx
+ * transaction, so both commit or neither does, and leaving InProgress fences the old cell (Run contract 2).
+ * Outside withTx it refuses before any write: the row lock, the atomicity and the hooks all depend on it.
  */
 export async function transitionItem(c: pg.PoolClient, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState> {
+  if (!inTx(c)) throw new Error("transitionItem needs a client inside withTx");
   const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
   const from = r.rows[0].state;

@@ -18,7 +18,10 @@ export function createPool(url?: string): pg.Pool {
   });
 }
 
-/** Applies db/migrations/*.sql in name order, each once, under an advisory lock so two migrators can't race. */
+/**
+ * Applies db/migrations/*.sql in name order, each once, under a session advisory lock so two migrators can't race.
+ * The connection is destroyed on release, which drops the lock, so a dropped connection can't hide the real error.
+ */
 export async function migrate(pool: pg.Pool): Promise<void> {
   const c = await pool.connect();
   try {
@@ -38,31 +41,37 @@ export async function migrate(pool: pg.Pool): Promise<void> {
       }
     }
   } finally {
-    await c.query("select pg_advisory_unlock(7400)");
-    c.release();
+    c.release(true);
   }
 }
 
 const afterCommit = new WeakMap<pg.PoolClient, (() => Promise<void>)[]>();
 
+/** True when c is a client inside withTx. */
+export function inTx(c: pg.PoolClient): boolean {
+  return afterCommit.has(c);
+}
+
 /** Queues work that must run only once the surrounding withTx commits, such as onTransition hooks. */
 export function runAfterCommit(c: pg.PoolClient, fn: () => Promise<void>): void {
   const queue = afterCommit.get(c);
-  if (queue) queue.push(fn);
+  if (!queue) throw new Error("runAfterCommit needs a client inside withTx");
+  queue.push(fn);
 }
 
-/** Runs fn in one transaction. Work queued with runAfterCommit runs after COMMIT, and is dropped on rollback. */
+/**
+ * Runs fn in one transaction. Work queued with runAfterCommit runs after COMMIT, once the connection is back in
+ * the pool, and is dropped on rollback. A failing job is logged and never turns a committed transaction into an error.
+ */
 export async function withTx<T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
   const c = await pool.connect();
   const queue: (() => Promise<void>)[] = [];
   afterCommit.set(c, queue);
+  let result: T;
   try {
     await c.query("begin");
-    const result = await fn(c);
+    result = await fn(c);
     await c.query("commit");
-    afterCommit.delete(c);
-    for (const job of queue) await job();
-    return result;
   } catch (e) {
     await c.query("rollback").catch(() => {});
     throw e;
@@ -70,4 +79,12 @@ export async function withTx<T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise
     afterCommit.delete(c);
     c.release();
   }
+  for (const job of queue) {
+    try {
+      await job();
+    } catch (e) {
+      console.error("after-commit job failed:", e);
+    }
+  }
+  return result;
 }

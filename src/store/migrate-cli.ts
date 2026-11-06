@@ -19,7 +19,7 @@ async function upsertSources(pool: pg.Pool, file: string): Promise<void> {
     await pool.query(
       `insert into backlog_source (adapter, url, owner_type, owner_login, project_number, field_map, repo_map)
        values ('github', $1, $2, $3, $4, $5, $6)
-       on conflict (url) do update set field_map = excluded.field_map, repo_map = excluded.repo_map`,
+       on conflict (url) do update set field_map = excluded.field_map, repo_map = backlog_source.repo_map || excluded.repo_map`,
       [projectUrl, s.owner.type, s.owner.login, s.projectNumber, JSON.stringify(s.fieldMap ?? {}), JSON.stringify({ [s.repo]: repo.rows[0].id })],
     );
   }

@@ -1,7 +1,8 @@
 import { After, AfterAll, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type pg from "pg";
@@ -98,17 +99,13 @@ Given("the event table refuses new rows", long, async function () {
 When("the item takes the event {string}", long, async function (event: string) {
   const c = ctx(this);
   const store = await load<Store>("src/store/items.ts");
-  if (!db || !store || !c.itemId) return;
-  const client = await db.pool.connect();
+  const tx = await load<{ withTx: <T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<T>) => Promise<T> }>("src/store/db.ts");
+  if (!db || !store || !tx || !c.itemId) return;
+  const itemId = c.itemId;
   try {
-    await client.query("begin");
-    await store.transitionItem(client, c.itemId, event, { actor: "system", actorId: "test" });
-    await client.query("commit");
+    await tx.withTx(db.pool, (client) => store.transitionItem(client, itemId, event, { actor: "system", actorId: "test" }));
   } catch (e) {
-    await client.query("rollback");
     c.error = e;
-  } finally {
-    client.release();
   }
 });
 
@@ -205,14 +202,15 @@ Then("the event row is unchanged", long, async function () {
   assert.equal(r.rows[0].kind, c.eventKind);
 });
 
+// The probe lives in a temp directory, so a crashed run can't leave a test file under src/ for npm test or git to pick up.
 function runProbe(c: Ctx, skip: boolean): void {
-  const dir = join(repo, "src", "probe-db");
-  if (!c.probeDir) {
-    c.probeDir = dir;
-    mkdirSync(dir, { recursive: true });
+  c.probeDir ??= mkdtempSync(join(tmpdir(), "pbi8-probe-"));
+  const dir = c.probeDir;
+  if (!existsSync(join(dir, "probe.test.ts"))) {
+    const testDb = pathToFileURL(join(repo, "src", "store", "test-db.ts")).href;
     writeFileSync(
       join(dir, "probe.test.ts"),
-      `import { describe, test } from "node:test";\nimport { dbTest, startTestDb } from "../store/test-db.ts";\n` +
+      `import { describe, test } from "node:test";\nimport { dbTest, startTestDb } from ${JSON.stringify(testDb)};\n` +
         `describe("db probe", dbTest, () => {\n  test("reaches the database", async () => {\n    const d = await startTestDb();\n` +
         `    await d.pool.query("select 1");\n    await d.stop();\n  });\n});\n`,
     );

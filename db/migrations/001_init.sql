@@ -46,7 +46,7 @@ create table item (
   external_id text not null,
   title text not null,
   state text not null check (state in ('Eligible', 'NotReady', 'Queued', 'InProgress', 'SignOff', 'NeedsInput', 'InReview', 'Accepted', 'Done', 'Failed', 'Abandoned')),
-  backlog_rank text,
+  backlog_rank numeric,
   readiness_notes text,
   readiness_policy_sha text,
   criteria_hash text,
@@ -113,7 +113,9 @@ create table question (
   comment_url text,
   answer text,
   answered_by uuid references "user" (id),
-  answered_at timestamptz
+  answered_at timestamptz,
+  -- Set when a question closes without an answer, such as on criteria_changed. Open means answer and closed_at are both null.
+  closed_at timestamptz
 );
 
 create table policy_result (

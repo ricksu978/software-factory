@@ -708,11 +708,11 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
     <tbody>
       <tr><td>backlog_source</td><td>id, adapter (github first), url, field map (acceptance criteria, status values, opt-in label, sprint field, and extra fields shown to the readiness check, such as size), label filter, repo map, paused</td></tr>
       <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha, quarantined_at</td></tr>
-      <tr><td>user</td><td>id, provider (google, microsoft), subject, tenant_id, email, github_login, role (viewer, operator, owner), product_owner, added_by, added_at</td></tr>
+      <tr><td>user</td><td>id, provider (google, microsoft, or dev for the local dev identity), subject, tenant_id, email, github_login, role (viewer, operator, owner), product_owner, added_by, added_at</td></tr>
       <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, readiness_policy_sha, criteria_hash, lease_owner, lease_generation, lease_expires</td></tr>
       <tr><td>run</td><td>id, item_id, repo_id, sop_version, config_sha, started_at, ended_at, outcome, cost_usd, branch, pr_url, features_lock_sha, signed_off_by, signed_off_at, risk_tier, tier_reasons</td></tr>
       <tr><td>approval</td><td>id, run_id, reviewer (git host login), sha, approved_at, dismissed_at. A row counts only while its sha is the PR's head commit, or every commit after it is a base merge that leaves the PR's diff unchanged (§6).</td></tr>
-      <tr><td>question</td><td>id, item_id, stage_run_id, kind (needs_input, sign_off), body, asked_at, reminders_sent, comment_url, answer, answered_by, answered_at. Open rows feed the Inbox and Floor's waiting strip.</td></tr>
+      <tr><td>question</td><td>id, item_id, stage_run_id, kind (needs_input, sign_off), body, asked_at, reminders_sent, comment_url, answer, answered_by, answered_at, closed_at. A row with neither an answer nor <code>closed_at</code> is open. Open rows feed the Inbox and Floor's waiting strip.</td></tr>
       <tr><td>policy_result</td><td>id, item_id, run_id (null for readiness), file (dor, pr-review, dod), source (repo or default), stage_id, attempt, checked_sha (the commit judged, null for readiness), criterion_index, criterion, status (passed, failed, person), reason, evidence_ref, at</td></tr>
       <tr><td>stage_run</td><td>id, run_id, stage_id, attempt, model, status, started_at, ended_at, tokens_in, tokens_out, cost_usd, transcript_ref</td></tr>
       <tr><td>event</td><td>id, at, actor (agent, human, system), actor_id (a user id for a human, the agent name for an agent), item_id, kind, payload. Append only.</td></tr>
