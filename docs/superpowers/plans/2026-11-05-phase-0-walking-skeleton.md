@@ -659,7 +659,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 - Modify: `src/store/runs.ts`, `src/control/model-gateway.ts` and its test
 
 **Interfaces:**
-- Consumes: `renewLease`, `releaseLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken` and `RepoHost.openReviewComments`.
+- Consumes: `renewLease`, `releaseLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken`, `RepoHost.openReviewComments`, `RepoHost.readFile` and `parseRepoConfig`.
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
@@ -672,11 +672,25 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL, signed locally from the Azurite connection in `FACTORY_BLOB`, with its host swapped for `CELL_BLOB_HOST` as Task 2 Step 8 proved, and in Azure with a user delegation key, for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
 - `runToken(secret: string, runId: string, generation: number): string`
 - The model gateway from issue #33, at `/internal/model/*` and outside the 409 rule above. It calls `handleModelRequest` from `src/control/model-gateway.ts` with the path after `/internal/model`, `upstream` set to `https://api.anthropic.com`, and `ownerToken` reading the control plane's own `CLAUDE_CODE_OAUTH_TOKEN`. Its `verify` splits the stand-in `<runId>.<generation>.<runToken>` and accepts it only when the run token matches `runToken` under `timingSafeEqual` and the generation is the item's current one. Every refusal is the gateway's 401, so a fenced cell can't reach the model either. The gateway already refuses any path outside its allowlist with 404.
-  - **Server tools.** `verify` changes from a boolean to `{ webTools: WebTool[] } | null`, where null refuses, and `webTools` comes from the run's pinned repo config (Task 9). The gateway then reads each request body, up to 32 MiB, with 413 above that. It answers 400, and sends nothing upstream, when the JSON has an `mcp_servers` key, or a `tools` entry whose `type` is neither absent nor `custom`, unless the type starts with `web_search_` and `webTools` holds `WebSearch`, or starts with `web_fetch_` and `webTools` holds `WebFetch`. Claude Code's own tools are custom tools, so they pass. A body that isn't JSON passes unread, because the upstream rejects it anyway. The check covers `/v1/messages` and `/v1/messages/count_tokens`.
+  - **Request check.** `verify` changes from a boolean to `{ webTools: WebTool[] } | null`, where null refuses. `webTools` is the run's pinned repo config, read once per run with `RepoHost.readFile(repo, config_sha, ".factory/config.yml")` and `parseRepoConfig`, then cached by `(repo, config_sha)`, which never changes for a run. A failed read answers 503, not 401, so a GitHub outage doesn't look like a bad credential to the cell. The gateway then reads each `/v1/messages` and `/v1/messages/count_tokens` body, up to 32 MiB, with 413 above that. It fails closed: it answers 400, and sends nothing upstream, for any of these:
+    - a `Content-Encoding` other than `identity`;
+    - a body that `JSON.parse` rejects;
+    - an `mcp_servers` key;
+    - a `tools` entry whose `type` is neither absent nor `custom`, unless the type starts with `web_search_` and `webTools` holds `WebSearch`, or starts with `web_fetch_` and `webTools` holds `WebFetch`;
+    - an object anywhere in the body whose `source` is an object with a `type` other than `base64`, `text` or `content`. A `url` source makes Anthropic's servers fetch that URL ([vision](https://platform.claude.com/docs/en/build-with-claude/vision), [PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support)), which is another way past the egress allowlist.
+
+    Claude Code sends its own tools as custom tools and its images as base64, so its requests pass. What goes upstream is `JSON.stringify` of the object the gateway checked, with `content-length` reset, so a parser that reads the original bytes differently, such as one keeping the first of two `tools` keys, never sees them.
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
   - **Model gateway.** With a fake upstream, a stand-in for the current generation reaches it with the owner's token. A forged stand-in, one from the previous generation after a re-claim, and a malformed one (no dots, a non-numeric generation) each get 401, and the fake upstream receives nothing.
-  - **Server tools.** In `model-gateway.test.ts`, with `verify` returning `{ webTools: [] }`, a body whose `tools` holds a custom tool reaches the upstream. Bodies holding `{ type: "web_search_20250305" }`, `{ type: "web_fetch_20250910" }`, `{ type: "code_execution_20250522" }`, or an `mcp_servers` key each get 400, and the upstream receives nothing. With `webTools: ["WebSearch"]` the web search body reaches the upstream and the web fetch one still gets 400. A 33 MiB body gets 413. The streaming and abort tests still pass, since the body is read before the upstream call starts.
+  - **Request check.** In `model-gateway.test.ts`, with `verify` returning `{ webTools: [] }`:
+    - a body whose `tools` holds a custom tool and whose messages hold a base64 image reaches the upstream;
+    - each of these gets 400 and the upstream receives nothing: a `tools` entry of type `web_search_20250305`, `web_fetch_20250910` or `code_execution_20250522`; an `mcp_servers` key; an image with `source: { type: "url" }` in a message; a document with a `url` source inside a `tool_result`; a body that isn't JSON; a body with `Content-Encoding: gzip`;
+    - a body with two `tools` keys, a web search one first and a custom one last, reaches the upstream holding only the custom one;
+    - with `webTools: ["WebSearch"]`, the web search body reaches the upstream and the web fetch one still gets 400;
+    - a 33 MiB body gets 413.
+
+    In `cell-api.test.ts`, the run's config is read once across two model requests, and a failed read gets 503. The streaming and abort tests still pass, since only the request body is buffered.
   - With the current generation's token, `/stage` writes one `stage_run` row.
   - **Review Focus 2.** After a re-claim bumps the generation, each of the nine routes with the old token returns 409, and the `stage_run`, `event`, `item` and `policy_result` tables are unchanged.
   - **End-of-stage order.** Calls in Run contract 9 order all succeed. A `/stage` sent after the stage's own `/transition` gets 409, which is why the order is fixed.
