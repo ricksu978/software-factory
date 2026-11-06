@@ -825,7 +825,7 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   : Promise<"done" | "waiting" | "failed" | "stopped" | "limited">;
 ```
 
-  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Every `runAgent` call in cell mode passes `webTools: config.webTools`, from the repo config pinned for the run. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
+  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Every `runAgent` call in cell mode passes `webTools: config.webTools`, from the repo config pinned for the run. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths. Before the red and green gates run, the engine commits whatever the agent left in the checkout with `git.commitAll`. `matchesLock` compares commits, so without that an edit to a locked feature file that was never committed would pass the lock check while `bdd.run` ran the edited file.
 
 Stage behaviour, from spec §6 rows 1 to 7:
 
@@ -864,6 +864,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Open PR.** The PR body contains `Refs #482` and never `Closes`, and lists each `dod.md` criterion as a `- [ ]` line, `POST /pr` comes before the first `GET /checks`, and `requestReviewers` is called with `config.reviewers`.
   - **Call order.** At the end of every stage the recording `CellApi` sees `/stage passed`, then the uploads, then `/transition`, per Run contract 9, and the run returns `waiting` or `done` rather than `stopped`.
   - **Red proof.** A red stage whose report has a green scenario retries twice, then posts `blocked` with "scenario passes before any behaviour exists".
+  - **Uncommitted lock edit.** A red stage whose agent edits a locked feature file and leaves it uncommitted fails the lock check, because the engine commits before the gates. It retries twice, then posts `blocked`.
   - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed`, post `/transition` with `usage_limited` and `resumeAt`, and return `limited`. That attempt doesn't count against retries.
   - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`, commits the work in progress, and returns `stopped`.
   - **Lost lease.** A 409 from any API call makes the engine stop at once, with no push and no further calls.
