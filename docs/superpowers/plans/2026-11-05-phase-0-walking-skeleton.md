@@ -599,7 +599,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 - [ ] **Step 3: Run the tests.** Expected: FAIL.
 - [ ] **Step 4: Implement.**
   - **`classify`.** Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`. A scenario is red when its first non-`PASSED` step is `FAILED` and of type `Outcome`. A hook step has no pickle step, so a failed hook is a crash. A retried scenario counts from its last attempt. A step with no result, as when a killed runner leaves the report cut short, is a crash, so a truncated report never yields a false red or green.
-  - **`redGate`.** Besides its two findings above, a crashed scenario of the item fails Red with "scenario crashed instead of failing on a Then: <name>: <reason>".
+  - **`redGate`.** Besides its two findings above, a crashed scenario of the item fails Red with "scenario crashed instead of failing on a Then: <name>: <reason>". It counts names rather than only matching them, because a Scenario Outline's rows share one name and an Examples-level `@db` tag can keep some rows out of the cell. An item with no scenarios in either list fails with "no scenario carries <tag>".
   - **`greenGate`.** A report with no scenarios fails with "the report holds no scenarios".
   - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`. Exit 1 means a locked file changed or was deleted. It throws on any other git error, such as an unknown `lockSha`, and on an empty file list, which would diff the whole tree.
 - [ ] **Step 5: Run the tests.** Expected: PASS.

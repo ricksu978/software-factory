@@ -59,6 +59,16 @@ test("red passes for a second item while the first item's scenarios are green", 
   assert.deepEqual(redGate(r, "@pbi-482", ["b"]), { ok: true, findings: [] });
 });
 
+test("red fails when only some rows of a Scenario Outline ran", () => {
+  // Outline rows share a name. One row ran and is red, the other was filtered out of the cell.
+  const r = results([["Totals add up", ["@pbi-482"], "red"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["Totals add up", "Totals add up"]).findings, ["not run in the cell: Totals add up"]);
+});
+
+test("red fails when the item has no scenarios at all", () => {
+  assert.deepEqual(redGate(new Map(), "@pbi-482", []).findings, ["no scenario carries @pbi-482"]);
+});
+
 test("red fails on a scenario of the item that crashed", () => {
   const r = results([["b", ["@pbi-482"], "crash"]]);
   assert.equal(redGate(r, "@pbi-482", ["b"]).ok, false);
