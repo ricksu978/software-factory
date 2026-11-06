@@ -447,6 +447,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // After the summary's commit, so the checklist always names the head the PR is opened at.
     const stale = await freshDod("open-pr", attempt);
     if (stale.length) { await end("failed"); return stale; }
+    // A cell resumed after green has no green report of its own, so the table lists the names and points at the evidence.
+    if (!greenResults.size) {
+      const parse = await bdd("parse");
+      for (const r of classify(parse.report).values()) if (r.tags.includes(tag)) greenResults.set(r.name, "in the run's green report");
+    }
     await push();
     const head = await git.head();
     const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(summary.ok ? summary.text : "") });

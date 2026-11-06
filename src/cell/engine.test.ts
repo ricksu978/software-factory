@@ -373,6 +373,25 @@ describe("runCell", () => {
     assert.deepEqual(of("green"), [1, 2]);
   });
 
+  test("a green @regression scenario beside a red one passes Red", async () => {
+    const h = harness({ script: (_a, stage) => {
+      if (stage !== "red") return;
+      const lines = report(["Criterion 1 holds", "Criterion 2 holds"], "red").split("\n");
+      // Criterion 2 becomes a @regression scenario that already passes.
+      const patched = lines.map((l) => l.includes('"p1"') && l.includes("pickle") ? l.replace('{"name":"@ac-2"}', '{"name":"@ac-2"},{"name":"@regression"}') : l)
+        .map((l) => l.includes('"testCaseStartedId":"r1"') ? l.replace('"FAILED"', '"PASSED"') : l);
+      writeFileSync(join(h.root, "fx", "run.ndjson"), patched.join("\n"));
+    } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
+  });
+
+  test("a cell resumed at open-pr still lists each scenario in the PR body", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs[0].body, /\| Criterion 1 holds \| in the run's red report \| in the run's green report \|/);
+  });
+
   test("the PR body lists each scenario with its red and green result, and the review rounds", async () => {
     const h = harness();
     await h.run();

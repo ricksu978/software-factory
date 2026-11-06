@@ -76,11 +76,21 @@ function tagged(results: Results, tag: string): ScenarioResult[] {
   return [...results.values()].filter((r) => r.tags.includes(tag));
 }
 
-// Red proof: every scenario tagged pbiTag is red, and every expected name ran. Other items' scenarios are ignored.
+// Red proof: every scenario tagged pbiTag is red, except @regression ones, which are green, and every expected
+// name ran. Other items' scenarios are ignored. A @regression scenario restates behaviour that already holds,
+// such as "every existing test still passes". A new-behaviour scenario tagged @regression is red at Red, so it
+// still fails, as long as its Then asserts. One whose Then asserts nothing passes both gates, so self-review's
+// "every step asserts" check and the person signing off, who sees the tag, are what catch it.
+export const REGRESSION_TAG = "@regression";
+
 export function redGate(results: Results, pbiTag: string, expected: string[]): GateResult {
   const mine = tagged(results, pbiTag);
   const findings: string[] = [];
   for (const r of mine) {
+    if (r.tags.includes(REGRESSION_TAG)) {
+      if (r.verdict !== "green") findings.push(`regression scenario doesn't pass before the build: ${r.name}: ${r.verdict}${r.reason ? `: ${r.reason}` : ""}`);
+      continue;
+    }
     if (r.verdict === "green") findings.push(`scenario passes before any behaviour exists: ${r.name}`);
     if (r.verdict === "crash") findings.push(`scenario crashed instead of failing on a Then: ${r.name}: ${r.reason}`);
   }
@@ -90,7 +100,10 @@ export function redGate(results: Results, pbiTag: string, expected: string[]): G
   for (const r of mine) ran.set(r.name, (ran.get(r.name) ?? 0) + 1);
   const want = new Map<string, number>();
   for (const name of expected) want.set(name, (want.get(name) ?? 0) + 1);
-  for (const [name, n] of want) if ((ran.get(name) ?? 0) < n) findings.push(`not run in the cell: ${name}`);
+  const notRun = [...want].filter(([name, n]) => (ran.get(name) ?? 0) < n).map(([name]) => name);
+  // Only when every expected scenario ran: if some didn't, the ones that did don't show the item is all @regression.
+  if (notRun.length === 0 && mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
+  for (const name of notRun) findings.push(`not run in the cell: ${name}`);
   if (mine.length === 0 && expected.length === 0) findings.push(`no scenario carries ${pbiTag}`);
   return { ok: findings.length === 0, findings };
 }
