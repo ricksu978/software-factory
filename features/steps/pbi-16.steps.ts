@@ -167,6 +167,7 @@ Given("a backlog source whose field map sets these board statuses:", long, async
     stageAfter: (_sop: string | null, stageId: string) => ({ understand: "specify", specify: "sign-off", red: "green" })[stageId] ?? null,
     uploadUrl: async (path: string) => `http://blob.test/${path}?sig=write-only`,
     gateway: { upstream: `http://127.0.0.1:${upstreamPort}`, ownerToken: () => "owner-secret" },
+    webToolsOf: () => [],
   });
   c.server = await m.server.startServer([api], { port: 0 });
 });

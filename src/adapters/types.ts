@@ -36,7 +36,10 @@ export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
-  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
+  /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
+  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
+  onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
   prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{
