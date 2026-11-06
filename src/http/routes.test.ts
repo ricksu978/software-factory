@@ -92,6 +92,30 @@ describe("dashboard routes", dbTest, () => {
     assert.match((await get("/", "octo")).html, /2 of 3 waiting/);
   });
 
+  test("Next up follows the scheduler's brake: at capacity, a fresh Queued item isn't next", async () => {
+    await person("octo", "viewer");
+    for (let n = 0; n < 3; n++) await item("InReview", `review ${n}`);
+    const fresh = await item("Queued", "fresh item");
+    await db.pool.query("update item set backlog_rank = 1 where id = $1", [fresh.id]);
+    const back = await item("Queued", "item back to address");
+    await db.pool.query("update item set backlog_rank = 2 where id = $1", [back.id]);
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'address') returning id", [back.id])).rows[0].id;
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'green', 1, 'passed')", [run]);
+    const { html } = await get("/", "octo");
+    const next = html.slice(html.indexOf(">Next up<"), html.indexOf("<h2", html.indexOf(">Next up<")));
+    assert.ok(next.includes("item back to address<"));
+    assert.ok(!next.includes("fresh item<"), "a fresh item shows as next while the brake is on");
+  });
+
+  test("an item with two open questions counts and lists once", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("NeedsInput", "two questions");
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'needs_input', 'q1'), ($1, 'needs_input', 'q2')", [id]);
+    const { html } = await get("/", "octo");
+    assert.match(html, /1 of 3 waiting/);
+    assert.equal(html.split("two questions<").length - 1, 2, "listed in Waiting on you and In flight only");
+  });
+
   test("Run detail shows the run's pins, policy results, stages and tier", async () => {
     await person("octo", "viewer");
     const { id } = await item("InReview", "detailed");

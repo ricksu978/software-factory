@@ -12,6 +12,8 @@ const dbUri = await db.uriExpression();
 const storage = await builder.addAzureStorage('storage').runAsEmulator({
   configureContainer: async (azurite) => {
     await azurite.withDataVolume();
+    // Pinned, as control is to 7400, so the egress proxy's allowlisted port and its label survive restarts (Task 13).
+    await azurite.withBlobPort(7410);
   },
 });
 const blobs = await storage.addBlobs('blobs');

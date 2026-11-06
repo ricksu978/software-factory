@@ -54,10 +54,11 @@ export function tokenBanner(env: Record<string, string | undefined>, now = Date.
 }
 
 async function floor(pool: pg.Pool) {
+  // One row per item, by its oldest open question, counted as the scheduler counts the waiting (Run contract 3).
   const waiting = (await pool.query(
-    `select i.id, i.title, i.state, q.asked_at as since from item i
+    `select i.id, i.title, i.state, min(q.asked_at) as since from item i
      join question q on q.item_id = i.id and q.answer is null and q.closed_at is null
-     where i.state in ('SignOff', 'NeedsInput') order by q.asked_at`,
+     where i.state in ('SignOff', 'NeedsInput') group by i.id, i.title, i.state order by since`,
   )).rows;
   const reviews = (await pool.query(
     `select i.id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since
@@ -78,7 +79,10 @@ async function floor(pool: pg.Pool) {
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
   )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(a.overridden ? ["override"] : [])] }));
-  return { active, waiting: [...waiting, ...reviews], waitingCount: waiting.length + reviews.length, capacity, next: await nextUp(pool, 5), notReady };
+  // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
+  const waitingCount = waiting.length + reviews.length;
+  const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
+  return { active, waiting: [...waiting, ...reviews], waitingCount, capacity, next, notReady };
 }
 
 /** Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. */
