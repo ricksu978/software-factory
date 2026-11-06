@@ -76,14 +76,25 @@ function tagged(results: Results, tag: string): ScenarioResult[] {
   return [...results.values()].filter((r) => r.tags.includes(tag));
 }
 
-// Red proof: every scenario tagged pbiTag is red, and every expected name ran. Other items' scenarios are ignored.
+// Red proof: every scenario tagged pbiTag is red, except @regression ones, which are green, and every expected
+// name ran. Other items' scenarios are ignored. A @regression scenario restates behaviour that already holds,
+// such as "every existing test still passes". A new-behaviour scenario tagged @regression is red at Red, so it
+// still fails, as long as its Then asserts. One whose Then asserts nothing passes both gates, so self-review's
+// "every step asserts" check and the person signing off, who sees the tag, are what catch it.
+export const REGRESSION_TAG = "@regression";
+
 export function redGate(results: Results, pbiTag: string, expected: string[]): GateResult {
   const mine = tagged(results, pbiTag);
   const findings: string[] = [];
   for (const r of mine) {
+    if (r.tags.includes(REGRESSION_TAG)) {
+      if (r.verdict !== "green") findings.push(`regression scenario doesn't pass before the build: ${r.name}: ${r.verdict}${r.reason ? `: ${r.reason}` : ""}`);
+      continue;
+    }
     if (r.verdict === "green") findings.push(`scenario passes before any behaviour exists: ${r.name}`);
     if (r.verdict === "crash") findings.push(`scenario crashed instead of failing on a Then: ${r.name}: ${r.reason}`);
   }
+  if (mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
   // Counted, not just named: a Scenario Outline's rows share one name, and a tag on one Examples block
   // can keep some rows out of the cell while the others run.
   const ran = new Map<string, number>();
