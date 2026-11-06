@@ -27,6 +27,9 @@ export type CellContext = {
   stageAttempts: Record<string, number>;
 };
 
+/** What a stage attempt is recorded under: an SOP stage, or the merge pass that opens a claim. */
+type Recorded = StageId | "merge";
+
 export type Policies = { scenarios: Policy; prReview: Policy; risk: Policy; dod: Policy };
 export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited";
 
@@ -154,11 +157,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return s;
   };
   const retriesOf = (id: StageId) => Number(stageOf(id).retries ?? 0);
-  const modelOf = (id: StageId) => sop.models[stageOf(id).model ?? "coding"];
+  // The merge pass edits code, so it runs on green's model.
+  const modelOf = (id: Recorded) => sop.models[stageOf(id === "merge" ? "green" : id).model ?? "coding"];
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
   // The stage attempt in flight, with what its agent calls cost so far.
-  let current: { stageId: StageId; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string; report: string | null; usage?: AgentResult["usage"] } | null = null;
+  let current: { stageId: Recorded; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string; report: string | null; usage?: AgentResult["usage"] } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
@@ -187,7 +191,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   /** Starts the stage's next attempt and returns its number. */
-  const begin = async (stageId: StageId): Promise<number> => {
+  const begin = async (stageId: Recorded): Promise<number> => {
     // ponytail: wall_clock counts this cell's own time, not the item's across claims; a run-level clock needs the control plane.
     if (d.now().getTime() - started > WALL_CLOCK_MS) throw new Blocked("the run used up its 8h wall clock");
     const attempt = (lastAttempt.get(stageId) ?? 0) + 1;
@@ -209,7 +213,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
   };
 
-  const ask = async (stageId: StageId, prompt: string, agent?: string): Promise<AgentResult> => {
+  const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> => {
     const r = await d.agent({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal });
     if (current) {
       current.costUsd += r.costUsd;
@@ -516,10 +520,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // ---- the run ----
 
   try {
-    // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths.
+    // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
+    // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
     const conflict = await git.mergeBase(ctx.base);
     if (conflict.length) {
-      await ask("green", brief("# Resolve a merge conflict",
+      await begin("merge");
+      await ask("merge", brief("# Resolve a merge conflict",
         `Merging \`origin/${ctx.base}\` into this branch left conflicts in: ${conflict.join(", ")}. Resolve them, keeping both sides' intent, and commit the merge.`));
       // Checked before commitAll, which would otherwise commit the conflict markers as the resolution.
       const marked = /^(<{7}|>{7})( |$)/m;
@@ -529,6 +535,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await git.commitAll(`merge ${ctx.base}`);
       const again = await git.mergeBase(ctx.base);
       if (again.length) throw new Blocked(`Merging ${ctx.base} left conflicts in: ${again.join(", ")}`);
+      await end("passed");
     }
 
     const start = ctx.nextStage;

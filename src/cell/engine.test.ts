@@ -167,24 +167,28 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s, i, all) => all.indexOf(s) === i), ["red", "green", "self-review", "open-pr"]);
   });
 
-  test("a base conflict the agent can't clear blocks with its paths, and no stage runs", async () => {
+  test("a base conflict the agent can't clear blocks with its paths, records the merge pass's cost, and no stage runs", async () => {
     const h = harness({ conflict: true });
     assert.equal(await h.run(), "waiting");
     const t = h.transitions().at(-1);
     assert.equal(t.event, "blocked");
     assert.match(t.question.body, /app\.txt/);
-    assert.deepEqual(h.started(), []);
+    assert.deepEqual(h.started(), ["merge"]);
+    const ended = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "merge" && c.body.status === "failed")!;
+    assert.equal(ended.body.costUsd, 0.5);
+    assert.ok(h.calls.some((c) => c.route === "/upload-url" && c.body.stageId === "merge" && c.body.kind === "transcript"));
   });
 
   test("a base conflict the agent resolves lets the run go on", async () => {
     const h = harness({ conflict: true, script: (a, stage) => {
-      if (stage === "" && a.prompt.includes("merge conflict")) {
+      if (stage === "merge" && a.prompt.includes("merge conflict")) {
         writeFileSync(join(a.cwd, "app.txt"), "both sides\n");
         git(a.cwd, "add", "-A");
         git(a.cwd, "commit", "-q", "--no-edit");
       }
     } });
     assert.equal(await h.run(), "done");
+    assert.ok(h.calls.some((c) => c.route === "/stage" && c.body.stageId === "merge" && c.body.status === "passed"));
   });
 
   test("the rubric can't drop the factory's BDD checks, which come after it under the outranking heading", async () => {
