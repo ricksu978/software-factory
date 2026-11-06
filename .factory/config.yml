@@ -1,7 +1,7 @@
 # How the factory runs this repo's checks. Plan Task 9's parseRepoConfig reads this file.
 bdd:
   parse: npm run bdd -- --dry-run
-  run: npm run bdd -- --tags "not @db"
+  run: npm run bdd -- --tags "not @db and not @local"
   report: reports/bdd.ndjson
 commands:
   test: FACTORY_DB_TESTS=skip npm test

@@ -27,18 +27,22 @@ function ctx(world: object): Ctx {
   return w.pbi6;
 }
 
-function sh(command: string, input?: string): { status: number | null; out: string } {
+function sh(command: string, input?: string): { status: number | null; out: string; stdout: string } {
   const r = spawnSync(command, { cwd: repo, shell: true, encoding: "utf8", input });
-  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
 }
 
+// Retries because a restart leaves fetch holding a dead keep-alive socket to the old process.
 async function get(path: string): Promise<{ status: number; body: string } | null> {
-  try {
-    const r = await fetch(`${control}${path}`, { signal: AbortSignal.timeout(5_000) });
-    return { status: r.status, body: await r.text() };
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const r = await fetch(`${control}${path}`, { signal: AbortSignal.timeout(5_000) });
+      return { status: r.status, body: await r.text() };
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
   }
+  return null;
 }
 
 async function startAspire(c: Ctx): Promise<void> {
@@ -96,7 +100,7 @@ Then("the {string} resource has exited with code {int}", function (resource: str
   const r = sh(`aspire describe ${resource} --format Json --non-interactive --nologo`);
   let doc: unknown = null;
   try {
-    doc = JSON.parse(r.out.slice(r.out.indexOf("{")));
+    doc = JSON.parse(r.stdout.slice(r.stdout.indexOf("{")));
   } catch {
     assert.fail(`aspire describe gave no JSON:\n${r.out}`);
   }
