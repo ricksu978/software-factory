@@ -270,6 +270,13 @@ describe("scheduler", dbTest, () => {
     // The same tick claims the expired item again, so what tick reports is the evidence, not the item's state.
     assert.deepEqual((await run()).expired, [expired]);
     assert.equal(started.length, 1);
+    // The failed requeue stays active, so it applies once GitHub answers.
+    repoHost.prs.push({
+      number: 9, repo: REPO, branch: "factory/pbi-1-r1", base: "main", title: "t", body: "", headSha: null, open: false, merged: false,
+      mergeSha: null, mergeable: null, reviewers: [], comments: [], reviews: [],
+    });
+    await run();
+    assert.deepEqual(await state(stuck), { state: "Queued", held: false });
   });
 
   test("after a re-queue reopens a question, its reminders come again", async () => {
