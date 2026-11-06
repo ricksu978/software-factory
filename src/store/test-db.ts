@@ -27,24 +27,33 @@ async function localServer(bin: string) {
   const dir = await mkdtemp(join(tmpdir(), "pg-"));
   const data = join(dir, "data");
   const user = userInfo().username;
+  const stop = async () => {
+    await run(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
+    await rm(dir, { recursive: true, force: true });
+  };
   try {
     await run(join(bin, "initdb"), ["-D", data, "--auth=trust", "-U", user, "--no-sync"]);
     await run(join(bin, "pg_ctl"), ["-D", data, "-l", join(dir, "log"), "-w", "-o", `-c listen_addresses='' -c unix_socket_directories='${dir}' -c fsync=off`, "start"]);
   } catch (e) {
-    await rm(dir, { recursive: true, force: true });
+    // pg_ctl -w can time out after the server started, so stop it, if it runs, before deleting its directory.
+    await stop().catch(() => rm(dir, { recursive: true, force: true }));
     throw e;
   }
   // pg reads a host that is a path as the socket's directory.
   const url = `postgresql://${encodeURIComponent(user)}@/postgres?host=${encodeURIComponent(dir)}`;
-  return started(url, async () => {
-    await run(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
-    await rm(dir, { recursive: true, force: true });
-  });
+  return started(url, stop);
 }
 
 async function started(url: string, shutdown: () => Promise<void>) {
   const pool = createPool(url);
-  await migrate(pool);
+  try {
+    await migrate(pool);
+  } catch (e) {
+    // No reaper cleans up after a local server, so a failed start shuts down what it began.
+    await pool.end().catch(() => undefined);
+    await shutdown().catch(() => undefined);
+    throw e;
+  }
   return {
     pool,
     url,

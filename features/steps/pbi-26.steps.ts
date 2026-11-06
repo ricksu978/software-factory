@@ -13,7 +13,10 @@ const long = { timeout: 900_000 };
 const IMAGE = "factory-cell:pbi-26-test";
 const CELL_NETWORK = "factory-cells";
 
-type Ctx = { dod?: string; config?: string; out?: string; outside?: string; outsidePort?: string; result?: Record<string, unknown> | null };
+type Ctx = {
+  dod?: string; config?: string; out?: string; outside?: string; outsidePort?: number; outsideIp?: string;
+  result?: Record<string, unknown> | null; control?: string;
+};
 
 function ctx(world: object): Ctx {
   const w = world as { pbi26?: Ctx };
@@ -127,7 +130,10 @@ Given("a Postgres server published on the host, outside the cell network", long,
   const r = await docker(["run", "-d", "--rm", "-e", "POSTGRES_PASSWORD=outside", "-p", "127.0.0.1::5432", "postgres:17"]);
   assert.equal(r.code, 0, r.stderr);
   c.outside = r.stdout.trim();
-  c.outsidePort = (await docker(["port", c.outside, "5432/tcp"])).stdout.trim().split(":").pop();
+  c.outsidePort = Number((await docker(["port", c.outside, "5432/tcp"])).stdout.trim().split("\n")[0].split(":").pop());
+  assert.ok(Number.isInteger(c.outsidePort) && c.outsidePort > 0, "the outside server's published port didn't parse");
+  c.outsideIp = (await docker(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", c.outside])).stdout.trim();
+  assert.match(c.outsideIp, /^\d+\.\d+\.\d+\.\d+$/, "the outside server has no bridge IP");
   for (let i = 0; i < 60; i++) {
     if ((await docker(["exec", c.outside, "pg_isready", "-U", "postgres"])).code === 0) return;
     await new Promise((res) => setTimeout(res, 1000));
@@ -135,17 +141,32 @@ Given("a Postgres server published on the host, outside the cell network", long,
   throw new Error("the outside Postgres never became ready");
 });
 
+// Tries each host:port with a real Postgres login and records "connected" or "unreachable: <why>" for each.
+function probe(targets: [string, number][]): string {
+  return `const pg = (await import("/work/node_modules/pg/lib/index.js")).default;
+    out.tried = {};
+    for (const [host, port] of ${JSON.stringify(targets)}) {
+      const client = new pg.Client({ host, port, user: "postgres", password: "outside", connectionTimeoutMillis: 5000 });
+      try { await client.connect(); out.tried[host + ":" + port] = "connected"; await client.end(); }
+      catch (e) { out.tried[host + ":" + port] = "unreachable: " + e.message; }
+    }`;
+}
+
 When("a cell on the cell network starts its own test database and then tries the outside server", long, async function () {
   const c = ctx(this);
-  const net = await docker(["network", "inspect", CELL_NETWORK]);
-  if (net.code !== 0) await docker(["network", "create", "--internal", CELL_NETWORK]);
+  if ((await docker(["network", "inspect", CELL_NETWORK])).code !== 0) await docker(["network", "create", "--internal", CELL_NETWORK]);
+  const gateway = (await docker(["network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", CELL_NETWORK])).stdout.trim();
+  const port = c.outsidePort ?? 0;
+  // The positive control: from the default bridge the outside server answers, so "unreachable" below means something.
+  const control = await docker(inCell(script(probe([[c.outsideIp ?? "", 5432]])), "bridge"));
+  c.control = String((lastJson(control.stdout)?.tried as Record<string, string> | undefined)?.[`${c.outsideIp}:5432`]);
+  // Every route a cell could try: the host's name, the cell network's gateway, and the server's own bridge address.
+  const targets: [string, number][] = [["host.docker.internal", port], [gateway, port], [c.outsideIp ?? "", 5432]];
   const r = await docker(inCell(script(`
     const own = await startTestDb();
     out.own = (await own.pool.query("select 1 as one")).rows[0].one;
     await own.stop();
-    const pg = (await import("/work/node_modules/pg/lib/index.js")).default;
-    const outside = new pg.Client({ host: "host.docker.internal", port: ${Number(c.outsidePort)}, user: "postgres", password: "outside", connectionTimeoutMillis: 5000 });
-    try { await outside.connect(); out.outside = "connected"; await outside.end(); } catch (e) { out.outside = "unreachable: " + e.message; }`), CELL_NETWORK));
+    ${probe(targets)}`), CELL_NETWORK));
   c.result = lastJson(r.stdout) ?? { error: r.stderr.slice(-2000) };
 });
 
@@ -154,7 +175,10 @@ Then("its own test database answers", function () {
 });
 
 Then("the outside server can't be reached", function () {
-  assert.match(String(result(this).outside), /^unreachable/);
+  assert.equal(ctx(this).control, "connected", "the control probe from the default bridge couldn't reach the outside server, so this check would prove nothing");
+  const tried = (result(this).tried ?? {}) as Record<string, string>;
+  assert.equal(Object.keys(tried).length, 3, `expected three routes tried, got ${JSON.stringify(tried)}`);
+  for (const [route, outcome] of Object.entries(tried)) assert.match(outcome, /^unreachable/, `the cell reached the outside server at ${route}`);
 });
 
 After({ tags: "@pbi-26" }, async function () {
