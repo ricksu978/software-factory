@@ -125,6 +125,18 @@ describe("store", dbTest, () => {
     }
   });
 
+  test("migrate-cli grants factory_app to FACTORY_APP_PRINCIPAL", async () => {
+    // A plain Postgres has no pgaadauth_create_principal, so the role exists beforehand and only the grant runs.
+    await db.pool.query(`create role "id-factory-control" nologin`);
+    const r = spawnSync(process.execPath, ["src/store/migrate-cli.ts"], {
+      env: { ...process.env, FACTORY_DB_URI: db.url, FACTORY_SOURCES: "none.yml", FACTORY_APP_PRINCIPAL: "id-factory-control" },
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const member = await db.pool.query("select pg_has_role('id-factory-control', 'factory_app', 'member') as m");
+    assert.equal(member.rows[0].m, true);
+  });
+
   test("migrate-cli seeds sources and the local dev owner, idempotently", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sources-"));
     try {

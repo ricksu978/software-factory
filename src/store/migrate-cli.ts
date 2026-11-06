@@ -25,6 +25,18 @@ async function upsertSources(pool: pg.Pool, file: string): Promise<void> {
   }
 }
 
+/**
+ * Azure only: makes the control plane's Entra principal a member of factory_app, so the append-only grant applies
+ * to the app. It runs as the database's Entra admin, the migrate job's identity. pgaadauth_create_principal exists
+ * only on Azure Postgres, so it's called only when the role is missing, and only the Azure job sets the variable.
+ * https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-manage-azure-ad-users
+ */
+async function ensureAppPrincipal(pool: pg.Pool, name: string): Promise<void> {
+  const exists = await pool.query("select 1 from pg_roles where rolname = $1", [name]);
+  if (exists.rowCount === 0) await pool.query("select * from pg_catalog.pgaadauth_create_principal($1, false, false)", [name]);
+  await pool.query(`grant factory_app to "${name.replaceAll('"', '""')}"`);
+}
+
 async function upsertDevOwner(pool: pg.Pool, login: string): Promise<void> {
   await pool.query(
     `insert into "user" (provider, subject, github_login, role, product_owner) values ('dev', $1, $1, 'owner', true)
@@ -57,6 +69,7 @@ export async function main(args: string[], env: NodeJS.ProcessEnv): Promise<numb
   const pool = createPool(env.FACTORY_DB_URI);
   try {
     await migrate(pool);
+    if (env.FACTORY_APP_PRINCIPAL) await ensureAppPrincipal(pool, env.FACTORY_APP_PRINCIPAL);
     const sources = env.FACTORY_SOURCES ?? "config/sources.yml";
     if (existsSync(sources)) await upsertSources(pool, sources);
     if (env.FACTORY_ENV === "local") {
