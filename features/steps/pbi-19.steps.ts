@@ -257,11 +257,12 @@ Then("the item still waits for sign-off", long, async function () {
   assert.equal(s.decision, null);
 });
 
-Then("the item is Queued to resume at {string}", long, async function (stage: string) {
+// An answered SignOff item is claimable as it stands (Run contract 3), so approval leaves the state alone.
+Then("the item is ready to resume at {string}", long, async function (stage: string) {
   const c = ctx(this);
   assert.ok(c.status !== undefined || c.applied, "nothing was sent to the dashboard or the comment handler");
   const s = await stored(c);
-  assert.deepEqual([s.state, s.nextStage], ["Queued", stage]);
+  assert.deepEqual([s.state, s.decision !== null, s.nextStage], ["SignOff", true, stage]);
 });
 
 // AC-3, Floor
