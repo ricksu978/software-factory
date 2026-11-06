@@ -3,7 +3,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import type { FactoryWebhookEvent } from "../adapters/types.ts";
+import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
+import { IllegalTransition, transitionItem } from "../store/items.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
 export function verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
@@ -58,6 +60,9 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
   } finally {
     c.release();
   }
+  // A failed move is logged, not thrown: the delivery is already recorded, so GitHub's redelivery would be dropped,
+  // and the poller's next pass catches the same merge, close or review from the PR's state.
+  await applyPrEvent(deps.pool, event).catch((e) => console.error(`applying ${event.kind} failed, the poller retries it:`, e));
   // Only after the commit and with the client back in the pool, and without holding up GitHub's 204. A redelivery
   // returned above, so the same comment is never applied twice.
   if (event.kind === "comment" && deps.onComment) {
@@ -65,4 +70,45 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
     void deps.onComment(comment).catch((e) => console.error(`applying comment ${comment.commentId} failed:`, e));
   }
   return { status: 204 };
+}
+
+const github = { actor: "system", actorId: "github" } as const;
+
+/**
+ * Plan Task 17: what a merge, a close or a review does to the item whose open run holds the PR. A merge moves InReview,
+ * or InProgress during address, to Accepted and records `merge_sha`; the scheduler's CI poll then decides Done or
+ * Failed. A close without a merge withdraws the item. A changes-requested review from an allowlisted login, newer
+ * than `run.reviews_seen_at`, sends an InReview item back to address (Run contract 10). An item another path moved
+ * first is left alone.
+ */
+async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void> {
+  if (e.kind !== "pr_merged" && e.kind !== "pr_closed" && !(e.kind === "review" && e.state === "changes_requested")) return;
+  const row = (await pool.query<{ item_id: string; state: string; run_id: string; reviews_seen_at: Date | null }>(
+    `select i.id as item_id, i.state, r.id as run_id, r.reviews_seen_at from run r join item i on i.id = r.item_id join repo on repo.id = r.repo_id
+     where r.ended_at is null and r.pr_number = $1 and lower(repo.url) = lower($2)`,
+    [e.prNumber, `https://github.com/${e.repo}`],
+  )).rows[0];
+  if (!row) return;
+  try {
+    if (e.kind === "pr_merged") {
+      if (row.state !== "InReview" && row.state !== "InProgress") return;
+      await withTx(pool, async (c) => {
+        await transitionItem(c, row.item_id, "merged", github);
+        await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, e.mergeSha]);
+      });
+    } else if (e.kind === "pr_closed") {
+      await withTx(pool, (c) => transitionItem(c, row.item_id, "withdrawn", github));
+    } else {
+      if (row.state !== "InReview") return;
+      if (row.reviews_seen_at && new Date(e.submittedAt).getTime() <= row.reviews_seen_at.getTime()) return;
+      const trusted = await pool.query(`select 1 from "user" where lower(github_login) = lower($1)`, [e.author]);
+      if (!trusted.rowCount) return;
+      await withTx(pool, async (c) => {
+        await transitionItem(c, row.item_id, "changes_requested", github);
+        await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
+      });
+    }
+  } catch (err) {
+    if (!(err instanceof IllegalTransition)) throw err;
+  }
 }

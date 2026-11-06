@@ -83,6 +83,8 @@ export function parseGitHubWebhook(headers: Record<string, string>, body: unknow
       return { kind: "comment", externalId: str(b.issue.number), repo, login: str(b.comment.user?.login), body: str(b.comment.body), commentId: str(b.comment.id) };
     }
     if (event === "pull_request" && b.action === "closed" && b.pull_request?.number && repo) {
+      // The factory closes its own PRs when an item is withdrawn or restarts, and has already moved the item.
+      if (!b.pull_request.merged && bot(b.sender)) return { kind: "ignored" };
       return b.pull_request.merged
         ? { kind: "pr_merged", prNumber: b.pull_request.number, repo, mergeSha: str(b.pull_request.merge_commit_sha) }
         : { kind: "pr_closed", prNumber: b.pull_request.number, repo };
