@@ -69,6 +69,24 @@ test("red fails when the item has no scenarios at all", () => {
   assert.deepEqual(redGate(new Map(), "@pbi-482", []).findings, ["no scenario carries @pbi-482"]);
 });
 
+test("red passes a green @regression scenario beside a red one", () => {
+  const r = results([["still passes", ["@pbi-482", "@regression"], "green"], ["new", ["@pbi-482"], "red"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["still passes", "new"]), { ok: true, findings: [] });
+});
+
+test("red fails a @regression scenario that is red or crashed, so the tag can't carry new behaviour past Red", () => {
+  const r = results([["sneaky", ["@pbi-482", "@regression"], "red"], ["broken", ["@pbi-482", "@regression"], "crash"], ["new", ["@pbi-482"], "red"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["sneaky", "broken", "new"]).findings, [
+    "regression scenario doesn't pass before the build: sneaky: red",
+    "regression scenario doesn't pass before the build: broken: crash",
+  ]);
+});
+
+test("red fails an item whose every scenario is @regression", () => {
+  const r = results([["still passes", ["@pbi-482", "@regression"], "green"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["still passes"]).findings, ["every scenario carrying @pbi-482 is @regression, so Red proves nothing"]);
+});
+
 test("red fails on a scenario of the item that crashed", () => {
   const r = results([["b", ["@pbi-482"], "crash"]]);
   assert.equal(redGate(r, "@pbi-482", ["b"]).ok, false);
