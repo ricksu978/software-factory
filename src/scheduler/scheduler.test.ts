@@ -211,6 +211,85 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select next_stage from run where item_id = $1", [id])).rows[0].next_stage, "open-pr");
   });
 
+  test("an item that names no repo is held with the reason", async () => {
+    await backlog.seed({ externalId: "1", repo: null });
+    const id = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '1', 't', 'Queued') returning id", [source])).rows[0].id;
+    await run();
+    assert.deepEqual(await state(id), { state: "Queued", held: true });
+    assert.match((await backlog.comments("1")).join(), /names no repo/);
+  });
+
+  test("a pin that fails for a passing reason, such as GitHub being down, leaves the item as it was", async () => {
+    const id = await item("1", "Queued");
+    repoHost.heads.clear();
+    await assert.rejects(run(), /no default branch head/);
+    assert.deepEqual(await state(id), { state: "Queued", held: false });
+    assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 0);
+  });
+
+  test("with three answered sign-offs and nothing else waiting, one of them starts", async () => {
+    for (const ext of ["1", "2", "3"]) {
+      const id = await item(ext, "SignOff");
+      await openRun(id, `next_stage = 'red', repo_id = '${repoId}', config_sha = 'x'`);
+      await db.pool.query("insert into question (item_id, kind, body, answer, answered_at) values ($1, 'sign_off', 'q', 'approve', $2)", [id, NOW]);
+    }
+    await run();
+    assert.equal(started.length, 1);
+  });
+
+  test("a start that fails moves the item out of InProgress, so the generation it handed out is never valid again", async () => {
+    const id = await item("1", "Queued");
+    launcher.start = async () => {
+      throw new Error("docker is down");
+    };
+    await run();
+    const r = (await db.pool.query("select state, lease_generation from item where id = $1", [id])).rows[0];
+    assert.deepEqual(r, { state: "Queued", lease_generation: 2 });
+  });
+
+  test("the kill switch still stops the other cells when one stop fails", async () => {
+    for (const [ext, cell] of [["1", "cell-a"], ["2", "cell-b"]]) {
+      const id = await item(ext, "InProgress", `lease_owner = 'x', lease_expires = '${new Date(NOW.getTime() + 60_000).toISOString()}'`);
+      await openRun(id, `execution_name = '${cell}'`);
+    }
+    const stop = launcher.stop;
+    launcher.stop = async (name) => {
+      if (name === "cell-a") throw new Error("gone");
+      await stop(name);
+    };
+    await run(NOW, true);
+    assert.deepEqual(stopped, ["cell-b"]);
+  });
+
+  test("an override that keeps failing doesn't stop leases expiring or new cells starting", async () => {
+    const stuck = await item("1", "Abandoned");
+    await openRun(stuck, `pr_number = 9, repo_id = '${repoId}', config_sha = 'x'`);
+    await override("requeue", stuck); // prState throws: the fake holds no PR 9
+    const expired = await item("2", "InProgress", `lease_owner = 'x', lease_expires = '${ago(1).toISOString()}'`);
+    await openRun(expired);
+    // The same tick claims the expired item again, so what tick reports is the evidence, not the item's state.
+    assert.deepEqual((await run()).expired, [expired]);
+    assert.equal(started.length, 1);
+  });
+
+  test("after a re-queue reopens a question, its reminders come again", async () => {
+    const id = await item("1", "Abandoned");
+    await openRun(id, "next_stage = 'sign-off'");
+    await db.pool.query("insert into question (item_id, kind, body, asked_at, reminders_sent) values ($1, 'sign_off', 'q', $2, 2)", [id, ago(5 * DAY)]);
+    await backlog.adapter.comment("1", "first round", `reminder:x`);
+    await override("requeue", id);
+    await run();
+    await run(new Date(NOW.getTime() + 2 * DAY + 1));
+    assert.equal((await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length, 1);
+  });
+
+  test("resume records who lifted the pause, and why", async () => {
+    await override("pause");
+    await setOverride(db.pool, { scope: "factory", targetId: null, kind: "resume", reason: "fixed", createdBy: operator, expiresAt: null });
+    const rows = (await db.pool.query("select kind, reason, cleared_by from override order by created_at")).rows;
+    assert.deepEqual(rows, [{ kind: "pause", reason: "unit", cleared_by: operator }, { kind: "resume", reason: "fixed", cleared_by: operator }]);
+  });
+
   test("an override with a blank reason is refused", async () => {
     await assert.rejects(setOverride(db.pool, { scope: "factory", targetId: null, kind: "pause", reason: " ", createdBy: operator, expiresAt: null }), /needs a reason/);
   });

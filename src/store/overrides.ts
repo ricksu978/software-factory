@@ -15,14 +15,16 @@ export async function setOverride(
 ): Promise<void> {
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   if ((o.scope === "item") !== (o.targetId !== null)) throw new Error("an item override names its item, and a factory override names none");
-  // resume ends a factory pause or drain, so it's stored as the clearing of those rather than as a row of its own.
-  if (o.kind === "resume") {
-    await c.query("update override set cleared_at = now() where cleared_at is null and scope = 'factory' and kind in ('pause', 'drain')");
-    return;
+  // resume clears the factory's pause and drain, recording who cleared them, and keeps its own row for the audit trail
+  // (spec §8). That row is cleared from the start, so it's never active.
+  const resume = o.kind === "resume";
+  if (resume) {
+    await c.query("update override set cleared_at = now(), cleared_by = $1 where cleared_at is null and scope = 'factory' and kind in ('pause', 'drain')", [o.createdBy]);
   }
   await c.query(
-    "insert into override (scope, target_id, kind, reason, created_by, expires_at) values ($1, $2, $3, $4, $5, $6)",
-    [o.scope, o.targetId, o.kind, o.reason, o.createdBy, o.expiresAt],
+    `insert into override (scope, target_id, kind, reason, created_by, expires_at, cleared_at, cleared_by)
+     values ($1, $2, $3, $4, $5, $6, case when $7 then now() end, case when $7 then $5::uuid end)`,
+    [o.scope, o.targetId, o.kind, o.reason, o.createdBy, o.expiresAt, resume],
   );
 }
 

@@ -110,13 +110,16 @@ export function fakeLauncher(): Launcher & { started: Record<string, string>[]; 
 
 const proxyScript = readFileSync(new URL("./egress-proxy.mjs", import.meta.url), "utf8");
 
-/** The host:port pairs the proxy admits: GitHub and npm on 443, and the control plane and Azurite on their pinned ports. */
-function egressAllow(cfg: { controlUrl: string; blob: string }): string[] {
+/**
+ * What the proxy admits, as `kind:host:port` (see egress-proxy.mjs): tunnels to GitHub and npm on 443, plain HTTP to
+ * the control plane, and SAS-signed plain HTTP to Azurite, each on its pinned port.
+ */
+export function egressAllow(cfg: { controlUrl: string; blob: string }): string[] {
   const controlPort = new URL(cfg.controlUrl).port;
   const endpoint = /(?:^|;)\s*BlobEndpoint=([^;]+)/i.exec(cfg.blob)?.[1];
   const blobPort = endpoint ? new URL(endpoint).port : "";
   if (!controlPort || !blobPort) throw new Error("the control plane and Azurite need explicit ports for the egress allowlist");
-  return ["github.com:443", "api.github.com:443", "registry.npmjs.org:443", `host.docker.internal:${controlPort}`, `host.docker.internal:${blobPort}`];
+  return ["tls:github.com:443", "tls:api.github.com:443", "tls:registry.npmjs.org:443", `http:host.docker.internal:${controlPort}`, `sas:host.docker.internal:${blobPort}`];
 }
 
 /**

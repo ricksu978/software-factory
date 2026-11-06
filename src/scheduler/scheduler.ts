@@ -40,6 +40,18 @@ export type TickResult = { started: string[]; stopped: string[]; expired: string
 
 const system: Actor = { actor: "system", actorId: "scheduler" };
 
+/**
+ * Runs one item's or one cell's step and logs a failure instead of throwing, so one broken call can't stop the kill
+ * switch reaching the other cells, or wedge every later tick before leases expire. The step retries next tick.
+ */
+async function isolated(what: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    console.error(`scheduler: ${what} failed, retrying next tick:`, e);
+  }
+}
+
 export async function tick(d: TickDeps): Promise<TickResult> {
   const result: TickResult = { started: [], stopped: [], expired: [] };
   const overrides = await activeOverrides(d.pool, d.now);
@@ -53,8 +65,10 @@ export async function tick(d: TickDeps): Promise<TickResult> {
       [d.now],
     );
     for (const { execution_name } of live.rows) {
-      await d.launcher.stop(execution_name);
-      result.stopped.push(execution_name);
+      await isolated(`stopping ${execution_name}`, async () => {
+        await d.launcher.stop(execution_name);
+        result.stopped.push(execution_name);
+      });
     }
     return result;
   }
@@ -93,40 +107,49 @@ async function applyItemOverrides(d: TickDeps, overrides: Awaited<ReturnType<typ
   for (const o of overrides) {
     if (o.scope !== "item" || !o.targetId) continue;
     const itemId = o.targetId;
-    if (o.kind === "hold") {
-      await d.pool.query("update item set held = true where id = $1", [itemId]);
-    } else if (o.kind === "unhold") {
-      await withTx(d.pool, async (c) => {
-        await c.query("update item set held = false where id = $1", [itemId]);
-        await clearItemOverrides(c, itemId, ["hold", "unhold"]);
-      });
-    } else if (o.kind === "requeue") {
-      await requeue(d, itemId);
-    } else if (o.kind === "stop_run") {
-      const row = await itemRow(d.pool, itemId);
-      if (row?.state === "InProgress") {
-        if (row.execution_name) {
-          await d.launcher.stop(row.execution_name);
-          result.stopped.push(row.execution_name);
-        }
+    await isolated(`${o.kind} on item ${itemId}`, async () => {
+      if (o.kind === "hold") {
+        await d.pool.query("update item set held = true where id = $1", [itemId]);
+      } else if (o.kind === "unhold") {
         await withTx(d.pool, async (c) => {
-          await overrideItem(c, itemId, "Failed", system, o.reason);
-          await c.query("update item set held = true where id = $1", [itemId]);
+          await c.query("update item set held = false where id = $1", [itemId]);
+          await clearItemOverrides(c, itemId, ["hold", "unhold"]);
         });
-        const branch = row.run_number !== null ? runBranch({ branch: row.branch, externalId: row.external_id, runNumber: row.run_number }) : null;
-        const body = branch
-          ? `An operator stopped this run: ${o.reason}. Its work is kept on the branch \`${branch}\`. Re-queue it to carry on.`
-          : `An operator stopped this run: ${o.reason}. Re-queue it to carry on.`;
-        await d.backlogFor(row.source_id).comment(row.external_id, body, `stopped:${o.id}`);
+      } else if (o.kind === "requeue") {
+        await requeue(d, itemId);
+      } else if (o.kind === "stop_run") {
+        await stopRun(d, itemId, o, result);
       }
-      await clearItemOverrides(d.pool, itemId, ["stop_run"]);
-    }
+    });
   }
   await d.pool.query(
     `update override o set cleared_at = $1 from item i
      where o.cleared_at is null and o.scope = 'item' and o.target_id = i.id and i.state in ('Done', 'Failed', 'Abandoned')`,
     [d.now],
   );
+}
+
+/**
+ * Stops the cell, then fails and holds the item and uses up the override in one transaction. A stop that throws
+ * leaves all three for the next tick. The comment naming the kept branch comes last and is best effort.
+ */
+async function stopRun(d: TickDeps, itemId: string, o: { id: string; reason: string }, result: TickResult) {
+  const row = await itemRow(d.pool, itemId);
+  if (row?.state !== "InProgress") return void (await clearItemOverrides(d.pool, itemId, ["stop_run"]));
+  if (row.execution_name) {
+    await d.launcher.stop(row.execution_name);
+    result.stopped.push(row.execution_name);
+  }
+  await withTx(d.pool, async (c) => {
+    await overrideItem(c, itemId, "Failed", system, o.reason);
+    await c.query("update item set held = true where id = $1", [itemId]);
+    await clearItemOverrides(c, itemId, ["stop_run"]);
+  });
+  const branch = row.run_number !== null ? runBranch({ branch: row.branch, externalId: row.external_id, runNumber: row.run_number }) : null;
+  const body = branch
+    ? `An operator stopped this run: ${o.reason}. Its work is kept on the branch \`${branch}\`. Re-queue it to carry on.`
+    : `An operator stopped this run: ${o.reason}. Re-queue it to carry on.`;
+  await isolated(`commenting the stop on item ${itemId}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `stopped:${o.id}`));
 }
 
 /**
@@ -176,17 +199,16 @@ async function chaseQuestions(d: TickDeps) {
      where q.answer is null and q.closed_at is null and i.state in ('SignOff', 'NeedsInput')`,
   );
   for (const q of r.rows) {
-    const age = d.now.getTime() - q.asked_at.getTime();
-    if (age > TIMEOUT_MS) {
-      await withTx(d.pool, (c) => transitionItem(c, q.item_id, "timed_out", system));
-      continue;
-    }
-    const due = REMIND_AT_MS.filter((at) => age >= at).length;
-    if (due > q.reminders_sent) {
+    await isolated(`chasing question ${q.id}`, async () => {
+      const age = d.now.getTime() - q.asked_at.getTime();
+      if (age > TIMEOUT_MS) return void (await withTx(d.pool, (c) => transitionItem(c, q.item_id, "timed_out", system)));
+      const due = REMIND_AT_MS.filter((at) => age >= at).length;
+      if (due <= q.reminders_sent) return;
       const body = `Reminder: this item is still waiting for you. With no answer it's abandoned ${Math.ceil((TIMEOUT_MS - age) / DAY_MS)} days from now.`;
-      await d.backlogFor(q.source_id).comment(q.external_id, body, `reminder:${q.id}:${due}`);
+      // asked_at is in the key, because a re-queue resets it and the reminders start again under new keys.
+      await d.backlogFor(q.source_id).comment(q.external_id, body, `reminder:${q.id}:${q.asked_at.toISOString()}:${due}`);
       await d.pool.query("update question set reminders_sent = $2 where id = $1", [q.id, due]);
-    }
+    });
   }
 }
 
@@ -199,17 +221,19 @@ async function pollMergedCi(d: TickDeps) {
      where i.state = 'Accepted'`,
   );
   for (const row of r.rows) {
-    const status = await d.repoHost.checksOnSha(repoName(row.repo_url), row.merge_sha);
-    const silent = status === "none" && row.merged_at !== null && d.now.getTime() - row.merged_at.getTime() > NO_CI_AFTER_MS;
-    if (status === "success") {
-      await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_verified", system));
-    } else if (status === "failure" || silent) {
-      await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_failed", system));
-      const body = silent
-        ? `No CI ran on main for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`
-        : `CI failed on main for the merge commit ${row.merge_sha}, so the item failed its Definition of Done.`;
-      await d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`);
-    }
+    await isolated(`polling CI for item ${row.item_id}`, async () => {
+      const status = await d.repoHost.checksOnSha(repoName(row.repo_url), row.merge_sha);
+      const silent = status === "none" && row.merged_at !== null && d.now.getTime() - row.merged_at.getTime() > NO_CI_AFTER_MS;
+      if (status === "success") {
+        await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_verified", system));
+      } else if (status === "failure" || silent) {
+        await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_failed", system));
+        const body = silent
+          ? `No CI ran on main for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`
+          : `CI failed on main for the merge commit ${row.merge_sha}, so the item failed its Definition of Done.`;
+        await isolated(`commenting CI on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`));
+      }
+    });
   }
 }
 
@@ -240,7 +264,9 @@ async function startNext(d: TickDeps, result: TickResult) {
     if (!(e instanceof PinError)) throw e;
     // The claim rolled back. Held, the item can't come first in line again, so it never blocks the items behind it.
     await d.pool.query("update item set held = true where id = $1", [e.itemId]);
-    await d.backlogFor(e.sourceId).comment(e.externalId, `The factory can't start this item: ${e.message}. Fix it, then re-queue the item.`, `pin:${e.message}`);
+    // A held item reaches this once per hold, and the time keeps a second hold after a re-queue from reusing the key.
+    const body = `The factory can't start this item: ${e.message}. Fix it, then re-queue the item.`;
+    await isolated(`commenting the hold on item ${e.itemId}`, () => d.backlogFor(e.sourceId).comment(e.externalId, body, `pin:${d.now.toISOString()}`));
     return;
   }
   if (started) result.started.push(started);
@@ -259,7 +285,31 @@ class PinError extends Error {
   }
 }
 
+/**
+ * Claims and pins in one transaction, and starts the cell only after that commits. Starting inside the transaction
+ * would let a rollback reuse the generation, and so the RUN_TOKEN, of a cell that had already started. A start that
+ * fails moves the item out of InProgress, which raises the generation past anything the launcher might have begun.
+ */
 async function claimAndStart(d: TickDeps, resumeOnly: boolean): Promise<string | null> {
+  const claimed = await claimAndPin(d, resumeOnly);
+  if (!claimed) return null;
+  const { claim, env } = claimed;
+  let name: string;
+  try {
+    name = await d.launcher.start(env);
+  } catch (e) {
+    console.error(`scheduler: starting a cell for item ${claim.itemId} failed:`, e);
+    await withTx(d.pool, async (c) => {
+      const still = await c.query("select 1 from item where id = $1 and state = 'InProgress' and lease_generation = $2", [claim.itemId, claim.generation]);
+      if (still.rowCount) await transitionItem(c, claim.itemId, "lease_expired", system);
+    });
+    return null;
+  }
+  await d.pool.query("update run set execution_name = $2 where id = $1", [claim.runId, name]);
+  return name;
+}
+
+async function claimAndPin(d: TickDeps, resumeOnly: boolean) {
   return withTx(d.pool, async (c) => {
     const claim = await claimNext(c, "scheduler", d.now, { resumeOnly });
     if (!claim) return null;
@@ -284,8 +334,6 @@ async function claimAndStart(d: TickDeps, resumeOnly: boolean): Promise<string |
       RUN_ID: claim.runId, ITEM_ID: claim.itemId, GENERATION: String(claim.generation),
       RUN_TOKEN: runToken(d.secret, claim.runId, claim.generation), CONTROL_URL: d.controlUrl, RESUME_FROM: run.next_stage,
     };
-    const name = await d.launcher.start(env);
-    await c.query("update run set execution_name = $2 where id = $1", [claim.runId, name]);
-    return name;
+    return { claim, env };
   });
 }

@@ -1,11 +1,19 @@
 // The local cells' egress proxy (plan Task 13). `ensureEgress` runs this file's text with `node -e` in the
-// factory-egress container. It admits only the host:port pairs in EGRESS_ALLOW: CONNECT for HTTPS, and plain
-// HTTP forwarding for the control plane and Azurite. Everything else gets 403. Built-in modules only.
+// factory-egress container. EGRESS_ALLOW lists `kind:host:port` entries, and each kind admits one thing:
+//   tls   a CONNECT tunnel, for the HTTPS hosts. Nothing else may tunnel, because a tunnel can't be inspected.
+//   http  plain HTTP forwarding, for the control plane, whose every route checks the run token itself.
+//   sas   plain HTTP forwarding for Azurite, only for a request that carries a SAS `sig=` and no Authorization
+//         header, so a cell can use the write-only URLs it's handed but can't sign requests with the emulator's key.
+// Everything else gets 403. Built-in modules only.
 import { createServer, request } from "node:http";
 import { connect } from "node:net";
 
-const allow = new Set((process.env.EGRESS_ALLOW ?? "").split(",").filter(Boolean));
-const allowed = (host, port) => allow.has(`${host.toLowerCase()}:${port}`);
+const rules = new Map();
+for (const entry of (process.env.EGRESS_ALLOW ?? "").split(",").filter(Boolean)) {
+  const [kind, ...rest] = entry.split(":");
+  rules.set(rest.join(":").toLowerCase(), kind);
+}
+const kindOf = (host, port) => rules.get(`${host.toLowerCase()}:${port}`);
 
 const server = createServer((req, res) => {
   let url;
@@ -15,7 +23,9 @@ const server = createServer((req, res) => {
     return void res.writeHead(400).end();
   }
   const port = url.port || "80";
-  if (url.protocol !== "http:" || !allowed(url.hostname, port)) return void res.writeHead(403).end();
+  const kind = url.protocol === "http:" ? kindOf(url.hostname, port) : undefined;
+  const signed = url.searchParams.has("sig") && req.headers.authorization === undefined;
+  if (kind !== "http" && !(kind === "sas" && signed)) return void res.writeHead(403).end();
   const headers = { ...req.headers };
   delete headers["proxy-connection"];
   delete headers["proxy-authorization"];
@@ -34,7 +44,7 @@ server.on("connect", (req, socket, head) => {
   const host = target.slice(0, i);
   const port = target.slice(i + 1);
   socket.on("error", () => {});
-  if (i < 1 || !allowed(host, port)) return void socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+  if (i < 1 || kindOf(host, port) !== "tls") return void socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
   let open = false;
   const up = connect(Number(port), host, () => {
     open = true;
@@ -47,4 +57,4 @@ server.on("connect", (req, socket, head) => {
   socket.on("close", () => up.destroy());
 });
 
-server.listen(3128);
+server.listen(Number(process.env.EGRESS_PORT ?? 3128));

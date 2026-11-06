@@ -64,7 +64,7 @@ describe("dockerLauncher", () => {
 
 describe("ensureEgress", () => {
   const cfg = { image: "factory-cell:local", controlUrl: "http://host.docker.internal:7400", blob: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=KEY;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;" };
-  const allow = "EGRESS_ALLOW=github.com:443,api.github.com:443,registry.npmjs.org:443,host.docker.internal:7400,host.docker.internal:7410";
+  const allow = "EGRESS_ALLOW=tls:github.com:443,tls:api.github.com:443,tls:registry.npmjs.org:443,http:host.docker.internal:7400,sas:host.docker.internal:7410";
   const verbs = (calls: string[][]) => calls.map((c) => c.slice(1, 3).join(" "));
 
   /** Boots once against an empty Docker to learn this configuration's label. */
