@@ -211,10 +211,12 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo));
     return byRepo.get(key)!;
   };
+  // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
+  const depsOf = async (fi: FactoryItem) => ((await readinessOf(fi)).repoKnown ? adapter.openDependencies(fi.externalId) : []);
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
-    if (readinessItemHash(fi, await adapter.openDependencies(fi.externalId)) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
+    if (readinessItemHash(fi, await depsOf(fi)) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
   // Most often a failure here is the judge on a usage limit. The item stays Eligible and the next poll tries again.
@@ -222,7 +224,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
     const r = await readinessOf(fi);
-    const openDeps = await adapter.openDependencies(fi.externalId);
+    const openDeps = await depsOf(fi);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
       openDeps, judge, adapter, policyErrors: r.policyErrors,

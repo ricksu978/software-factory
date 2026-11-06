@@ -334,6 +334,17 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(judged, []);
   });
 
+  test("an item in an unknown repo is told so, even when its host can't list dependencies", async () => {
+    const ext = await seed({ repo: "someone/else" });
+    fake.adapter.openDependencies = async () => {
+      throw new Error("404 from a repo outside the App's installation");
+    };
+    await poll();
+    await poll();
+    assert.equal((await row(ext)).state, "NotReady");
+    assert.match((await fake.comments(ext))[0], /doesn't know this item's repo/);
+  });
+
   test("a pr-review.md with a run: line makes the item NotReady with that reason, and fixing it re-gates", async () => {
     commit("c2", { ...files, ".factory/pr-review.md": "- [ ] Lint `run: npm run lint`\n" });
     const ext = await seed();
