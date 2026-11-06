@@ -83,8 +83,18 @@ Given("the cell image built from this checkout", long, async function () {
   await built;
 });
 
+// Runs a command the way the cell engine runs a gate: from the image's full environment, filtered by the engine's own
+// commandEnv (Run contract 11), so the scenario fails if that env ever drops what the gates need.
+function viaEngine(command: string): string[] {
+  const js = `import { commandEnv } from "/work/src/cell/engine.ts";
+import { spawnSync } from "node:child_process";
+const r = spawnSync("sh", ["-c", ${JSON.stringify(command)}], { cwd: "/work", env: commandEnv(), stdio: "inherit" });
+process.exit(r.status ?? 1);`;
+  return ["run", "--rm", "--network", "none", "-v", `${repo}:/work:ro`, "-w", "/work", "--entrypoint", "node", IMAGE, "--input-type=module", "-e", js];
+}
+
 When("a cell runs the database suites {string} and {string} with the gates' environment", long, async function (a: string, b: string) {
-  const r = await docker(inCell(`node --test ${a} ${b}`));
+  const r = await docker(viaEngine(`node --test ${a} ${b}`));
   ctx(this).out = `${r.stdout}\n${r.stderr}`;
 });
 
