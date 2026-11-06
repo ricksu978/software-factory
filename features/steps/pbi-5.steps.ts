@@ -17,8 +17,9 @@ function ctx(world: object): Ctx {
   return w.pbi5;
 }
 
+// FACTORY_DB_TESTS=skip keeps nested runs off Testcontainers, because a cell has no Docker daemon. CI's own npm test still runs the DB suites.
 function run(command: string, cwd: string): Result {
-  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8" });
+  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...process.env, FACTORY_DB_TESTS: "skip" } });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
@@ -57,9 +58,9 @@ Then("the command exits {int}", function (code: number) {
 
 Given("a new test file {string} with one passing test named {string}", function (path: string, name: string) {
   const file = join(repo, path);
-  mkdirSync(dirname(file), { recursive: true });
+  const created = mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `import { test } from "node:test";\ntest(${JSON.stringify(name)}, () => {});\n`);
-  ctx(this).cleanup.push(dirname(file));
+  ctx(this).cleanup.push(created ?? file);
 });
 
 Then("the output reports the passing test {string}", function (name: string) {
@@ -86,7 +87,9 @@ Then("the scratch project's {string} holds one {string} message per scenario", f
   const file = join(c.scratch, path);
   assert.ok(existsSync(file), `${path} was not written`);
   const messages = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
-  assert.equal(messages.filter((m) => key in m).length, 1);
+  const scenarios = messages.filter((m) => "pickle" in m).length;
+  assert.ok(scenarios > 0, "the report holds no scenarios");
+  assert.equal(messages.filter((m) => key in m).length, scenarios);
 });
 
 When("I read the workflow {string}", function (path: string) {
