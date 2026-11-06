@@ -19,8 +19,10 @@ type Call = { route: string; body: Record<string, any> };
 type AgentCall = { stage: string; prompt: string; agent?: string; mode: string; webTools?: string[] };
 type Scenario = { name: string; tags: string[] };
 
-type Ctx = {
+export type Ctx = {
   root: string; origin: string; dir: string; fixtures: string;
+  /** What the fake risk classifier answers at open-pr (PBI 16): a tier, or anything else as unreadable text. */
+  riskAnswer: string;
   criteria: number; nextStage: string; decision: { kind: string; text: string } | null;
   lockSha: string | null; lockedFiles: string[]; prNumber: number | null; startHead: string;
   scenarios: Scenario[]; skipCriterion: number | null; greenAtRed: boolean; editLockAtRed: boolean;
@@ -65,7 +67,8 @@ function featureText(scenarios: Scenario[]): string {
 }
 
 // A bare origin with main, and a working clone. A signed-off run also gets its branch, holding the locked feature.
-function setUp(world: object, nextStage: string, signedOff: boolean): Ctx {
+// PBI 16's steps reuse it, with runTheCell, to reach open-pr.
+export function setUp(world: object, nextStage: string, signedOff: boolean): Ctx {
   const root = mkdtempSync(join(tmpdir(), "pbi18-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -101,7 +104,7 @@ function setUp(world: object, nextStage: string, signedOff: boolean): Ctx {
   git(dir, "config", "user.name", "cell");
 
   const c: Ctx = {
-    root, origin, dir, fixtures, criteria: 3, nextStage, decision: null,
+    root, origin, dir, fixtures, riskAnswer: "Low", criteria: 3, nextStage, decision: null,
     lockSha, lockedFiles: signedOff ? [FEATURE] : [], prNumber: nextStage === "address" ? 7 : null, startHead: git(dir, "rev-parse", "HEAD"),
     scenarios, skipCriterion: null, greenAtRed: false, editLockAtRed: false,
     dod: "- [ ] Typecheck passes. `run: true`\n", dodJudged: new Map(), trusted: [], stranger: [], ciOldOnly: false, secrets: null,
@@ -211,6 +214,12 @@ function agent(c: Ctx) {
     } else if (c.stage === "address") {
       writeFileSync(join(a.cwd, "app.txt"), `fix ${c.agentCalls.length}\n`);
     }
+    // The shadow risk classifier's two passes at open-pr (PBI 16).
+    if (a.mode === "judge" && a.prompt.includes('{"tier":')) {
+      text = ["Low", "Medium", "High"].includes(c.riskAnswer) ? JSON.stringify({ tier: c.riskAnswer, reason: "the fake classifier's call" }) : c.riskAnswer;
+    } else if (a.mode === "judge" && a.prompt.includes('{"needsPerson":')) {
+      text = JSON.stringify({ needsPerson: false, reason: "the fake classifier's call" });
+    }
     return { ok: true, text, costUsd: 0.5, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" };
   };
 }
@@ -238,7 +247,12 @@ function policy(name: PolicyName, text: string): Policy {
 
 // Real git and sh across up to four attempts outlast cucumber's 5-second default on a busy machine.
 When("the cell runs", { timeout: 60_000 }, async function () {
-  const c = ctx(this);
+  await runTheCell(this);
+});
+
+/** Runs the engine against the run setUp built. A failure lands in ctx.error, so Thens can assert on it. */
+export async function runTheCell(world: object): Promise<void> {
+  const c = ctx(world);
   const run = (cmd: string) => `mkdir -p reports && cp "${fwd(join(c.fixtures, cmd))}" reports/bdd.ndjson`;
   try {
     const file = join(repo, "src/cell/engine.ts");
@@ -279,7 +293,7 @@ When("the cell runs", { timeout: 60_000 }, async function () {
   } catch (e) {
     c.error = e;
   }
-});
+}
 
 function ran(c: Ctx): string[] {
   assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);

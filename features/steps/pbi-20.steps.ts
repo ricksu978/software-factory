@@ -1,8 +1,10 @@
 import { Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { runTheCell, setUp } from "./pbi-18.steps.ts";
 
 // Steps record and Thens assert. src/risk/shadow.ts loads lazily, so while it doesn't exist every scenario fails on
 // its Then. The fake agent answers the classifier's two passes: the first with {"tier","reason"} when the scenario's
@@ -92,19 +94,37 @@ Then("its reasons include {string}", function (text: string) {
   assert.ok(r.reasons.some((x) => x.includes(text)), `no reason says ${text}: ${JSON.stringify(r.reasons)}`);
 });
 
-// AC-3 goes through the cell engine's open-pr stage, which PBI 14 (#18) builds. Until it merges these steps find no
-// engine, so the scenario fails on its Then; Green rewrites the When against the engine's open-pr.
-When("the cell opens the PR for an item whose change touches {string}", async function (_file: string) {
+// AC-3 runs the real cell engine through open-pr, on PBI 14's harness: a temporary git repo, a scripted agent and a
+// recording repo host. The scripted agent gives the classifier this scenario's answer.
+When("the cell opens the PR for an item whose change touches {string}", { timeout: 60_000 }, async function (file: string) {
   const c = ctx(this);
-  c.ran = (await load<object>("src/cell/engine.ts")) !== null;
+  const run = setUp(this, "open-pr", true);
+  run.riskAnswer = c.answer;
+  mkdirSync(dirname(join(run.dir, file)), { recursive: true });
+  writeFileSync(join(run.dir, file), "changed: true\n");
+  execFileSync("git", ["add", "-A"], { cwd: run.dir });
+  execFileSync("git", ["commit", "-q", "-m", `change ${file}`], { cwd: run.dir });
+  await runTheCell(this);
+  c.ran = true;
+  assert.equal(run.error, null, `the cell failed: ${String(run.error)}`);
+  c.prBody = run.prBodies.at(-1);
 });
 
+// The tier section runs from its heading to the next heading or the end of the body.
+function tierSection(c: Ctx, heading: string): string {
+  assert.ok(c.ran && c.prBody !== undefined, "the cell opened no PR");
+  const at = c.prBody.indexOf(`## ${heading}`);
+  assert.ok(at >= 0, `the PR body has no "${heading}" section:\n${c.prBody}`);
+  const rest = c.prBody.slice(at + 3);
+  const end = rest.search(/\n## /);
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
 Then("the PR body has a {string} section saying {string}", function (heading: string, tier: string) {
-  const c = ctx(this);
-  assert.ok(c.ran, "src/cell/engine.ts doesn't exist yet: it comes with PBI 14 (#18)");
-  assert.match(c.prBody ?? "", new RegExp(`#+ ${heading}[\\s\\S]*${tier}`), `no ${heading} section saying ${tier}`);
+  assert.match(tierSection(ctx(this), heading), new RegExp(`\\*\\*${tier}\\*\\*`));
 });
 
 Then("that section lists the reason naming {string}", function (file: string) {
-  assert.ok((ctx(this).prBody ?? "").includes(file), `the PR body doesn't name ${file}`);
+  const section = tierSection(ctx(this), "Shadow risk tier");
+  assert.ok(section.split("\n").some((l) => l.startsWith("- ") && l.includes(file)), `no reason names ${file}:\n${section}`);
 });
