@@ -150,6 +150,10 @@ const routes: Record<string, Route> = {
        order by criterion_index`,
       [run.run_id],
     );
+    const attempts = await c.query<{ stage_id: string; attempt: number }>(
+      "select stage_id, max(attempt) as attempt from stage_run where run_id = $1 group by stage_id",
+      [run.run_id],
+    );
     let trustedComments: ReviewComment[] = [];
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief.
     if (run.next_stage === "address" && run.pr_number !== null) {
@@ -169,6 +173,7 @@ const routes: Record<string, Route> = {
       dodVerdicts: dod.rows.map((v) => ({ index: v.criterion_index, criterion: v.criterion, status: v.status, reason: v.reason ?? "" })),
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       trustedComments,
+      stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
     };
   },
 

@@ -18,6 +18,8 @@ export type WebhookDeps = {
   pool: pg.Pool;
   secret: string;
   parse: (headers: Record<string, string>, body: unknown) => FactoryWebhookEvent;
+  /** Runs once a new `comment` event has committed, so /approve and /answer comments reach `applyComment` (Task 15). */
+  onComment?: (e: Extract<FactoryWebhookEvent, { kind: "comment" }>) => Promise<unknown>;
 };
 
 /**
@@ -36,6 +38,7 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
     return { status: 400 };
   }
   const c = await deps.pool.connect();
+  let event: FactoryWebhookEvent;
   try {
     await c.query("begin");
     const fresh = await c.query("insert into webhook_delivery (id) values ($1) on conflict (id) do nothing", [deliveryId]);
@@ -43,16 +46,23 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
       await c.query("rollback");
       return { status: 200 };
     }
+    event = deps.parse(headers, body);
     await appendEvent(c, {
       actor: "system", actorId: "github", itemId: null, kind: "webhook",
-      payload: { deliveryId, githubEvent: headers["x-github-event"] ?? null, event: deps.parse(headers, body) },
+      payload: { deliveryId, githubEvent: headers["x-github-event"] ?? null, event },
     });
     await c.query("commit");
-    return { status: 204 };
   } catch (e) {
     await c.query("rollback");
     throw e;
   } finally {
     c.release();
   }
+  // Only after the commit and with the client back in the pool, and without holding up GitHub's 204. A redelivery
+  // returned above, so the same comment is never applied twice.
+  if (event.kind === "comment" && deps.onComment) {
+    const comment = event;
+    void deps.onComment(comment).catch((e) => console.error(`applying comment ${comment.commentId} failed:`, e));
+  }
+  return { status: 204 };
 }

@@ -67,7 +67,7 @@ describe("parseGitHubWebhook", () => {
 
   test("an issue_comment created maps to comment, and one by a bot user is ignored", () => {
     const body = { action: "created", repository, issue: { number: 11 }, comment: { id: 99, body: "/approve", user: { login: "ricksu978", type: "User" } } };
-    assert.deepEqual(parseGitHubWebhook(h("issue_comment"), body), { kind: "comment", externalId: "11", login: "ricksu978", body: "/approve", commentId: "99" });
+    assert.deepEqual(parseGitHubWebhook(h("issue_comment"), body), { kind: "comment", externalId: "11", repo: repository.full_name, login: "ricksu978", body: "/approve", commentId: "99" });
     const own = { ...body, comment: { ...body.comment, user: { login: "ricksu978-software-factory[bot]", type: "Bot" } } };
     assert.deepEqual(parseGitHubWebhook(h("issue_comment"), own), { kind: "ignored" });
     assert.deepEqual(parseGitHubWebhook(h("issue_comment"), { ...body, action: "edited" }), { kind: "ignored" });
