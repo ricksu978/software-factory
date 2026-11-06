@@ -307,11 +307,14 @@ export function cellApi(deps: CellApiDeps): Handler {
   const verify = async (credential: string): Promise<Grant | null> => {
     const m = /^([0-9a-f-]{36})\.(\d{1,9})\.([0-9a-f]{64})$/.exec(credential);
     if (!m || !uuid.test(m[1])) return null;
+    // A database outage is a check that can't run, so the cell gets 503, not the 401 of a bad credential.
     const r = await deps.pool.query<{ generation: number; state: string; config_sha: string | null; repo_url: string | null }>(
       `select i.lease_generation as generation, i.state, r.config_sha, repo.url as repo_url
        from run r join item i on i.id = r.item_id left join repo on repo.id = r.repo_id where r.id = $1`,
       [m[1]],
-    );
+    ).catch((e) => {
+      throw new GatewayUnavailable(`can't check the run: ${String(e)}`);
+    });
     const row = r.rows[0];
     if (!row || row.state !== "InProgress" || row.generation !== Number(m[2]) || !same(runToken(deps.secret, m[1], row.generation), m[3])) return null;
     if (!row.config_sha || !row.repo_url) throw new GatewayUnavailable("the run has no pinned repo config yet");

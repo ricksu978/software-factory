@@ -146,6 +146,25 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(seen, []);
   });
 
+  test("a database the gateway can't reach answers 503, not 401", async () => {
+    const cell = await claimed();
+    const down = { query: async () => { throw new Error("connect ECONNREFUSED"); } } as unknown as typeof db.pool;
+    const api = cellApi({
+      pool: down, secret, repoHost: hostProxy(), backlogFor: () => board.adapter, stageAfter: () => null,
+      uploadUrl: async (path) => path, gateway: { upstream: "http://127.0.0.1:1", ownerToken: () => "owner-secret" }, webToolsOf: () => [],
+    });
+    const other = await startServer([api], { port: 0 });
+    try {
+      const r = await fetch(`http://127.0.0.1:${(other.address() as AddressInfo).port}/internal/model/v1/messages`, {
+        method: "POST", headers: { authorization: `Bearer sk-ant-oat01-${cell.runId}.${cell.generation}.${cell.token}` }, body: "{}",
+      });
+      await r.text();
+      assert.equal(r.status, 503);
+    } finally {
+      await new Promise((r) => other.close(r));
+    }
+  });
+
   test("the end-of-stage calls succeed in Run contract 9's order, and a /stage after the transition gets 409", async () => {
     const cell = await claimed();
     host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
