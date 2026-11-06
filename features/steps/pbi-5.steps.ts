@@ -27,9 +27,17 @@ function tail(out: string): string {
   return out.split("\n").slice(-30).join("\n");
 }
 
-function read(path: string): unknown {
+// Keeps the raw text for steps that check prose, and treats text that isn't YAML as no document.
+function read(world: object, path: string): unknown {
   const file = join(repo, path);
-  return existsSync(file) ? parse(readFileSync(file, "utf8")) : null;
+  const text = existsSync(file) ? readFileSync(file, "utf8") : null;
+  (world as { lastText?: string | null }).lastText = text;
+  if (text === null) return null;
+  try {
+    return parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function at(doc: unknown, path: string): unknown {
@@ -93,11 +101,11 @@ Then("the scratch project's {string} holds one {string} message per scenario", f
 });
 
 When("I read the workflow {string}", function (path: string) {
-  ctx(this).doc = read(path);
+  ctx(this).doc = read(this, path);
 });
 
 When("I read {string}", function (path: string) {
-  ctx(this).doc = read(path);
+  ctx(this).doc = read(this, path);
 });
 
 Then("it runs on {string} and {string}", function (a: string, b: string) {
