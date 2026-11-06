@@ -33,6 +33,20 @@ export interface BacklogAdapter {
 /** A line comment in a review thread, or a review's top-level summary, which has no path and the review's id as threadId. */
 export type ReviewComment = { threadId: string; path: string | null; line: number | null; author: string; body: string };
 
+/**
+ * A login as GitHub compares it: logins ignore case. A bot author is always named `name[bot]`, as REST names it, so a
+ * user account with the bot's bare name never shares its key (issue #79). Callers compare whole keys, never prefixes.
+ */
+export function loginKey(login: string): string {
+  return login.toLowerCase();
+}
+
+/** The key of a repo's trusted bot, stored with or without its "[bot]" suffix. */
+export function botKey(login: string): string {
+  const key = loginKey(login);
+  return key.endsWith("[bot]") ? key : `${key}[bot]`;
+}
+
 export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
 
 /**
@@ -42,7 +56,7 @@ export type Review = { id: string; author: string; state: "changes_requested" | 
  */
 export function standingSummaries(reviews: Review[]): ReviewComment[] {
   const latest = new Map<string, Review>();
-  for (const r of reviews) if (r.state !== "commented") latest.set(r.author.toLowerCase(), r);
+  for (const r of reviews) if (r.state !== "commented") latest.set(loginKey(r.author), r);
   return [...latest.values()]
     .filter((r) => r.state === "changes_requested" && r.body.trim() !== "")
     .map((r) => ({ threadId: r.id, path: null, line: null, author: r.author, body: r.body }));

@@ -22,7 +22,7 @@ type Mods = {
 type Comment = { author: string; body: string };
 type Ctx = { server?: Server; host?: Host; run?: { runId: string; token: string }; clock: number; comments?: Comment[] | null };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi28?: Ctx };
   w.pbi28 ??= { clock: Date.parse("2026-11-06T09:00:00Z") };
   return w.pbi28;
@@ -36,12 +36,13 @@ async function mods(): Promise<Mods | null> {
   return cellApi && server && fake && items && db ? { cellApi, server, fake, items, db } : null;
 }
 
-Before({ tags: "@pbi-28", ...long }, async function () {
+// PBI 79's scenarios drive the same address run, so they share these hooks and the steps below.
+Before({ tags: "@pbi-28 or @pbi-79", ...long }, async function () {
   const d = await testDb();
   if (d) await d.pool.query(`truncate item, "user" cascade`);
 });
 
-After({ tags: "@pbi-28" }, async function () {
+After({ tags: "@pbi-28 or @pbi-79" }, async function () {
   const s = ctx(this).server;
   if (s) await new Promise((r) => s.close(r));
 });
