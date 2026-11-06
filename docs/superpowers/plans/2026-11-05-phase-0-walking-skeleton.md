@@ -519,7 +519,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 
 **Interfaces:**
 - Produces:
-  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
+  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; webTools: WebTool[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }` and `type WebTool = "WebSearch" | "WebFetch"`. Defaults: `sensitivePaths: []`, `reviewers: []` and `webTools: []`, read from the YAML key `web_tools`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
   - In `src/policy/policy.ts`, per Run contract 11:
     - `type Criterion = { index: number; text: string; run: string | null }` and `type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string }`. `person` is valid only in `dod.md`, and anywhere else it counts as `failed`.
@@ -534,6 +534,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 
 - [ ] **Step 1: Write failing tests:**
   - `parseRepoConfig(null)` throws `ConfigError("bdd")`. A repo with no config can't run BDD, so it can't be ready.
+  - `web_tools: [WebSearch]` gives `webTools: ["WebSearch"]`, and `web_tools: [Bash]` throws `ConfigError("web_tools")`, so a typo can't widen what a cell may do.
   - `gate` rule checks run first, and the judge isn't called when any rule fails. Rules:
     - The DoD file is missing: "No .factory/dod.md in this repo".
     - The repo config is missing or invalid: "No valid .factory/config.yml in this repo".
@@ -615,7 +616,7 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string };
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
-  maxTurns?: number; mode: "cell" | "judge"; signal: AbortSignal }): Promise<AgentResult>;
+  maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
 export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promise<string>; // raw reply; gate() parses it
 ```
@@ -635,13 +636,14 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
   - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
   - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted. Locally it's omitted, because bubblewrap can't start under Docker Desktop, and Task 13's egress proxy enforces the allowlist instead. In Azure, Task 19 Step 9 decides.
+  - `disallowedTools` holds each of `WebSearch` and `WebFetch` that `webTools` leaves out, so with the default `[]` both are denied. The proxy can't see WebSearch, which runs on Anthropic's side, so this deny list is the only thing keeping it from carrying data out (spec §6 "Web tools").
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
   - no `permissionMode`, so the default applies;
   - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)).
 
-  Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings.
+  Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings. Add another asserting that cell mode with no `webTools` denies both `WebSearch` and `WebFetch`, and with `webTools: ["WebSearch"]` denies only `WebFetch`.
 
   The spike may show that the SDK refuses the OAuth token. In that case `runAgent` spawns `claude -p --output-format stream-json --verbose`, with the same model and cwd, and feeds the parsed lines to `foldMessages`. The CLI emits the same message shapes, so nothing else changes.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
@@ -800,7 +802,7 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   : Promise<"done" | "waiting" | "failed" | "stopped" | "limited">;
 ```
 
-  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
+  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Every `runAgent` call in cell mode passes `webTools: config.webTools`, from the repo config pinned for the run. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
 
 Stage behaviour, from spec §6 rows 1 to 7:
 
