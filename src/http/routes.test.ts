@@ -183,6 +183,27 @@ describe("dashboard routes", dbTest, () => {
     }
   });
 
+  test("a dropped listener connection ends the streams without crashing, and a new stream listens again", async () => {
+    await person("octo", "viewer");
+    const first = await fetch(`${origin}/events`, { headers: as("octo") });
+    const reader = first.body!.getReader();
+    await reader.read();
+    // Kill the listener's backend, as a Postgres restart or an idle-connection kill would.
+    await db.pool.query("select pg_terminate_backend(pid) from pg_stat_activity where query = 'listen factory_events'");
+    while (!(await reader.read()).done);
+    const again = new AbortController();
+    const second = await fetch(`${origin}/events`, { headers: as("octo"), signal: again.signal });
+    try {
+      const r = second.body!.getReader();
+      await db.pool.query("select pg_notify('factory_events', '{\"id\":\"e2\"}')");
+      let text = "";
+      while (!text.includes("data:")) text += new TextDecoder().decode((await r.read()).value);
+      assert.match(text, /"id":"e2"/);
+    } finally {
+      again.abort();
+    }
+  });
+
   test("Floor reloads itself from the event stream", async () => {
     await person("octo", "viewer");
     assert.match((await get("/", "octo")).html, /new EventSource\("\/events"\)/);

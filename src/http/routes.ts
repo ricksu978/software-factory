@@ -147,6 +147,15 @@ function eventStreams(pool: pg.Pool) {
       c.on("notification", (m) => {
         if (m.channel === "factory_events") for (const s of streams) s.write(`data: ${m.payload ?? "{}"}\n\n`);
       });
+      // A checked-out client has no pool error handler, so a dropped connection would otherwise crash the process.
+      // Drop the dead client and end the open streams: each browser's EventSource reconnects and LISTENs again.
+      c.on("error", (e) => {
+        console.error("dashboard event listener lost its connection:", e.message);
+        listener = null;
+        c.release(true);
+        for (const s of streams) s.end();
+        streams.clear();
+      });
       try {
         await c.query("listen factory_events");
       } catch (e) {
