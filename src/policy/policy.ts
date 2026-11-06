@@ -21,7 +21,8 @@ const policyDir = () => process.env.FACTORY_POLICY_DIR ?? join(import.meta.dirna
 /** One criterion per top-level `- [ ]` line, numbered from 1 in file order. Nested lines and prose are guidance. */
 export function parseCriteria(markdown: string): Criterion[] {
   const criteria: Criterion[] = [];
-  for (const line of markdown.split(/\r?\n/)) {
+  // A file saved with a UTF-8 byte-order mark would otherwise lose a criterion on its first line.
+  for (const line of markdown.replace(/^﻿/, "").split(/\r?\n/)) {
     if (!line.startsWith("- [ ] ")) continue;
     const text = line.slice(6).trim();
     const run = runInLine.exec(text)?.[1].trim();
