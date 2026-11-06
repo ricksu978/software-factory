@@ -7,22 +7,25 @@ export async function startTestDb(): Promise<{ pool: pg.Pool; url: string; stop(
   const container = await new PostgreSqlContainer("postgres:17").start();
   const url = container.getConnectionUri();
   const pool = createPool(url);
+  // Every client that connected and hasn't yet closed its socket (issue #88). pool.end() resolves once each idle
+  // client is told to end, before its socket closes, and the pool emits `remove` only from client.end()'s callback.
+  // Tracked by identity from the start, so a client still closing from earlier counts, a client that emits `remove`
+  // twice does no harm, and one whose connect failed, which never emits `connect`, is never waited for.
+  const live = new Set<pg.PoolClient>();
+  let drained: (() => void) | null = null;
+  pool.on("connect", (c) => live.add(c));
+  pool.on("remove", (c) => {
+    live.delete(c);
+    if (live.size === 0) drained?.();
+  });
   await migrate(pool);
   return {
     pool,
     url,
     async stop(opts = {}) {
-      // pool.end() resolves once each idle client is told to end, before its socket closes. The pool emits `remove`
-      // only from client.end()'s callback, so waiting for one per client means none is still connected when
-      // Postgres shuts down and terminates it, which surfaced as an uncaughtException (issue #88).
-      const clients = pool.totalCount;
-      const closed = new Promise<void>((resolve) => {
-        let left = clients;
-        if (left === 0) return resolve();
-        pool.on("remove", () => --left === 0 && resolve());
-      });
+      const closed = new Promise<void>((resolve) => (drained = resolve));
       await pool.end();
-      await closed;
+      if (live.size > 0) await closed;
       opts.beforeContainerStop?.();
       await container.stop();
     },

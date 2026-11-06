@@ -18,6 +18,10 @@ test("stop() waits until every client has disconnected before the database stops
   await Promise.all(Array.from({ length: 5 }, () => db.pool.query("select pg_sleep(0.05)")));
   assert.ok(opened.length > 1, `expected several clients, got ${opened.length}`);
   let open = -1;
-  await db.stop({ beforeContainerStop: () => (open = opened.length - ended.size) });
+  await db.stop({
+    beforeContainerStop: () => {
+      open = opened.length - ended.size;
+    },
+  });
   assert.equal(open, 0, `${open} of ${opened.length} clients were still connected when the database began to stop`);
 });
