@@ -258,6 +258,17 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
   });
 
+  // Plan Task 13: drain and the usage reserve let a running cell finish, and a kill override stops it.
+  test("lease says carry on under a drain or the usage reserve, and stop under a kill override", async () => {
+    const cell = await claimed();
+    const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'release')");
+    await db.pool.query("update wip_policy set usage_paused_until = $1", [new Date(at.getTime() + 3_600_000)]);
+    assert.deepEqual(await lease(), { ok: true, stop: false });
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'kill', 'incident')");
+    assert.deepEqual(await lease(), { ok: true, stop: true });
+  });
+
   test("lease says stop while the kill switch's env flag is on", async () => {
     const cell = await claimed();
     killed = true;
