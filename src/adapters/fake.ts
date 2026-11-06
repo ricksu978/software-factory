@@ -177,5 +177,11 @@ export function fakeRepoHost(): RepoHost & {
     async openReviewComments(repo, n) {
       return (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
     },
+    async replyToThread(repo, threadId, body) {
+      const key = [...reviewComments.keys()].find((k) => k.startsWith(`${repo}#`) && reviewComments.get(k)!.some((c) => c.threadId === threadId));
+      if (!key) throw new Error(`no review thread ${threadId} in ${repo}`);
+      const thread = reviewComments.get(key)!.find((c) => c.threadId === threadId)!;
+      reviewComments.get(key)!.push({ threadId, path: thread.path, line: thread.line, author: "factory[bot]", body });
+    },
   };
 }

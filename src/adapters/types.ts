@@ -47,4 +47,6 @@ export interface RepoHost {
   defaultBranchSha(repo: string): Promise<string>;
   /** Every comment in the PR's unresolved review threads. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
+  /** Adds a reply to one review thread, as the address stage does when it answers a comment instead of changing code. */
+  replyToThread(repo: string, threadId: string, body: string): Promise<void>;
 }

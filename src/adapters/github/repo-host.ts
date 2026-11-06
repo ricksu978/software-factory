@@ -26,8 +26,17 @@ const split = (repo: string) => {
 };
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
-function prMethods(client: () => Promise<GitHubClient>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers"> {
+type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread">;
+
+const REPLY = `mutation($thread: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
+
+function prMethods(client: () => Promise<GitHubClient>): PrMethods {
   return {
+    async replyToThread(_repo, threadId, body) {
+      await (await client()).graphql(REPLY, { thread: threadId, body });
+    },
+
     async openOrUpdatePr({ repo, branch, base, title, body }) {
       const gh = await client();
       const r = split(repo);
@@ -190,6 +199,6 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 }
 
 /** What a cell may do on GitHub, on the token the control plane minted for its run. Checks come through the cell API. */
-export function cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers"> {
+export function cellRepoHost(getToken: () => Promise<string>): PrMethods {
   return prMethods(async () => new Octokit({ auth: await getToken() }) as unknown as GitHubClient);
 }

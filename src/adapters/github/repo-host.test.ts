@@ -98,6 +98,14 @@ describe("githubRepoHost", () => {
     assert.deepEqual(await fake.openReviewComments("o/r", 3), [{ threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" }]);
   });
 
+  test("replyToThread adds a reply to that one review thread", async () => {
+    const seen: any[] = [];
+    const { host } = stubGitHub({}, (q, v) => (seen.push({ q, v }), {}));
+    await host.replyToThread("o/r", "t2", "kept as is, because the name matches the spec");
+    assert.match(seen[0].q, /addPullRequestReviewThreadReply/);
+    assert.deepEqual(seen[0].v, { thread: "t2", body: "kept as is, because the name matches the spec" });
+  });
+
   test("readFile decodes a file and gives null for a missing one", async () => {
     const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/contents/{path}": (p) => (p.path === "a.txt" ? { type: "file", content: b64("hi") } : (() => { throw Object.assign(new Error("404"), { status: 404 }); })()) });
     assert.equal(await host.readFile("o/r", "main", "a.txt"), "hi");

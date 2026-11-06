@@ -236,7 +236,8 @@ function policy(name: PolicyName, text: string): Policy {
   return { name, source: "repo", sha: name, text, criteria: name === "scenarios" || name === "risk" ? [] : parseCriteria(text) };
 }
 
-When("the cell runs", async function () {
+// Real git and sh across up to four attempts outlast cucumber's 5-second default on a busy machine.
+When("the cell runs", { timeout: 60_000 }, async function () {
   const c = ctx(this);
   const run = (cmd: string) => `mkdir -p reports && cp "${fwd(join(c.fixtures, cmd))}" reports/bdd.ndjson`;
   try {
