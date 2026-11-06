@@ -28,7 +28,7 @@ Takes over: nothing yet. It makes the first line of `.factory/dod.md` checkable.
 
 Implements plan Task 2.
 
-- [ ] `aspire run` brings up Postgres and the Azurite storage emulator, both with data volumes, a `migrate` resource that exits 0, and the control resource on port 7400.
+- [ ] `aspire run` brings up Postgres and the Azurite storage emulator, both with data volumes, a `migrate` resource that exits 0, and the control resource answering, with the URL it gives cells naming the port it answers on.
 - [ ] After a stop and a second `aspire run`, `migrate` connects to the same database.
 - [ ] The control resource receives the database and blob connections and the four secret parameters as environment variables, and the spike record names them.
 - [ ] From inside a `factory-cell:local` container, a ping to the control plane gets 204, and a PUT to a local upload URL gets 201.
