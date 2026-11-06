@@ -339,6 +339,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 ### Task 5: Leases and claiming
 
 **Files:**
+- Create: `db/migrations/002_item_blocked_by.sql`, which adds `item.blocked_by text[] not null default '{}'`, the item's open dependencies by external id. Task 8's poller fills it.
 - Modify: `src/store/items.ts`
 - Test: `src/store/leases.test.ts`
 
@@ -351,13 +352,13 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - Constants `LEASE_RENEW_MS = 60_000` and `LEASE_EXPIRY_MS = 300_000`.
 
 - [ ] **Step 1: Write failing tests:**
-  - **Claim order.** `claimNext` picks a SignOff or NeedsInput item whose `question` has an answer before any Queued item. Among Queued items it picks highest `priority`, then lowest `backlog_rank`. It skips `held` items and items with an open dependency. It moves the claimed item to InProgress through `transitionItem(..., "claimed")`.
+  - **Claim order.** `claimNext` picks a SignOff or NeedsInput item whose `question` has an answer before any Queued item. Among Queued items it picks highest `priority`, then lowest `backlog_rank`. It skips `held` items and items with an open dependency, which is any item whose `blocked_by` isn't empty. An answered item with a newer open question isn't claimable. It moves the claimed item to InProgress through `transitionItem(..., "claimed")`.
   - **Generations.** Each claim sets `lease_generation` to the previous value plus 1, and `lease_expires = now + 300s`. That is the claim half of Run contract 2.
   - **Renewal.** `renewLease` with the current generation returns `"ok"` and pushes `lease_expires` out. With an older generation it returns `"lost"` and changes nothing.
   - **Expiry.** `expireLeases(now + 301s)` returns the item, moves it to Queued through `lease_expired`, and leaves `run.next_stage` unchanged, so a new cell resumes there. An expired `lease_expires` on an item that isn't InProgress is ignored.
   - **Concurrency.** Two concurrent `claimNext` calls with one Queued item return one claim and one null. Use `SELECT ... FOR UPDATE SKIP LOCKED`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement** the four functions. A claim of an item with no open run creates a `run` row. The scheduler fills `sop_version`, `config_sha` and `repo_id` right after the claim, in Task 13.
+- [ ] **Step 3: Implement** the four functions. A claim of an item with no open run creates a `run` row at `understand`, numbered one above the item's last run. A claim of an item with an open run reuses it, and when that run's `next_stage` is `address`, it sets `run.reviews_seen_at` to the claim's time (Run contract 10). `renewLease` also needs the item to be InProgress. `releaseLease` clears `lease_owner` and `lease_expires` for the current generation and leaves the generation alone. The scheduler fills `sop_version`, `config_sha` and `repo_id` right after the claim, in Task 13.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(store): leases with generation fencing`.
 
@@ -473,9 +474,10 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
 - Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts (Run contract 11), which it also passes to `gate` as `ctx.readinessSha`. Also `POLL_INTERVAL_MS = 300_000`.
-- Each `pollOnce` does four things:
+- Each `pollOnce` does five things:
   - lists new and changed eligible items from the cursor;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
+  - writes `openDependencies` into `item.blocked_by` for every Queued, SignOff and NeedsInput item, so `claimNext` skips an item whose dependency reopened after the gate passed it (Task 5);
   - runs `gate` on every Eligible item;
   - reads `prState` for every InReview item.
 - The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
@@ -486,6 +488,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - A Done item that loses its label is left alone.
   - The cursor persists in `backlog_source.cursor`, so a second `pollOnce` with no changes upserts nothing.
   - A paused `backlog_source` is skipped.
+  - **Dependencies.** A Queued item whose `openDependencies` returns `["12"]` gets `blocked_by = {12}`, and the next poll, with the list empty, clears it.
   - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`. One that fails moves to NotReady through `readiness_failed` with a reasons comment. The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch. Its `dor` comes from `loadPolicy` on the same commit, and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
   - **Criteria change.** An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. In the same transaction:
     - `item.criteria_hash` takes the new value, so the next poll sees no change and fires nothing more;
@@ -757,7 +760,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - the label differs, and the old proxy is removed and a new one starts with the new label.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.** A run can be created by a claim, by `criteria_changed` in Task 8, or by a re-queue after a merge. So the scheduler pins on the first claim of any run whose `config_sha` is still null, and records:
-  - `run.repo_id` and `run.run_number`;
+  - `run.repo_id`, since whoever creates the run already set `run.run_number` one above the item's last (Task 5);
   - `run.config_sha`, from `RepoHost.defaultBranchSha`;
   - `run.sop_version`, from the loaded SOP file.
 
