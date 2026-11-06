@@ -104,18 +104,40 @@ describe("githubRepoHost", () => {
     assert.equal(await host.readFile("o/r", "main", "b.txt"), null);
   });
 
-  test("checksOnSha is failure on any failed run, pending while one runs or none exist, and success otherwise", async () => {
+  test("checksOnSha is failure on any failed run, pending while one runs or only a status exists, none with neither, and success otherwise", async () => {
     const run = (status: string, conclusion: string | null) => ({ status, conclusion });
-    const cases: [object[], string][] = [
-      [[run("completed", "success"), run("completed", "failure")], "failure"],
-      [[run("completed", "success"), run("in_progress", null)], "pending"],
-      [[], "pending"],
-      [[run("completed", "success"), run("completed", "skipped")], "success"],
+    const cases: [object[], number, string][] = [
+      [[run("completed", "success"), run("completed", "failure")], 0, "failure"],
+      [[run("completed", "success"), run("in_progress", null)], 0, "pending"],
+      [[], 1, "pending"],
+      [[], 0, "none"],
+      [[run("completed", "success"), run("completed", "skipped")], 0, "success"],
     ];
-    for (const [runs, want] of cases) {
-      const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }) });
+    for (const [runs, statuses, want] of cases) {
+      const { host } = stubGitHub({
+        "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+        "GET /repos/{owner}/{repo}/commits/{ref}/status": () => ({ total_count: statuses }),
+      });
       assert.equal(await host.checksOnSha("o/r", "abc"), want);
     }
+  });
+
+  test("checksOnHead reads a head with no checks at all as pending", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [] }),
+      "GET /repos/{owner}/{repo}/commits/{ref}/status": () => ({ total_count: 0 }),
+    });
+    assert.equal(await host.checksOnHead("o/r", 3), "pending");
+  });
+
+  test("onBranch is true when the branch is ahead of or at the sha, and false when diverged, behind or unknown", async () => {
+    for (const [status, want] of [["ahead", true], ["identical", true], ["diverged", false], ["behind", false]] as const) {
+      const { calls, host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status }) });
+      assert.equal(await host.onBranch("o/r", "factory/pbi-1-r1", "abc"), want);
+      assert.equal(calls[0].params.basehead, "abc...factory/pbi-1-r1");
+    }
+    assert.equal(await stubGitHub({}).host.onBranch("o/r", "main", "abc"), false);
   });
 });
 
