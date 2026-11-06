@@ -199,9 +199,9 @@ Takes over: nothing. It proves the parts fit.
 
 ## PBI 18. First live item, locally
 
-Implements plan Task 18. This is Phase 0a's exit.
+Implements plan Task 18. This is Phase 0a's exit. It waits on PBI 15b (#89), because nothing starts the control plane under `aspire run` until `src/main.ts` exists.
 
-- [ ] Under `aspire run`, the factory takes a `factory`-labelled PBI from this repo's own board, opens its PR from a local cell container, and moves it to Done after the owner merges and CI on main is green. Before the run, the owner puts on the board a PBI whose criteria need neither the owner's machine nor, until PBI 22 merges, a database, so none of its scenarios is `@local` or `@db`. The owner takes the `factory` label off every other open item a cell can't build, such as this PBI and PBI 15b (#89), so that PBI is the one the factory takes. The poller lists only labelled items, so this works before the factory has seen them, which a hold can't.
+- [ ] Under `aspire run`, the factory takes a `factory`-labelled PBI from this repo's own board, opens its PR from a local cell container, and moves it to Done after the owner merges and CI on main is green. Before the run, the owner puts on the board a PBI whose criteria need neither the owner's machine nor, until PBI 22 merges, a database, so none of its scenarios is `@local` or `@db`. The owner takes the `factory` label off every other open item a cell can't build, such as this PBI, so that PBI is the one the factory takes. The poller lists only labelled items, so this works before the factory has seen them, which a hold can't.
 - [ ] Sign-off in the local dashboard moves the item on, and the dev identity works only with `FACTORY_ENV=local`.
 - [ ] Each of the five Phase 0 overrides takes effect within 30 seconds, and the kill switch stops every cell container within a minute.
 - [ ] A restart of `aspire run` while a cell is in Green loses no item, event or transcript, and starts no second cell.
