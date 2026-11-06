@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
-import { cellModelEnv, handleModelRequest, startModelGateway } from "./model-gateway.ts";
+import { cellModelEnv, GatewayUnavailable, handleModelRequest, startModelGateway, type WebTool } from "./model-gateway.ts";
 
 const port = (s: Server) => (s.address() as AddressInfo).port;
 const listen = (s: Server) => new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
@@ -42,7 +42,7 @@ describe("model gateway", () => {
     });
     await listen(upstream);
     await listen(attacker);
-    gateway = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: (c) => c === "ok" });
+    gateway = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: (c) => (c === "ok" ? { webTools: [] } : null) });
   });
   after(async () => {
     await close(gateway);
@@ -107,9 +107,18 @@ describe("model gateway", () => {
     }
   });
 
+  test("a verify that can't decide answers 503, not 401", async () => {
+    const g = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: () => { throw new GatewayUnavailable("config read failed"); } });
+    try {
+      assert.equal(await raw(port(g), "/v1/messages"), 503);
+    } finally {
+      await close(g);
+    }
+  });
+
   test("handleModelRequest forwards the path it's given, so Task 12 can mount it under a prefix", async () => {
     seen.length = 0;
-    const host = createServer((req, res) => void handleModelRequest({ upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: () => true }, req, res, (req.url ?? "/").replace(/^\/internal\/model/, "")));
+    const host = createServer((req, res) => void handleModelRequest({ upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: () => ({ webTools: [] }) }, req, res, (req.url ?? "/").replace(/^\/internal\/model/, "")));
     await listen(host);
     try {
       assert.equal(await raw(port(host), "/internal/model/v1/messages"), 200);
@@ -121,7 +130,7 @@ describe("model gateway", () => {
   });
 
   test("an unreachable upstream gets 502", async () => {
-    const dead = await startModelGateway({ port: 0, upstream: "http://127.0.0.1:1", ownerToken: () => "owner", verify: () => true });
+    const dead = await startModelGateway({ port: 0, upstream: "http://127.0.0.1:1", ownerToken: () => "owner", verify: () => ({ webTools: [] }) });
     try {
       assert.equal(await raw(port(dead), "/v1/messages"), 502);
     } finally {
@@ -141,7 +150,7 @@ describe("model gateway", () => {
       });
     });
     await listen(endless);
-    const g = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(endless)}`, ownerToken: () => "owner", verify: () => true });
+    const g = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(endless)}`, ownerToken: () => "owner", verify: () => ({ webTools: [] }) });
     try {
       await new Promise<void>((resolve) => {
         const req = request({ host: "127.0.0.1", port: port(g), method: "POST", path: "/v1/messages", headers: { authorization: "Bearer sk-ant-oat01-x" } }, (res) => {
@@ -170,7 +179,7 @@ describe("model gateway", () => {
       setTimeout(() => res.socket?.destroy(), 30);
     });
     await listen(dying);
-    const g = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(dying)}`, ownerToken: () => "owner", verify: () => true });
+    const g = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(dying)}`, ownerToken: () => "owner", verify: () => ({ webTools: [] }) });
     try {
       const outcome = await new Promise<string>((resolve) => {
         const req = request({ host: "127.0.0.1", port: port(g), method: "POST", path: "/v1/messages", headers: { authorization: "Bearer sk-ant-oat01-x" } }, (res) => {
@@ -194,5 +203,100 @@ describe("model gateway", () => {
       ANTHROPIC_BASE_URL: "http://gw:1",
       CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-run-1",
     });
+  });
+});
+
+describe("model gateway request check", () => {
+  let upstream: Server;
+  const bodies: { body: string; headers: IncomingHttpHeaders }[] = [];
+  let webTools: WebTool[] = [];
+  let gateway: Server;
+
+  before(async () => {
+    upstream = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        bodies.push({ body, headers: req.headers });
+        res.writeHead(200).end("{}");
+      });
+    });
+    await listen(upstream);
+    gateway = await startModelGateway({ port: 0, upstream: `http://127.0.0.1:${port(upstream)}`, ownerToken: () => "owner", verify: () => ({ webTools }) });
+  });
+  after(async () => {
+    await close(gateway);
+    await close(upstream);
+  });
+
+  /** Sends a body as given, so a test can send bytes JSON.stringify would never produce. */
+  function send(body: string | Buffer, headers: Record<string, string> = {}, chunked = false): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const h: Record<string, string> = { authorization: "Bearer sk-ant-oat01-ok", "content-type": "application/json", ...headers };
+      if (!chunked) h["content-length"] = String(Buffer.byteLength(body));
+      const req = request({ host: "127.0.0.1", port: port(gateway), method: "POST", path: "/v1/messages", headers: h }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      });
+      req.on("error", reject);
+      if (chunked) {
+        const text = String(body);
+        req.write(text.slice(0, 5));
+        req.end(text.slice(5));
+      } else req.end(body);
+    });
+  }
+  const ok = (o: unknown) => send(JSON.stringify(o));
+  const custom = { name: "Bash", input_schema: { type: "object", properties: { source: { type: "string" } } } };
+  const image = (source: unknown) => ({ role: "user", content: [{ type: "image", source }] });
+
+  test("custom tools, base64 images and source-shaped tool schemas and inputs reach the upstream", async () => {
+    bodies.length = 0;
+    webTools = [];
+    assert.equal(await ok({ tools: [custom, { ...custom, type: "custom" }], messages: [image({ type: "base64", media_type: "image/png", data: "AA==" })] }), 200);
+    assert.equal(await ok({ messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "AskUserQuestion", input: { metadata: { source: { type: "url" } } } }] }] }), 200);
+    assert.equal(bodies.length, 2);
+  });
+
+  test("server tools, MCP servers, URL sources, bodies that aren't JSON and encoded bodies get 400 and reach nothing", async () => {
+    bodies.length = 0;
+    webTools = [];
+    const refused: [string, number][] = [];
+    for (const type of ["web_search_20250305", "web_fetch_20250910", "code_execution_20250522"]) refused.push([type, await ok({ tools: [{ type, name: "x" }] })]);
+    refused.push(["mcp_servers", await ok({ mcp_servers: [] })]);
+    refused.push(["url image", await ok({ messages: [image({ type: "url", url: "http://x" })] })]);
+    refused.push(["url document in a tool_result", await ok({ messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: [{ type: "document", source: { type: "url", url: "http://x" } }] }] }] })]);
+    refused.push(["url image in system", await ok({ system: [{ type: "image", source: { type: "url", url: "http://x" } }] })]);
+    refused.push(["not JSON", await send("{not json")]);
+    refused.push(["gzip", await send("{}", { "content-encoding": "gzip" })]);
+    assert.deepEqual(refused.filter(([, s]) => s !== 400), []);
+    assert.equal(bodies.length, 0);
+  });
+
+  test("a body with two tools keys goes upstream holding only the last one, as the gateway parsed it", async () => {
+    bodies.length = 0;
+    webTools = [];
+    assert.equal(await send('{"tools":[{"type":"web_search_20250305","name":"w"}],"tools":[{"name":"Bash","input_schema":{}}]}'), 200);
+    assert.deepEqual(JSON.parse(bodies[0].body), { tools: [{ name: "Bash", input_schema: {} }] });
+  });
+
+  test("with WebSearch and WebFetch allowed, web search passes and web fetch is still refused", async () => {
+    webTools = ["WebSearch", "WebFetch"];
+    assert.equal(await ok({ tools: [{ type: "web_search_20250305", name: "web_search" }] }), 200);
+    assert.equal(await ok({ tools: [{ type: "web_fetch_20250910", name: "web_fetch" }] }), 400);
+    webTools = [];
+  });
+
+  test("a chunked request goes upstream with a content-length and no transfer-encoding", async () => {
+    bodies.length = 0;
+    assert.equal(await send('{"messages":[]}', {}, true), 200);
+    assert.equal(bodies[0].headers["transfer-encoding"], undefined);
+    assert.equal(bodies[0].headers["content-length"], String(Buffer.byteLength('{"messages":[]}')));
+  });
+
+  test("a body over 32 MiB gets 413", async () => {
+    bodies.length = 0;
+    assert.equal(await send(Buffer.alloc(33 * 1024 * 1024, 0x20)), 413);
+    assert.equal(bodies.length, 0);
   });
 });

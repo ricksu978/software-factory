@@ -18,7 +18,7 @@ const cellName = "pbi33-cell";
 const standIn = "run-credential-ok";
 
 type Gateway = {
-  startModelGateway: (cfg: { port: number; host?: string; upstream: string; ownerToken: () => string; verify: (credential: string) => boolean | Promise<boolean> }) => Promise<Server>;
+  startModelGateway: (cfg: { port: number; host?: string; upstream: string; ownerToken: () => string; verify: (credential: string) => { webTools: string[] } | null }) => Promise<Server>;
   cellModelEnv: (cfg: { gatewayUrl: string; credential: string }) => Record<string, string>;
 };
 type Seen = { headers: IncomingHttpHeaders; body: string };
@@ -67,7 +67,7 @@ Given("a model gateway in front of a fake upstream, holding the owner token {str
     });
   });
   const upstreamPort = await listen(c.upstream);
-  c.gateway = await mod.startModelGateway({ port: 0, upstream: `http://127.0.0.1:${upstreamPort}`, ownerToken: () => owner, verify: (cred) => cred === standIn });
+  c.gateway = await mod.startModelGateway({ port: 0, upstream: `http://127.0.0.1:${upstreamPort}`, ownerToken: () => owner, verify: (cred) => (cred === standIn ? { webTools: [] } : null) });
 });
 
 async function send(c: Ctx, credential: string, beta?: string): Promise<void> {
@@ -126,7 +126,7 @@ async function runCell(c: Ctx, command: string[]): Promise<void> {
   assert.ok(owner, "CLAUDE_CODE_OAUTH_TOKEN must hold the owner's token for this scenario");
   c.containers = true;
   sh(["network", "create", network]);
-  const start = `import(${JSON.stringify("file:///app/src/control/model-gateway.ts")}).then((m) => m.startModelGateway({ port: 7499, host: "0.0.0.0", upstream: "https://api.anthropic.com", ownerToken: () => process.env.OWNER_TOKEN, verify: (c) => c === ${JSON.stringify(standIn)} }))`;
+  const start = `import(${JSON.stringify("file:///app/src/control/model-gateway.ts")}).then((m) => m.startModelGateway({ port: 7499, host: "0.0.0.0", upstream: "https://api.anthropic.com", ownerToken: () => process.env.OWNER_TOKEN, verify: (c) => (c === ${JSON.stringify(standIn)} ? { webTools: [] } : null) }))`;
   const gw = sh(
     ["run", "-d", "--name", gatewayName, "--network", network, "-e", "OWNER_TOKEN", "-v", `${join(repo, "src")}:/app/src:ro`, "factory-cell:local", "node", "-e", start],
     { ...process.env, OWNER_TOKEN: owner },

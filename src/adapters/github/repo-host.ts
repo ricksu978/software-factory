@@ -110,12 +110,16 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
   }
 }
 
-async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure"> {
+async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { status: string; conclusion: string | null }[];
   if (runs.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""))) return "failure";
-  if (runs.length === 0 || runs.some((c) => c.status !== "completed")) return "pending";
-  return "success";
+  if (runs.length === 0) {
+    // "none" only when no commit status has reported either, so a repo whose CI reports statuses still reads pending.
+    const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
+    return statuses === 0 ? "none" : "pending";
+  }
+  return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
@@ -143,7 +147,19 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
     async checksOnHead(repo, prNumber) {
       const gh = await client();
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...split(repo), pull_number: prNumber })).data;
-      return checksOn(gh, split(repo), pr.head.sha);
+      const state = await checksOn(gh, split(repo), pr.head.sha);
+      return state === "none" ? "pending" : state;
+    },
+
+    async onBranch(repo, branch, sha) {
+      // "ahead" means the branch contains the sha and "identical" means it is the head; "diverged" and "behind" don't.
+      try {
+        const { status } = (await (await client()).request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...split(repo), basehead: `${sha}...${branch}` })).data;
+        return status === "ahead" || status === "identical";
+      } catch (e) {
+        if (notFound(e)) return false; // a sha GitHub doesn't know
+        throw e;
+      }
     },
 
     async prState(repo, prNumber, trustedLogins) {
