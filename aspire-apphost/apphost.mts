@@ -21,6 +21,7 @@ const claudeToken = await secret('claude-oauth-token');
 const appKey = await secret('github-app-key');
 const projectToken = await secret('github-project-token');
 const cellSecret = await secret('cell-secret');
+const webhookSecret = await secret('github-webhook-secret');
 const devLogin = await builder.addParameter('dev-login');
 const appId = await builder.addParameter('github-app-id');
 const tokenCreatedAt = await builder.addParameter('claude-token-created-at');
@@ -40,6 +41,7 @@ const control = await builder.addNodeApp('control', repo, 'spike/hello.ts')
   .withEnvironment('GITHUB_APP_KEY', appKey)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
   .withEnvironment('CELL_SECRET', cellSecret)
+  .withEnvironment('GITHUB_WEBHOOK_SECRET', webhookSecret)
   .withEnvironment('GITHUB_APP_ID', appId)
   .withEnvironment('CLAUDE_TOKEN_CREATED_AT', tokenCreatedAt)
   .withEnvironment('FACTORY_POLICY_DIR', './policy')

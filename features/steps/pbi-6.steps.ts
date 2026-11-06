@@ -85,13 +85,23 @@ When("I start {string} and wait until the control resource answers on port {int}
   await startAspire(ctx(this));
 });
 
+// Asks Aspire which container and named volume belong to this AppHost's resource, then checks that exact
+// container. A name filter could match another AppHost's container, and both images declare an anonymous
+// VOLUME, so any container would show a volume mount even without withDataVolume().
 Then("the {string} and {string} containers are running, each with a data volume", function (a: string, b: string) {
   assert.ok(ctx(this).up, "the AppHost never came up");
-  for (const name of [a, b]) {
-    const ids = sh(`docker ps --filter "name=${name}" --format "{{.ID}}"`).out.split("\n").filter(Boolean);
-    assert.ok(ids.length > 0, `no running container named like "${name}"`);
-    const mounts = sh(`docker inspect --format "{{range .Mounts}}{{.Type}} {{end}}" ${ids[0]}`).out;
-    assert.match(mounts, /volume/, `container "${name}" has no data volume`);
+  for (const resource of [a, b]) {
+    const r = sh(`aspire describe ${resource} --format Json --non-interactive --nologo`);
+    const doc = JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) as { resources: { properties?: Record<string, unknown>; volumes?: unknown }[] };
+    const res = doc.resources[0];
+    const id = res?.properties?.["container.id"];
+    assert.ok(typeof id === "string" && id, `aspire describe gave no container for "${resource}"`);
+    const volumes = ([] as { source?: string; mountType?: string }[]).concat((res.volumes ?? []) as never);
+    const named = volumes.find((v) => v.mountType === "volume" && v.source?.endsWith("-data"));
+    assert.ok(named?.source, `"${resource}" has no named data volume in ${JSON.stringify(res.volumes)}`);
+    const state = sh(`docker inspect --format "{{.State.Running}} {{range .Mounts}}{{.Name}} {{end}}" ${id}`).out;
+    assert.match(state, /^true /, `the "${resource}" container isn't running`);
+    assert.ok(state.split(/\s+/).includes(named.source), `the "${resource}" container doesn't mount ${named.source}`);
   }
 });
 
