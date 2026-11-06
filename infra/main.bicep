@@ -352,8 +352,9 @@ resource cellJob 'Microsoft.App/jobs@2024-03-01' = {
       triggerType: 'Manual'
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
       replicaRetryLimit: 1
-      // ponytail: a 4-hour cap per run, raise it if a real stage runs longer.
-      replicaTimeout: 14400
+      // A cell lives for its whole run, and the engine posts blocked at the SOP's 8h wall clock
+      // (sop/default.yml). The extra half hour lets it do that before the platform kills the replica.
+      replicaTimeout: 30600
       registries: [{ server: acr.properties.loginServer, identity: idCell.id }]
     }
     template: {

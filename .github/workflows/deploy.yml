@@ -27,6 +27,14 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+      # Built-in auth deploys only with both client ids, and the bootstrap never runs this workflow. So a param
+      # file still on its bootstrap values would ship the app without sign-in, which this step refuses.
+      - name: Refuse bootstrap params
+        run: |
+          if grep -nE "ClientId = ''|<yyyy-mm-dd>" infra/main.bicepparam; then
+            echo "infra/main.bicepparam on this commit still has bootstrap values. Merge the client ids and the token date first."
+            exit 1
+          fi
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}

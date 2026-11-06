@@ -19,7 +19,19 @@ Run from your own `az login`, signed in to the subscription that should hold the
 2. Export the five secrets, which `main.bicepparam` reads from the environment: `GITHUB_APP_KEY`, `GITHUB_PROJECT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `GITHUB_WEBHOOK_SECRET` and `CELL_SECRET` (`openssl rand -hex 32`). An unset one leaves its Key Vault secret alone, which is why `deploy.yml` never handles a secret value.
 3. `az group create -n rg-software-factory-aue -l australiaeast`, then `az deployment group what-if -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam` and read the resource list against Step 1. Then run the same command with `create` in place of `what-if`.
 4. The deploy's outputs give `controlFqdn` and `deployClientId`. Register a Microsoft Entra app for "Any Microsoft Entra directory and personal Microsoft accounts" with redirect URI `https://<controlFqdn>/.auth/login/aad/callback`, and a Google OAuth client with redirect URI `https://<controlFqdn>/.auth/login/google/callback` ([Container Apps auth](https://learn.microsoft.com/en-us/azure/container-apps/authentication-azure-active-directory), [Google](https://learn.microsoft.com/en-us/azure/container-apps/authentication-google)). Put both client ids in `main.bicepparam`, export their secrets as `AUTH_MICROSOFT_SECRET` and `AUTH_GOOGLE_SECRET`, and deploy again. Built-in auth stays off until both ids are set.
-5. Create the repo's `production` environment with yourself as required reviewer and `main` as its only deployment branch. Give it the variables `AZURE_CLIENT_ID` (`deployClientId`), `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`. The federated credential on `id-factory-deploy` is already in the Bicep.
+5. Merge the client ids and `claudeTokenCreatedAt` to `main`. `deploy.yml` deploys the param file on `main`, and it refuses to run while that file still has an empty client id or the date placeholder, because it would ship the app without sign-in.
+6. Create the repo's `production` environment with yourself as required reviewer and `main` as its only deployment branch. Give it the variables `AZURE_CLIENT_ID` (`deployClientId`), `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`. The federated credential on `id-factory-deploy` is already in the Bicep.
+
+**Your later deploys.** Rotating a secret, such as the Claude token, still takes your own deploy with the variable exported. Pass the running images too, or the app and both jobs fall back to the placeholder image:
+
+```sh
+rg=rg-software-factory-aue q=properties.template.containers[0].image
+control=$(az containerapp show -n ca-factory-control -g $rg --query $q -o tsv)
+cell=$(az containerapp job show -n caj-factory-cell -g $rg --query $q -o tsv)
+migrate=$(az containerapp job show -n caj-factory-migrate -g $rg --query $q -o tsv)
+az deployment group create -g $rg -f infra/main.bicep -p infra/main.bicepparam \
+  -p controlImage=$control cellImage=$cell migrateImage=$migrate
+```
 
 ## Azure probes
 
