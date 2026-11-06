@@ -10,36 +10,37 @@ import type pg from "pg";
 // One Postgres serves the whole feature, and each scenario gets its own item, so seven scenarios cost one
 // container start. Rows are set up with plain SQL; only the behaviour under test goes through src/store.
 // Modules load lazily, so while they don't exist every scenario fails on its Then instead of crashing the run.
+// PBI 9's steps reuse the "stored item" steps below, so they share this database and context through the exports.
 const repo = process.cwd();
-const long = { timeout: 300_000 };
+export const long = { timeout: 300_000 };
 
-type TestDb = { pool: pg.Pool; stop(): Promise<void> };
+export type TestDb = { pool: pg.Pool; stop(): Promise<void> };
 type Store = {
   transitionItem: (c: pg.PoolClient, itemId: string, event: string, actor: { actor: string; actorId: string }) => Promise<string>;
 };
-type Ctx = { itemId?: string; error?: unknown; eventId?: string; eventKind?: string; out?: string; status?: number | null; probeDir?: string };
+export type Ctx = { itemId?: string; error?: unknown; eventId?: string; eventKind?: string; out?: string; status?: number | null; probeDir?: string };
 
 let db: TestDb | null | undefined;
 
-async function load<T>(path: string): Promise<T | null> {
+export async function load<T>(path: string): Promise<T | null> {
   const file = join(repo, path);
   return existsSync(file) ? ((await import(pathToFileURL(file).href)) as T) : null;
 }
 
-async function testDb(): Promise<TestDb | null> {
+export async function testDb(): Promise<TestDb | null> {
   if (db !== undefined) return db;
   const mod = await load<{ startTestDb: () => Promise<TestDb> }>("src/store/test-db.ts");
   db = mod ? await mod.startTestDb() : null;
   return db;
 }
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi8?: Ctx };
   w.pbi8 ??= {};
   return w.pbi8;
 }
 
-function need(): TestDb {
+export function need(): TestDb {
   assert.ok(db, "src/store/test-db.ts doesn't exist");
   return db;
 }
