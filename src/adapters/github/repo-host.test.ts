@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
+import { standingSummaries, type Review } from "../types.ts";
 import { githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -85,8 +86,32 @@ describe("githubRepoHost", () => {
 
   test("openReviewComments returns every comment in unresolved threads and none from resolved ones", async () => {
     const thread = (id: string, isResolved: boolean, body: string) => ({ id, isResolved, path: "a.ts", line: 4, comments: { nodes: [{ author: { login: "dev" }, body }] } });
-    const { host } = stubGitHub({}, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [thread("t1", true, "done"), thread("t2", false, "fix this")] } } } }));
+    const { host } = stubGitHub({}, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [thread("t1", true, "done"), thread("t2", false, "fix this")] }, reviews: { nodes: [] } } } }));
     assert.deepEqual(await host.openReviewComments("o/r", 3), [{ threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" }]);
+  });
+
+  test("openReviewComments adds a standing changes-requested summary after the thread comments, and skips a pending review", async () => {
+    const review = (id: string, state: string, body: string, login = "dev") => ({ id, state, body, author: { login } });
+    const { host } = stubGitHub({}, () => ({ repository: { pullRequest: {
+      reviewThreads: { nodes: [{ id: "t1", isResolved: false, path: "a.ts", line: 4, comments: { nodes: [{ author: { login: "dev" }, body: "fix this" }] } }] },
+      reviews: { nodes: [review("r1", "CHANGES_REQUESTED", "Split run.ts"), review("r2", "PENDING", "draft", "factory[bot]")] },
+    } } }));
+    assert.deepEqual(await host.openReviewComments("o/r", 3), [
+      { threadId: "t1", path: "a.ts", line: 4, author: "dev", body: "fix this" },
+      { threadId: "r1", path: null, line: null, author: "dev", body: "Split run.ts" },
+    ]);
+  });
+
+  test("a summary stands only while its reviewer's latest review that isn't a comment requests changes", () => {
+    const r = (id: string, author: string, state: Review["state"], body = `body ${id}`): Review => ({ id, author, state, body });
+    const ids = (reviews: Review[]) => standingSummaries(reviews).map((s) => s.threadId);
+    assert.deepEqual(ids([r("1", "dev", "changes_requested")]), ["1"]);
+    assert.deepEqual(ids([r("1", "dev", "changes_requested"), r("2", "dev", "approved")]), []);
+    assert.deepEqual(ids([r("1", "dev", "changes_requested"), r("2", "dev", "commented")]), ["1"], "a comment-only review keeps the request standing");
+    assert.deepEqual(ids([r("1", "dev", "dismissed")]), []);
+    assert.deepEqual(ids([r("1", "dev", "changes_requested", "  ")]), [], "an empty summary adds nothing");
+    assert.deepEqual(ids([r("1", "Dev", "changes_requested"), r("2", "dev", "approved")]), [], "logins compare without case");
+    assert.deepEqual(ids([r("1", "dev", "changes_requested"), r("2", "lead", "changes_requested")]), ["1", "2"]);
   });
 
   test("fakeRepoHost passes the same resolved-thread case", async () => {
@@ -96,6 +121,17 @@ describe("githubRepoHost", () => {
       { threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" },
     ]);
     assert.deepEqual(await fake.openReviewComments("o/r", 3), [{ threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" }]);
+  });
+
+  test("fakeRepoHost adds the same standing summary, in submission order", async () => {
+    const fake = fakeRepoHost();
+    const { number } = await fake.openOrUpdatePr({ repo: "o/r", branch: "b", base: "main", title: "t", body: "" });
+    fake.prs[0].reviews.push(
+      { state: "approved", author: "dev", submittedAt: "2026-11-06T02:00:00Z" },
+      { state: "changes_requested", author: "dev", submittedAt: "2026-11-06T01:00:00Z", body: "Split run.ts" },
+      { state: "changes_requested", author: "lead", submittedAt: "2026-11-06T03:00:00Z", body: "Name the retry limit" },
+    );
+    assert.deepEqual((await fake.openReviewComments("o/r", number)).map((c) => [c.author, c.body, c.path]), [["lead", "Name the retry limit", null]]);
   });
 
   test("readFile decodes a file and gives null for a missing one", async () => {

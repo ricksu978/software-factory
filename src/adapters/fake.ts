@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import type { FactoryItem, RepoHost, ReviewComment } from "./types.ts";
+import { standingSummaries, type FactoryItem, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -103,7 +103,7 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
 type FakePr = {
   number: number; repo: string; branch: string; base: string; title: string; body: string; headSha: string | null;
   open: boolean; merged: boolean; mergeSha: string | null; mergeable: boolean | null; reviewers: string[]; comments: string[];
-  reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }[];
+  reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body?: string }[];
 };
 type Status = "pending" | "success" | "failure";
 
@@ -185,7 +185,11 @@ export function fakeRepoHost(): RepoHost & {
       return head;
     },
     async openReviewComments(repo, n) {
-      return (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
+      const comments = (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
+      const reviews = [...(prs.find((p) => p.repo === repo && p.number === n)?.reviews ?? [])]
+        .sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
+        .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));
+      return [...comments, ...standingSummaries(reviews)];
     },
   };
 }
