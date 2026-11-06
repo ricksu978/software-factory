@@ -13,4 +13,5 @@ Plan Task 2, run on 2026-11-06 on the owner's machine: Windows 11 on ARM64, Dock
 - **Cell to Azurite.** A PUT to a `/probe/sas` URL with its host name swapped to `host.docker.internal` got 201, so the SAS signature doesn't cover the host.
 - **Bubblewrap.** It doesn't start in a local cell container. `bwrap --ro-bind / / --dev /dev true` fails with "Creating new namespace failed: Operation not permitted", under the default `docker run` and with `--security-opt seccomp=unconfined` too. The egress allowlist needs another mechanism locally, which is a pending decision.
 - **Agent SDK.** Not run yet. It needs the owner's Claude token from `claude setup-token`.
-- **Bot assignment.** Not run yet. It needs the factory GitHub App installed on this repo.
+- **GitHub App.** `ricksu978-software-factory`, App id 5636555, created through the manifest flow with write on contents, pull requests and issues and read on checks, commit statuses and metadata. It's installed on this repo only, as installation 179116800. Its private key and webhook secret sit in the AppHost's user secrets, never in the repo.
+- **Bot assignment.** GitHub refused it. Assigning `ricksu978-software-factory[bot]` to issue #6 with an installation token holding issues write got 403 "Forbidden", and the assignees stayed empty. So Task 6's claim marker is the `factory:in-progress` label alone.
