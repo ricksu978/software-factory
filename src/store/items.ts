@@ -120,15 +120,15 @@ export async function releaseLease(c: pg.PoolClient, itemId: string, generation:
   );
 }
 
-export type NewItem = { sourceId: string; externalId: string; title: string };
+export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number };
 
-/** Inserts an item as Eligible, or refreshes its title, keyed on (source_id, external_id). Task 6 widens the input to FactoryItem. */
+/** Inserts an item as Eligible, or refreshes its title and backlog rank, keyed on (source_id, external_id). */
 export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Promise<string> {
   const r = await c.query<{ id: string }>(
-    `insert into item (source_id, external_id, title, state) values ($1, $2, $3, 'Eligible')
-     on conflict (source_id, external_id) do update set title = excluded.title
+    `insert into item (source_id, external_id, title, state, backlog_rank) values ($1, $2, $3, 'Eligible', $4)
+     on conflict (source_id, external_id) do update set title = excluded.title, backlog_rank = coalesce(excluded.backlog_rank, item.backlog_rank)
      returning id`,
-    [item.sourceId, item.externalId, item.title],
+    [item.sourceId, item.externalId, item.title, item.rank ?? null],
   );
   return r.rows[0].id;
 }

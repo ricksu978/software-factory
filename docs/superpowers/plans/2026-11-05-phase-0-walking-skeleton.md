@@ -85,7 +85,7 @@ These rules hold across every task. A task that touches one of them follows this
    - It writes `fieldMap.statusFor[to]` through `setStatus`. A null entry leaves the board's status as it is.
    - It calls `claim` on every move into InProgress, which is idempotent, so a revived item gets its marker back. It calls `release` on reaching Done, Failed or Abandoned, and `linkPr` on `pr_opened`.
    - It closes the item at Done.
-   - Whenever an item with an open PR reaches Abandoned, through `withdrawn` from any state, the PR is closed with a comment that names the kept branch.
+   - Whenever an item with an open PR reaches Abandoned, through `withdrawn` from any state, the PR is closed with a comment that names the kept branch. The poller already closes it when it withdraws an item (Task 8), so the hook skips a PR that's no longer open.
 9. **End-of-stage order.** A stage ends with these calls in this order: `/stage` with `passed`, then every `/upload-url` upload, then `/pr` when the stage opened a PR, and the `/transition` last. The transition is the call that raises the generation, so any call after it would get 409.
 10. **Review triggers.** Requested changes count only when a changes-requested review was submitted after `run.reviews_seen_at`. Two writes set that column:
     - the first `pr_opened`;
@@ -421,7 +421,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - `parseWebhook` on an unknown payload returns `{ kind: "ignored" }` and never throws.
   - `close` followed by `getItem` shows `closed: true`.
 - [ ] **Step 2: Write `fake.test.ts`**, which calls `backlogContract("fake", ...)`. Run it. Expected: FAIL.
-- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. `fakeBacklog()` returns a `ContractTarget`, so `fake.test.ts` passes it straight to `backlogContract`. Its cursor is a change counter, so a `listEligible` from the returned cursor sees only items changed since. Its `openDependencies` returns an empty list, and Task 8 adds a way to seed dependencies when its tests need one. It also exports `fakeRepoHost()`, an in-memory `RepoHost` holding PRs, checks, files and review comments, which the tests in Tasks 7 to 17 use. Tests set its state directly: `prs`, `checks` by `repo@sha`, `files` by `repo@ref:path`, `heads` by repo and `reviewComments` by `repo#number`. A review comment marked `resolved: true` sits in a resolved thread, so `openReviewComments` leaves it out, which is the case Task 7 asserts. The backlog stores deep copies, so a test's input and the items it reads back never share arrays with the fake's state. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
+- [ ] **Step 3: Implement `fake.ts`** as an in-memory map. `fakeBacklog()` returns a `ContractTarget`, so `fake.test.ts` passes it straight to `backlogContract`. Its cursor is a change counter, so a `listEligible` from the returned cursor sees only items changed since. Its `openDependencies` returns what `setDependencies(externalId, open)` last set for that item, and an empty list before that. It also exports `fakeRepoHost()`, an in-memory `RepoHost` holding PRs, checks, files and review comments, which the tests in Tasks 7 to 17 use. Tests set its state directly: `prs`, `checks` by `repo@sha`, `files` by `repo@ref:path`, `heads` by repo and `reviewComments` by `repo#number`. A review comment marked `resolved: true` sits in a resolved thread, so `openReviewComments` leaves it out, which is the case Task 7 asserts. The backlog stores deep copies, so a test's input and the items it reads back never share arrays with the fake's state. The claim marker is a `factory:in-progress` label. The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(adapters): interfaces, fake adapter, contract suite`.
 
@@ -497,7 +497,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
     - its PR is closed with a comment, and the open question, if any, closes.
 
     The item gets a comment saying the scenarios need a new sign-off. The same holds from Queued, InProgress, SignOff and NeedsInput, and a second `pollOnce` after the change fires nothing.
-  - **Withdrawal.** An InProgress item returned by `getItem` with the label gone, or with `closed: true`, moves to Abandoned through `withdrawn`, which fences its cell. An InReview item does the same. Either way an open PR is closed by Run contract 8.
+  - **Withdrawal.** An InProgress item returned by `getItem` with the label gone, or with `closed: true`, moves to Abandoned through `withdrawn`, which fences its cell. An InReview item does the same. Either way the poller closes the run's PR if it's still open, with a comment that names the kept branch, since Run contract 8's hook only arrives in Task 12.
   - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
     - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
@@ -508,6 +508,9 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
+  - The eligibility label is `backlog_source.label_filter`, or `factory` when it's null. `upsertItem` also takes the item's `rank` into `item.backlog_rank`.
+  - The readiness inputs are read once per repo per poll, at the default branch head. A repo with no `repo` row is unknown, and its items fail the gate's unknown-repo rule. A read that fails skips that repo's gating until the next poll.
+  - `criteriaHash(criteria)`, exported from `poller.ts`, is the SHA-256 of the criteria as JSON. Task 13 writes `item.criteria_hash` with it, and the poller skips the criteria check while it's null.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(watcher): polling with cursor`.
 
@@ -789,7 +792,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
     - A Failed item whose PR already merged starts a new run, numbered one above the item's last run, on a new branch, per Run contract 7.
     - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1.
-  - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
+  - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria, through `criteriaHash` from Task 8.
   - **Egress boot.** `ensureEgress` with a stubbed `execFile`, in three cases:
     - `docker network create` answers "already exists", and `ensureEgress` still succeeds;
     - the running `factory-egress` carries the label for this boot's configuration, and nothing is removed or started;

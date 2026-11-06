@@ -5,9 +5,10 @@ import type { FactoryItem, RepoHost, ReviewComment } from "./types.ts";
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
  * last cursor. It has no webhooks, so parseWebhook ignores everything.
  */
-export function fakeBacklog(): ContractTarget {
+export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void } {
   const items = new Map<string, FactoryItem & { seq: number }>();
   const comments = new Map<string, { body: string; key: string }[]>();
+  const dependencies = new Map<string, string[]>();
   let seq = 0;
 
   const get = (id: string) => {
@@ -42,8 +43,8 @@ export function fakeBacklog(): ContractTarget {
         const item = items.get(id);
         return item ? copy(item) : null;
       },
-      async openDependencies() {
-        return [];
+      async openDependencies(id) {
+        return [...(dependencies.get(id) ?? [])];
       },
       async claim(id) {
         touch(id, (i) => {
@@ -92,6 +93,9 @@ export function fakeBacklog(): ContractTarget {
     },
     async comments(id) {
       return (comments.get(id) ?? []).map((c) => c.body);
+    },
+    setDependencies(id, open) {
+      dependencies.set(id, [...open]);
     },
   };
 }
