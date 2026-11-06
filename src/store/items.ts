@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { next, type ItemEvent, type ItemState } from "../core/states.ts";
+import { next, overrideTo, type ItemEvent, type ItemState } from "../core/states.ts";
 import { inTx, runAfterCommit } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
 
@@ -10,7 +10,8 @@ export class IllegalTransition extends Error {
   }
 }
 
-type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>;
+// "override" marks an operator's move through overrideItem, which follows no edge of the state machine.
+type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent | "override") => Promise<void>;
 const hooks: Hook[] = [];
 
 /** Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is one (Run contract 8). */
@@ -45,6 +46,27 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   return to;
 }
 
+/**
+ * An operator's move to any state, such as a stopped run going to Failed (overrideTo, plan Task 3). It writes like
+ * transitionItem, fences the old cell when leaving InProgress, logs an override event with the reason, and runs the
+ * same hooks, so the board mirrors it.
+ */
+export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemState, actor: Actor, reason: string): Promise<ItemState> {
+  if (!inTx(c)) throw new Error("overrideItem needs a client inside withTx");
+  const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
+  if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
+  const from = r.rows[0].state;
+  const target = overrideTo(from, to);
+  if (from === "InProgress") {
+    await c.query("update item set state = $2, lease_generation = lease_generation + 1, lease_owner = null, lease_expires = null where id = $1", [itemId, target]);
+  } else {
+    await c.query("update item set state = $2 where id = $1", [itemId, target]);
+  }
+  await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  for (const hook of hooks) runAfterCommit(c, () => hook(itemId, from, target, "override"));
+  return target;
+}
+
 export const LEASE_RENEW_MS = 60_000;
 export const LEASE_EXPIRY_MS = 300_000;
 
@@ -55,18 +77,24 @@ const system = (actorId: string): Actor => ({ actor: "system", actorId });
  * come before Queued ones, then highest priority, then lowest backlog rank. Held items and items with an open
  * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
+ * With `resumeOnly`, the waiting-count brake is on, so a Queued item counts only when its open run already has a
+ * stage behind it, such as one back from changes_requested. Answered items always count (Run contract 3).
  */
-export async function claimNext(c: pg.PoolClient, owner: string, now: Date): Promise<{ itemId: string; runId: string; generation: number } | null> {
+export async function claimNext(
+  c: pg.PoolClient, owner: string, now: Date, opts: { resumeOnly?: boolean } = {},
+): Promise<{ itemId: string; runId: string; generation: number } | null> {
   const pick = await c.query<{ id: string }>(
     `select i.id from item i
      where not i.held and cardinality(i.blocked_by) = 0
-       and (i.state = 'Queued'
+       and ((i.state = 'Queued'
+           and (not $1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
          or (i.state in ('SignOff', 'NeedsInput')
            and exists (select from question q where q.item_id = i.id and q.answer is not null)
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
      order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id
      limit 1
      for update of i skip locked`,
+    [opts.resumeOnly ?? false],
   );
   if (pick.rowCount === 0) return null;
   const itemId = pick.rows[0].id;
