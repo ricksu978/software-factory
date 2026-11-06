@@ -114,7 +114,7 @@ export async function releaseLease(c: pg.PoolClient, itemId: string, generation:
   await c.query("update item set lease_owner = null, lease_expires = null where id = $1 and lease_generation = $2", [itemId, generation]);
 }
 
-export type NewItem ={ sourceId: string; externalId: string; title: string };
+export type NewItem = { sourceId: string; externalId: string; title: string };
 
 /** Inserts an item as Eligible, or refreshes its title, keyed on (source_id, external_id). Task 6 widens the input to FactoryItem. */
 export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Promise<string> {

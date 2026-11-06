@@ -492,7 +492,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`. One that fails moves to NotReady through `readiness_failed` with a reasons comment. The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch. Its `dor` comes from `loadPolicy` on the same commit, and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
   - **Criteria change.** An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`. In the same transaction:
     - `item.criteria_hash` takes the new value, so the next poll sees no change and fires nothing more;
-    - a new `run` row starts at `understand` on a new branch, per Run contract 7;
+    - a new `run` row, numbered one above the item's last run, starts at `understand` on a new branch, per Run contract 7;
     - its PR is closed with a comment, and the open question, if any, closes.
 
     The item gets a comment saying the scenarios need a new sign-off. The same holds from Queued, InProgress, SignOff and NeedsInput, and a second `pollOnce` after the change fires nothing.
@@ -751,7 +751,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - **Usage reserve.** With `usage_paused_until` in the future, `tick` starts nothing, and running cells' `/lease` replies keep `stop: false`, so they finish.
   - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Two variants:
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
-    - A Failed item whose PR already merged starts a new run on a new branch, per Run contract 7.
+    - A Failed item whose PR already merged starts a new run, numbered one above the item's last run, on a new branch, per Run contract 7.
     - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1.
   - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria.
   - **Egress boot.** `ensureEgress` with a stubbed `execFile`, in three cases:
