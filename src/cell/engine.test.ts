@@ -270,24 +270,37 @@ describe("runCell", () => {
     assert.match(h.prs[0].body, new RegExp(`checked these lines at ${head}`));
   });
 
-  test("a Definition of Done judge that changes the branch fails open-pr, and the PR opens only at a head checked since", async () => {
+  // A judge that commits once, on its first call.
+  const committingJudge = () => {
     let edits = 0;
-    const h = harness({ nextStage: "open-pr", script: (a) => {
-      if (a.prompt.startsWith("# Definition of Done") && edits++ === 0) writeFileSync(join(a.cwd, "judge.txt"), "edit\n");
-    } });
+    return (a: AgentArgs) => {
+      if (!a.prompt.startsWith("# Definition of Done") || edits++ > 0) return;
+      writeFileSync(join(a.cwd, "judge.txt"), "edit\n");
+      git(a.cwd, "add", "-A");
+      git(a.cwd, "commit", "-q", "-m", "judge");
+    };
+  };
+
+  test("a Definition of Done judge that commits fails open-pr, and the PR opens only at a head checked since", async () => {
+    const h = harness({ nextStage: "open-pr", script: committingJudge() });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are clear.\n");
     assert.equal(await h.run(), "done");
     const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").map((c) => c.body.status);
     assert.deepEqual(openPr, ["started", "failed", "started", "passed"]);
-    assert.ok(h.agentCalls.some((a) => a.stage === "green" && a.prompt.includes("the Definition of Done check changed the branch")));
+    assert.ok(h.agentCalls.some((a) => a.stage === "green" && a.prompt.includes("the Definition of Done check committed to the branch")));
     assert.match(h.prs[0].body, new RegExp(`checked these lines at ${git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH)}`));
   });
 
-  test("a Definition of Done judge that changes the branch fails the green attempt before its push", async () => {
-    let edits = 0;
-    const h = harness({ nextStage: "green", script: (a) => {
-      if (a.prompt.startsWith("# Definition of Done") && edits++ === 0) writeFileSync(join(a.cwd, "judge.txt"), "edit\n");
-    } });
+  test("output green's checks leave uncommitted doesn't fail green", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.config.commands.test = "echo out > test-output.txt";
+    h.deps.policies.dod = policy("dod", "- [ ] Coverage is written. `run: echo 1 > coverage.txt`\n- [ ] Docs are clear.\n");
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
+  });
+
+  test("a Definition of Done judge that commits fails the green attempt before its push", async () => {
+    const h = harness({ nextStage: "green", script: committingJudge() });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are clear.\n");
     assert.equal(await h.run(), "done");
     const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status);
