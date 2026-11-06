@@ -13,17 +13,22 @@ export class IllegalTransition extends Error {
 type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>;
 const hooks: Hook[] = [];
 
-/** Registers a hook that runs after each committed transition. Task 12 registers board mirroring (Run contract 8). */
-export function onTransition(hook: Hook): void {
+/** Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is one (Run contract 8). */
+export function onTransition(hook: Hook): () => void {
   hooks.push(hook);
+  return () => {
+    const i = hooks.indexOf(hook);
+    if (i !== -1) hooks.splice(i, 1);
+  };
 }
 
 /**
  * Moves an item along one state-machine edge. It writes the state and its event on the caller's withTx
  * transaction, so both commit or neither does, and leaving InProgress fences the old cell (Run contract 2).
  * Outside withTx it refuses before any write: the row lock, the atomicity and the hooks all depend on it.
+ * `detail` adds fields to the event's payload, such as the attempts behind retries_exhausted.
  */
-export async function transitionItem(c: pg.PoolClient, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState> {
+export async function transitionItem(c: pg.PoolClient, itemId: string, event: ItemEvent, actor: Actor, detail: Record<string, unknown> = {}): Promise<ItemState> {
   if (!inTx(c)) throw new Error("transitionItem needs a client inside withTx");
   const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
@@ -35,7 +40,7 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, to]);
   }
-  await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { from, to, event } });
+  await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
   for (const hook of hooks) runAfterCommit(c, () => hook(itemId, from, to, event));
   return to;
 }
@@ -120,15 +125,15 @@ export async function releaseLease(c: pg.PoolClient, itemId: string, generation:
   );
 }
 
-export type NewItem = { sourceId: string; externalId: string; title: string };
+export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number };
 
-/** Inserts an item as Eligible, or refreshes its title, keyed on (source_id, external_id). Task 6 widens the input to FactoryItem. */
+/** Inserts an item as Eligible, or refreshes its title and backlog rank, keyed on (source_id, external_id). */
 export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Promise<string> {
   const r = await c.query<{ id: string }>(
-    `insert into item (source_id, external_id, title, state) values ($1, $2, $3, 'Eligible')
-     on conflict (source_id, external_id) do update set title = excluded.title
+    `insert into item (source_id, external_id, title, state, backlog_rank) values ($1, $2, $3, 'Eligible', $4)
+     on conflict (source_id, external_id) do update set title = excluded.title, backlog_rank = coalesce(excluded.backlog_rank, item.backlog_rank)
      returning id`,
-    [item.sourceId, item.externalId, item.title],
+    [item.sourceId, item.externalId, item.title, item.rank ?? null],
   );
   return r.rows[0].id;
 }

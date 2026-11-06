@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesGlob } from "node:path";
-import type { RepoHost, ReviewComment } from "../types.ts";
+import { standingSummaries, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -26,7 +26,7 @@ const split = (repo: string) => {
 };
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
-type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread">;
+type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -35,6 +35,10 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
   return {
     async replyToThread(_repo, threadId, body) {
       await (await client()).graphql(REPLY, { thread: threadId, body });
+    },
+
+    async commentOnPr(repo, prNumber, body) {
+      await (await client()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...split(repo), issue_number: prNumber, body });
     },
 
     async openOrUpdatePr({ repo, branch, base, title, body }) {
@@ -119,17 +123,22 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
   }
 }
 
-async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure"> {
+async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { status: string; conclusion: string | null }[];
   if (runs.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""))) return "failure";
-  if (runs.length === 0 || runs.some((c) => c.status !== "completed")) return "pending";
-  return "success";
+  if (runs.length === 0) {
+    // "none" only when no commit status has reported either, so a repo whose CI reports statuses still reads pending.
+    const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
+    return statuses === 0 ? "none" : "pending";
+  }
+  return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
-    id isResolved path line comments(first: 100) { nodes { author { login } body } } } } } } }`;
+    id isResolved path line comments(first: 100) { nodes { author { login } body } } } }
+  reviews(first: 100) { nodes { id state body author { login } } } } } }`;
 
 /** RepoHost on the App's installation token. The control plane alone holds the App key. */
 export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
@@ -152,7 +161,19 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
     async checksOnHead(repo, prNumber) {
       const gh = await client();
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...split(repo), pull_number: prNumber })).data;
-      return checksOn(gh, split(repo), pr.head.sha);
+      const state = await checksOn(gh, split(repo), pr.head.sha);
+      return state === "none" ? "pending" : state;
+    },
+
+    async onBranch(repo, branch, sha) {
+      // "ahead" means the branch contains the sha and "identical" means it is the head; "diverged" and "behind" don't.
+      try {
+        const { status } = (await (await client()).request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...split(repo), basehead: `${sha}...${branch}` })).data;
+        return status === "ahead" || status === "identical";
+      } catch (e) {
+        if (notFound(e)) return false; // a sha GitHub doesn't know
+        throw e;
+      }
     },
 
     async prState(repo, prNumber, trustedLogins) {
@@ -191,9 +212,14 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       const r = split(repo);
       const res = await (await client()).graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber });
       const threads = res.repository.pullRequest.reviewThreads.nodes as { id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { author: { login: string } | null; body: string }[] } }[];
-      return threads.filter((t) => !t.isResolved).flatMap((t) =>
+      const comments = threads.filter((t) => !t.isResolved).flatMap((t) =>
         t.comments.nodes.map((c): ReviewComment => ({ threadId: t.id, path: t.path, line: t.line, author: c.author?.login ?? "ghost", body: c.body })),
       );
+      // ponytail: one page of 100 reviews, oldest first, as in prState; a PR with more would miss the newest summaries.
+      const reviews = (res.repository.pullRequest.reviews.nodes as { id: string; state: string; body: string; author: { login: string } | null }[])
+        .filter((v) => v.state !== "PENDING")
+        .map((v): Review => ({ id: v.id, author: v.author?.login ?? "ghost", state: v.state.toLowerCase() as Review["state"], body: v.body }));
+      return [...comments, ...standingSummaries(reviews)];
     },
   };
 }

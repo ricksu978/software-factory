@@ -30,13 +30,32 @@ export interface BacklogAdapter {
   parseWebhook(headers: Record<string, string>, body: unknown): FactoryWebhookEvent;
 }
 
-export type ReviewComment = { threadId: string; path: string; line: number | null; author: string; body: string };
+/** A line comment in a review thread, or a review's top-level summary, which has no path and the review's id as threadId. */
+export type ReviewComment = { threadId: string; path: string | null; line: number | null; author: string; body: string };
+
+export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
+
+/**
+ * The summaries that still stand, from a PR's reviews in the order they were submitted. A summary can't be resolved,
+ * so it counts while its reviewer's latest review requests changes. As in GitHub's own reviewer state, a review that
+ * only comments changes nothing, and an approval, a dismissal or a newer review replaces the summary (issue #28).
+ */
+export function standingSummaries(reviews: Review[]): ReviewComment[] {
+  const latest = new Map<string, Review>();
+  for (const r of reviews) if (r.state !== "commented") latest.set(r.author.toLowerCase(), r);
+  return [...latest.values()]
+    .filter((r) => r.state === "changes_requested" && r.body.trim() !== "")
+    .map((r) => ({ threadId: r.id, path: null, line: null, author: r.author, body: r.body }));
+}
 
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
-  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
+  /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
+  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
+  onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
   prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{
@@ -45,8 +64,10 @@ export interface RepoHost {
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
   defaultBranchSha(repo: string): Promise<string>;
-  /** Every comment in the PR's unresolved review threads. */
+  /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
   /** Adds a reply to one review thread, as the address stage does when it answers a comment instead of changing code. */
   replyToThread(repo: string, threadId: string, body: string): Promise<void>;
+  /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */
+  commentOnPr(repo: string, prNumber: number, body: string): Promise<void>;
 }

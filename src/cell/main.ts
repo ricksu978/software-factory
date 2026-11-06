@@ -34,7 +34,10 @@ async function main() {
   const helper = `!"${process.execPath}" "${import.meta.filename}" credential`;
   await cloneRun(`https://github.com/${ctx.repo}.git`, ctx.branch, ctx.base, dir, helper);
 
-  // Policy files at the run's pinned commit (Run contract 11). A path missing there reads as absent.
+  // Policy files at the run's pinned commit (Run contract 11). A path missing there reads as absent, but a pinned
+  // commit the clone lacks is a read error, which never falls back to a default.
+  if (!ctx.configSha) throw new Error("the run has no pinned config_sha yet");
+  await exec("git", ["cat-file", "-e", `${ctx.configSha}^{commit}`], { cwd: dir });
   const read = async (path: string) => {
     try {
       await exec("git", ["cat-file", "-e", `${ctx.configSha}:${path}`], { cwd: dir });

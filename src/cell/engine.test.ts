@@ -34,6 +34,8 @@ function report(names: string[], verdict: "red" | "green"): string {
   ].map((m) => JSON.stringify(m))).join("\n") + "\n";
 }
 
+const ownerComment = { threadId: "t1", path: "app.txt", line: 1, author: "owner", body: "rename foo" };
+
 const policy = (name: PolicyName, text: string): Policy =>
   ({ name, source: "repo", sha: name, text, criteria: name === "scenarios" || name === "risk" ? [] : parseCriteria(text) });
 
@@ -130,6 +132,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       openOrUpdatePr: async (p) => (prs.push(p), rec("/repo/openOrUpdatePr"), { number: 7, url: "https://github.com/acme/app/pull/7" }),
       requestReviewers: async (_r, _n, fallback) => (rec("/repo/requestReviewers", { fallback }), fallback),
       replyToThread: async (_r, threadId, body) => rec("/repo/replyToThread", { threadId, body }),
+      commentOnPr: async (_r, prNumber, body) => rec("/repo/commentOnPr", { prNumber, body }),
     },
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
@@ -213,7 +216,7 @@ describe("runCell", () => {
     writeFileSync(join(h.dir, ".claude", "agents", "pr-addresser.md"), "---\nname: pr-addresser\n---\n");
     await h.run();
     assert.ok(h.agentCalls.some((a) => a.agent === "factory-self-reviewer"));
-    const a = harness({ nextStage: "address" });
+    const a = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] } });
     await a.run();
     assert.ok(a.agentCalls.some((x) => x.agent === "factory-pr-addresser"));
     assert.ok(![...h.agentCalls, ...a.agentCalls].some((x) => x.agent === "self-reviewer" || x.agent === "pr-addresser"));
@@ -264,7 +267,8 @@ describe("runCell", () => {
   });
 
   test("an address fix that moves HEAD rechecks dod.md and fails before pr_opened", async () => {
-    const h = harness({ nextStage: "address", script: (a, stage) => { if (stage === "address") writeFileSync(join(a.cwd, "app.txt"), "fix\n"); } });
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] },
+      script: (a, stage) => { if (stage === "address") writeFileSync(join(a.cwd, "app.txt"), "fix\n"); } });
     h.deps.ctx.dodCheckedSha = h.lockSha;
     h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: false`\n");
     assert.equal(await h.run(), "waiting");
@@ -293,6 +297,87 @@ describe("runCell", () => {
       } });
     assert.equal(await h.run(), "done");
     assert.deepEqual(h.calls.filter((c) => c.route === "/repo/replyToThread").map((c) => c.body), [{ threadId: "t1", body: "kept, it matches the spec" }]);
+  });
+
+  test("an address run with no trusted review text and a clean merge blocks, and never posts pr_opened", async () => {
+    const h = harness({ nextStage: "address" });
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.transitions(), [{ event: "blocked", question: { kind: "needs_input", body: "no trusted review text to address" } }]);
+    assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+  });
+
+  test("an address run there for a merge conflict, with no review text, resolves it and hands the PR back", async () => {
+    const h = harness({ nextStage: "address", conflict: true, script: (a) => {
+      if (a.prompt.includes("merge conflict")) {
+        writeFileSync(join(a.cwd, "app.txt"), "both sides\n");
+        git(a.cwd, "add", "-A");
+        git(a.cwd, "commit", "-q", "--no-edit");
+      }
+    } });
+    assert.equal(await h.run(), "done");
+    assert.equal(h.transitions().at(-1).event, "pr_opened");
+  });
+
+  test("a reply to a review summary goes out as one PR comment quoting it, never as a thread reply by its id", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [{ threadId: "PRR_9", path: null, line: null, author: "owner", body: "Split run.ts" }] },
+      script: (a) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (file) writeFileSync(file, '{"threadId":"PRR_9","body":"Split in this push."}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    const brief = h.agentCalls.find((a) => a.agent === "factory-pr-addresser")!.prompt;
+    assert.match(brief, /"kind": "summary"/);
+    assert.match(brief, /may already be dealt with/);
+    assert.ok(!h.routes().includes("/repo/replyToThread"));
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/commentOnPr").map((c) => c.body), [{ prNumber: 7, body: "> Split run.ts\n\nSplit in this push." }]);
+  });
+
+  test("a usage report sends its reset time as an ISO time, which the cell API reads", async () => {
+    const h = harness({ script: (_a, stage) => (stage === "red" ? { usage: { utilization: 0.72, resetsAt: 1762400000 } } : undefined) });
+    await h.run();
+    const passed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "red" && c.body.status === "passed")!;
+    assert.deepEqual(passed.body.usage, { utilization: 0.72, resetsAt: new Date(1762400000 * 1000).toISOString() });
+  });
+
+  test("the reviewer sees every earlier round, so it can answer DEADLOCK after two rebuttals", async () => {
+    let n = 0;
+    const h = harness({ script: (a) => {
+      if (a.agent !== "factory-self-reviewer") return a.prompt.startsWith("# Fix review findings") ? { text: `rebuttal ${n}` } : undefined;
+      n++;
+      if (n === 3) {
+        assert.match(a.prompt, /Earlier round 1[\s\S]*rebuttal 1[\s\S]*Earlier round 2[\s\S]*rebuttal 2/);
+        return { text: "app.txt:1: still unclear\nDEADLOCK" };
+      }
+      return { text: "app.txt:1: unclear\nOPEN: 1" };
+    } });
+    assert.equal(await h.run(), "waiting");
+    assert.equal(n, 3);
+    assert.match(h.transitions().at(-1).question.body, /deadlocked/);
+  });
+
+  test("a stop that arrives while the cell reports a block still ends the run as stopped", async () => {
+    let leases = 0;
+    const h = harness({ nextStage: "address", lease: async () => ({ stop: ++leases > 0 }) });
+    assert.equal(await h.run(), "stopped");
+    assert.ok(!h.transitions().length);
+  });
+
+  test("a second pass after back to green writes new self-review and open-pr attempts", async () => {
+    let checks = 0;
+    const h = harness();
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ++checks === 1 ? "failure" : "success");
+    assert.equal(await h.run(), "done");
+    const of = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started").map((c) => c.body.attempt);
+    assert.deepEqual(of("self-review"), [1, 2]);
+    assert.deepEqual(of("open-pr"), [1, 2]);
+    assert.deepEqual(of("green"), [1, 2]);
+  });
+
+  test("the PR body lists each scenario with its red and green result, and the review rounds", async () => {
+    const h = harness();
+    await h.run();
+    assert.match(h.prs[0].body, /\| Criterion 1 holds \| red \| green \|/);
+    assert.match(h.prs[0].body, /Self-review took 1 round\./);
   });
 
   test("a usage limit commits, fails the stage, posts usage_limited with the reset time, and returns limited", async () => {

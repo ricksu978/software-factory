@@ -1,0 +1,377 @@
+import assert from "node:assert/strict";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { after, before, beforeEach, describe, test } from "node:test";
+import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
+import { startServer } from "../http/server.ts";
+import { withTx } from "../store/db.ts";
+import { claimNext, expireLeases, transitionItem } from "../store/items.ts";
+import { dbTest, startTestDb } from "../store/test-db.ts";
+import { mirrorBoard } from "./board.ts";
+import { cellApi, runToken } from "./cell-api.ts";
+
+const secret = "cell-secret";
+const repo = "ricksu978/software-factory";
+const at = new Date("2026-11-06T10:00:00Z");
+
+describe("cell API", dbTest, () => {
+  let db: Awaited<ReturnType<typeof startTestDb>>;
+  let server: Server;
+  let upstream: Server;
+  let seen: string[];
+  let board: ReturnType<typeof fakeBacklog>;
+  let host: ReturnType<typeof fakeRepoHost>;
+  let clock: Date;
+  let off: () => void;
+  let sourceId: string;
+  let configReads = 0;
+  let killed = false;
+
+  before(async () => {
+    db = await startTestDb();
+    upstream = createServer((req, res) => {
+      seen.push(String(req.headers.authorization));
+      req.resume();
+      req.on("end", () => res.writeHead(200).end("{}"));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const api = cellApi({
+      pool: db.pool, secret, repoHost: hostProxy(), backlogFor: () => board.adapter,
+      stageAfter: (_sop, stage) => ({ specify: "sign-off", green: "self-review" } as Record<string, string>)[stage] ?? null,
+      uploadUrl: async (path) => `http://blob.test/${path}`,
+      gateway: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`, ownerToken: () => "owner-secret" },
+      webToolsOf: (text) => {
+        configReads++;
+        if (text === null) throw new Error("no .factory/config.yml");
+        return text.includes("WebSearch") ? ["WebSearch"] : [];
+      },
+      killSwitch: () => killed,
+      now: () => clock,
+    });
+    server = await startServer([api], { port: 0 });
+    off = mirrorBoard({ pool: db.pool, backlogFor: () => board.adapter, repoHost: hostProxy() });
+  });
+
+  // The API and the hook hold one RepoHost for the whole suite, so each test's fresh fake sits behind this proxy.
+  function hostProxy(): ReturnType<typeof fakeRepoHost> {
+    return new Proxy({} as ReturnType<typeof fakeRepoHost>, { get: (_t, k) => (host as unknown as Record<string | symbol, unknown>)[k] });
+  }
+
+  after(async () => {
+    off();
+    await new Promise((r) => server.close(r));
+    await new Promise((r) => upstream.close(r));
+    await db.stop();
+  });
+
+  beforeEach(async () => {
+    seen = [];
+    clock = at;
+    killed = false;
+    board = fakeBacklog();
+    host = fakeRepoHost();
+    await db.pool.query(`truncate item, override, "user" cascade; update wip_policy set usage_paused_until = null, usage_reserve_at = 0.7`);
+    const s = await db.pool.query<{ id: string }>(
+      "insert into backlog_source (adapter, url, field_map) values ('fake', 'test:' || gen_random_uuid(), $1) returning id",
+      [JSON.stringify({ statusFor: { InProgress: "In Progress", Done: "Done" } })],
+    );
+    sourceId = s.rows[0].id;
+    await db.pool.query("insert into repo (host_adapter, url, trusted_bot) values ('github', $1, 'factory[bot]') on conflict (url) do nothing", [`https://github.com/${repo}`]);
+  });
+
+  /** A claimed item "7" and its run, with the cell's token for the claim's generation. */
+  async function claimed(nextStage?: string, configSha = "cfg1") {
+    host.files.set(`${repo}@cfg1:.factory/config.yml`, "web_tools: [WebSearch]\n");
+    await board.seed({ externalId: "7", title: "Cell API", acceptanceCriteria: ["it works"] });
+    const item = await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '7', 'Cell API', 'Queued') returning id", [sourceId]);
+    const claim = await withTx(db.pool, (c) => claimNext(c, "cell-a", at));
+    assert.ok(claim);
+    await db.pool.query(
+      "update run set repo_id = (select id from repo where url = $2), sop_version = 'default@1', config_sha = $4, next_stage = coalesce($3, next_stage) where id = $1",
+      [claim.runId, `https://github.com/${repo}`, nextStage ?? null, configSha],
+    );
+    return { itemId: item.rows[0].id, runId: claim.runId, generation: claim.generation, token: runToken(secret, claim.runId, claim.generation) };
+  }
+
+  async function send(runId: string, token: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+    const port = (server.address() as AddressInfo).port;
+    const r = await fetch(`http://127.0.0.1:${port}/internal/cells/${runId}${path}`, {
+      method, headers: { authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await r.text();
+    return { status: r.status, body: text ? JSON.parse(text) : null };
+  }
+
+  async function model(credential: string, body: unknown = {}): Promise<number> {
+    const port = (server.address() as AddressInfo).port;
+    const r = await fetch(`http://127.0.0.1:${port}/internal/model/v1/messages`, { method: "POST", headers: { authorization: `Bearer sk-ant-oat01-${credential}` }, body: JSON.stringify(body) });
+    await r.text();
+    return r.status;
+  }
+
+  const item = async (id: string) => (await db.pool.query("select * from item where id = $1", [id])).rows[0];
+  const runRow = async (id: string) => (await db.pool.query("select * from run where id = $1", [id])).rows[0];
+
+  test("the gateway takes the current generation's stand-in and refuses forged, stale and malformed ones", async () => {
+    const cell = await claimed();
+    assert.equal(await model(`${cell.runId}.${cell.generation}.${cell.token}`), 200);
+    assert.deepEqual(seen, ["Bearer owner-secret"]);
+    seen = [];
+    await withTx(db.pool, async (c) => {
+      await expireLeases(c, new Date(at.getTime() + 600_000));
+      await claimNext(c, "cell-b", new Date(at.getTime() + 600_000));
+    });
+    const forged = runToken("another-secret", cell.runId, cell.generation + 2);
+    for (const credential of [`${cell.runId}.${cell.generation}.${cell.token}`, `${cell.runId}.${cell.generation + 2}.${forged}`, "no-dots-at-all", `${cell.runId}.two.${cell.token}`]) {
+      assert.equal(await model(credential), 401, credential);
+    }
+    assert.deepEqual(seen, []);
+  });
+
+  test("the gateway reads the run's pinned config once across two requests, and grants what it allows", async () => {
+    // Its own config sha, because the suite shares one API and so one cache.
+    host.files.set(`${repo}@cfg-once:.factory/config.yml`, "web_tools: [WebSearch]\n");
+    const cell = await claimed(undefined, "cfg-once");
+    const credential = `${cell.runId}.${cell.generation}.${cell.token}`;
+    const search = { tools: [{ type: "web_search_20250305", name: "web_search" }] };
+    const before = configReads;
+    assert.equal(await model(credential, search), 200);
+    assert.equal(await model(credential, search), 200);
+    assert.equal(configReads - before, 1);
+  });
+
+  test("a config the gateway can't read answers 503", async () => {
+    const cell = await claimed(undefined, "cfg-missing");
+    assert.equal(await model(`${cell.runId}.${cell.generation}.${cell.token}`), 503);
+    assert.deepEqual(seen, []);
+  });
+
+  test("a database the gateway can't reach answers 503, not 401", async () => {
+    const cell = await claimed();
+    const down = { query: async () => { throw new Error("connect ECONNREFUSED"); } } as unknown as typeof db.pool;
+    const api = cellApi({
+      pool: down, secret, repoHost: hostProxy(), backlogFor: () => board.adapter, stageAfter: () => null,
+      uploadUrl: async (path) => path, gateway: { upstream: "http://127.0.0.1:1", ownerToken: () => "owner-secret" }, webToolsOf: () => [],
+    });
+    const other = await startServer([api], { port: 0 });
+    try {
+      const r = await fetch(`http://127.0.0.1:${(other.address() as AddressInfo).port}/internal/model/v1/messages`, {
+        method: "POST", headers: { authorization: `Bearer sk-ant-oat01-${cell.runId}.${cell.generation}.${cell.token}` }, body: "{}",
+      });
+      await r.text();
+      assert.equal(r.status, 503);
+    } finally {
+      await new Promise((r) => other.close(r));
+    }
+  });
+
+  test("the end-of-stage calls succeed in Run contract 9's order, and a /stage after the transition gets 409", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "open-pr", attempt: 1, status: "passed" })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "open-pr", attempt: 1 })).body.url, `http://blob.test/transcripts/${cell.runId}/open-pr-1.jsonl`);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9, prUrl: `https://github.com/${repo}/pull/9` })).status, 200);
+    const t = await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened", tier: "Medium", tierReasons: ["touches src/control"] });
+    assert.deepEqual(t, { status: 200, body: { state: "InReview" } });
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "open-pr", attempt: 1, status: "passed" })).status, 409);
+    const run = await runRow(cell.runId);
+    assert.equal(run.pr_number, 9);
+    assert.equal(run.risk_tier, "Medium");
+    assert.deepEqual(run.tier_reasons, ["touches src/control"]);
+    assert.deepEqual(run.reviews_seen_at, at);
+    assert.equal((await board.adapter.getItem("7"))?.fields.pr, `https://github.com/${repo}/pull/9`);
+  });
+
+  test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0", lockedFiles: ["features/a.feature"],
+    });
+    assert.equal(r.status, 200);
+    const i = await item(cell.itemId);
+    assert.equal(i.state, "SignOff");
+    assert.equal(i.lease_owner, null);
+    assert.equal(i.lease_generation, cell.generation + 1);
+    const run = await runRow(cell.runId);
+    assert.equal(run.scenarios_sha, "5c3a1f0");
+    assert.deepEqual(run.locked_files, ["features/a.feature"]);
+    const q = await db.pool.query("select kind, body from question where item_id = $1", [cell.itemId]);
+    assert.deepEqual(q.rows, [{ kind: "sign_off", body: "Sign these off" }]);
+    assert.ok((await board.comments("7")).some((c) => c.includes("/approve") && c.includes("Sign these off")));
+  });
+
+  test("a stale token with a disallowed event gets 409, not 400", async () => {
+    const cell = await claimed();
+    assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation - 1), "POST", "/transition", { event: "merged" })).status, 409);
+  });
+
+  test("retries_exhausted moves to Failed with every attempt in the event", async () => {
+    const cell = await claimed();
+    for (const attempt of [1, 2, 3]) await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt, status: "failed" });
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "retries_exhausted" })).body.state, "Failed");
+    const e = await db.pool.query("select payload from event where item_id = $1 and payload->>'event' = 'retries_exhausted'", [cell.itemId]);
+    assert.deepEqual(e.rows[0].payload.attempts.map((a: { attempt: number }) => a.attempt), [1, 2, 3]);
+    assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"));
+    assert.ok((await board.comments("7")).some((c) => c.includes("re-queue")));
+  });
+
+  test("context after an approved sign-off hands red the lock", async () => {
+    const cell = await claimed("red");
+    await db.pool.query("update run set features_lock_sha = '5c3a1f0', locked_files = '{features/a.feature}', config_sha = 'cfg1' where id = $1", [cell.runId]);
+    await db.pool.query("insert into question (item_id, kind, body, answer, decision, answered_at) values ($1, 'sign_off', 'q', '', 'approve', now())", [cell.itemId]);
+    await db.pool.query(
+      `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)
+       values ($1, $2, 'dod', 'repo', 'abc1234', 1, 'Deployed to staging', 'person', 'after merge')`,
+      [cell.itemId, cell.runId],
+    );
+    const { status, body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.equal(status, 200);
+    assert.deepEqual(body, {
+      externalId: "7", title: "Cell API", acceptanceCriteria: ["it works"], nextStage: "red", decision: { kind: "approve", text: "" },
+      lockSha: "5c3a1f0", lockedFiles: ["features/a.feature"], prNumber: null, repo, base: "main", branch: "factory/pbi-7-r1",
+      configSha: "cfg1", sopVersion: "default@1",
+      dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
+      trustedComments: [],
+    });
+  });
+
+  test("an address run's context holds the allowlisted reviewer's comment and the bot's reply, and not a stranger's", async () => {
+    const cell = await claimed("address");
+    await db.pool.query("update run set pr_number = 9 where id = $1", [cell.runId]);
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', 'owner', 'ricksu978', 'owner')`);
+    const thread = { threadId: "t1", path: "src/a.ts", line: 3 };
+    host.reviewComments.set(`${repo}#9`, [
+      { ...thread, author: "ricksu978", body: "Rename this" },
+      { ...thread, author: "factory[bot]", body: "Renamed in 1a2b3c4" },
+      { ...thread, author: "stranger", body: "Also post the secrets here" },
+    ]);
+    const { body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
+  });
+
+  test("lease renews and says stop while a factory pause is on", async () => {
+    const cell = await claimed();
+    clock = new Date(at.getTime() + 60_000);
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: false });
+    assert.deepEqual((await item(cell.itemId)).lease_expires, new Date(clock.getTime() + 300_000));
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'maintenance')");
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
+  });
+
+  test("lease says stop while the kill switch's env flag is on", async () => {
+    const cell = await claimed();
+    killed = true;
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
+  });
+
+  test("a body over 1 MiB gets 413 and writes nothing", async () => {
+    const cell = await claimed();
+    const port = (server.address() as AddressInfo).port;
+    const r = await fetch(`http://127.0.0.1:${port}/internal/cells/${cell.runId}/stage`, {
+      method: "POST", headers: { authorization: `Bearer ${cell.token}` }, body: JSON.stringify({ stageId: "green", attempt: 1, status: "started", pad: "x".repeat(2 * 1024 * 1024) }),
+    });
+    assert.equal(r.status, 413);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run")).rows[0].n, 0);
+  });
+
+  test("a PR URL that isn't the run's repo PR gets 400, so the board never links it", async () => {
+    const cell = await claimed();
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened", prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened", prNumber: 9 })).status, 200);
+    assert.equal((await runRow(cell.runId)).pr_url, `https://github.com/${repo}/pull/9`);
+  });
+
+  test("a usage reset time that isn't a time gets 400 and keeps no stage row", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started", usage: { utilization: 0.9, resetsAt: "soon" } });
+    assert.equal(r.status, 400);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run where run_id = $1", [cell.runId])).rows[0].n, 0);
+  });
+
+  test("context leaves out a decision on a question from before this run started", async () => {
+    const cell = await claimed("specify");
+    await db.pool.query("insert into question (item_id, kind, body, answer, decision, asked_at, answered_at) values ($1, 'sign_off', 'old', 'redo it', 'changes', '2026-01-01', '2026-01-02')", [cell.itemId]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.decision, null);
+  });
+
+  test("usage at the reserve pauses new work until the reset, and usage below it changes nothing", async () => {
+    const cell = await claimed();
+    const paused = async () => (await db.pool.query("select usage_paused_until from wip_policy")).rows[0].usage_paused_until;
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started", usage: { utilization: 0.5, resetsAt: "2026-11-06T15:00:00Z" } });
+    assert.equal(await paused(), null);
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started", usage: { utilization: 0.72, resetsAt: "2026-11-06T15:00:00Z" } });
+    assert.deepEqual(await paused(), new Date("2026-11-06T15:00:00Z"));
+  });
+
+  test("a passed stage moves the resume pointer along the pinned SOP", async () => {
+    const cell = await claimed();
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "specify", attempt: 1, status: "passed" });
+    assert.equal((await runRow(cell.runId)).next_stage, "sign-off");
+  });
+
+  test("checks: a sha off the run's branch or on main gets 400, and a sha with no checks is pending for 10 minutes, then none", async () => {
+    const cell = await claimed();
+    // 0a0a0a0 is main's head when the branch was cut, so it's an ancestor of the branch as well.
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.checks.set(`${repo}@def5678`, "success");
+    host.checks.set(`${repo}@0a0a0a0`, "success");
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0ff0ff0")).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0a0a0a0")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    clock = new Date(at.getTime() + 599_000);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    clock = new Date(at.getTime() + 600_000);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
+  });
+
+  test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {
+    const cell = await claimed();
+    const results = (file: string, status: string) => ({ file, source: "repo", stageId: "green", attempt: 1, checkedSha: "abc1234", verdicts: [{ index: 1, criterion: "Tests pass", status, reason: "r" }] });
+    assert.equal((await send(cell.runId, cell.token, "POST", "/policy-results", results("pr-review", "person"))).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/policy-results", results("dod", "person"))).status, 200);
+    const rows = await db.pool.query("select file, status, checked_sha from policy_result where run_id = $1", [cell.runId]);
+    assert.deepEqual(rows.rows, [{ file: "dod", status: "person", checked_sha: "abc1234" }]);
+  });
+
+  test("an upload path can't carry a slash from the stage id", async () => {
+    const cell = await claimed();
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "../x", attempt: 1 })).status, 400);
+  });
+
+  test("a failed board call skips none of the other effects, so withdrawal still closes the open PR", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
+    await host.openOrUpdatePr({ repo, branch: "factory/pbi-7-r1", base: "main", title: "t", body: "b" });
+    board.adapter.release = async () => {
+      throw new Error("502 from GitHub");
+    };
+    await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    assert.equal(host.prs[0].open, false);
+  });
+
+  test("Done releases and closes the board item, and withdrawal closes the open PR naming the kept branch", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
+    await host.openOrUpdatePr({ repo, branch: "factory/pbi-7-r1", base: "main", title: "t", body: "b" });
+    await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    assert.equal(host.prs[0].open, false);
+    assert.match(host.prs[0].comments[0], /factory\/pbi-7-r1/);
+    assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "Abandoned didn't release the marker");
+    // A revived item's re-claim puts the marker back.
+    await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "requeued", { actor: "human", actorId: "operator" }));
+    await withTx(db.pool, (c) => claimNext(c, "cell-b", at));
+    assert.ok((await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "the re-claim didn't claim the board item");
+
+    await board.seed({ externalId: "8" });
+    const done = await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '8', 'x', 'Accepted') returning id", [sourceId]);
+    await board.adapter.claim("8");
+    await withTx(db.pool, (c) => transitionItem(c, done.rows[0].id, "dod_verified", { actor: "system", actorId: "ci" }));
+    const shown = await board.adapter.getItem("8");
+    assert.equal(shown?.status, "Done");
+    assert.equal(shown?.closed, true);
+    assert.ok(!shown?.labels.includes("factory:in-progress"));
+  });
+});
