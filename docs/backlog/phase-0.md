@@ -233,7 +233,7 @@ Takes over: the owner's machine. The factory now runs in the cloud.
 
 ## PBI 21. Length-prefixed readiness hash
 
-Implements plan Run contract 11 and Task 9. The factory builds it.
+Implements plan Run contract 11 and Task 9. It was built by hand in #78.
 
 - [ ] Two sets of readiness texts that join to the same string, such as `dor` = "ab" with `scenarios` = "c" and `dor` = "a" with `scenarios` = "bc", give different `readinessSha` values.
 - [ ] A null file and a file whose text is the word `absent` give different values.
