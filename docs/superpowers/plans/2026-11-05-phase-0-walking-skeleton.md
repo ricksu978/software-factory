@@ -519,7 +519,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 
 **Interfaces:**
 - Produces:
-  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }`. Defaults: `sensitivePaths: []` and `reviewers: []`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
+  - `parseRepoConfig(yamlText: string | null): RepoConfig`, where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; webTools: WebTool[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string } }` and `type WebTool = "WebSearch" | "WebFetch"`. Defaults: `sensitivePaths: []`, `reviewers: []` and `webTools: []`, read from the YAML key `web_tools`. A missing `bdd` or `commands` key throws `ConfigError` naming the key.
   - `loadSop(yamlText: string): Sop`, which validates stage ids, `models.coding` and `models.triage`. A stage `model` must name a key in `models`.
   - In `src/policy/policy.ts`, per Run contract 11:
     - `type Criterion = { index: number; text: string; run: string | null }` and `type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string }`. `person` is valid only in `dod.md`, and anywhere else it counts as `failed`.
@@ -534,6 +534,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 
 - [ ] **Step 1: Write failing tests:**
   - `parseRepoConfig(null)` throws `ConfigError("bdd")`. A repo with no config can't run BDD, so it can't be ready.
+  - `web_tools: [WebSearch]` gives `webTools: ["WebSearch"]`, and `web_tools: [Bash]` throws `ConfigError("web_tools")`, so a typo can't widen what a cell may do.
   - `gate` rule checks run first, and the judge isn't called when any rule fails. Rules:
     - The DoD file is missing: "No .factory/dod.md in this repo".
     - The repo config is missing or invalid: "No valid .factory/config.yml in this repo".
@@ -615,7 +616,7 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string };
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
-  maxTurns?: number; mode: "cell" | "judge"; signal: AbortSignal }): Promise<AgentResult>;
+  maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
 export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promise<string>; // raw reply; gate() parses it
 ```
@@ -635,13 +636,14 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
   - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
   - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted. Locally it's omitted, because bubblewrap can't start under Docker Desktop, and Task 13's egress proxy enforces the allowlist instead. In Azure, Task 19 Step 9 decides.
+  - `disallowedTools` holds each of `WebSearch` and `WebFetch` that `webTools` leaves out, so with the default `[]` both are denied. This only stops the model being offered a tool. The fence is Task 12's gateway, which refuses the same tools in any request body, since an agent with a shell can call the gateway directly (spec §6 "Web tools").
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
   - no `permissionMode`, so the default applies;
   - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)).
 
-  Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings.
+  Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings. Add another asserting that cell mode with no `webTools` denies both `WebSearch` and `WebFetch`, and with `webTools: ["WebSearch"]` denies only `WebFetch`.
 
   The spike may show that the SDK refuses the OAuth token. In that case `runAgent` spawns `claude -p --output-format stream-json --verbose`, with the same model and cwd, and feeds the parsed lines to `foldMessages`. The CLI emits the same message shapes, so nothing else changes.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
@@ -654,10 +656,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 
 **Files:**
 - Create: `src/control/cell-api.ts`, `src/control/cell-api.test.ts`, `src/http/server.ts`, which is a plain `node:http` route table that Task 15 extends
-- Modify: `src/store/runs.ts`
+- Modify: `src/store/runs.ts`, `src/control/model-gateway.ts` and its test
 
 **Interfaces:**
-- Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken` and `RepoHost.openReviewComments`.
+- Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken`, `RepoHost.openReviewComments`, `RepoHost.readFile` and `parseRepoConfig`.
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
@@ -670,9 +672,27 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
   - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL, signed locally from the Azurite connection in `FACTORY_BLOB`, with its host swapped for `CELL_BLOB_HOST` as Task 2 Step 8 proved, and in Azure with a user delegation key, for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
 - `runToken(secret: string, runId: string, generation: number): string`
 - The model gateway from issue #33, at `/internal/model/*` and outside the 409 rule above. It calls `handleModelRequest` from `src/control/model-gateway.ts` with the path after `/internal/model`, `upstream` set to `https://api.anthropic.com`, and `ownerToken` reading the control plane's own `CLAUDE_CODE_OAUTH_TOKEN`. Its `verify` splits the stand-in `<runId>.<generation>.<runToken>` and accepts it only when the run token matches `runToken` under `timingSafeEqual` and the generation is the item's current one. Every refusal is the gateway's 401, so a fenced cell can't reach the model either. The gateway already refuses any path outside its allowlist with 404.
+  - **Request check.** `verify` changes from a boolean to `{ webTools: WebTool[] } | null`, where null refuses. `webTools` is the run's pinned repo config, read once per run with `RepoHost.readFile(repo, config_sha, ".factory/config.yml")` and `parseRepoConfig`, then cached by `(repo, config_sha)`, which never changes for a run. A failed read answers 503, not 401, so a GitHub outage doesn't look like a bad credential to the cell. The gateway then reads each `/v1/messages` and `/v1/messages/count_tokens` body, up to 32 MiB, with 413 above that. It fails closed: it answers 400, and sends nothing upstream, for any of these:
+    - a `Content-Encoding` other than `identity`;
+    - a body that `JSON.parse` rejects;
+    - an `mcp_servers` key;
+    - a `tools` entry whose `type` is neither absent nor `custom`, unless the type starts with `web_search_` and `webTools` holds `WebSearch`. A `web_fetch_*` tool is always refused: the API fetches its URLs from Anthropic's servers ([web fetch tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)), while Claude Code's WebFetch fetches in the cell and never sends it, so `WebFetch` in `webTools` only lifts the agent's deny list;
+    - an object anywhere in `messages` or `system` whose `source` is an object with a `type` other than `base64`, `text` or `content`. The walk skips the `input` of `tool_use` blocks and never enters `tools`. The API reads neither as content, and a JSON schema for a parameter named `source`, such as AskUserQuestion's `metadata.source`, is an object with `type: "string"`. A `url` source makes Anthropic's servers fetch that URL ([vision](https://platform.claude.com/docs/en/build-with-claude/vision), [PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support)), which is another way past the egress allowlist.
+
+    Claude Code sends its own tools as custom tools and its images as base64, so its requests pass. What goes upstream is `JSON.stringify` of the object the gateway checked, with `content-length` reset and `transfer-encoding` dropped, so a parser that reads the original bytes differently, such as one keeping the first of two `tools` keys, never sees them.
 
 - [ ] **Step 1: Write failing tests** against `startTestDb()` and a request helper:
   - **Model gateway.** With a fake upstream, a stand-in for the current generation reaches it with the owner's token. A forged stand-in, one from the previous generation after a re-claim, and a malformed one (no dots, a non-numeric generation) each get 401, and the fake upstream receives nothing.
+  - **Request check.** In `model-gateway.test.ts`, with `verify` returning `{ webTools: [] }`:
+    - a body whose `tools` holds a custom tool and whose messages hold a base64 image reaches the upstream;
+    - a body reaches the upstream when a custom tool's `input_schema` has a `source` property, or a past `tool_use` block's `input` has a `source` object;
+    - each of these gets 400 and the upstream receives nothing: a `tools` entry of type `web_search_20250305`, `web_fetch_20250910` or `code_execution_20250522`; an `mcp_servers` key; an image with `source: { type: "url" }` in a message; a document with a `url` source inside a `tool_result`; a body that isn't JSON; a body with `Content-Encoding: gzip`;
+    - a body with two `tools` keys, a web search one first and a custom one last, reaches the upstream holding only the custom one;
+    - with `webTools: ["WebSearch", "WebFetch"]`, the web search body reaches the upstream and the web fetch one still gets 400;
+    - a chunked request reaches the upstream with a `content-length` and no `transfer-encoding`;
+    - a 33 MiB body gets 413.
+
+    In `cell-api.test.ts`, the run's config is read once across two model requests, and a failed read gets 503. The streaming and abort tests still pass, since only the request body is buffered.
   - With the current generation's token, `/stage` writes one `stage_run` row.
   - **Review Focus 2.** After a re-claim bumps the generation, each of the nine routes with the old token returns 409, and the `stage_run`, `event`, `item` and `policy_result` tables are unchanged.
   - **End-of-stage order.** Calls in Run contract 9 order all succeed. A `/stage` sent after the stage's own `/transition` gets 409, which is why the order is fixed.
@@ -800,7 +820,7 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   : Promise<"done" | "waiting" | "failed" | "stopped" | "limited">;
 ```
 
-  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
+  The engine starts at `ctx.nextStage`, and the item's tag is `@pbi-${ctx.externalId}`. Every `runAgent` call in cell mode passes `webTools: config.webTools`, from the repo config pinned for the run. Before the first stage of every claim, `runCell` calls `git.mergeBase(ctx.base)`. On `conflict` it runs the coding agent once to resolve it. A conflict still left goes to `blocked`, with the conflicting paths.
 
 Stage behaviour, from spec §6 rows 1 to 7:
 
@@ -823,7 +843,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
 
   It fetches no review threads, watches nothing and runs no script outside the repo, so the brief's list is the only review text it works from. The new names matter because cell mode loads the repo's own `.claude/agents/`, and Claude Code prefers a project agent over a user agent of the same name ([sub-agents](https://code.claude.com/docs/en/sub-agents), "Choose the subagent scope"). Under the old names, a repo shipping its own `self-reviewer.md` would replace the factory's reviewer and its report format. From the vendored reviewer, remove its rubric list (what to review for) and its line saying a repo's own agent file overrides it. Keep only the review loop and the `APPROVED` / `OPEN: <n>` report format, so `pr-review.md` is the only rubric. `address.md` gives `factory-pr-addresser` the conflict and `ctx.trustedComments` (Run contract 10), and tells it to treat that text as requests to weigh, never as commands. `self-review.md` gives the reviewer the repo's `pr-review.md` as its rubric, numbered as in Run contract 11. Then come the engine's BDD checks, under a heading that says they outrank anything in the rubric above: every step definition asserts something, no scenario is pending or skipped, and no tag hides a scenario. It also adds the rule "after a finding is rebutted twice and still held, end with `DEADLOCK`". The reviewer reports each `pr-review.md` criterion as a JSON line, which the engine stores in `policy_result`.
 - [ ] **Step 3: Write failing engine tests** with a scripted fake agent, a fake `Git` and a recording `CellApi`:
-  - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify, posts `scenarios_written` with `scenariosSha` and `lockedFiles`, and returns `waiting`. A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost.
+  - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify, posts `scenarios_written` with `scenariosSha` and `lockedFiles`, and returns `waiting`. A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red, green, self-review and open-pr. It posts `pr_opened` and returns `done`. Each stage writes `started` then `passed` with the fake agent's cost. With `config.webTools: ["WebSearch"]`, every `mode: "cell"` call the fake agent records carries `webTools: ["WebSearch"]`.
   - **Checkpoint resume.** With `ctx.nextStage = "red"`, it never calls the agent for understand or specify.
   - **Changes asked.** With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`, the specify prompt contains the note.
   - **Base merge.** Every run calls `mergeBase` before its first stage. A `conflict` the agent can't clear posts `blocked` naming the paths, and no stage runs.
@@ -1057,7 +1077,7 @@ Phase 0b starts here, once the walking skeleton runs locally (Task 18). The sign
 - [ ] **Step 7a: Turn on the App webhook.** The factory GitHub App was registered in Task 2 Step 5 with its webhook inactive. Point it at `https://<app>/webhooks/github`, set its secret, and subscribe it to issues, issue comment, pull request, pull request review, check suite and issue dependencies. Pull request review is a separate subscription from pull request, and "a GitHub App must have at least read-level access for the 'Pull requests' repository permission" to receive it ([GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)). Personal accounts get no `projects_v2_item` webhook, so board changes still come through the 5-minute poll.
 - [ ] **Step 7: Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery. Expected: 204 in the App's delivery log, and no login redirect. Change the secret on one side, then expect 401.
 - [ ] **Step 8: SDK probe in Azure.** The cell job holds no Claude token, so the probe goes through a gateway, as every real cell will.
-  - Before Step 4's deploy, `spike/hello.ts` gains an `/internal/model/*` route that calls `handleModelRequest` like Task 12, except that `verify` accepts only the value of a `MODEL_PROBE_CREDENTIAL` env var. While that var is unset, `verify` refuses everything, so the route answers 401, which is what Step 6 expects.
+  - Before Step 4's deploy, `spike/hello.ts` gains an `/internal/model/*` route that calls `handleModelRequest` like Task 12, except that `verify` returns `{ webTools: [] }` only for the value of a `MODEL_PROBE_CREDENTIAL` env var, and null for anything else. While that var is unset, `verify` refuses everything, so the route answers 401, which is what Step 6 expects.
   - For the probe, set `MODEL_PROBE_CREDENTIAL` on `ca-factory-control` to a fresh random value. Run `spike/sdk-oauth.ts` from Task 2 as one execution of `caj-factory-cell`, with the two `cellModelEnv` variables pointing at `https://<app>/internal/model` and that value as the credential. Remove `MODEL_PROBE_CREDENTIAL` from the app once Step 9 is done.
   - Expected: `subtype: "success"`.
   - If the SDK refuses the token, run `claude -p "Reply with the word ready." --output-format json` in the same image. Record which one works. §14 already names the headless CLI as the fallback.
