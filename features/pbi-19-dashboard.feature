@@ -53,7 +53,7 @@ Feature: Dashboard sign-in, Floor and sign-off
   Scenario: A dashboard POST from the dashboard's own origin goes through
     Given "octo", a product owner, is signed in, and an item waits for sign-off
     When "octo" posts an approval from the dashboard's own origin
-    Then the item is Queued to resume at "red"
+    Then the item is ready to resume at "red"
 
   @ac-3 @db
   Scenario: Floor shows what waits on the owner, oldest first
@@ -78,7 +78,7 @@ Feature: Dashboard sign-in, Floor and sign-off
   Scenario Outline: A product owner's /approve comment signs off exactly as the dashboard button does
     Given an item waits for sign-off on scenarios at "abc123"
     When "octo", a product owner, approves through <channel>
-    Then the item is Queued to resume at "red"
+    Then the item is ready to resume at "red"
     And its scenarios are locked at "abc123"
     And its sign-off question is answered "approve"
 
