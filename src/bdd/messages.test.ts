@@ -82,6 +82,14 @@ test("red fails a @regression scenario that is red or crashed, so the tag can't 
   ]);
 });
 
+test("a crashed @regression scenario's finding carries the crash reason", () => {
+  const r: Results = new Map([
+    ["p0", { name: "broken", tags: ["@pbi-482", "@regression"], verdict: "crash", reason: 'UNDEFINED at "the hash is stable"' }],
+    ["p1", { name: "new", tags: ["@pbi-482"], verdict: "red", reason: "" }],
+  ]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["broken", "new"]).findings, ['regression scenario doesn\'t pass before the build: broken: crash: UNDEFINED at "the hash is stable"']);
+});
+
 test("red fails an item whose every scenario is @regression", () => {
   const r = results([["still passes", ["@pbi-482", "@regression"], "green"]]);
   assert.deepEqual(redGate(r, "@pbi-482", ["still passes"]).findings, ["every scenario carrying @pbi-482 is @regression, so Red proves nothing"]);

@@ -76,10 +76,11 @@ function tagged(results: Results, tag: string): ScenarioResult[] {
   return [...results.values()].filter((r) => r.tags.includes(tag));
 }
 
-// Red proof: every scenario tagged pbiTag is red, and every expected name ran. Other items' scenarios are ignored.
-// A scenario tagged @regression restates behaviour that already holds, such as "every existing test still
-// passes", so Red wants it green, not red. A new-behaviour scenario tagged @regression to get past Red is red at
-// Red, so it still fails. Green treats it like any other scenario.
+// Red proof: every scenario tagged pbiTag is red, except @regression ones, which are green, and every expected
+// name ran. Other items' scenarios are ignored. A @regression scenario restates behaviour that already holds,
+// such as "every existing test still passes". A new-behaviour scenario tagged @regression is red at Red, so it
+// still fails, as long as its Then asserts. One whose Then asserts nothing passes both gates, so self-review's
+// "every step asserts" check and the person signing off, who sees the tag, are what catch it.
 export const REGRESSION_TAG = "@regression";
 
 export function redGate(results: Results, pbiTag: string, expected: string[]): GateResult {
@@ -87,7 +88,7 @@ export function redGate(results: Results, pbiTag: string, expected: string[]): G
   const findings: string[] = [];
   for (const r of mine) {
     if (r.tags.includes(REGRESSION_TAG)) {
-      if (r.verdict !== "green") findings.push(`regression scenario doesn't pass before the build: ${r.name}: ${r.verdict}`);
+      if (r.verdict !== "green") findings.push(`regression scenario doesn't pass before the build: ${r.name}: ${r.verdict}${r.reason ? `: ${r.reason}` : ""}`);
       continue;
     }
     if (r.verdict === "green") findings.push(`scenario passes before any behaviour exists: ${r.name}`);
