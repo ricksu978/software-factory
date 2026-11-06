@@ -141,6 +141,20 @@ describe("githubRepoHost", () => {
     assert.deepEqual(await fake.openReviewComments("o/r", 3), [{ threadId: "t2", path: "a.ts", line: 4, author: "dev", body: "fix this" }]);
   });
 
+  test("replyToThread adds a reply to that one review thread", async () => {
+    const seen: any[] = [];
+    const { host } = stubGitHub({}, (q, v) => (seen.push({ q, v }), {}));
+    await host.replyToThread("o/r", "t2", "kept as is, because the name matches the spec");
+    assert.match(seen[0].q, /addPullRequestReviewThreadReply/);
+    assert.deepEqual(seen[0].v, { thread: "t2", body: "kept as is, because the name matches the spec" });
+  });
+
+  test("commentOnPr posts one comment on the PR's conversation", async () => {
+    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/issues/{issue_number}/comments": () => ({}) });
+    await host.commentOnPr("o/r", 3, "> Split run.ts\n\nSplit in a1b2c3d.");
+    assert.deepEqual(calls[0].params, { owner: "o", repo: "r", issue_number: 3, body: "> Split run.ts\n\nSplit in a1b2c3d." });
+  });
+
   test("fakeRepoHost adds the same standing summary, in submission order", async () => {
     const fake = fakeRepoHost();
     const { number } = await fake.openOrUpdatePr({ repo: "o/r", branch: "b", base: "main", title: "t", body: "" });

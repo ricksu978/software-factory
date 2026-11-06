@@ -1,0 +1,66 @@
+# The Phase 0 SOP (spec §6 "SOP", plan Task 14 Step 1). Model IDs live here and nowhere else.
+# Phase 0 records the budget but enforces only wall_clock, which counts time with a lease.
+sop: default
+version: 0.1.0
+budget:              # per PBI, across all stages
+  usd: 40
+  wall_clock: 8h     # runs only while the item holds a WIP slot
+models:
+  coding: claude-opus-5-5
+  triage: claude-haiku-5-5
+stages:
+  - id: understand
+    model: coding
+    prompt: sop/prompts/understand.md
+    retries: 0
+    on_fail: needs_input
+  - id: specify
+    model: coding
+    prompt: sop/prompts/specify.md
+    exit:
+      - every_criterion_has_scenario: true
+      - bdd: parse
+    retries: 1
+    on_fail: needs_input
+  - id: sign-off
+    approver: product_owner
+    lock: features/**/*.feature
+  - id: red
+    model: coding
+    prompt: sop/prompts/red.md
+    exit:
+      - bdd: fail_on_assertion
+      - matches_lock: features/**/*.feature
+    keep_output: true
+    retries: 2
+    on_fail: needs_input
+  - id: green
+    model: coding
+    prompt: sop/prompts/tdd.md
+    exit:
+      - bdd: pass
+      - cmd: test
+      - cmd: lint
+      - matches_lock: features/**/*.feature
+    retries: 3
+    timeout: 90m
+    on_fail: retry
+  - id: self-review
+    agent: factory-self-reviewer
+    model: coding
+    prompt: sop/prompts/self-review.md
+    loop_until: "APPROVED"
+    max_rebuttals: 2
+    max_rounds: 5
+    on_fail: needs_input
+  - id: open-pr
+    model: coding
+    prompt: sop/prompts/open-pr.md
+    on_fail: needs_input
+  - id: address
+    agent: factory-pr-addresser
+    model: coding
+    prompt: sop/prompts/address.md
+    retries: 2
+    on_fail: needs_input
+policy: .factory/
