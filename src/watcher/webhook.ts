@@ -83,8 +83,8 @@ const github = { actor: "system", actorId: "github" } as const;
  */
 async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void> {
   if (e.kind !== "pr_merged" && e.kind !== "pr_closed" && !(e.kind === "review" && e.state === "changes_requested")) return;
-  const row = (await pool.query<{ item_id: string; state: string; run_id: string; reviews_seen_at: Date | null }>(
-    `select i.id as item_id, i.state, r.id as run_id, r.reviews_seen_at from run r join item i on i.id = r.item_id join repo on repo.id = r.repo_id
+  const row = (await pool.query<{ item_id: string; state: string; run_id: string; reviews_seen_at: Date | null; trusted_bot: string | null }>(
+    `select i.id as item_id, i.state, r.id as run_id, r.reviews_seen_at, repo.trusted_bot from run r join item i on i.id = r.item_id join repo on repo.id = r.repo_id
      where r.ended_at is null and r.pr_number = $1 and lower(repo.url) = lower($2)`,
     [e.prNumber, `https://github.com/${e.repo}`],
   )).rows[0];
@@ -97,6 +97,8 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
         await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, e.mergeSha]);
       });
     } else if (e.kind === "pr_closed") {
+      // The factory's own close comes from moving the item already, so only someone else's withdraws it.
+      if (row.trusted_bot && e.by.toLowerCase() === row.trusted_bot.toLowerCase()) return;
       await withTx(pool, (c) => transitionItem(c, row.item_id, "withdrawn", github));
     } else {
       if (row.state !== "InReview") return;

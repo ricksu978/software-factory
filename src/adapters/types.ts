@@ -10,7 +10,7 @@ export type FactoryItem = {
 export type FactoryWebhookEvent =
   | { kind: "item_changed"; externalId: string }
   | { kind: "pr_merged"; prNumber: number; repo: string; mergeSha: string }
-  | { kind: "pr_closed"; prNumber: number; repo: string }
+  | { kind: "pr_closed"; prNumber: number; repo: string; by: string } // `by`: the login that closed it
   | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; repo: string; login: string; body: string; commentId: string }
   | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }

@@ -155,6 +155,9 @@ Then("Red for {string} passed while the scenarios of {string} were green", long,
     [ext(c, title)],
   );
   assert.equal(passed.rowCount, 1, "Red didn't pass");
+  // Red ran on the later item's branch, so the earlier item's feature file must be on that branch, not just in a report.
+  const file = `features/pbi-${ext(c, earlier)}.feature`;
+  assert.ok(c.f.hasFile(`refs/heads/factory/pbi-${ext(c, title)}-r1`, file), `${file} isn't on the branch "${title}" ran Red on`);
   const theirs = [...red].filter(([name]) => name.includes(`item ${ext(c, earlier)} `));
   const mine = [...red].filter(([name]) => name.includes(`item ${ext(c, title)} `));
   assert.ok(theirs.length > 0 && theirs.every(([, v]) => v === "green"), `"${earlier}" at Red: ${JSON.stringify(theirs)}`);
@@ -163,6 +166,8 @@ Then("Red for {string} passed while the scenarios of {string} were green", long,
 
 Then("every scenario of {string} still passes on main", long, async function (title: string) {
   const c = ctx(this);
+  const file = `features/pbi-${ext(c, title)}.feature`;
+  assert.ok(c.f.hasFile("refs/heads/main", file), `${file} isn't on main`);
   // The second item's last green run had main merged in, so it shows the earlier item's scenarios on main.
   const green = await c.f.report(c.current, "green");
   assert.ok(green, "no green report");

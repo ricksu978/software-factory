@@ -81,9 +81,9 @@ describe("parseGitHubWebhook", () => {
   test("issues, merged and closed PRs and completed check suites map to their events", () => {
     assert.deepEqual(parseGitHubWebhook(h("issues"), { action: "labeled", repository, issue: { number: 3 } }), { kind: "item_changed", externalId: "3" });
     assert.deepEqual(parseGitHubWebhook(h("pull_request"), { action: "closed", repository, pull_request: { number: 5, merged: true, merge_commit_sha: "m1" } }), { kind: "pr_merged", prNumber: 5, repo: "o/r", mergeSha: "m1" });
-    assert.deepEqual(parseGitHubWebhook(h("pull_request"), { action: "closed", repository, pull_request: { number: 5, merged: false } }), { kind: "pr_closed", prNumber: 5, repo: "o/r" });
-    // The factory's own App closing a PR it withdrew is no person's withdrawal.
-    assert.deepEqual(parseGitHubWebhook(h("pull_request"), { action: "closed", repository, sender: { login: "factory[bot]", type: "Bot" }, pull_request: { number: 5, merged: false } }), { kind: "ignored" });
+    assert.deepEqual(parseGitHubWebhook(h("pull_request"), { action: "closed", repository, sender: { login: "dev" }, pull_request: { number: 5, merged: false } }), { kind: "pr_closed", prNumber: 5, repo: "o/r", by: "dev" });
+    // A bot's close still maps, naming the bot, so the webhook can tell the factory's own App from any other.
+    assert.deepEqual(parseGitHubWebhook(h("pull_request"), { action: "closed", repository, sender: { login: "github-actions[bot]", type: "Bot" }, pull_request: { number: 5, merged: false } }), { kind: "pr_closed", prNumber: 5, repo: "o/r", by: "github-actions[bot]" });
     assert.deepEqual(parseGitHubWebhook(h("check_suite"), { action: "completed", repository, check_suite: { head_sha: "s1" } }), { kind: "checks_completed", sha: "s1", repo: "o/r" });
   });
 

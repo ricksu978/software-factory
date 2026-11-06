@@ -283,6 +283,15 @@ export async function startFactory(pool: pg.Pool) {
       await deliver({ kind: "pr_merged", prNumber: pr.number, repo: REPO, mergeSha: sha }, "pull_request");
       return sha;
     },
+    /** Whether `path` is in the origin at `ref`, such as `main` or a run's branch. */
+    hasFile(ref: string, path: string): boolean {
+      try {
+        git(origin, "cat-file", "-e", `${ref}:${path}`);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     async state(ext: string) {
       return (await pool.query<{ state: string }>("select state from item where id = $1", [await itemId(ext)])).rows[0]?.state;
     },

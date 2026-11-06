@@ -60,7 +60,9 @@ describe("walking skeleton", dbTest, () => {
     );
     assert.deepEqual(merged.rows.map((r) => r.external_id), [first, second]);
     for (const r of merged.rows) assert.ok(r.cost > 0, `item ${r.external_id} has no cost`);
-    // The second item's Red ran with the first item's scenarios already green on main.
+    // The second item's Red ran with the first item's scenarios already green on main, on a branch that holds them.
+    assert.ok(f!.hasFile("refs/heads/main", `features/pbi-${first}.feature`), "the first item's feature file isn't on main");
+    assert.ok(f!.hasFile(`refs/heads/factory/pbi-${second}-r1`, `features/pbi-${first}.feature`), "the second item's branch lacks the first item's feature file");
     const red = await f!.report(second, "red");
     assert.ok(red);
     for (const [name, verdict] of red) assert.equal(verdict, name.includes(`item ${first} `) ? "green" : "red", name);

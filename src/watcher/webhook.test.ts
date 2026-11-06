@@ -92,11 +92,11 @@ describe("handleWebhook", dbTest, () => {
   describe("PR events (plan Task 17)", () => {
     let n = 0;
     /** An InReview item whose open run holds PR 7 in o/r, with reviews counted from `seen`. */
-    async function inReview(seen: string | null) {
-      await db.pool.query(`insert into repo (host_adapter, url) values ('github', 'https://github.com/o/r') on conflict (url) do nothing`);
+    async function inReview(seen: string | null, itemState = "InReview") {
+      await db.pool.query(`insert into repo (host_adapter, url, trusted_bot) values ('github', 'https://github.com/o/r', 'factory[bot]') on conflict (url) do nothing`);
       await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', 'rev', 'Reviewer', 'owner') on conflict do nothing`);
       const source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:' || gen_random_uuid()) returning id")).rows[0].id;
-      const item = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, gen_random_uuid()::text, 't', 'InReview') returning id", [source])).rows[0].id;
+      const item = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, gen_random_uuid()::text, 't', $2) returning id", [source, itemState])).rows[0].id;
       // PR numbers are per repo, so each item gets its own.
       const pr = 100 + ++n;
       await db.pool.query("insert into run (item_id, repo_id, pr_number, reviews_seen_at) values ($1, (select id from repo where url = 'https://github.com/o/r'), $2, $3)", [item, pr, seen]);
@@ -115,8 +115,27 @@ describe("handleWebhook", dbTest, () => {
 
     test("a person closing the PR unmerged withdraws the item", async () => {
       const { item, pr } = await inReview(null);
-      await send({ kind: "pr_closed", prNumber: pr, repo: "o/r" });
+      await send({ kind: "pr_closed", prNumber: pr, repo: "o/r", by: "dev" });
       assert.equal(await state(item), "Abandoned");
+    });
+
+    test("the factory's own close leaves the item alone, and another App's close withdraws it", async () => {
+      const own = await inReview(null);
+      await send({ kind: "pr_closed", prNumber: own.pr, repo: "o/r", by: "Factory[bot]" });
+      assert.equal(await state(own.item), "InReview");
+      const other = await inReview(null);
+      await send({ kind: "pr_closed", prNumber: other.pr, repo: "o/r", by: "github-actions[bot]" });
+      assert.equal(await state(other.item), "Abandoned");
+    });
+
+    test("a merge during address moves InProgress to Accepted, and a late close the state can't take changes nothing", async () => {
+      const { item, pr } = await inReview(null, "InProgress");
+      await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc1234" });
+      assert.equal(await state(item), "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where item_id = $1", [item])).rows[0].merge_sha, "abc1234");
+      // Accepted has no withdrawn edge, so transitionItem throws IllegalTransition, which applyPrEvent swallows.
+      assert.deepEqual(await send({ kind: "pr_closed", prNumber: pr, repo: "o/r", by: "dev" }), { status: 204 });
+      assert.equal(await state(item), "Accepted");
     });
 
     test("only an allowlisted reviewer's review newer than reviews_seen_at sends the item to address", async () => {
