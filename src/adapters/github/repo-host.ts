@@ -45,14 +45,16 @@ function prMethods(client: () => Promise<GitHubClient>): Pick<RepoHost, "openOrU
       const r = split(repo);
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
       const rules = await codeowners(gh, r, pr.base.ref);
-      let wanted = fallback;
+      const author = String(pr.user?.login ?? "").toLowerCase();
+      const clean = (list: string[]) => list.map((o) => o.replace(/^@/, "")).filter((o) => !o.includes("@") && o.toLowerCase() !== author);
+      let names: string[] = [];
       if (rules) {
         // ponytail: one page of 100 files; a bigger PR asks owners of its first 100 files only.
         const files = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/files", { ...r, pull_number: prNumber, per_page: 100 })).data as { filename: string }[];
-        wanted = [...new Set(files.flatMap((f) => ownersOf(rules, f.filename)))];
+        names = clean([...new Set(files.flatMap((f) => ownersOf(rules, f.filename)))]);
       }
-      const author = String(pr.user?.login ?? "").toLowerCase();
-      const names = wanted.map((o) => o.replace(/^@/, "")).filter((o) => !o.includes("@") && o.toLowerCase() !== author);
+      // No CODEOWNERS, or it names nobody but the author for these files: the PR would otherwise get no reviewer.
+      if (!names.length) names = clean(fallback);
       const reviewers = names.filter((o) => !o.includes("/"));
       const teams = names.filter((o) => o.includes("/")).map((o) => o.split("/")[1]);
       if (reviewers.length || teams.length) {

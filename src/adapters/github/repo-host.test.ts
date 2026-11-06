@@ -56,6 +56,19 @@ describe("githubRepoHost", () => {
     assert.deepEqual([req.reviewers, req.team_reviewers], [["dev"], ["payments-team"]]);
   });
 
+  test("requestReviewers falls back when CODEOWNERS names nobody but the author for the changed files", async () => {
+    for (const codeowners of ["/docs/ @writer\n", "* @author\n"]) {
+      const { calls, host } = stubGitHub({
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,
+        "GET /repos/{owner}/{repo}/contents/{path}": (p) => (p.path === ".github/CODEOWNERS" ? { type: "file", content: b64(codeowners) } : undefined),
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/files": () => [{ filename: "src/a.ts" }],
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers": () => ({}),
+      });
+      assert.deepEqual(await host.requestReviewers("o/r", 3, ["dev"]), ["dev"]);
+      assert.deepEqual(calls.find((c) => c.route.endsWith("/requested_reviewers"))!.params.reviewers, ["dev"]);
+    }
+  });
+
   test("prState takes the newest changes-requested review from a trusted login and ignores a stranger's newer one", async () => {
     const reviews = [
       { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "Owner" } },
