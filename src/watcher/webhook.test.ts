@@ -46,14 +46,28 @@ describe("handleWebhook", dbTest, () => {
     const seen: string[] = [];
     const commentDeps = {
       pool: db.pool, secret,
-      parse: () => ({ kind: "comment" as const, externalId: "11", login: "octo", body: "/approve", commentId: "c42" }),
+      parse: () => ({ kind: "comment" as const, externalId: "11", repo: "o/r", login: "octo", body: "/approve", commentId: "c42" }),
       onComment: async (e: { commentId: string }) => {
         seen.push(`${e.commentId}:${(await count("d-comment")).events.length}`);
       },
     };
     assert.equal((await handleWebhook(commentDeps, { headers: headers("d-comment", sign("sha256", body)), rawBody: body })).status, 204);
     assert.equal((await handleWebhook(commentDeps, { headers: headers("d-comment", sign("sha256", body)), rawBody: body })).status, 200);
+    // onComment runs after the 204, so it can't hold up GitHub. Wait for it.
+    for (let i = 0; i < 50 && seen.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(seen, ["c42:1"]);
+  });
+
+  test("a failing onComment never turns the delivery into an error", async () => {
+    const failing = {
+      pool: db.pool, secret,
+      parse: () => ({ kind: "comment" as const, externalId: "11", repo: "o/r", login: "octo", body: "/approve", commentId: "c43" }),
+      onComment: async () => {
+        throw new Error("GitHub 502");
+      },
+    };
+    assert.equal((await handleWebhook(failing, { headers: headers("d-comment-2", sign("sha256", body)), rawBody: body })).status, 204);
+    assert.equal((await count("d-comment-2")).events.length, 1);
   });
 
   test("the same delivery id twice stores one row and one event, and the second call returns 200", async () => {

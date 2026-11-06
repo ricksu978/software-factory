@@ -66,7 +66,11 @@ ${list(f.notReady.map((n) => `<li>${link(n.id, n.title)}<ul>${n.failed.map((l) =
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${link(a.id, a.title)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td></tr>`).join("\n")}
-</tbody></table>` : `<p class="muted">No item is in flight.</p>`}`, banner);
+</tbody></table>` : `<p class="muted">No item is in flight.</p>`}
+<script>
+// Floor updates live from the event log: reload a second after the last event, so a burst reloads once.
+let reload; new EventSource("/events").onmessage = () => { clearTimeout(reload); reload = setTimeout(() => location.reload(), 1000); };
+</script>`, banner);
 }
 
 export type RunDetail = {
@@ -76,6 +80,8 @@ export type RunDetail = {
   stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: string[] }[] | null;
+  /** The signed-off feature files at the lock sha. */
+  features: { path: string; text: string }[];
 };
 
 export function runDetailPage(d: RunDetail, banner: string | null): string {
@@ -107,5 +113,9 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${form}${criteria}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}`, banner);
+${form}${criteria}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}${
+    d.features.length
+      ? `<h2>Signed-off scenarios</h2>${d.features.map((f) => `<h3>${escapeHtml(f.path)}</h3><pre>${escapeHtml(f.text)}</pre>`).join("")}`
+      : ""
+  }`, banner);
 }

@@ -24,7 +24,7 @@ type RoutesModule = {
 type DecisionsModule = {
   applyComment?: (
     deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string },
-    e: { externalId: string; login: string; body: string; commentId: string },
+    e: { externalId: string; repo: string; login: string; body: string; commentId: string },
   ) => Promise<string>;
 };
 type Fake = ReturnType<typeof fakeBacklog>;
@@ -91,7 +91,7 @@ async function item(c: Ctx, title: string, state: string, extra: { rank?: number
 /** An item in SignOff with an open sign-off question and a run whose scenarios were written at `sha`. */
 async function awaitingSignOff(c: Ctx, sha: string): Promise<void> {
   if (!(await dashboard(c))) return;
-  c.extId = await c.fake!.seed({ title: "the item", labels: ["factory"] });
+  c.extId = await c.fake!.seed({ title: "the item", labels: ["factory"], repo: "octo/repo" });
   const pool = need().pool;
   c.itemId = (await pool.query<{ id: string }>(
     "insert into item (source_id, external_id, title, state, lease_generation) values ($1, $2, 'the item', 'SignOff', 2) returning id",
@@ -117,7 +117,7 @@ async function approveFromDashboard(c: Ctx, login: string, origin: string | null
 async function comment(c: Ctx, login: string, body: string): Promise<void> {
   const mod = await load<DecisionsModule>("src/control/decisions.ts");
   if (!mod?.applyComment || !c.fake || !c.extId || !c.sourceId) return;
-  await mod.applyComment({ pool: need().pool, adapter: c.fake.adapter, sourceId: c.sourceId }, { externalId: c.extId, login, body, commentId: "c1" });
+  await mod.applyComment({ pool: need().pool, adapter: c.fake.adapter, sourceId: c.sourceId }, { externalId: c.extId, repo: "octo/repo", login, body, commentId: "c1" });
   c.applied = true;
 }
 

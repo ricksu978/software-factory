@@ -78,9 +78,9 @@ export function parseGitHubWebhook(headers: Record<string, string>, body: unknow
     const repo = str(b.repository?.full_name);
     const bot = (u: any) => u?.type === "Bot" || str(u?.login).endsWith("[bot]");
     if (event === "issues" && b.issue?.number) return { kind: "item_changed", externalId: str(b.issue.number) };
-    if (event === "issue_comment" && b.action === "created" && b.issue?.number && b.comment) {
+    if (event === "issue_comment" && b.action === "created" && b.issue?.number && b.comment && repo) {
       if (bot(b.comment.user)) return { kind: "ignored" };
-      return { kind: "comment", externalId: str(b.issue.number), login: str(b.comment.user?.login), body: str(b.comment.body), commentId: str(b.comment.id) };
+      return { kind: "comment", externalId: str(b.issue.number), repo, login: str(b.comment.user?.login), body: str(b.comment.body), commentId: str(b.comment.id) };
     }
     if (event === "pull_request" && b.action === "closed" && b.pull_request?.number && repo) {
       return b.pull_request.merged

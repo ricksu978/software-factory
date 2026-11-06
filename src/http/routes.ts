@@ -3,10 +3,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
-import { decideAndAnnounce, type DecisionKind } from "../control/decisions.ts";
+import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { nextUp } from "../store/items.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
-import type { Handler } from "./server.ts";
+import { BadRequest, readJson, type Handler } from "./server.ts";
 import { floorPage, noAccessPage, runDetailPage, signInPage, type RunDetail } from "./views.ts";
 
 export type DashboardDeps = {
@@ -28,15 +28,21 @@ function send(res: ServerResponse, status: number, html: string, headers: Record
   res.end(html);
 }
 
+const MAX_FORM = 1024 * 1024;
+
+/** A form post or a JSON body, capped at 1 MiB like readJson, so an oversized or broken body is a 4xx. */
 async function form(req: IncomingMessage): Promise<Record<string, string>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString("utf8");
   if ((req.headers["content-type"] ?? "").includes("application/json")) {
-    const parsed: unknown = raw ? JSON.parse(raw) : {};
-    return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]));
+    return Object.fromEntries(Object.entries(await readJson(req)).map(([k, v]) => [k, String(v ?? "")]));
   }
-  return Object.fromEntries(new URLSearchParams(raw));
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size <= MAX_FORM) chunks.push(chunk as Buffer);
+  }
+  if (size > MAX_FORM) throw new BadRequest("the body is over 1 MiB", 413);
+  return Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString("utf8")));
 }
 
 /** A banner once the Claude token is within 30 days of its 365-day life, counted from CLAUDE_TOKEN_CREATED_AT. */
@@ -97,6 +103,15 @@ async function criteriaView(deps: DashboardDeps, externalId: string, sha: string
   return fi.acceptanceCriteria.map((criterion, i) => ({ criterion, scenarios: byAc.get(i + 1) ?? [] }));
 }
 
+/** The signed-off feature files, read at the lock sha. */
+async function lockedFeatures(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["features"]> {
+  const fi = await deps.adapter.getItem(externalId);
+  if (!fi?.repo || !deps.repoHost) return [];
+  const out: RunDetail["features"] = [];
+  for (const path of files) out.push({ path, text: (await deps.repoHost.readFile(fi.repo, sha, path)) ?? "(missing at this commit)" });
+  return out;
+}
+
 async function runDetail(deps: DashboardDeps, id: string): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
@@ -110,33 +125,74 @@ async function runDetail(deps: DashboardDeps, id: string): Promise<RunDetail | n
      where item_id = $1 order by file, criterion_index, at desc`, [id],
   )).rows;
   const stages = run ? (await pool.query("select * from stage_run where run_id = $1 order by started_at", [run.id])).rows : [];
-  const question = (await pool.query("select kind, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [id])).rows[0] ?? null;
+  // A form shows only where a decision can still apply: an item still waiting, or one that timed out waiting.
+  const open = (await pool.query("select kind, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [id])).rows[0] ?? null;
+  const waiting = item.state === "SignOff" || item.state === "NeedsInput" || (item.state === "Abandoned" && (await revivable(pool, id)));
+  const question = waiting ? open : null;
   const criteria = item.state === "SignOff" && run?.scenarios_sha ? await criteriaView(deps, item.external_id, run.scenarios_sha, run.locked_files ?? []) : null;
-  return { item, run, policies, stages, question, criteria };
+  const features = run?.features_lock_sha ? await lockedFeatures(deps, item.external_id, run.features_lock_sha, run.locked_files ?? []) : [];
+  return { item, run, policies, stages, question, criteria, features };
 }
 
-/** Streams every factory event as server-sent events, fed by LISTEN factory_events. */
-async function events(pool: pg.Pool, req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const c = await pool.connect();
-  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-  const forward = (m: { channel: string; payload?: string }) => {
-    if (m.channel === "factory_events") res.write(`data: ${m.payload ?? "{}"}\n\n`);
+/**
+ * Server-sent events for every open dashboard, fed by one LISTEN factory_events client the streams share, so open
+ * tabs never hold more than one pool connection. `close` releases it.
+ */
+function eventStreams(pool: pg.Pool) {
+  const streams = new Set<ServerResponse>();
+  let listener: Promise<pg.PoolClient> | null = null;
+  const listen = () =>
+    (listener ??= (async () => {
+      const c = await pool.connect();
+      c.on("notification", (m) => {
+        if (m.channel === "factory_events") for (const s of streams) s.write(`data: ${m.payload ?? "{}"}\n\n`);
+      });
+      try {
+        await c.query("listen factory_events");
+      } catch (e) {
+        c.release(true);
+        listener = null;
+        throw e;
+      }
+      return c;
+    })());
+  return {
+    async open(req: IncomingMessage, res: ServerResponse): Promise<void> {
+      // Listen first, so no event is missed between the stream opening and the LISTEN taking effect.
+      await listen();
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      // Node holds headers until the first write, so a comment line opens the stream at once.
+      res.write(": open\n\n");
+      streams.add(res);
+      req.on("close", () => streams.delete(res));
+    },
+    async close(): Promise<void> {
+      for (const s of streams) s.end();
+      streams.clear();
+      const c = await listener;
+      listener = null;
+      c?.release(true);
+    },
   };
-  c.on("notification", forward);
-  await c.query("listen factory_events");
-  req.on("close", () => {
-    c.off("notification", forward);
-    c.query("unlisten factory_events").finally(() => c.release());
-  });
 }
 
-/** The dashboard as one handler. Anything under /webhooks or /internal belongs to other handlers. */
-export function dashboardRoutes(deps: DashboardDeps): Handler {
+/**
+ * The dashboard as one handler. Anything under /webhooks, /internal or /probe belongs to other handlers. Those
+ * checks, and sign-in, use the raw path: a path whose dot segments or encoding normalise to something else is
+ * refused, so no request can pass as a webhook to a proxy and land on a dashboard route here (Review Focus 4).
+ */
+export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promise<void> } {
   const env = deps.env ?? process.env;
-  return async (req, res) => {
+  const streams = eventStreams(deps.pool);
+  const handler: Handler = async (req, res) => {
+    const raw = (req.url ?? "/").split("?")[0];
     const url = new URL(req.url ?? "/", deps.origin);
     const path = url.pathname;
-    if (path.startsWith("/webhooks") || path.startsWith("/internal") || path.startsWith("/probe")) return false;
+    if (raw.startsWith("/webhooks") || raw.startsWith("/internal") || raw.startsWith("/probe")) return false;
+    if (raw !== path || /%2e|%2f|%5c/i.test(raw)) {
+      send(res, 400, "Bad path.");
+      return true;
+    }
 
     if (req.method === "GET" && path === "/dev-login") {
       const cookie = deps.auth.devLoginCookie(url.searchParams.get("token") ?? "");
@@ -167,7 +223,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler {
       return true;
     }
     if (req.method === "GET" && path === "/events") {
-      await events(deps.pool, req, res);
+      await streams.open(req, res);
       return true;
     }
     const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer))?$/.exec(path);
@@ -206,15 +262,23 @@ export function dashboardRoutes(deps: DashboardDeps): Handler {
         send(res, 400, "A user needs a provider, a subject and a role.");
         return true;
       }
-      await deps.pool.query(
-        `insert into "user" (provider, subject, email, role, product_owner, github_login, added_by) values ($1, $2, $3, $4, $5, $6, $7)
-         on conflict (provider, subject) do update set role = excluded.role, product_owner = excluded.product_owner, github_login = excluded.github_login`,
-        [b.provider, b.subject, b.email || null, b.role, b.product_owner === "on" || b.product_owner === "true", b.github_login || null, user.id],
-      );
+      try {
+        await deps.pool.query(
+          `insert into "user" (provider, subject, email, role, product_owner, github_login, added_by) values ($1, $2, $3, $4, $5, $6, $7)
+           on conflict (provider, subject) do update set role = excluded.role, product_owner = excluded.product_owner, github_login = excluded.github_login`,
+          [b.provider, b.subject, b.email || null, b.role, b.product_owner === "on" || b.product_owner === "true", b.github_login || null, user.id],
+        );
+      } catch (e) {
+        // GitHub logins are case-insensitive and belong to one user (migration 004).
+        if ((e as { code?: string }).code !== "23505") throw e;
+        send(res, 400, "Another user already has that GitHub login.");
+        return true;
+      }
       send(res, 303, "", { location: "/" });
       return true;
     }
     send(res, 404, "Not found.");
     return true;
   };
+  return Object.assign(handler, { close: streams.close });
 }

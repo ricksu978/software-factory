@@ -17,6 +17,18 @@ export function parseCommand(body: string): { kind: DecisionKind; text: string }
   return m ? { kind: m[1] as DecisionKind, text: m[2].trim() } : null;
 }
 
+/**
+ * True when an Abandoned item may come back through a late decision: only one that timed out waiting for it. An
+ * item withdrawn from the backlog stays gone, even with its question still open.
+ */
+export async function revivable(c: pg.Pool | pg.PoolClient, itemId: string): Promise<boolean> {
+  const last = (await c.query<{ event: string }>(
+    "select payload->>'event' as event from event where item_id = $1 and kind = 'transition' and payload->>'to' = 'Abandoned' order by at desc limit 1",
+    [itemId],
+  )).rows[0];
+  return last?.event === "timed_out";
+}
+
 /** Who may make a decision of `kind`: a product owner signs off, and an operator or product owner answers. */
 function allowed(kind: DecisionKind, u: { role: string; product_owner: boolean }): boolean {
   return kind === "answer" ? u.product_owner || u.role === "operator" || u.role === "owner" : u.product_owner;
@@ -38,7 +50,8 @@ export async function decide(c: pg.PoolClient, d: Decision): Promise<Outcome> {
     [d.itemId, kind],
   )).rows[0];
   const waiting = d.kind === "answer" ? "NeedsInput" : "SignOff";
-  if (!item || !question || (item.state !== waiting && item.state !== "Abandoned")) return "ignored";
+  if (!item || !question) return "ignored";
+  if (item.state !== waiting && !(item.state === "Abandoned" && (await revivable(c, d.itemId)))) return "ignored";
 
   await c.query("update question set answer = $2, decision = $3, answered_by = $4, answered_at = now() where id = $1", [question.id, d.text, d.kind, d.userId]);
   const run = "(select id from run where item_id = $1 and ended_at is null order by started_at desc limit 1)";
@@ -75,17 +88,20 @@ const refusal: Record<DecisionKind, string> = {
 };
 
 /**
- * Applies an item comment that starts with /approve, /changes or /answer. The author's GitHub login must map to an
- * allowlisted user with the right role. A refused command gets one reply naming who may decide, and changes nothing.
+ * Applies an item comment that starts with /approve, /changes or /answer. It must be on the item's own repo, since
+ * the same issue number exists in every repo. The author's GitHub login must map to an allowlisted user with the
+ * right role. A refused command gets one reply naming who may decide, and changes nothing.
  */
 export async function applyComment(
   deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string },
-  e: { externalId: string; login: string; body: string; commentId: string },
+  e: { externalId: string; repo: string; login: string; body: string; commentId: string },
 ): Promise<Outcome> {
   const command = parseCommand(e.body);
   if (!command) return "ignored";
   const item = (await deps.pool.query<{ id: string }>("select id from item where source_id = $1 and external_id = $2", [deps.sourceId, e.externalId])).rows[0];
   if (!item) return "ignored";
+  const fi = await deps.adapter.getItem(e.externalId);
+  if (!fi?.repo || fi.repo.toLowerCase() !== e.repo.toLowerCase()) return "ignored";
   const user = (await deps.pool.query<{ id: string }>(`select id from "user" where lower(github_login) = lower($1)`, [e.login])).rows[0];
   const outcome = user
     ? await decideAndAnnounce(deps, { itemId: item.id, userId: user.id, kind: command.kind, text: command.text, via: "comment" }, e.externalId)

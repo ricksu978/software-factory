@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
+import { request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
@@ -25,23 +25,27 @@ describe("dashboard routes", dbTest, () => {
   let fake: ReturnType<typeof fakeBacklog>;
   let host: ReturnType<typeof fakeRepoHost>;
   let sourceId: string;
-  let handler: Handler = async () => false;
+  let routes: ReturnType<typeof dashboardRoutes> | null = null;
+  const handler: Handler = (req, res) => (routes ? routes(req, res) : Promise.resolve(false));
 
   before(async () => {
     db = await startTestDb();
-    server = await startServer([(req, res) => handler(req, res)], { port: 0 });
+    server = await startServer([handler], { port: 0 });
     origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(async () => {
+    await routes?.close();
+    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await db?.stop();
   });
   beforeEach(async () => {
+    await routes?.close();
     await db.pool.query('truncate item, backlog_source, "user", override cascade');
     fake = fakeBacklog();
     host = fakeRepoHost();
     sourceId = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
-    handler = dashboardRoutes({ pool: db.pool, auth: createAuth({ mode: "azure" }), origin, adapter: fake.adapter, sourceId, repoHost: host, env: {} });
+    routes = dashboardRoutes({ pool: db.pool, auth: createAuth({ mode: "azure" }), origin, adapter: fake.adapter, sourceId, repoHost: host, env: {} });
   });
 
   const as = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
@@ -137,6 +141,80 @@ describe("dashboard routes", dbTest, () => {
     assert.match((await fake.comments(ext))[0], /signed off[\s\S]*Looks right/);
     const ev = (await db.pool.query("select actor, actor_id from event where item_id = $1 and kind = 'decision'", [id])).rows[0];
     assert.deepEqual(ev, { actor: "human", actor_id: userId });
+  });
+
+  test("a path with dot segments never signs in or reaches a dashboard route", async () => {
+    await person("po", "owner", true);
+    const { id } = await item("SignOff");
+    await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha) values ($1, 1, 'sign-off', 'abc')", [id]);
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    // fetch normalises dot segments before sending, so this goes through node:http with the raw path.
+    const port = (server.address() as AddressInfo).port;
+    const raw = (path: string) =>
+      new Promise<number>((resolve, reject) => {
+        const r = request({ host: "127.0.0.1", port, path, method: "POST", headers: { ...as("po"), origin, "content-type": "application/x-www-form-urlencoded" } }, (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        r.on("error", reject);
+        r.end("decision=approve");
+      });
+    for (const path of [`/webhooks/github/%2e%2e/%2e%2e/items/${id}/signoff`, `/items/%2e/${id}/signoff`, `/x/../items/${id}/signoff`]) {
+      const status = await raw(path);
+      assert.ok(status === 400 || status === 404, `${path} got ${status}`);
+    }
+    assert.equal((await db.pool.query("select decision from question where item_id = $1", [id])).rows[0].decision, null);
+  });
+
+  test("open event streams share one connection, so the rest of the dashboard keeps working, and events reach them", async () => {
+    await person("octo", "viewer");
+    const aborts = Array.from({ length: 12 }, () => new AbortController());
+    const streams = await Promise.all(aborts.map((a) => fetch(`${origin}/events`, { headers: as("octo"), signal: a.signal })));
+    try {
+      assert.ok(streams.every((s) => s.status === 200));
+      assert.equal((await get("/", "octo")).status, 200);
+      const reader = streams[0].body!.getReader();
+      await db.pool.query("select pg_notify('factory_events', '{\"id\":\"e1\"}')");
+      let text = "";
+      while (!text.includes("data:")) text += new TextDecoder().decode((await reader.read()).value);
+      assert.match(text, /data: \{"id":"e1"\}/);
+    } finally {
+      for (const a of aborts) a.abort();
+    }
+  });
+
+  test("Floor reloads itself from the event stream", async () => {
+    await person("octo", "viewer");
+    assert.match((await get("/", "octo")).html, /new EventSource\("\/events"\)/);
+  });
+
+  test("Run detail shows the signed-off feature files at the lock sha", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("InProgress", "locked", { repo: "octo/repo" });
+    await db.pool.query("insert into run (item_id, run_number, next_stage, features_lock_sha, locked_files) values ($1, 1, 'green', 'lock1', '{features/a.feature}')", [id]);
+    host.files.set("octo/repo@lock1:features/a.feature", "Feature: Export <invoices>\n  Scenario: one month\n");
+    const { html } = await get(`/items/${id}`, "octo");
+    assert.match(html, /Signed-off scenarios/);
+    assert.match(html, /<h3>features\/a\.feature<\/h3><pre>Feature: Export &lt;invoices&gt;/);
+  });
+
+  test("an item withdrawn while waiting for sign-off shows no sign-off form", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("Abandoned");
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    await db.pool.query(`insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'poller', $1, 'transition', '{"from":"SignOff","to":"Abandoned","event":"withdrawn"}')`, [id]);
+    assert.doesNotMatch((await get(`/items/${id}`, "octo")).html, /\/signoff/);
+  });
+
+  test("a GitHub login another user holds in any case is refused with 400", async () => {
+    await person("boss", "owner");
+    await person("Octo", "viewer");
+    assert.equal((await post("/users", "boss", "provider=google&subject=g1&role=viewer&github_login=octo")).status, 400);
+  });
+
+  test("a form body over 1 MiB gets 413", async () => {
+    await person("boss", "owner");
+    assert.equal((await post("/users", "boss", `provider=google&subject=${"x".repeat(1024 * 1024 + 1)}&role=viewer`)).status, 413);
   });
 
   test("only an owner can add people", async () => {
