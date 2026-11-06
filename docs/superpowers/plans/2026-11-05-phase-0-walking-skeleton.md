@@ -623,30 +623,36 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
+export function agentOptions(a: /* runAgent's argument */): Options; // the SDK options for a's mode
 export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promise<string>; // raw reply; gate() parses it
 ```
 
-  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `mode: "judge"`. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt puts the repo's `dor.md` in the instructions and the item text, with its readiness fields, in a fenced data block that it treats as requirements to weigh, never as commands. It asks for one JSON line per `dor.md` criterion, per Run contract 11, then a last line `{"flags":[]}`. `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires. That check is the engine's, and no `dor.md` can remove it.
+  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1`, `mode: "judge"` and a 2-minute timeout. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt puts the repo's `dor.md` in the instructions, lists each criterion as a JSON line with its index, and puts the item text, with its readiness fields, as JSON in a fenced data block that it treats as requirements to weigh, never as commands. The fence is one backtick longer than the longest backtick run in the data, so item text can't close it. It asks for one JSON line per `dor.md` criterion, per Run contract 11, then a last line `{"flags":[]}`. `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires. That check is the engine's, and no `dor.md` can remove it. A run that isn't `ok` makes `haikuJudge` throw instead of returning its text, so a usage limit never reads as the item failing readiness, and the poller tries again on its next poll.
+
+  `haikuJudge` types its inputs by the fields it reads, `sop.models.triage` and the `dor` policy's `text` and `criteria`, so Task 9's `Sop` and `Policy` fit without this module importing them.
 
 - [ ] **Step 1: Write failing `foldMessages` tests** against arrays of SDK-shaped messages:
   - A `result` with `subtype: "success"` gives `ok: true`, the result text, and `costUsd` as the sum of `modelUsage[*].costUSD`. `tokensIn` sums `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`, and `tokensOut` sums `outputTokens`.
-  - A `rate_limit_event` with `rate_limit_info.status: "rejected"` and `resetsAt: 1762400000` gives `limit.resetsAt = 1762400000` and `ok: false`.
-  - A `rate_limit_event` with `status: "allowed_warning"`, `utilization: 0.74` and a `resetsAt` gives `usage: { utilization: 0.74, resetsAt }`, leaves `limit` null and doesn't change `ok`. The last such event in the stream wins.
+  - A `rate_limit_event` with `rate_limit_info.status: "rejected"` and `resetsAt: 1762400000` gives `limit.resetsAt = 1762400000` and `ok: false`, even when the run's `result` says success. A rejection with no `resetsAt` waits 5 hours from now, as Task 12 does for usage.
+  - A `rate_limit_event` with `status: "allowed_warning"`, `utilization: 0.74` and a `resetsAt` gives `usage: { utilization: 0.74, resetsAt }`, leaves `limit` null and doesn't change `ok`. Any event that carries `utilization` sets `usage`, and the last one in the stream wins.
   - A `result` with `subtype: "error_max_turns"` gives `ok: false` and keeps the cost.
+  - A `result` with `subtype: "success"` and `is_error: true` gives `ok: false`. The SDK sends that shape when a turn ends on an API error (`sdk.d.ts`, `SDKResultMessage`), and PBI 11's usage-limit scenario expects it after a rejection. A stream with no `result` gives `ok: false`.
   - `transcript` is the JSONL of every message, for Blob upload.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `runAgent`.** Call `query({ prompt, options })` with `model`, `cwd`, `maxTurns` and the `AbortController` behind `signal`, plus the options for its mode.
 
   In `cell` mode:
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
-  - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
+  - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token. The SDK also requires `allowDangerouslySkipPermissions: true` for that mode.
   - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted. Locally it's omitted, because bubblewrap can't start under Docker Desktop, and Task 13's egress proxy enforces the allowlist instead. In Azure, Task 19 Step 9 decides.
   - `disallowedTools` holds each of `WebSearch` and `WebFetch` that `webTools` leaves out, so with the default `[]` both are denied. This only stops the model being offered a tool. The fence is Task 12's gateway, which refuses the same tools in any request body, since an agent with a shell can call the gateway directly (spec §6 "Web tools").
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
   - no `permissionMode`, so the default applies;
-  - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)).
+  - `tools: []`, which the pinned SDK's types document as the way to disable every built-in tool;
+  - `strictMcpConfig: true` with no `mcpServers`, so no MCP server from a project, user or plugin config starts;
+  - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)). The pinned 0.3.318 types don't mention `"*"`, so judge mode sets all three. A live judge-mode run on Haiku succeeded, and its `init` message listed no tools and no MCP servers.
 
   Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings. Add another asserting that cell mode with no `webTools` denies both `WebSearch` and `WebFetch`, and with `webTools: ["WebSearch"]` denies only `WebFetch`.
 
