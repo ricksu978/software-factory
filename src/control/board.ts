@@ -36,21 +36,33 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
   if (!row) return;
   const board = deps.backlogFor(row.source_id);
   const id = row.external_id;
+  // Each effect runs on its own, so one failed call can't skip the rest. Nothing retries a hook, so a skipped
+  // closePr would leave a withdrawn item's PR open for someone to merge.
+  const attempt = async (what: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (e) {
+      console.error(`board mirroring: ${what} failed for item ${itemId}:`, e);
+    }
+  };
   const status = row.field_map?.statusFor?.[to];
-  if (status) await board.setStatus(id, status);
-  if (to === "InProgress") await board.claim(id);
-  if (event === "pr_opened" && row.pr_url) await board.linkPr(id, row.pr_url);
-  if (to === "Done" || to === "Failed" || to === "Abandoned") await board.release(id);
-  if (to === "Done") await board.close(id);
+  if (status) await attempt("setStatus", () => board.setStatus(id, status));
+  if (to === "InProgress") await attempt("claim", () => board.claim(id));
+  if (event === "pr_opened" && row.pr_url) await attempt("linkPr", () => board.linkPr(id, row.pr_url!));
+  if (to === "Done" || to === "Failed" || to === "Abandoned") await attempt("release", () => board.release(id));
+  if (to === "Done") await attempt("close", () => board.close(id));
   const note = waitingFor[to];
   // Each exit from InProgress has its own generation, so one key per exit posts each wait once.
-  if (note) await board.comment(id, row.question ? `${note}\n\n${row.question}` : note, `waiting:${to}:${row.lease_generation}`);
+  if (note) await attempt("comment", () => board.comment(id, row.question ? `${note}\n\n${row.question}` : note, `waiting:${to}:${row.lease_generation}`));
   if (to === "Abandoned" && event === "withdrawn" && row.pr_number !== null && row.repo_url && row.run_number !== null) {
     const repo = repoName(row.repo_url);
-    if ((await deps.repoHost.prState(repo, row.pr_number, [])).open) {
-      const branch = runBranch({ branch: row.branch, externalId: id, runNumber: row.run_number });
-      await deps.repoHost.closePr(repo, row.pr_number, `The item was withdrawn, so the factory closed this PR. The branch \`${branch}\` is kept.`);
-    }
+    const pr = row.pr_number;
+    const branch = runBranch({ branch: row.branch, externalId: id, runNumber: row.run_number });
+    await attempt("closePr", async () => {
+      if ((await deps.repoHost.prState(repo, pr, [])).open) {
+        await deps.repoHost.closePr(repo, pr, `The item was withdrawn, so the factory closed this PR. The branch \`${branch}\` is kept.`);
+      }
+    });
   }
 }
 

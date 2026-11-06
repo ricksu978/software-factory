@@ -318,6 +318,17 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "../x", attempt: 1 })).status, 400);
   });
 
+  test("a failed board call skips none of the other effects, so withdrawal still closes the open PR", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
+    await host.openOrUpdatePr({ repo, branch: "factory/pbi-7-r1", base: "main", title: "t", body: "b" });
+    board.adapter.release = async () => {
+      throw new Error("502 from GitHub");
+    };
+    await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    assert.equal(host.prs[0].open, false);
+  });
+
   test("Done releases and closes the board item, and withdrawal closes the open PR naming the kept branch", async () => {
     const cell = await claimed();
     await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
