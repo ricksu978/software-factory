@@ -116,7 +116,7 @@ describe("leases", dbTest, () => {
   });
 
   test("releaseLease clears the lease for the current generation only, and keeps the generation", async () => {
-    const id = await item("InProgress", "lease_generation = 5, lease_owner = 'cell-a', lease_expires = now()");
+    const id = await item("SignOff", "lease_generation = 5, lease_owner = 'cell-a', lease_expires = now()");
     await withTx(db.pool, (c) => releaseLease(c, id, 4));
     assert.equal((await row(id)).lease_owner, "cell-a");
     await withTx(db.pool, (c) => releaseLease(c, id, 5));
@@ -124,5 +124,12 @@ describe("leases", dbTest, () => {
     assert.equal(r.lease_owner, null);
     assert.equal(r.lease_expires, null);
     assert.equal(r.lease_generation, 5);
+  });
+
+  test("releaseLease leaves an InProgress item's lease, so expireLeases can still take it back", async () => {
+    const id = await item("InProgress", `lease_generation = 5, lease_owner = 'cell-a', lease_expires = '2026-11-06T09:00:00Z'`);
+    await withTx(db.pool, (c) => releaseLease(c, id, 5));
+    assert.equal((await row(id)).lease_owner, "cell-a");
+    assert.deepEqual(await withTx(db.pool, (c) => expireLeases(c, t0)), [id]);
   });
 });

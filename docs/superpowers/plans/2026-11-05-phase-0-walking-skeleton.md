@@ -359,7 +359,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - **Expiry.** `expireLeases(now + 301s)` returns the item, moves it to Queued through `lease_expired`, and leaves `run.next_stage` unchanged, so a new cell resumes there. An expired `lease_expires` on an item that isn't InProgress is ignored.
   - **Concurrency.** Two concurrent `claimNext` calls with one Queued item return one claim and one null. Use `SELECT ... FOR UPDATE SKIP LOCKED`.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement** the four functions. A claim of an item with no open run creates a `run` row at `understand`, numbered one above the item's last run. A claim of an item with an open run reuses it, and when that run's `next_stage` is `address`, it sets `run.reviews_seen_at` to the claim's time (Run contract 10). `renewLease` also needs the item to be InProgress. `releaseLease` clears `lease_owner` and `lease_expires` for the current generation and leaves the generation alone. The scheduler fills `sop_version`, `config_sha` and `repo_id` right after the claim, in Task 13.
+- [ ] **Step 3: Implement** the four functions. A claim of an item with no open run creates a `run` row at `understand`, numbered one above the item's last run. A claim of an item with an open run reuses it, and when that run's `next_stage` is `address`, it sets `run.reviews_seen_at` to the claim's time (Run contract 10). `renewLease` also needs the item to be InProgress. `releaseLease` clears `lease_owner` and `lease_expires` for the current generation and leaves the generation alone. It skips an InProgress item, because one with no `lease_expires` would never expire and never be claimed again. Every exit from InProgress already clears the lease through `transitionItem` (Run contract 2), so no row the factory writes needs `releaseLease`, and Task 12 doesn't call it. The scheduler fills `sop_version`, `config_sha` and `repo_id` right after the claim, in Task 13.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(store): leases with generation fencing`.
 
@@ -657,7 +657,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 - Modify: `src/store/runs.ts`
 
 **Interfaces:**
-- Consumes: `renewLease`, `releaseLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken` and `RepoHost.openReviewComments`.
+- Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken` and `RepoHost.openReviewComments`.
 - Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
   - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
   - `POST /github-token` returns `{ token, expiresAt }`.
