@@ -73,13 +73,16 @@ let reload; new EventSource("/events").onmessage = () => { clearTimeout(reload);
 </script>`, banner);
 }
 
+/** A @regression scenario is exempt from failing at Red, so the sign-off view says so. */
+export type Scenario = { name: string; regression: boolean };
+
 export type RunDetail = {
   item: { id: string; title: string; state: string };
   run: { sop_version: string | null; config_sha: string | null; scenarios_sha: string | null; features_lock_sha: string | null; risk_tier: string | null; tier_reasons: string[] | null; next_stage: string | null } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
   stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
   question: { kind: string; body: string } | null;
-  criteria: { criterion: string; scenarios: string[] }[] | null;
+  criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The signed-off feature files at the lock sha. */
   features: { path: string; text: string }[];
 };
@@ -98,7 +101,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No stage has run yet.</p>`;
   const criteria = d.criteria
     ? `<h2>Criteria and their scenarios</h2><ol>${d.criteria
-        .map((c) => `<li>${escapeHtml(c.criterion)}${c.scenarios.length ? `<ul>${c.scenarios.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>` : ` <strong>no scenario</strong>`}</li>`)
+        .map((c) => `<li>${escapeHtml(c.criterion)}${c.scenarios.length ? `<ul>${c.scenarios.map((s) => `<li>${escapeHtml(s.name)}${s.regression ? ` <strong>expected to pass at Red</strong>` : ""}</li>`).join("")}</ul>` : ` <strong>no scenario</strong>`}</li>`)
         .join("")}</ol>`
     : "";
   const id = escapeHtml(d.item.id);

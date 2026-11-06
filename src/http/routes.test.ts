@@ -152,13 +152,23 @@ describe("dashboard routes", dbTest, () => {
     const { id } = await item("SignOff", "to sign", { repo: "octo/repo", criteria: ["Exports one month", "Keeps the currency"] });
     await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha, locked_files) values ($1, 1, 'sign-off', 'sc1', '{features/x.feature}')", [id]);
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
-    host.files.set("octo/repo@sc1:features/x.feature", "@pbi-1\nFeature: x\n\n  @ac-1\n  Scenario: Other months are left out\n    Given a\n\n  @ac-1 @db\n  Scenario Outline: A month with no invoices\n    Given b\n");
+    host.files.set("octo/repo@sc1:features/x.feature", "@pbi-1\nFeature: x\n\n  @ac-1\n  Scenario: Other months are left out\n    Given a\n\n  @ac-1 @db @regression\n  Scenario Outline: A month with no invoices\n    Given b\n");
     const { html } = await get(`/items/${id}`, "octo");
     const view = html.slice(html.indexOf("Criteria and their scenarios"));
     assert.ok(view.indexOf("Other months are left out") < view.indexOf("Keeps the currency"));
-    assert.ok(view.includes("A month with no invoices"));
+    assert.match(view, /A month with no invoices <strong>expected to pass at Red<\/strong>/);
+    assert.match(view, /Other months are left out<\/li>/);
     assert.match(view, /Keeps the currency <strong>no scenario<\/strong>/);
     assert.match(html, /<label for="note">/);
+  });
+
+  test("the sign-off view marks every scenario of a feature tagged @regression", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("SignOff", "to sign", { repo: "octo/repo", criteria: ["Exports one month"] });
+    await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha, locked_files) values ($1, 1, 'sign-off', 'sc1', '{features/x.feature}')", [id]);
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    host.files.set("octo/repo@sc1:features/x.feature", "@pbi-1 @regression\nFeature: x\n\n  @ac-1\n  Scenario: Other months are left out\n    Given a\n");
+    assert.match((await get(`/items/${id}`, "octo")).html, /Other months are left out <strong>expected to pass at Red<\/strong>/);
   });
 
   test("a sign-off from a user who isn't a product owner gets 403 and changes nothing", async () => {

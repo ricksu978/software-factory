@@ -3,11 +3,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
+import { REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { nextUp } from "../store/items.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { floorPage, noAccessPage, runDetailPage, signInPage, type RunDetail } from "./views.ts";
+import { floorPage, noAccessPage, runDetailPage, signInPage, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -87,20 +88,28 @@ async function floor(pool: pg.Pool) {
   return { active, waiting: [...waiting, ...reviews], waitingCount, capacity, next, notReady };
 }
 
-/** Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. */
+/**
+ * Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. A
+ * scenario carrying @regression, itself or through its feature, is marked, since Red expects it to pass.
+ */
 async function criteriaView(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["criteria"]> {
   const fi = await deps.adapter.getItem(externalId);
   if (!fi || !deps.repoHost || !fi.repo) return null;
-  const byAc = new Map<number, string[]>();
+  const byAc = new Map<number, Scenario[]>();
   for (const path of files) {
     let tags: string[] = [];
+    let featureTags: string[] = [];
     for (const line of ((await deps.repoHost.readFile(fi.repo, sha, path)) ?? "").split(/\r?\n/)) {
       const t = line.trim();
       if (t.startsWith("@")) tags.push(...t.split(/\s+/));
-      else if (/^Scenario( Outline)?:/.test(t)) {
+      else if (/^Feature:/.test(t)) {
+        featureTags = tags;
+        tags = [];
+      } else if (/^Scenario( Outline)?:/.test(t)) {
+        const scenario = { name: t.replace(/^Scenario( Outline)?:\s*/, ""), regression: [...featureTags, ...tags].includes(REGRESSION_TAG) };
         for (const tag of tags) {
           const n = /^@ac-(\d+)$/.exec(tag)?.[1];
-          if (n) byAc.set(Number(n), [...(byAc.get(Number(n)) ?? []), t.replace(/^Scenario( Outline)?:\s*/, "")]);
+          if (n) byAc.set(Number(n), [...(byAc.get(Number(n)) ?? []), scenario]);
         }
         tags = [];
       } else if (t && !t.startsWith("#")) tags = [];
