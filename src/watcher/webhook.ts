@@ -2,7 +2,7 @@
 // acted on once, so a redelivery never produces a second event (spec §10).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import type { FactoryWebhookEvent } from "../adapters/types.ts";
+import { botKey, loginKey, type FactoryWebhookEvent } from "../adapters/types.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
@@ -98,7 +98,8 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
       });
     } else if (e.kind === "pr_closed") {
       // The factory's own close comes from moving the item already, so only someone else's withdraws it.
-      if (row.trusted_bot && e.by.toLowerCase() === row.trusted_bot.toLowerCase()) return;
+      // trusted_bot may be stored without "[bot]" (issue #79), and GitHub always sends an App's login with it.
+      if (row.trusted_bot && loginKey(e.by) === botKey(row.trusted_bot)) return;
       await withTx(pool, (c) => transitionItem(c, row.item_id, "withdrawn", github));
     } else {
       if (row.state !== "InReview") return;

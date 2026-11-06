@@ -128,6 +128,20 @@ describe("handleWebhook", dbTest, () => {
       assert.equal(await state(other.item), "Abandoned");
     });
 
+    test("a trusted_bot stored without [bot] still matches the factory's own close", async () => {
+      const own = await inReview(null);
+      await db.pool.query("update repo set trusted_bot = 'factory' where url = 'https://github.com/o/r'");
+      try {
+        await send({ kind: "pr_closed", prNumber: own.pr, repo: "o/r", by: "factory[bot]" });
+        assert.equal(await state(own.item), "InReview");
+        // A user account with the bot's bare name is someone else (issue #79), so its close withdraws.
+        await send({ kind: "pr_closed", prNumber: own.pr, repo: "o/r", by: "factory" });
+        assert.equal(await state(own.item), "Abandoned");
+      } finally {
+        await db.pool.query("update repo set trusted_bot = 'factory[bot]' where url = 'https://github.com/o/r'");
+      }
+    });
+
     test("a merge during address moves InProgress to Accepted, and a late close the state can't take changes nothing", async () => {
       const { item, pr } = await inReview(null, "InProgress");
       await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc1234" });
