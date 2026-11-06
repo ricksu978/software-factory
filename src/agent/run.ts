@@ -40,22 +40,28 @@ export function agentOptions(a: AgentArgs): Options {
 export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">> {
   const r: Omit<AgentResult, "model"> = { ok: false, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0, limit: null, usage: null, transcript: "" };
   const lines: string[] = [];
-  for await (const m of msgs) {
-    lines.push(JSON.stringify(m));
-    if (m.type === "rate_limit_event") {
-      const i = m.rate_limit_info;
-      if (i.status === "rejected") r.limit = { resetsAt: i.resetsAt ?? Math.floor(Date.now() / 1000) + FALLBACK_WAIT_S };
-      if (i.utilization !== undefined) r.usage = { utilization: i.utilization, resetsAt: i.resetsAt ?? null };
-    } else if (m.type === "result") {
-      // A success with is_error carries an API error, such as the one that follows a rejected usage limit.
-      r.ok = m.subtype === "success" && !m.is_error;
-      r.text = m.subtype === "success" ? m.result : m.errors.join("\n");
-      // modelUsage is the run's running total, so the last result holds the whole cost.
-      const models = Object.values(m.modelUsage);
-      r.costUsd = models.reduce((s, u) => s + u.costUSD, 0);
-      r.tokensIn = models.reduce((s, u) => s + u.inputTokens + u.cacheReadInputTokens + u.cacheCreationInputTokens, 0);
-      r.tokensOut = models.reduce((s, u) => s + u.outputTokens, 0);
+  try {
+    for await (const m of msgs) {
+      lines.push(JSON.stringify(m));
+      if (m.type === "rate_limit_event") {
+        const i = m.rate_limit_info;
+        if (i.status === "rejected") r.limit = { resetsAt: i.resetsAt ?? Math.floor(Date.now() / 1000) + FALLBACK_WAIT_S };
+        if (i.utilization !== undefined) r.usage = { utilization: i.utilization, resetsAt: i.resetsAt ?? null };
+      } else if (m.type === "result") {
+        // A success with is_error carries an API error, such as the one that follows a rejected usage limit.
+        r.ok = m.subtype === "success" && !m.is_error;
+        r.text = m.subtype === "success" ? m.result : m.errors.join("\n");
+        // modelUsage is the run's running total, so the last result holds the whole cost.
+        const models = Object.values(m.modelUsage);
+        r.costUsd = models.reduce((s, u) => s + u.costUSD, 0);
+        r.tokensIn = models.reduce((s, u) => s + u.inputTokens + u.cacheReadInputTokens + u.cacheCreationInputTokens, 0);
+        r.tokensOut = models.reduce((s, u) => s + u.outputTokens, 0);
+      }
     }
+  } catch (e) {
+    // The CLI exits non-zero after an error result, and the SDK throws then. Keep what was folded so far.
+    r.ok = false;
+    if (!r.text) r.text = e instanceof Error ? e.message : String(e);
   }
   // A clean success means the run got past any rejection, such as on overage, so it isn't parked until the reset.
   if (r.ok) r.limit = null;

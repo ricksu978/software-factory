@@ -85,6 +85,25 @@ test("a stream with no result isn't ok", async () => {
   assert.equal(r.costUsd, 0);
 });
 
+test("a stream that throws after an error result keeps the limit, cost and transcript", async () => {
+  // The SDK throws once the CLI exits non-zero, which follows every error result.
+  const msgs = [rateLimit({ status: "rejected", resetsAt: 1762400000 }), result("success", true, { "claude-opus-5-5": usage(0.25) })];
+  async function* throwing() { yield* msgs; throw new Error("Claude Code returned an error result: limit"); }
+  const r = await foldMessages(throwing() as never);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.limit, { resetsAt: 1762400000 });
+  assert.equal(r.costUsd, 0.25);
+  assert.equal(r.text, "the answer");
+  assert.equal(r.transcript.trimEnd().split("\n").length, 2);
+});
+
+test("a stream that throws before any result reports the error as its text", async () => {
+  async function* throwing() { yield rateLimit({ status: "allowed" }); throw new Error("boom"); }
+  const r = await foldMessages(throwing() as never);
+  assert.equal(r.ok, false);
+  assert.equal(r.text, "boom");
+});
+
 test("the transcript is the JSONL of every message", async () => {
   const msgs = [rateLimit({ status: "allowed" }), result("success", false, {})];
   const r = await fold(...msgs);
