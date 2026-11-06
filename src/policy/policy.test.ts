@@ -66,6 +66,10 @@ describe("parseCriteria", () => {
     ]);
   });
 
+  test("a byte-order mark before the first line doesn't hide its criterion", () => {
+    assert.deepEqual(parseCriteria("\uFEFF- [ ] First\r\n- [ ] Second\r\n").map((c) => c.text), ["First", "Second"]);
+  });
+
   test("a run: in backticks becomes the criterion's command", () => {
     assert.deepEqual(parseCriteria("- [ ] E2E suite passes `run: npm run e2e`\n"), [
       { index: 1, text: "E2E suite passes `run: npm run e2e`", run: "npm run e2e" },
