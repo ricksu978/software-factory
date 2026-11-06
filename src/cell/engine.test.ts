@@ -315,6 +315,20 @@ describe("runCell", () => {
     assert.match(h.prs[0].body, /^- \[x\] Typecheck passes/m);
   });
 
+  test("each passed stage sends its own prompted call's text as message, never a judge's or the classifier's", async () => {
+    const h = harness({
+      // Every stage's own prompt answers with its stage. The DoD judge, the reviewer and the classifier keep their answers.
+      script: (a, stage) => a.mode === "cell" && !a.prompt.startsWith("# Definition of Done") && a.agent !== "factory-self-reviewer"
+        ? { text: `said at ${stage}` } : undefined,
+    });
+    h.deps.policies.dod = policy("dod", "- [ ] Docs are updated.\n- [ ] Typecheck passes. `run: true`\n");
+    assert.equal(await h.run(), "done");
+    const passed = h.calls.filter((c) => c.route === "/stage" && c.body.status === "passed").map((c) => [c.body.stageId, c.body.message]);
+    assert.deepEqual(passed.map(([s]) => s), ["red", "green", "self-review", "open-pr"]);
+    assert.deepEqual(passed.filter(([s]) => s !== "self-review"), [["red", "said at red"], ["green", "said at green"], ["open-pr", "said at open-pr"]]);
+    assert.match(passed[2][1], /APPROVED$/);
+  });
+
   test("each stage ends with /stage passed, then its uploads, then the transition", async () => {
     const h = harness();
     assert.equal(await h.run(), "done");

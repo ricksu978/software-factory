@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { loadSop, SopError } from "./sop.ts";
+import { readFileSync } from "node:fs";
+import { loadSop, SopError, stageAfter } from "./sop.ts";
+
+describe("stageAfter", () => {
+  const def = loadSop(readFileSync(new URL("../../sop/default.yml", import.meta.url), "utf8"));
+  test("gives the next listed stage, and null for merge, open-pr, address and a stage the SOP doesn't list", () => {
+    assert.equal(stageAfter(def, "understand"), "specify");
+    assert.equal(stageAfter(def, "specify"), "sign-off");
+    assert.equal(stageAfter(def, "self-review"), "open-pr");
+    for (const s of ["merge", "open-pr", "address", "deploy"]) assert.equal(stageAfter(def, s), null, s);
+  });
+});
 
 const sop = (stages: string, models = "  coding: claude-opus-5-5\n  triage: claude-haiku-5-5\n") =>
   `sop: default\nversion: 0.1.0\nmodels:\n${models}stages:\n${stages}`;

@@ -137,6 +137,21 @@ describe("store", dbTest, () => {
     assert.equal(member.rows[0].m, true);
   });
 
+  test("seed-owner adds a first owner through migrate-cli, and refuses a word it doesn't know", async () => {
+    const seed = (...words: string[]) =>
+      spawnSync(process.execPath, ["src/store/migrate-cli.ts", "seed-owner", ...words], { env: { ...process.env, FACTORY_DB_URI: db.url }, encoding: "utf8" });
+    const bad = seed("provider=microsoft", "subject=s-2", "role=viewer");
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /role=viewer/);
+    assert.equal(seed("provider=github", "subject=s-3").status, 1, "an unknown provider");
+    assert.equal(seed("provider=microsoft").status, 1, "no subject");
+    const ok = seed("provider=microsoft", "subject=s-1", "email=me@example.com", "github-login=Octo", "product-owner");
+    assert.equal(ok.status, 0, ok.stderr);
+    const rows = (await db.pool.query(`select provider, subject, email, github_login, role, product_owner from "user" where subject like 's-%'`)).rows;
+    assert.deepEqual(rows, [{ provider: "microsoft", subject: "s-1", email: "me@example.com", github_login: "Octo", role: "owner", product_owner: true }]);
+    await db.pool.query(`delete from "user" where subject like 's-%'`);
+  });
+
   test("migrate-cli seeds sources and the local dev owner, idempotently", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sources-"));
     try {
