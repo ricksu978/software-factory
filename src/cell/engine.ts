@@ -11,6 +11,8 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock } from "../bdd/lock.ts";
 import { classify, greenGate, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
+import { fenced } from "../core/fence.ts";
+import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
@@ -82,12 +84,6 @@ export function sh(command: string, cwd: string): Promise<{ code: number; out: s
   });
 }
 
-/** A fence one backtick longer than any run in `text`, so data can't close it. */
-function fenced(text: string, lang = ""): string {
-  const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((x) => x[0].length + 1)));
-  return `${fence}${lang}\n${text}\n${fence}`;
-}
-
 /** The tags written before a feature file's `Feature:` line. */
 export function featureTags(text: string): string[] {
   const tags: string[] = [];
@@ -97,6 +93,16 @@ export function featureTags(text: string): string[] {
     if (t.startsWith("@")) tags.push(...t.split(/\s+/).filter((x) => x.startsWith("@")));
   }
   return tags;
+}
+
+/**
+ * Every path the change touches between `range`'s ends, both sides of a rename included and verbatim. Without
+ * --no-renames, `git mv .factory/dod.md docs/dod.md` lists only `docs/dod.md`; without -z, git quotes a non-ASCII path,
+ * so `.github/workflows/dé.yml` starts with `".github`. Either way the risk floor would miss it.
+ */
+export async function changedFiles(dir: string, range: string): Promise<string[]> {
+  const { stdout } = await run("git", ["diff", "--name-only", "-z", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
+  return [...new Set(stdout.split("\0").filter(Boolean))];
 }
 
 /** Every tracked or new .feature file in the checkout, by repo-relative path. */
@@ -213,8 +219,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
   };
 
-  const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> => {
-    const r = await d.agent({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal });
+  const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> =>
+    settle(await d.agent({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal }));
+
+  // Every agent call, a stage's own or the risk classifier's, is charged to the current stage, and a stop or a usage
+  // limit leaves the run the same way.
+  const settle = (r: AgentResult): AgentResult => {
     if (current) {
       current.costUsd += r.costUsd;
       current.tokensIn += r.tokensIn;
@@ -438,7 +448,27 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     throw new Blocked(`Self-review didn't approve in ${rounds} rounds`);
   };
 
-  const prBody = (summary: string) => {
+  // The shadow risk tier for the branch's change against the base (plan Task 16). Classified before the PR body is
+  // written, so the body can show it. Shadow mode: it's recorded, and a person still approves every PR.
+  const shadowTier = async (): Promise<{ tier: Tier; reasons: string[] }> => {
+    const range = `origin/${ctx.base}...HEAD`;
+    try {
+      const files = await changedFiles(dir, range);
+      const diff = (await run("git", ["diff", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
+      return await classifyRisk(diff, files, {
+        sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal,
+        agent: async (a) => settle(await d.agent(a)),
+      });
+    } catch (e) {
+      // A limit or a stop leaves the run as any stage's does. Any other failure, an API error, a timeout or a diff too
+      // big to read, raises the tier instead of crashing the cell after its push, so the PR still opens.
+      if (e instanceof Limited || abort.signal.aborted) throw e;
+      const m = e instanceof Error ? e.message : String(e);
+      return { tier: "High", reasons: [m.startsWith("classifier run failed") ? m : `classifier run failed: ${m}`] };
+    }
+  };
+
+  const prBody = (summary: string, risk: { tier: Tier; reasons: string[] }) => {
     const policyLink = policies.prReview.source === "repo"
       ? `[\`.factory/pr-review.md\`](https://github.com/${ctx.repo}/blob/${ctx.configSha}/.factory/pr-review.md)`
       : "the factory's default `pr-review.md`";
@@ -451,8 +481,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const rows = [...greenResults].map(([name, green]) => `| ${cell(name)} | ${redResults.get(name) ?? "in the run's red report"} | ${green} |`);
     const scenarios = rows.length ? `## Scenarios\n\n| Scenario | Red | Green |\n|---|---|---|\n${rows.join("\n")}` : "";
     const review = reviewRounds ? `Self-review took ${reviewRounds} round${reviewRounds === 1 ? "" : "s"}.` : "";
+    const tier = `## Shadow risk tier\n\n**${risk.tier}**. Recorded only, so a person still approves this PR.\n\n${risk.reasons.map((r) => `- ${r}`).join("\n")}`;
     return brief(summary.trim(), `Refs #${ctx.externalId}`, `Reviewed against ${policyLink}.`, review, scenarios,
-      `## Definition of Done\n\nThe factory checked these lines at ${dodSha}.\n\n${lines.join("\n")}`);
+      `## Definition of Done\n\nThe factory checked these lines at ${dodSha}.\n\n${lines.join("\n")}`, tier);
   };
 
   // Returns findings that send the item back to green, or null once the PR is open and CI passed.
@@ -471,15 +502,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
     await push();
     const head = await git.head();
-    const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(summary.ok ? summary.text : "") });
+    const risk = await shadowTier();
+    const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(summary.ok ? summary.text : "", risk) });
     await api.pr({ prNumber: pr.number, prUrl: pr.url });
     await d.repoHost.requestReviewers(ctx.repo, pr.number, config.reviewers);
     const ci = await waitForChecks(head);
     if (ci === "none") throw new Blocked("no CI ran on the PR");
     if (ci === "failure") { await end("failed"); return [`CI failed on ${head}`]; }
     await end("passed");
-    // PBI 16 (#20) adds tier and tierReasons here, from the shadow risk classifier.
-    await transition({ event: "pr_opened", prNumber: pr.number, prUrl: pr.url });
+    await transition({ event: "pr_opened", prNumber: pr.number, prUrl: pr.url, tier: risk.tier, tierReasons: risk.reasons });
     return null;
   };
 

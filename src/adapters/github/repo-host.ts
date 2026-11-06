@@ -1,7 +1,7 @@
 // GitHub as a RepoHost. The control plane runs it on the App's installation token; a cell gets only the two methods
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
-import { matchesGlob } from "node:path";
+import { matchesPath } from "../../core/glob.ts";
 import { standingSummaries, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
@@ -93,14 +93,10 @@ async function codeowners(gh: GitHubClient, r: { owner: string; repo: string }, 
   return null;
 }
 
-// matchesGlob never lets `*` match a leading dot and takes no `dot` option, while CODEOWNERS follows gitignore, where
-// it does. Swapping each segment's leading dot for NUL, which no git path holds, in both glob and path closes the gap.
-const undot = (s: string) => s.replace(/(^|\/)\./g, "$1\0");
-
 /** The owners of a path: the last matching CODEOWNERS rule wins, as GitHub documents. */
 export function ownersOf(rules: Rule[], path: string): string[] {
   let owners: string[] = [];
-  for (const { pattern, owners: o } of rules) if (globsFor(pattern).some((g) => matchesGlob(undot(path), undot(g)))) owners = o;
+  for (const { pattern, owners: o } of rules) if (globsFor(pattern).some((g) => matchesPath(path, g))) owners = o;
   return owners;
 }
 

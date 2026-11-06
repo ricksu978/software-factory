@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
+import { changedFiles, loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -117,6 +117,9 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       agentCalls.push({ ...a, stage });
       const judged = [...a.prompt.matchAll(/^\{"index":(\d+),"criterion":".*"\}$/gm)].map((m) => JSON.stringify({ index: Number(m[1]), status: "passed", reason: "ok" }));
       let text = a.agent === "factory-self-reviewer" ? `${judged.join("\n")}\nAPPROVED` : judged.length ? judged.join("\n") : "@ac-1\n@ac-2";
+      // The shadow risk classifier's two passes at open-pr (Task 16).
+      if (a.mode === "judge" && a.prompt.includes('{"tier":')) text = JSON.stringify({ tier: "Low", reason: "a fake Low" });
+      if (a.mode === "judge" && a.prompt.includes('{"needsPerson":')) text = JSON.stringify({ needsPerson: false, reason: "a fake no" });
       if (stage === "specify") {
         mkdirSync(join(a.cwd, "features"), { recursive: true });
         writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482\n");
@@ -151,13 +154,77 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   return { deps, calls, agentCalls, prs, routes, transitions, started, dir, origin, root, lockSha, run: () => runCell(deps) };
 }
 
+describe("changedFiles", () => {
+  test("lists both sides of a rename and non-ASCII paths verbatim, so the risk floor sees them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "changed-"));
+    try {
+      const g = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+      g("init", "-q", "-b", "main");
+      g("config", "user.email", "t@example.com");
+      g("config", "user.name", "t");
+      mkdirSync(join(dir, ".factory"));
+      writeFileSync(join(dir, ".factory", "dod.md"), "- [ ] Tests pass\n");
+      g("add", "-A");
+      g("commit", "-q", "-m", "base");
+      g("checkout", "-q", "-b", "work");
+      mkdirSync(join(dir, "docs"));
+      g("mv", ".factory/dod.md", "docs/dod.md");
+      mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+      writeFileSync(join(dir, ".github", "workflows", "dé.yml"), "on: push\n");
+      g("add", "-A");
+      g("commit", "-q", "-m", "move and add");
+      assert.deepEqual((await changedFiles(dir, "main...HEAD")).sort(), [".factory/dod.md", ".github/workflows/dé.yml", "docs/dod.md"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runCell", () => {
   test("every cell-mode agent call carries the repo's web tools", async () => {
     const h = harness();
     h.deps.config.webTools = ["WebSearch"];
     assert.equal(await h.run(), "done");
-    assert.ok(h.agentCalls.length > 0);
-    for (const a of h.agentCalls) assert.deepEqual([a.mode, a.webTools], ["cell", ["WebSearch"]]);
+    const cell = h.agentCalls.filter((a) => a.mode === "cell");
+    assert.ok(cell.length > 0);
+    for (const a of cell) assert.deepEqual(a.webTools, ["WebSearch"]);
+    // The only other calls are the risk classifier's two judge passes at open-pr, which get no tools at all.
+    const other = h.agentCalls.filter((a) => a.mode !== "cell");
+    assert.deepEqual(other.map((a) => [a.mode, a.stage, a.webTools]), [["judge", "open-pr", undefined], ["judge", "open-pr", undefined]]);
+  });
+
+  test("open-pr classifies the change before writing the PR body, and pr_opened carries the tier and reasons", async () => {
+    const h = harness();
+    assert.equal(await h.run(), "done");
+    const body = h.prs.at(-1)!.body;
+    assert.match(body, /## Shadow risk tier\n\n\*\*Low\*\*/);
+    assert.match(body, /- the classifier says Low: a fake Low/);
+    const opened = h.transitions().find((t) => t.event === "pr_opened")!;
+    assert.equal(opened.tier, "Low");
+    assert.deepEqual(opened.tierReasons, ["the classifier says Low: a fake Low"]);
+  });
+
+  test("a change under .factory/ opens its PR at Medium, whatever the classifier says", async () => {
+    const h = harness({ script: async (_a, stage) => {
+      if (stage === "green") { mkdirSync(join(h.dir, ".factory"), { recursive: true }); writeFileSync(join(h.dir, ".factory", "config.yml"), "x: 1\n"); }
+      return {};
+    } });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs.at(-1)!.body, /## Shadow risk tier\n\n\*\*Medium\*\*[\s\S]*\.factory\/config\.yml/);
+    assert.equal(h.transitions().find((t) => t.event === "pr_opened")!.tier, "Medium");
+  });
+
+  test("a classifier failure that isn't a usage limit opens the PR at High with the cause, instead of crashing", async () => {
+    const h = harness({ script: async (a) => (a.mode === "judge" ? { ok: false, text: "API error 529" } : {}) });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs.at(-1)!.body, /## Shadow risk tier\n\n\*\*High\*\*[\s\S]*- classifier run failed: API error 529$/m);
+    assert.equal(h.transitions().find((t) => t.event === "pr_opened")!.tier, "High");
+  });
+
+  test("a usage limit while classifying parks the run like any other stage's limit", async () => {
+    const h = harness({ script: async (a) => (a.mode === "judge" ? { ok: false, text: "", limit: { resetsAt: 1762400000 } } : {}) });
+    assert.equal(await h.run(), "limited");
+    assert.equal(h.prs.length, 0, "no PR opens without its tier");
   });
 
   test("a run resumed at red never calls the agent for understand or specify", async () => {
