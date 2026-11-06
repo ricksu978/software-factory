@@ -67,7 +67,7 @@ describe("parseCriteria", () => {
   });
 
   test("a byte-order mark before the first line doesn't hide its criterion", () => {
-    assert.deepEqual(parseCriteria("﻿- [ ] First\r\n- [ ] Second\r\n").map((c) => c.text), ["First", "Second"]);
+    assert.deepEqual(parseCriteria("\uFEFF- [ ] First\r\n- [ ] Second\r\n").map((c) => c.text), ["First", "Second"]);
   });
 
   test("a run: in backticks becomes the criterion's command", () => {

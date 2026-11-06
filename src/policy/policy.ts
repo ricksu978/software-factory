@@ -22,7 +22,7 @@ const policyDir = () => process.env.FACTORY_POLICY_DIR ?? join(import.meta.dirna
 export function parseCriteria(markdown: string): Criterion[] {
   const criteria: Criterion[] = [];
   // A file saved with a UTF-8 byte-order mark would otherwise lose a criterion on its first line.
-  for (const line of markdown.replace(/^﻿/, "").split(/\r?\n/)) {
+  for (const line of markdown.replace(/^\uFEFF/, "").split(/\r?\n/)) {
     if (!line.startsWith("- [ ] ")) continue;
     const text = line.slice(6).trim();
     const run = runInLine.exec(text)?.[1].trim();
