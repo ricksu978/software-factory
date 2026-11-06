@@ -32,9 +32,9 @@ function ctx(world: object): Ctx {
   return w.pbi6;
 }
 
-function sh(command: string, input?: string): { status: number | null; out: string; stdout: string } {
+function sh(command: string, input?: string): { status: number | null; out: string; stdout: string; stderr: string } {
   const r = spawnSync(command, { cwd: repo, shell: true, encoding: "utf8", input, env: { ...process.env, FACTORY_FLOAT_PORTS: "1" } });
-  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
+  return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
 // Retries because a restart leaves fetch holding a dead keep-alive socket to the old process.
@@ -51,13 +51,16 @@ async function get(path: string): Promise<{ status: number; body: string } | nul
   return null;
 }
 
-/** `aspire describe` for one resource, or every resource when none is named, parsed from the JSON on stdout. */
-function describe(resource = ""): { out: string; doc: { resources: Record<string, any>[] } | null } {
+/**
+ * `aspire describe` for one resource, or every resource when none is named, parsed from the JSON on stdout. It hands
+ * back the exit status and stderr, never stdout, because stdout shows environment values such as FACTORY_DB_URI.
+ */
+function describe(resource = ""): { status: number | null; stderr: string; doc: { resources: Record<string, any>[] } | null } {
   const r = sh(`aspire describe ${resource} --format Json ${APPHOST}`);
   try {
-    return { out: r.out, doc: JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) };
+    return { status: r.status, stderr: r.stderr, doc: JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) };
   } catch {
-    return { out: r.out, doc: null };
+    return { status: r.status, stderr: r.stderr, doc: null };
   }
 }
 
@@ -141,7 +144,7 @@ Then("the {string} and {string} containers are running, each with a data volume"
 Then("the {string} resource has exited with code {int}", function (resource: string, code: number) {
   assert.ok(ctx(this).up, "the AppHost never came up");
   const r = describe(resource);
-  assert.ok(r.doc, `aspire describe gave no JSON:\n${r.out}`);
+  assert.ok(r.doc, `aspire describe gave no JSON, exit status ${r.status}, stderr:\n${r.stderr}`);
   // The resource's state, never the whole describe output, which shows environment values such as FACTORY_DB_URI.
   assert.equal(findKey(r.doc, /^exit_?code$/i), code, `exit code of "${resource}", in state ${String(r.doc.resources[0]?.state)}`);
 });
