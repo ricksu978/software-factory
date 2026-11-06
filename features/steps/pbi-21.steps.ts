@@ -110,6 +110,7 @@ Given("the item {string} went from Eligible to Done, and its scenarios are on ma
   await c.f.approveInRunDetail(c.current);
   await c.f.tick();
   await merge(c);
+  assert.equal(await c.f.state(c.current), "Done", `states so far: ${(await c.f.states(c.current)).join(" > ")}`);
 });
 
 When("the factory takes {string} through readiness, Specify, sign-off, Red, Green, its pull request and a merge", long, async function (title: string) {
