@@ -310,11 +310,15 @@ describe("cell API", dbTest, () => {
     assert.equal((await runRow(cell.runId)).next_stage, "sign-off");
   });
 
-  test("checks: a sha off the run's branch gets 400, and a sha with no checks is pending for 10 minutes, then none", async () => {
+  test("checks: a sha off the run's branch or on main gets 400, and a sha with no checks is pending for 10 minutes, then none", async () => {
     const cell = await claimed();
-    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234", "def5678"]);
+    // 0a0a0a0 is main's head when the branch was cut, so it's an ancestor of the branch as well.
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
     host.checks.set(`${repo}@def5678`, "success");
+    host.checks.set(`${repo}@0a0a0a0`, "success");
     assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0ff0ff0")).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0a0a0a0")).status, 400);
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success" });
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
     clock = new Date(at.getTime() + 599_000);
