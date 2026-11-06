@@ -71,12 +71,19 @@ const announcement: Record<DecisionKind, string> = {
   answer: "Answer received. The factory picks the item up again.",
 };
 
-/** Runs `decide` in its own transaction and, once it's applied, comments the decision on the PBI. */
+/**
+ * Runs `decide` in its own transaction and, once it's applied, comments the decision on the PBI. The decision has
+ * committed by then, so a failed comment is logged and the outcome stays `applied`.
+ */
 export async function decideAndAnnounce(deps: { pool: pg.Pool; adapter: BacklogAdapter }, d: Decision, externalId: string): Promise<Outcome> {
   const outcome = await withTx(deps.pool, (c) => decide(c, d));
   if (outcome === "applied") {
     const note = d.text ? `\n\n> ${d.text.replace(/\n/g, "\n> ")}` : "";
-    await deps.adapter.comment(externalId, `${announcement[d.kind]}${note}`, `decision:${d.itemId}:${d.kind}:${Date.now()}`);
+    try {
+      await deps.adapter.comment(externalId, `${announcement[d.kind]}${note}`, `decision:${d.itemId}:${d.kind}:${Date.now()}`);
+    } catch (e) {
+      console.error(`decision on item ${d.itemId} applied, but its PBI comment failed:`, e);
+    }
   }
   return outcome;
 }

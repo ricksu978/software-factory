@@ -122,6 +122,17 @@ describe("decisions", dbTest, () => {
     assert.deepEqual(await fake.comments(ext), []);
   });
 
+  test("an applied decision stays applied when its PBI comment fails", async (t) => {
+    await person("octo", "owner", true);
+    const { ext, id } = await waiting("SignOff", "sign_off", "sign-off");
+    t.mock.method(fake.adapter, "comment", async () => {
+      throw new Error("GitHub 502");
+    });
+    t.mock.method(console, "error", () => {});
+    assert.equal(await comment(ext, "octo", "/approve"), "applied");
+    assert.deepEqual(await state(id), { state: "SignOff", next_stage: "red", features_lock_sha: "abc" });
+  });
+
   test("an item with no open question of that kind is ignored", async () => {
     await person("octo", "owner", true);
     const { ext } = await waiting("NeedsInput", "needs_input", "green");
