@@ -475,12 +475,12 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
 - Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts (Run contract 11), which it also passes to `gate` as `ctx.readinessSha`. Also `POLL_INTERVAL_MS = 300_000`.
-- Each `pollOnce` does five things:
+- Each `pollOnce` does five things, in this order:
   - lists new and changed eligible items from the cursor;
+  - reads `prState` for every InReview item, before any withdrawal, so a PR merged just before its item closed still counts as a merge;
   - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
   - writes `openDependencies` into `item.blocked_by` for every Queued, SignOff and NeedsInput item, so `claimNext` skips an item whose dependency reopened after the gate passed it (Task 5);
-  - runs `gate` on every Eligible item;
-  - reads `prState` for every InReview item.
+  - runs `gate` on every Eligible item.
 - The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
 
 - [ ] **Step 1: Write failing tests** with the fake adapter:
@@ -508,7 +508,10 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
-  - The eligibility label is `backlog_source.label_filter`, or `factory` when it's null. `upsertItem` also takes the item's `rank` into `item.backlog_rank`.
+  - The eligibility label is `fieldMap.optInLabel` from `backlog_source.field_map`, the field Task 7's adapter lists by, or `factory` when it's unset. An Eligible or NotReady item that lost the label or closed is never gated, since neither state has a `withdrawn` edge. `upsertItem` also takes the item's `rank` into `item.backlog_rank`.
+  - Every item is handled on its own. A failure, such as `getItem`, `prState` or the judge throwing, is logged and that item waits for the next poll, while the rest of the poll runs and the cursor is saved. An `IllegalTransition` means another poll or a webhook moved the item first, and counts as done.
+  - A withdrawal or criteria change closes the run's PR before the item moves, so a failed close leaves the item where the next poll repeats it. When the board item is gone, the repo comes from `run.repo_id`.
+  - A listed NotReady item moves to Eligible through `item_edited` only when `readinessItemHash`, over its title, body, criteria, fields and repo, differs from `item.readiness_item_hash`, which the gate records with `readiness_policy_sha`. The factory's own board writes, such as `setStatus`, never re-gate it.
   - The readiness inputs are read once per repo per poll, at the default branch head. A repo with no `repo` row is unknown, and its items fail the gate's unknown-repo rule. A read that fails skips that repo's gating until the next poll.
   - `criteriaHash(criteria)`, exported from `poller.ts`, is the SHA-256 of the criteria as JSON. Task 13 writes `item.criteria_hash` with it, and the poller skips the criteria check while it's null.
 - [ ] **Step 4: Run the tests.** Expected: PASS.

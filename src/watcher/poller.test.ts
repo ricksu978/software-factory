@@ -93,11 +93,49 @@ describe("pollOnce", dbTest, () => {
     const ext = await seed();
     await poll();
     verdict = "passed";
-    await fake.adapter.setStatus(ext, "Edited");
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, body: "Now with a clearer scope." });
     await poll();
     assert.equal((await row(ext)).state, "Queued");
     const events = (await db.pool.query("select payload->>'event' as e from event where item_id = $1 order by at", [(await row(ext)).id])).rows.map((x) => x.e);
     assert.deepEqual(events, ["readiness_failed", "item_edited", "ready"]);
+  });
+
+  test("the factory's own board write doesn't re-gate a NotReady item", async () => {
+    verdict = "failed";
+    const ext = await seed();
+    await poll();
+    await fake.adapter.setStatus(ext, "Not ready");
+    judged = [];
+    await poll();
+    assert.equal((await row(ext)).state, "NotReady");
+    assert.deepEqual(judged, []);
+    assert.equal((await fake.comments(ext)).length, 1);
+  });
+
+  test("an Eligible or NotReady item that left the backlog is never gated into Queued", async () => {
+    verdict = "failed";
+    const notReady = await seed();
+    await poll();
+    verdict = "throw";
+    const eligible = await seed();
+    await poll();
+    assert.deepEqual([(await row(notReady)).state, (await row(eligible)).state], ["NotReady", "Eligible"]);
+    await fake.seed({ externalId: eligible, labels: [], repo: REPO });
+    await fake.adapter.close(notReady);
+    verdict = "passed";
+    commit("c2", { ...files, ".factory/dor.md": "- [ ] Has a title\n\nEdited.\n" });
+    judged = [];
+    await poll();
+    assert.equal((await row(eligible)).state, "Eligible");
+    assert.equal((await row(notReady)).state, "NotReady");
+    assert.deepEqual(judged, []);
+  });
+
+  test("the opt-in label comes from the source's field map", async () => {
+    await db.pool.query(`update backlog_source set field_map = '{"optInLabel": "ready-for-factory"}' where id = $1`, [sourceId]);
+    const { ext } = await held("Queued");
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
   });
 
   test("a Done item that loses its label is left alone", async () => {
@@ -151,6 +189,84 @@ describe("pollOnce", dbTest, () => {
     assert.match((await fake.comments(ext))[0], /new sign-off/);
     await poll();
     assert.equal((await db.pool.query("select count(*)::int as n from run where item_id = $1", [id])).rows[0].n, 2);
+  });
+
+  test("changed criteria on an InProgress item fence its cell and start a new run", async () => {
+    const { ext } = await held("InProgress", { criteriaHash: criteriaHash(["old criterion"]) });
+    await db.pool.query("update item set lease_generation = 3, lease_owner = 'cell-a', lease_expires = now() where source_id = $1 and external_id = $2", [sourceId, ext]);
+    await poll();
+    const r = (await db.pool.query("select state, lease_generation, lease_owner from item where source_id = $1 and external_id = $2", [sourceId, ext])).rows[0];
+    assert.deepEqual(r, { state: "Queued", lease_generation: 4, lease_owner: null });
+  });
+
+  test("a PR that fails to close leaves the item for the next poll, which closes it and withdraws the item", async () => {
+    const { ext, pr } = await held("InReview", { pr: true });
+    await fake.adapter.close(ext);
+    const closePr = host.closePr.bind(host);
+    let fail = true;
+    host.closePr = async (...args) => {
+      if (fail) throw new Error("GitHub 502");
+      return closePr(...args);
+    };
+    await poll();
+    assert.equal((await row(ext)).state, "InReview");
+    fail = false;
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    assert.equal(host.prs.find((p) => p.number === pr)?.open, false);
+  });
+
+  test("one PR that can't be read, or an item a webhook already moved, doesn't stop the rest of the poll", async () => {
+    const broken = await held("InReview", { pr: true });
+    const raced = await held("InReview", { pr: true });
+    const merged = await held("InReview", { pr: true });
+    for (const h of [raced, merged]) Object.assign(host.prs.find((p) => p.number === h.pr)!, { open: false, merged: true, mergeSha: "m1" });
+    const prState = host.prState.bind(host);
+    host.prState = async (repo, n, logins) => {
+      if (n === broken.pr) throw new Error("GitHub 502");
+      // A pr_merged webhook moves this item between the poller's read and its own move.
+      if (n === raced.pr) await db.pool.query("update item set state = 'Accepted' where id = $1", [raced.id]);
+      return prState(repo, n, logins);
+    };
+    const fresh = await seed();
+    const out = await poll();
+    assert.equal((await row(broken.ext)).state, "InReview");
+    assert.equal((await row(raced.ext)).state, "Accepted");
+    assert.equal((await row(merged.ext)).state, "Accepted");
+    assert.equal((await row(fresh)).state, "Queued");
+    assert.equal((await db.pool.query("select cursor from backlog_source where id = $1", [sourceId])).rows[0].cursor, out.cursor);
+  });
+
+  test("a PR merged just before its item closed counts as a merge", async () => {
+    const { ext, pr, run } = await held("InReview", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === pr)!, { open: false, merged: true, mergeSha: "m1" });
+    await fake.adapter.close(ext);
+    await poll();
+    assert.equal((await row(ext)).state, "Accepted");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m1");
+  });
+
+  test("a PR whose board item was deleted is still closed, through the run's repo", async () => {
+    const { ext, pr, run } = await held("InReview", { pr: true });
+    const repoId = (await db.pool.query<{ id: string }>("select id from repo")).rows[0].id;
+    await db.pool.query("update run set repo_id = $2 where id = $1", [run, repoId]);
+    // A first poll consumes the listing, so the item is gone from the board by the next one.
+    await poll();
+    const getItem = fake.adapter.getItem;
+    fake.adapter.getItem = async (id) => (id === ext ? null : getItem(id));
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    assert.equal(host.prs.find((p) => p.number === pr)?.open, false);
+  });
+
+  test("a review submitted while address ran requeues the item once it's back in InReview", async () => {
+    await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
+    // The claim that started the address run set reviews_seen_at to its own time.
+    const { ext, pr, run } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    host.prs.find((p) => p.number === pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:30:00Z", author: "octo" });
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
   });
 
   test("a merge conflict sends an InReview item to address", async () => {
