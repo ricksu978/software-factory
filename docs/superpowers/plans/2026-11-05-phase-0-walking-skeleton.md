@@ -293,8 +293,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `migrate(pool): Promise<void>`, which applies `db/migrations/*.sql` in name order and tracks them in `schema_migrations`.
   - `withTx<T>(pool, fn: (c: pg.PoolClient) => Promise<T>): Promise<T>`, plus `runAfterCommit(c, fn)`, which queues work that runs only once that transaction commits, after the connection is back in the pool, and is dropped on rollback. A failing job is logged and never turns the committed transaction into an error. `runAfterCommit` throws outside `withTx`. `transitionItem` uses it for `onTransition` hooks, and refuses to run outside `withTx` before any write, because its row lock and its atomicity depend on that transaction.
   - `appendEvent(c, e: { actor: "agent" | "human" | "system"; actorId: string; itemId: string | null; kind: string; payload: unknown }): Promise<void>`. It also runs `NOTIFY factory_events`.
-  - `transitionItem(c, itemId: string, event: ItemEvent, actor: Actor): Promise<ItemState>`. It throws `IllegalTransition` when `next` returns null. It writes `item.state` and the event row in one transaction, and applies Run contract 2 to the lease columns.
-  - `onTransition(hook: (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>): void` registers the hook that runs after each committed transition. Task 12 registers the board mirroring from Run contract 8.
+  - `transitionItem(c, itemId: string, event: ItemEvent, actor: Actor, detail?: Record<string, unknown>): Promise<ItemState>`. It throws `IllegalTransition` when `next` returns null. It writes `item.state` and the event row in one transaction, and applies Run contract 2 to the lease columns. `detail` adds fields to the event's payload, such as the attempts Task 12 records on `retries_exhausted`.
+  - `onTransition(hook: (itemId: string, from: ItemState, to: ItemState, event: ItemEvent) => Promise<void>): () => void` registers the hook that runs after each committed transition, and returns the call that removes it, so a test can drop its hook. Task 12 registers the board mirroring from Run contract 8.
   - `upsertItem(c, item: { sourceId; externalId; title }): Promise<string>`, keyed on `(source_id, external_id)`, which inserts a new item as Eligible. Task 6 widens the input to `FactoryItem`, which doesn't exist before it.
   - `startTestDb(): Promise<{ pool: pg.Pool; url: string; stop(): Promise<void> }>`, which uses `@testcontainers/postgresql` with image `postgres:17` and runs `migrate`.
   - `dbTest`, the options object every `describe` that calls `startTestDb` passes: `{ skip: process.env.FACTORY_DB_TESTS === "skip" && "no Docker daemon here" }`.
@@ -400,7 +400,8 @@ export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
-  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure">;
+  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">; // "none": no check has reported on the sha at all
+  onBranch(repo: string, branch: string, sha: string): Promise<boolean>; // the branch head or one of its ancestors (Task 12)
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>; // CODEOWNERS first
   prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
@@ -430,19 +431,22 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
 ### Task 7: GitHub adapters and webhook intake
 
 **Files:**
-- Create: `src/adapters/github/app.ts`, `src/adapters/github/backlog.ts`, `src/adapters/github/repo-host.ts`, `src/adapters/github/backlog.contract.test.ts`, `src/watcher/webhook.ts`, `src/watcher/webhook.test.ts`, `src/adapters/github/app.test.ts`
+- Create: `src/adapters/github/backlog.ts`, `src/adapters/github/backlog.test.ts`, `src/adapters/github/repo-host.ts`, `src/adapters/github/repo-host.test.ts`, `src/adapters/github/backlog.contract.test.ts`, `src/watcher/webhook.ts`, `src/watcher/webhook.test.ts`. Callers build the App with `new App({ appId, privateKey })` from `@octokit/app`, so there's no wrapper module.
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `RepoHost` and `backlogContract` from Task 6, and `appendEvent` from Task 4.
 - Produces:
   - `githubBacklog(cfg: { app: App; installationId: number; owner: { type: "user" | "org"; login: string }; projectToken: string | null; projectNumber: number; fieldMap: FieldMap }): BacklogAdapter`, with `capabilities.webhooks = true`. It resolves the project's node id once, through GraphQL `user(login:)` or `organization(login:)` and `projectV2(number:)`, so `config/sources.yml` holds only the number the board's URL shows.
-    - **Events.** Issue, PR, check and dependency events come from the App webhook. Project item changes come from an organization's `projects_v2_item` webhook when `owner.type` is `org`. A user-owned project has no such webhook, so its changes come only through the 5-minute poll.
+    - **Events.** Issue, PR, check and dependency events come from the App webhook. Project item changes come only through the 5-minute poll. A user-owned project has no `projects_v2_item` webhook, and an organization's names an item node rather than an issue number, so `parseWebhook` maps it to `ignored` and the next poll picks the change up.
     - **Tokens.** Board reads and writes use `projectToken` when `owner.type` is `user`, and the App's installation token when it's `org`. Issue comments, labels and closing go through the App in both cases.
     - **Test.** A user-owned config with a null `projectToken` throws at construction, naming the missing secret.
   - `githubRepoHost(app: App, installationId: number): RepoHost`, used only in the control plane, which holds the App key.
+    - **`onBranch`.** `GET /repos/{o}/{r}/compare/{sha}...{branch}` answers `status: "ahead"` when the branch contains the sha and `"identical"` at its head, and `"diverged"` or `"behind"` otherwise, so only the first two are true. The probe on this repo: `compare/5d86133...main` gave `ahead` and `compare/9a850c6...main`, a commit only on a factory branch, gave `diverged`.
+    - **`checksOnSha` and `none`.** `none` means `GET .../commits/{sha}/check-runs` and `GET .../commits/{sha}/status` both report `total_count: 0`. A `githubRepoHost` that never returns `none` leaves the cell API answering `pending` for good, instead of `none` after 10 minutes.
   - `cellRepoHost(getToken: () => Promise<string>): Pick<RepoHost, "openOrUpdatePr" | "requestReviewers">`, used in the cell with the token from `/github-token`. Checks reach the cell only through the cell API, per Run contract 6.
   - `verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean`
-  - `handleWebhook(deps, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 }>`
+  - `handleWebhook(deps: { pool; secret: string; parse: BacklogAdapter["parseWebhook"] }, req: { headers; rawBody: Buffer }): Promise<{ status: 204 | 401 | 200 | 400 }>`. A bad signature, or an empty secret, gets 401 with nothing written. A signed body with no delivery id or no JSON gets 400. Otherwise the delivery id and one event of kind `webhook`, with payload `{ deliveryId, githubEvent, event }` where `event` is `parse`'s `FactoryWebhookEvent`, go in one transaction: 204 the first time, 200 and no event for a redelivery.
+  - A `comment` dedupe marker counts only in a comment by a bot user, so a person can't post a guessable key first and suppress the factory's comment.
 - `FieldMap` mirrors the spec: `{ acceptanceCriteriaHeading: string; statusField: string; statusFor: Record<ItemState, string | null>; optInLabel: string; sprintField: string | null; readinessFields: string[] }`. `readinessFields` names board fields, such as Size, that the readiness check passes to the judge, so `dor.md` can refer to them. `statusFor` names the board status for each factory state, and a null entry leaves the board alone. For example, Queued maps to "Todo", InProgress, SignOff and NeedsInput map to "In Progress", InReview maps to "In Review", Done maps to "Done", and Eligible maps to null.
 
 - [ ] **Step 1: Write failing tests:**
@@ -450,8 +454,8 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - Calling `handleWebhook` twice with the same `X-GitHub-Delivery` stores one `webhook_delivery` row and one event. The second call returns 200 with no event.
   - `handleWebhook` with a bad signature returns 401 and writes nothing.
   - `cellToken` sends `permissions: { contents: "write", pull_requests: "write", issues: "write" }` and `repositories: [repo]`, and the body has no `statuses` or `checks` key. Assert this against a stubbed `app.octokit.request`.
-  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased and its author's login. A comment by the App's own bot user maps to `ignored`, so the factory never reacts to its own posts.
-  - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` otherwise.
+  - `parseWebhook` maps an `issue_comment` with action `created` to `{ kind: "comment" }`, and a `pull_request_review` with action `submitted` to `{ kind: "review" }` with the review's state lowercased and its author's login. A comment or review by any bot user, the App's own included, maps to `ignored`, so the factory never reacts to its own posts.
+  - `requestReviewers` returns the CODEOWNERS owners of the changed files when the repo has a CODEOWNERS file, and `fallback` when it has none or names nobody but the PR author.
   - `prState` reports `lastChangesRequestedAt` as the `submitted_at` of the newest review in state `CHANGES_REQUESTED` whose author is in `trustedLogins`, and null when there is none. A newer `CHANGES_REQUESTED` review from a login outside the list leaves it unchanged (Run contract 10). That is the poller's backstop for a missed review webhook, under Run contract 10.
   - `openReviewComments` returns every comment, with its author, from the PR's unresolved review threads, and none from resolved ones. Assert this against a stubbed GraphQL `reviewThreads` reply that has one resolved and one unresolved thread. `fakeRepoHost` from Task 6 passes the same case. The control plane uses it to build `/context`'s `trustedComments` (Task 12).
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
@@ -462,7 +466,7 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
   - Dependencies come from `GET /repos/{o}/{r}/issues/{n}/dependencies/blocked_by`, filtered to open issues.
   - `comment` stores the `dedupeKey` as an HTML comment, `<!-- factory:KEY -->`, and checks for it before posting.
 - [ ] **Step 4: Run the unit tests.** Expected: PASS.
-- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. Run it with that variable. Expected: every contract case passes.
+- [ ] **Step 5: Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account, using `github-project-token`, and only when `FACTORY_GH_CONTRACT=1` is set. It seeds issues in `FACTORY_GH_REPO`, a sandbox repo the App is installed on, `ricksu978/factory-sandbox`. It refuses a repo with a `.factory/config.yml`, because the live board auto-adds this repo's `factory` issues, and a poller could take test issues as real work. Run it with that variable. Expected: every contract case passes.
 - [ ] **Step 6: Commit** `feat(github): backlog and repo host adapters, webhook intake`.
 
 ---
@@ -503,10 +507,11 @@ export type ReviewComment = { threadId: string; path: string; line: number | nul
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
     - **Stranger's review.** A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview, because the poller passes only allowlisted `github_login` values to `prState`. The same review from the dev owner's login requeues the item to address.
   - **Policy change.** After any readiness input changes on the default branch, so `readinessSha` no longer matches `item.readiness_policy_sha`, the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`. The gate then runs as usual, and an item that now passes moves to Queued. A repo on the default file gets the same re-gate when a deploy changes `policy/dor.md`, because the default's sha is the SHA-256 of its text. Adding a missing `dod.md`, or fixing a `pr-review.md` that held a `run:` line, re-gates too, and posts a fresh comment.
+  - **Judge failure.** A `judge` that throws, as `haikuJudge` does on a usage limit (Task 11), leaves that item in Eligible with no comment. The same `pollOnce` still gates the other items, reads every `prState` and saves its cursor, so a limit that lasts days never stops merge or withdrawal detection.
   - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`, recording `merge_sha`.
   - **Closed PR.** An InReview item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event.
+- [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event, which Task 7's intake stores as an event of kind `webhook` whose `payload.event.kind` is `item_changed`.
 - [ ] **Step 4: Run the tests.** Expected: PASS.
 - [ ] **Step 5: Commit** `feat(watcher): polling with cursor`.
 
@@ -623,30 +628,36 @@ export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn
 export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
+export function agentOptions(a: /* runAgent's argument */): Options; // the SDK options for a's mode
 export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promise<string>; // raw reply; gate() parses it
 ```
 
-  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1` and `mode: "judge"`. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt puts the repo's `dor.md` in the instructions and the item text, with its readiness fields, in a fenced data block that it treats as requirements to weigh, never as commands. It asks for one JSON line per `dor.md` criterion, per Run contract 11, then a last line `{"flags":[]}`. `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires. That check is the engine's, and no `dor.md` can remove it.
+  This is the only module that imports `@anthropic-ai/claude-agent-sdk`. `haikuJudge` calls `runAgent` with `model: sop.models.triage`, `maxTurns: 1`, `mode: "judge"` and a 2-minute timeout. It runs in the control plane, which holds the App key and database access, while reading untrusted item text, so judge mode carries none of the cell's freedoms. Its prompt puts the repo's `dor.md` in the instructions, lists each criterion as a JSON line with its index, and puts the item text, with its readiness fields, as JSON in a fenced data block that it treats as requirements to weigh, never as commands. The fence is one backtick longer than the longest backtick run in the data, so item text can't close it. It asks for one JSON line per `dor.md` criterion, per Run contract 11, then a last line `{"flags":[]}`. `flags` covers requests for credentials, CI or workflow changes, and access outside the repo, as spec §9 requires. That check is the engine's, and no `dor.md` can remove it. A run that isn't `ok` makes `haikuJudge` throw instead of returning its text, so a usage limit never reads as the item failing readiness, and the poller tries again on its next poll.
+
+  `haikuJudge` types its inputs by the fields it reads, `sop.models.triage` and the `dor` policy's `text` and `criteria`, so Task 9's `Sop` and `Policy` fit without this module importing them.
 
 - [ ] **Step 1: Write failing `foldMessages` tests** against arrays of SDK-shaped messages:
   - A `result` with `subtype: "success"` gives `ok: true`, the result text, and `costUsd` as the sum of `modelUsage[*].costUSD`. `tokensIn` sums `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`, and `tokensOut` sums `outputTokens`.
-  - A `rate_limit_event` with `rate_limit_info.status: "rejected"` and `resetsAt: 1762400000` gives `limit.resetsAt = 1762400000` and `ok: false`.
-  - A `rate_limit_event` with `status: "allowed_warning"`, `utilization: 0.74` and a `resetsAt` gives `usage: { utilization: 0.74, resetsAt }`, leaves `limit` null and doesn't change `ok`. The last such event in the stream wins.
+  - A `rate_limit_event` with `rate_limit_info.status: "rejected"` and `resetsAt: 1762400000` gives `limit.resetsAt = 1762400000` and `ok: false`, unless the run still ends in a clean success, as it can on overage. Then `limit` is null and `ok` is true, so a finished stage isn't parked until the reset. A rejection with no `resetsAt` waits 5 hours from now, as Task 12 does for usage.
+  - A `rate_limit_event` with `status: "allowed_warning"`, `utilization: 0.74` and a `resetsAt` gives `usage: { utilization: 0.74, resetsAt }`, leaves `limit` null and doesn't change `ok`. Any event that carries `utilization` sets `usage`, and the last one in the stream wins.
   - A `result` with `subtype: "error_max_turns"` gives `ok: false` and keeps the cost.
+  - A `result` with `subtype: "success"` and `is_error: true` gives `ok: false`. The SDK sends that shape when a turn ends on an API error (`sdk.d.ts`, `SDKResultMessage`), and PBI 11's usage-limit scenario expects it after a rejection. A stream with no `result` gives `ok: false`.
   - `transcript` is the JSONL of every message, for Blob upload.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `runAgent`.** Call `query({ prompt, options })` with `model`, `cwd`, `maxTurns` and the `AbortController` behind `signal`, plus the options for its mode.
 
   In `cell` mode:
   - `settingSources: ["user", "project"]`, so the vendored `~/.claude/agents` and the repo's own `.claude/` load.
-  - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token.
+  - `permissionMode: "bypassPermissions"`, which is safe only because the cell is a throwaway container holding a one-repo token. The SDK also requires `allowDangerouslySkipPermissions: true` for that mode.
   - `sandbox` from the sandbox probes, Task 2 Step 8 for local containers and Task 19 Step 9 for Azure: the egress allowlist when the sandbox can start, otherwise omitted. Locally it's omitted, because bubblewrap can't start under Docker Desktop, and Task 13's egress proxy enforces the allowlist instead. In Azure, Task 19 Step 9 decides.
   - `disallowedTools` holds each of `WebSearch` and `WebFetch` that `webTools` leaves out, so with the default `[]` both are denied. This only stops the model being offered a tool. The fence is Task 12's gateway, which refuses the same tools in any request body, since an agent with a shell can call the gateway directly (spec §6 "Web tools").
 
   In `judge` mode:
   - `settingSources: []`, so nothing on disk loads;
   - no `permissionMode`, so the default applies;
-  - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)).
+  - `tools: []`, which the pinned SDK's types document as the way to disable every built-in tool;
+  - `strictMcpConfig: true` with no `mcpServers`, so no MCP server from a project, user or plugin config starts;
+  - `disallowedTools: ["*"]`, which the SDK reference gives as the way "to deny every tool" ([TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript)). The pinned 0.3.318 types don't mention `"*"`, so judge mode sets all three. A live judge-mode run on Haiku succeeded, and its `init` message listed no tools and no MCP servers.
 
   Add a unit test asserting that the options built for `judge` mode contain none of the cell-mode settings. Add another asserting that cell mode with no `webTools` denies both `WebSearch` and `WebFetch`, and with `webTools: ["WebSearch"]` denies only `WebFetch`.
 
@@ -660,18 +671,24 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 ### Task 12: Cell API in the control plane
 
 **Files:**
-- Create: `src/control/cell-api.ts`, `src/control/cell-api.test.ts`, `src/http/server.ts`, which is a plain `node:http` route table that Task 15 extends
-- Modify: `src/store/runs.ts`, `src/control/model-gateway.ts` and its test
+- Create: `src/control/cell-api.ts`, `src/control/cell-api.test.ts`, `src/control/board.ts` for Run contract 8's mirroring, `db/migrations/003_cell_api.sql`, and `src/http/server.ts`, which is a plain `node:http` list of handlers that Task 15 extends
+- Modify: `src/store/runs.ts`, `src/store/items.ts`, `src/adapters/types.ts` and `src/adapters/fake.ts`, `src/control/model-gateway.ts` and its test
 
 **Interfaces:**
-- Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken`, `RepoHost.openReviewComments`, `RepoHost.readFile` and `parseRepoConfig`.
-- Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write.
-  - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active.
+- Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken`, `RepoHost.openReviewComments`, `RepoHost.readFile`, `RepoHost.checksOnSha`, `RepoHost.onBranch` and `parseRepoConfig`.
+- `cellApi(deps): Handler` takes `{ pool, secret, repoHost, backlogFor, stageAfter, uploadUrl, gateway: { upstream, ownerToken }, webToolsOf, killSwitch?, now? }`. `killSwitch()` is true while the kill switch's env flag is on, and defaults to reading `FACTORY_KILL=1`. Three of these stand in for code that other tasks own, and the cell API imports none of that code:
+  - `stageAfter(sopVersion, stageId)` names the next stage in the pinned SOP, from Task 9's `loadSop`;
+  - `webToolsOf(configYaml)` is `parseRepoConfig(configYaml).webTools` from Task 9;
+  - `uploadUrl(path)` is `blobUploadUrl(FACTORY_BLOB, CELL_BLOB_HOST)` locally, and a user delegation key in Task 19.
+- `mirrorBoard({ pool, backlogFor, repoHost }): () => void` registers Run contract 8 through `onTransition`. It also closes a withdrawn item's PR when `prState` says it's still open.
+- `003_cell_api.sql` adds `question.decision` (`approve`, `changes` or `answer`), which `decide` writes in Task 15 and `/context` returns as `decision.kind`, and `check_watch(run_id, sha, first_asked_at)`, which starts each sha's 10-minute clock.
+- Produces the routes below, all under `/internal/cells/:runId`, all with `Authorization: Bearer <runToken>`. The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex. Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one. A failure of either check gets 409 with no write. Both checks run under the item's row lock, in the transaction that holds the route's writes, so a re-claim can't land between check and write. The token is checked before the body, so a fenced cell gets 409 even for a request that would get 400. A body over 1 MiB gets 413 and is drained, not kept, because the gateway shares this listener and is on public ingress in Azure.
+  - `POST /lease` takes `{ generation }` and returns `{ ok: true, stop: boolean }`. `stop` is true when the kill switch, a pause or a stop-run override is active. The kill switch is either half of Task 13's definition: `FACTORY_KILL=1` or a `kill` override.
   - `POST /github-token` returns `{ token, expiresAt }`.
-  - `GET /context` returns the fields Run contract 5 lists.
-  - `POST /policy-results` takes `{ file: "pr-review" | "dod", source: "repo" | "default", stageId, attempt, checkedSha, verdicts: Verdict[] }` and writes them to `policy_result` for the run. Run detail shows each criterion's verdict from its latest stage attempt.
-  - `POST /pr` takes `{ prNumber, prUrl }` and records them on the run, so the control plane starts polling that PR's checks (Run contract 6).
-  - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none" }` for that commit on the run's branch, from the control plane's own poll in Run contract 6. The first request for a sha starts its 10-minute `none` clock. A sha that isn't on the run's branch gets 400.
+  - `GET /context` returns the fields Run contract 5 lists. `decision` comes only from questions asked since the run started, so a run that `criteria_changed` started never sees the previous run's decision.
+  - `POST /policy-results` takes `{ file: "pr-review" | "dod", source: "repo" | "default", stageId, attempt, checkedSha, verdicts: Verdict[] }` and writes them to `policy_result` for the run. Run detail shows each criterion's verdict from its latest stage attempt. A `person` verdict outside `dod.md` gets 400, so a cell can't turn a `pr-review.md` fail into an unticked checklist line.
+  - `POST /pr` takes `{ prNumber, prUrl }` and records them on the run, so the control plane starts polling that PR's checks (Run contract 6). The stored URL is built from the run's repo and `prNumber`, and a `prUrl` that differs gets 400, here and on `pr_opened`, because the board links it from a public item.
+  - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none" }` for that commit on the run's branch. The control plane reads it on each request through its own `RepoHost.checksOnSha`, so the cell never sees a check API, per Run contract 6. The first request for a sha records it in `check_watch`, which starts its 10-minute `none` clock, and `none` from the host reads as `pending` until then. A sha that `RepoHost.onBranch` doesn't place on the run's branch gets 400, and so does one it places on main, since the branch starts from main and main's commits are its ancestors too. So a cell can't ask about main's green head.
   - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed", model, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage? }`. It writes `stage_run` and, on `passed`, `run.next_stage` per Run contract 1. When `usage.utilization` is at or above `wip_policy.usage_reserve_at`, it sets `wip_policy.usage_paused_until` to `usage.resetsAt`, or to now plus 5 hours when the event gave no reset time.
   - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string }, scenariosSha?: string, lockedFiles?: string[], prNumber?: number, prUrl?: string, resumeAt?: string, tier?: "Low" | "Medium" | "High", tierReasons?: string[] }`. A cell may send only `scenarios_written`, `blocked`, `pr_opened`, `retries_exhausted` and `usage_limited`, and any other event gets 400.
   - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL, signed locally from the Azurite connection in `FACTORY_BLOB`, with its host swapped for `CELL_BLOB_HOST` as Task 2 Step 8 proved, and in Azure with a user delegation key, for `<kind>s/<runId>/<stageId>-<attempt>.<jsonl|ndjson>`, valid for 15 minutes.
@@ -866,7 +883,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
   - **Red proof.** A red stage whose report has a green scenario retries twice, then posts `blocked` with "scenario passes before any behaviour exists".
   - **Locked files at every gate.** These cases use a real temporary repo and a real `Git`, because `matchesLock` runs `git diff` and a fake `Git` writes no commits. A red stage whose agent edits a locked feature file and leaves it uncommitted retries twice, then posts `blocked`. An address stage whose agent commits an edit to a locked feature file never pushes it, never posts `pr_opened`, and posts `blocked` after its retries. A self-review fix that commits an edit to a locked feature file posts `blocked` at once, with no second round. A red stage whose agent left a clean tree passes, with HEAD unchanged by `commitAll`.
   - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit, post `/stage failed`, post `/transition` with `usage_limited` and `resumeAt`, and return `limited`. That attempt doesn't count against retries.
-  - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`, commits the work in progress, and returns `stopped`.
+  - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`, commits the work in progress, and returns `stopped`. An aborted `runAgent` doesn't throw, because `foldMessages` catches any error from the stream. It returns `ok: false`, so the engine checks `signal.aborted` after every agent call and never counts a stop as a failed attempt. In this test the fake agent answers the abort as `runAgent` does. It resolves with `ok: false` and never rejects, so an engine that waits for a throw fails here.
   - **Lost lease.** A 409 from any API call makes the engine stop at once, with no push and no further calls.
 - [ ] **Step 4: Run the tests.** Expected: FAIL.
 - [ ] **Step 5: Implement `engine.ts`, `api-client.ts` and `main.ts`.**
@@ -908,7 +925,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - `POST /users` needs owner.
     - `GET /phase0` is the exit report.
   - `scripts/seed-owner.ts` takes dash-free words `provider=<p>`, `subject=<id>`, `email=<e>` and `github-login=<login>`, plus an optional bare `product-owner`, and inserts the first owner. `provider` is `google`, `microsoft` or `dev`. It exits 1 on any other word. It runs only through `migrate-cli.ts`. Locally the dev owner seeds itself (Task 4), so `seed-owner` is for Azure's migrate job and for adding a second local user.
-  - `decide(c, d: { itemId: string; userId: string; kind: "approve" | "changes" | "answer"; text: string; via: "dashboard" | "comment" }): Promise<"applied" | "ignored" | "forbidden">`. The routes and the webhook's `comment` events both call it, so the two channels can't drift.
+  - `decide(c, d: { itemId: string; userId: string; kind: "approve" | "changes" | "answer"; text: string; via: "dashboard" | "comment" }): Promise<"applied" | "ignored" | "forbidden">`. The routes and the webhook's `comment` events both call it, so the two channels can't drift. It records `d.kind` in `question.decision` and `d.text` in `question.answer`, which is what Task 12's `/context` hands the cell as `decision`.
     - **Roles.** `decide` owns the role rules. `approve` and `changes` need `product_owner`, and `answer` needs operator or product owner. The routes only check that the user is signed in and allowlisted.
     - **Effects.** It answers the open question and applies Run contract 1. On approve it copies `scenarios_sha` into `features_lock_sha`. On an Abandoned item it revives the item through `requeued`.
   - `parseCommand(body: string): { kind: "approve" | "changes" | "answer"; text: string } | null`, which reads only a leading `/approve`, `/changes` or `/answer`.
