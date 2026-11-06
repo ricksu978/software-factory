@@ -1,6 +1,7 @@
 // The shadow-mode risk classifier (spec §6, plan Task 16). It records a tier and reasons on every factory PR. A
 // person still approves every PR in this phase, so a wrong tier costs nothing yet, but the floors below are the
 // engine's: no risk.md and no classifier answer can take a change under them.
+import { fenced } from "../core/fence.ts";
 import { matchesPath } from "../core/glob.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import type { RepoConfig } from "../config/repo-config.ts";
@@ -33,10 +34,13 @@ export type RiskContext = {
   signal?: AbortSignal;
 };
 
-// ponytail: the diff goes to the model whole up to this size; a bigger one is cut, and the reasons say so.
+// ponytail: the diff goes to the model whole up to this size; a bigger one is cut, which raises the floor to Medium
+// because the model never saw the rest.
 const MAX_DIFF = 200_000;
+const PASS_TIMEOUT_MS = 120_000;
 
-const fence = (diff: string) => `<diff>\n${diff.slice(0, MAX_DIFF)}\n</diff>`;
+// A backtick fence longer than any run in the diff, so text in a changed file can't close it and pass as prompt.
+const fence = (diff: string) => fenced(diff.slice(0, MAX_DIFF), "diff");
 
 function tierPrompt(diff: string, files: string[], risk: string): string {
   return [
@@ -75,10 +79,20 @@ export async function classifyRisk(diff: string, files: string[], ctx: RiskConte
     min = max(min, "Medium");
     reasons.push(`a DoD line needs a person at merge: ${v.criterion}`);
   }
-  if (diff.length > MAX_DIFF) reasons.push(`the diff was cut to ${MAX_DIFF} characters for the classifier`);
+  if (diff.length > MAX_DIFF) {
+    min = max(min, "Medium");
+    reasons.push(`the diff was cut to ${MAX_DIFF} characters for the classifier, so the change is at least Medium`);
+  }
 
-  const ask = async (prompt: string) =>
-    jsonLines((await ctx.agent({ prompt, model: ctx.sop.models.coding, cwd: process.cwd(), mode: "judge", maxTurns: 1, signal: ctx.signal ?? new AbortController().signal })).text);
+  const ask = async (prompt: string) => {
+    // Bounded either way: a caller's signal can cancel sooner, and a missing one never leaves a pass running forever.
+    const timeout = AbortSignal.timeout(PASS_TIMEOUT_MS);
+    const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
+    const r = await ctx.agent({ prompt, model: ctx.sop.models.coding, cwd: process.cwd(), mode: "judge", maxTurns: 1, signal });
+    // A failed run isn't an answer, so a usage limit or an API error never gets recorded as an unreadable tier.
+    if (!r.ok) throw new Error(`classifier run failed: ${r.limit ? `usage limit until ${r.limit.resetsAt}` : r.text}`);
+    return jsonLines(r.text);
+  };
 
   const first = (await ask(tierPrompt(diff, files, ctx.risk.text))).find((o) => TIERS.includes(o.tier as Tier));
   if (!first) return { tier: "High", reasons: [UNREADABLE, ...reasons] };
