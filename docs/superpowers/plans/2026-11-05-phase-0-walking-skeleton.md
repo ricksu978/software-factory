@@ -668,7 +668,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy) => Promis
 
 **Interfaces:**
 - Consumes: `renewLease`, `transitionItem`, `appendEvent`, `RepoHost.cellToken`, `RepoHost.openReviewComments`, `RepoHost.readFile`, `RepoHost.checksOnSha`, `RepoHost.onBranch` and `parseRepoConfig`.
-- `cellApi(deps): Handler` takes `{ pool, secret, repoHost, backlogFor, stageAfter, uploadUrl, gateway: { upstream, ownerToken }, webToolsOf, now? }`. Three of these stand in for code that other tasks own, and the cell API imports none of that code:
+- `cellApi(deps): Handler` takes `{ pool, secret, repoHost, backlogFor, stageAfter, uploadUrl, gateway: { upstream, ownerToken }, webToolsOf, killSwitch?, now? }`. `killSwitch()` is true while the kill switch's env flag is on, and defaults to reading `FACTORY_KILL=1`. Three of these stand in for code that other tasks own, and the cell API imports none of that code:
   - `stageAfter(sopVersion, stageId)` names the next stage in the pinned SOP, from Task 9's `loadSop`;
   - `webToolsOf(configYaml)` is `parseRepoConfig(configYaml).webTools` from Task 9;
   - `uploadUrl(path)` is `blobUploadUrl(FACTORY_BLOB, CELL_BLOB_HOST)` locally, and a user delegation key in Task 19.
