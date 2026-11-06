@@ -123,7 +123,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): BacklogAdapter {
       const res = await (await board()).graphql<any>(PROJECT(scope), { login: cfg.owner.login, number: cfg.projectNumber });
       const p = res[scope].projectV2;
       return { id: p.id, fields: p.fields.nodes.filter((f: Field) => f.id) };
-    })());
+    })().catch((e) => {
+      // A failed lookup isn't cached, so one rate limit or token blip doesn't break the adapter until a restart.
+      project = undefined;
+      throw e;
+    }));
 
   const toItem = (raw: RawItem, rank: number, projectId: string): FactoryItem | null => {
     const c = raw.content;
@@ -207,8 +211,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): BacklogAdapter {
       const i = await issue(externalId);
       const marker = `<!-- factory:${dedupeKey} -->`;
       // ponytail: one page of 100 comments is checked for the marker; an issue with more could get a repeat.
-      const existing = (await gh.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...i, per_page: 100 })).data as { body?: string }[];
-      if (existing.some((c) => c.body?.includes(marker))) return;
+      const existing = (await gh.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...i, per_page: 100 })).data as { body?: string; user?: { type?: string } }[];
+      // Only a bot's comment counts. The repo is public and the keys are guessable, so a person could otherwise post
+      // the marker first and stop the factory's comment from ever appearing.
+      if (existing.some((c) => c.user?.type === "Bot" && c.body?.includes(marker))) return;
       await gh.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...i, body: `${marker}\n${body}` });
     },
 

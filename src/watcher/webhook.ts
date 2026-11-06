@@ -7,7 +7,8 @@ import { appendEvent } from "../store/events.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
 export function verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
-  if (!header?.startsWith("sha256=")) return false;
+  // An empty secret would accept anything signed with an empty key, so a missing secret refuses every delivery.
+  if (!secret || !header?.startsWith("sha256=")) return false;
   const want = Buffer.from(`sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`);
   const got = Buffer.from(header);
   return got.length === want.length && timingSafeEqual(got, want);

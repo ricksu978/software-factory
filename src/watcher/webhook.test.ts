@@ -20,6 +20,10 @@ describe("verifySignature", () => {
     assert.equal(verifySignature(secret, body, sign("sha1", body)), false);
     assert.equal(verifySignature(secret, body, "sha256=short"), false);
   });
+
+  test("an empty secret refuses even a body signed with the empty key", () => {
+    assert.equal(verifySignature("", body, `sha256=${createHmac("sha256", "").update(body).digest("hex")}`), false);
+  });
 });
 
 describe("handleWebhook", dbTest, () => {

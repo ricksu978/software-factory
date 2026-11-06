@@ -15,6 +15,46 @@ describe("githubBacklog", () => {
     assert.doesNotThrow(() => githubBacklog({ app, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap }));
   });
 
+  // An org-owned board goes through the installation client, so one stub serves both the board and the issues.
+  function orgBoard(comments: { body: string; user: { type: string } }[], failFirstLookup = false) {
+    const posted: string[] = [];
+    let lookups = 0;
+    const client = {
+      async request(route: string, params: Record<string, any> = {}) {
+        if (route.startsWith("GET") && route.endsWith("/comments")) return { data: comments };
+        if (route.startsWith("POST") && route.endsWith("/comments")) posted.push(params.body);
+        return { data: {} };
+      },
+      async graphql(query: string) {
+        if (query.includes("projectV2(number")) {
+          if (failFirstLookup && lookups++ === 0) throw new Error("rate limited");
+          return { organization: { projectV2: { id: "P1", fields: { nodes: [] } } } };
+        }
+        return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
+          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
+          content: { number: 7, title: "t", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
+        }] } } };
+      },
+    };
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    return { adapter, posted };
+  }
+
+  test("a dedupe marker posted by a person doesn't stop the factory's comment, and one posted by a bot does", async () => {
+    const planted = orgBoard([{ body: "<!-- factory:pr:x -->", user: { type: "User" } }]);
+    await planted.adapter.comment("7", "hello", "pr:x");
+    assert.equal(planted.posted.length, 1);
+    const own = orgBoard([{ body: "<!-- factory:pr:x -->\nhello", user: { type: "Bot" } }]);
+    await own.adapter.comment("7", "hello", "pr:x");
+    assert.equal(own.posted.length, 0);
+  });
+
+  test("a failed project lookup isn't cached, so the next call tries again", async () => {
+    const { adapter } = orgBoard([], true);
+    await assert.rejects(adapter.getItem("7"), /rate limited/);
+    assert.equal((await adapter.getItem("7"))?.externalId, "7");
+  });
+
   test("acceptance criteria are the list under the heading, up to the next heading", () => {
     const body = "Intro\n\n## Acceptance criteria\n\n- [ ] First thing\n- Second thing\n* [x] Third\n\nNot a criterion.\n\n## Notes\n- not this";
     assert.deepEqual(acceptanceCriteria(body, "Acceptance criteria"), ["First thing", "Second thing", "Third"]);
