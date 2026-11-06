@@ -39,6 +39,8 @@ export type CellApiDeps = {
 const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited"]);
 const NONE_AFTER_MS = 600_000;
 const USAGE_PAUSE_MS = 5 * 3_600_000;
+// ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
+const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
@@ -161,8 +163,7 @@ const routes: Record<string, Route> = {
       nextStage: run.next_stage,
       decision: decision.rows[0] ? { kind: decision.rows[0].decision, text: decision.rows[0].answer ?? "" } : null,
       lockSha: run.features_lock_sha, lockedFiles: run.locked_files ?? [], prNumber: run.pr_number, repo,
-      // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
-      base: "main",
+      base: BASE,
       branch: runBranch({ branch: run.branch, externalId: run.external_id, runNumber: run.run_number }),
       configSha: run.config_sha, sopVersion: run.sop_version,
       dodVerdicts: dod.rows.map((v) => ({ index: v.criterion_index, criterion: v.criterion, status: v.status, reason: v.reason ?? "" })),
@@ -206,6 +207,9 @@ const routes: Record<string, Route> = {
     const repo = repoOf(run);
     const branch = runBranch({ branch: run.branch, externalId: run.external_id, runNumber: run.run_number });
     if (!(await deps.repoHost.onBranch(repo, branch, sha))) throw new BadRequest(`${sha} isn't on ${branch}`);
+    // The branch starts from main, so main's commits are its ancestors too. Only the branch's own commits pass, or a
+    // cell could ask about main's green head instead of its own push.
+    if (await deps.repoHost.onBranch(repo, BASE, sha)) throw new BadRequest(`${sha} is on ${BASE}, not only on ${branch}`);
     const watch = await c.query<{ first_asked_at: Date }>(
       `insert into check_watch (run_id, sha, first_asked_at) values ($1, $2, $3)
        on conflict (run_id, sha) do update set sha = excluded.sha returning first_asked_at`,
