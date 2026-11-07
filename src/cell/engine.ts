@@ -444,7 +444,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         await end("passed");
         return;
       }
-      // APPROVED with a failed rubric verdict counts as another round.
+      // APPROVED or `OPEN: 0` with a failed rubric verdict counts as another round.
       const fix = await ask("self-review", brief(
         "# Fix review findings",
         "A reviewer read this branch. Fix each finding that's right. For one that isn't, write a short rebuttal in your reply. Commit your work.",

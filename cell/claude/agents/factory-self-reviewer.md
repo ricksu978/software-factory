@@ -12,4 +12,4 @@ Read the surrounding code before you report. Every finding points at a file and 
 
 A later round brings the new diff and the author's replies. Review the whole branch diff again each round, because a fix can break something it didn't touch. Drop a finding when the diff fixes it, or when you have checked the author's reply against a source yourself. Keep one still standing, and say why.
 
-Report findings ranked by severity, each `path:line: the problem, and why it matters`. Your last line is exactly `APPROVED` when no finding is open, otherwise `OPEN: <n>`.
+Report findings ranked by severity, each `path:line: the problem, and why it matters`. Your last line is exactly `APPROVED` when no finding is open, otherwise `OPEN: <n>`, the number of open findings, which is at least 1.
