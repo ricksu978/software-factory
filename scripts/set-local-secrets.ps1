@@ -7,12 +7,16 @@ param([string]$AppHost = (Split-Path $PSScriptRoot -Parent))
 $ErrorActionPreference = 'Stop'
 
 $src = Get-Content (Join-Path $AppHost 'aspire-apphost/apphost.mts') -Raw
-$secret = [regex]::Matches($src, "secret\('([\w-]+)'\)") | ForEach-Object { $_.Groups[1].Value }
-$plain = [regex]::Matches($src, "addParameter\('([\w-]+)'") | ForEach-Object { $_.Groups[1].Value }
+# Secrets are the ones declared through apphost.mts's secret() helper. @() keeps a single match a list.
+$secret = @([regex]::Matches($src, "secret\('([\w-]+)'\)") | ForEach-Object { $_.Groups[1].Value })
+$plain = @([regex]::Matches($src, "addParameter\('([\w-]+)'") | ForEach-Object { $_.Groups[1].Value })
 if (-not ($secret + $plain)) { throw "no parameters found in $AppHost/aspire-apphost/apphost.mts" }
 
-$file = (aspire secret path --apphost $AppHost --non-interactive --nologo | Select-Object -Last 1).Trim()
+$out = aspire secret path --apphost $AppHost --non-interactive --nologo
 if ($LASTEXITCODE) { throw "aspire secret path failed for $AppHost" }
+$file = "$($out | Select-Object -Last 1)".Trim()
+# Refuse anything but an absolute secrets.json, so a changed CLI output can't send the tokens into the working tree.
+if (-not ([IO.Path]::IsPathRooted($file) -and (Split-Path $file -Leaf) -eq 'secrets.json')) { throw "aspire secret path gave '$file', not a secrets.json path" }
 $store = if (Test-Path $file) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable } else { @{} }
 if (-not $store) { $store = @{} }
 
@@ -25,7 +29,8 @@ foreach ($name in $secret + $plain) {
     $path = (Read-Host "$name ($state), path to the .pem file").Trim().Trim('"', "'")
     $value = if ($path) { (Get-Content -LiteralPath $path -Raw).Trim() } else { '' }
   } elseif ($secret -contains $name) {
-    $value = (Read-Host "$name ($state), hidden" -AsSecureString | ConvertFrom-SecureString -AsPlainText)
+    # NetworkCredential, because ConvertFrom-SecureString throws on the empty input that Enter gives.
+    $value = [Net.NetworkCredential]::new('', (Read-Host "$name ($state), hidden" -AsSecureString)).Password
   } else {
     $value = Read-Host "$name ($state)"
   }
