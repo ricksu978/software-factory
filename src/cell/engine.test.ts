@@ -288,6 +288,29 @@ describe("runCell", () => {
     assert.equal(rounds, 2);
   });
 
+  // PBI 105's live run: the reviewer ended five clean rounds with `OPEN: 0`, and the stage blocked.
+  test("OPEN: 0 with every rubric verdict passed approves, as APPROVED does", async () => {
+    let rounds = 0;
+    const h = harness({ script: (a) => {
+      if (a.agent !== "factory-self-reviewer") return;
+      rounds++;
+      return { text: '{"index":1,"status":"passed","reason":"ok"}\nOPEN: 0' };
+    } });
+    assert.equal(await h.run(), "done");
+    assert.equal(rounds, 1);
+  });
+
+  test("OPEN: 0 with a failed rubric verdict starts another round", async () => {
+    let rounds = 0;
+    const h = harness({ script: (a) => {
+      if (a.agent !== "factory-self-reviewer") return;
+      rounds++;
+      return { text: rounds === 1 ? '{"index":1,"status":"failed","reason":"unclear names"}\nOPEN: 0' : '{"index":1,"status":"passed","reason":"ok"}\nOPEN: 0' };
+    } });
+    assert.equal(await h.run(), "done");
+    assert.equal(rounds, 2);
+  });
+
   test("self-review and address name the factory's own agents, whatever the repo ships", async () => {
     const h = harness();
     mkdirSync(join(h.dir, ".claude", "agents"), { recursive: true });
