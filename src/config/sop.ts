@@ -47,3 +47,15 @@ export function loadSop(yamlText: string): Sop {
   }
   return d as unknown as Sop;
 }
+
+/**
+ * Where a run resumes after `stageId` passes (Run contract 1, issue #97): the next stage the SOP lists. Open-pr and
+ * address hand the item back through pr_opened, and the merge pass isn't an SOP stage, so those, and any stage the
+ * SOP doesn't list, give null and leave the resume pointer where it was.
+ */
+export function stageAfter(sop: Sop, stageId: string): string | null {
+  if (stageId === "open-pr" || stageId === "address") return null;
+  const ids: string[] = sop.stages.map((s) => s.id);
+  const i = ids.indexOf(stageId);
+  return i < 0 ? null : ids[i + 1] ?? null;
+}

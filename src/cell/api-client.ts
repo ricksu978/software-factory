@@ -12,6 +12,8 @@ export type CheckStatus = "pending" | "success" | "failure" | "none";
 export type StageReport = {
   stageId: string; attempt: number; status: "started" | "passed" | "failed"; model: string;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
+  /** The text of the stage's own prompted agent call, for Floor. The cell API keeps the first 500 characters. */
+  message?: string;
 };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;

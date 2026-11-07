@@ -39,7 +39,7 @@ export function signInPage(): string {
   return page("Sign in", "<h1>Sign in</h1><p>Sign in to use the factory dashboard.</p>");
 }
 
-export type ActiveRow = { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[] };
+export type ActiveRow = { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
 export type WaitingRow = { id: string; title: string; state: string; since: Date | null };
 export type NotReadyRow = { id: string; title: string; failed: string[] };
 
@@ -53,10 +53,25 @@ export function age(since: Date | null, now = Date.now()): string {
 
 const link = (id: string, title: string) => `<a href="/items/${escapeHtml(id)}">${escapeHtml(title)}</a>`;
 
-export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: { id: string; title: string }[]; notReady: NotReadyRow[] }, banner: string | null): string {
+/** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */
+function overrideForm(kinds: [kind: string, label: string][], itemId: string | null): string {
+  const id = itemId ? `-${escapeHtml(itemId)}` : "";
+  return `<form method="post" action="/overrides">${itemId ? `<input type="hidden" name="itemId" value="${escapeHtml(itemId)}">` : ""}
+<label for="reason${id}">Reason</label><input id="reason${id}" name="reason" required>
+<p>${kinds.map(([k, label]) => `<button name="kind" value="${k}">${label}</button>`).join(" ")}</p></form>`;
+}
+
+const factoryState: Record<string, string> = { pause: "Paused", drain: "Draining", kill: "Killed" };
+
+export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: { id: string; title: string }[];
+  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
-  return page("Floor", `<h1>Floor</h1>
-<p>${f.waitingCount} of ${f.capacity} waiting</p>
+  const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("");
+  const controls = f.canOperate
+    ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"]], null)}`
+    : "";
+  return page("Floor", `<h1>Floor</h1>${status}
+<p>${f.waitingCount} of ${f.capacity} waiting. <a href="/phase0">Phase 0 report</a></p>
 <h2>Waiting on you</h2>
 ${list(f.waiting.map((w) => `<li>${link(w.id, w.title)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
@@ -64,12 +79,16 @@ ${list(f.next.map((n) => `<li>${link(n.id, n.title)}</li>`), "Nothing is ready t
 <h2>Not ready</h2>
 ${list(f.notReady.map((n) => `<li>${link(n.id, n.title)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>In flight</h2>
-${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${link(a.id, a.title)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td></tr>`).join("\n")}
+${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
+${f.active.map((a) => `<tr><td>${link(a.id, a.title)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
+${controls}
 <script>
-// Floor updates live from the event log: reload a second after the last event, so a burst reloads once.
-let reload; new EventSource("/events").onmessage = () => { clearTimeout(reload); reload = setTimeout(() => location.reload(), 1000); };
+// Floor updates live from the event log: reload a second after the last event, so a burst reloads once. While an
+// operator is filling in a form, it waits, so a half-typed reason isn't lost.
+const busy = () => document.activeElement?.form || [...document.querySelectorAll("form input:not([type=hidden])")].some((i) => i.value);
+let reload; const later = () => { clearTimeout(reload); reload = setTimeout(() => (busy() ? later() : location.reload()), 1000); };
+new EventSource("/events").onmessage = later;
 </script>`, banner);
 }
 
@@ -85,6 +104,12 @@ export type RunDetail = {
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The signed-off feature files at the lock sha. */
   features: { path: string; text: string }[];
+  /** The item's scenarios with their verdicts in the latest red and green reports. */
+  verdicts: { name: string; red: string; green: string }[];
+  /** True when the stored transcripts can be served, so each one is a link. */
+  linkBlobs: boolean;
+  /** An operator's override buttons for this item, or null for anyone else. */
+  controls: { held: boolean; stoppable: boolean; requeueable: boolean } | null;
 };
 
 export function runDetailPage(d: RunDetail, banner: string | null): string {
@@ -96,7 +121,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${escapeHtml(s.tokens_in ?? 0)} in, ${escapeHtml(s.tokens_out ?? 0)} out</td><td>$${escapeHtml(s.cost_usd ?? "0")}</td><td>${s.transcript_ref ? escapeHtml(s.transcript_ref) : ""}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${escapeHtml(s.tokens_in ?? 0)} in, ${escapeHtml(s.tokens_out ?? 0)} out</td><td>$${escapeHtml(s.cost_usd ?? "0")}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const criteria = d.criteria
@@ -111,14 +136,42 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : d.question?.kind === "needs_input"
       ? `<h2>Answer</h2><p>${escapeHtml(d.question.body)}</p><form method="post" action="/items/${id}/answer"><label for="answer">Your answer</label><textarea id="answer" name="answer" required></textarea><p><button>Send the answer</button></p></form>`
       : "";
+  const verdicts = d.verdicts.length
+    ? `<h2>Scenarios at red and green</h2><table><thead><tr><th scope="col">Scenario</th><th scope="col">Red</th><th scope="col">Green</th></tr></thead><tbody>${d.verdicts
+        .map((v) => `<tr><td>${escapeHtml(v.name)}</td><td>${escapeHtml(v.red)}</td><td>${escapeHtml(v.green)}</td></tr>`).join("")}</tbody></table>`
+    : "";
+  const c = d.controls;
+  const controls = c
+    ? `<h2>Controls</h2>${overrideForm([
+        ...(c.held ? [["unhold", "Release the hold"]] : [["hold", "Hold"]]),
+        ...(c.stoppable ? [["stop_run", "Stop the run"]] : []),
+        ...(c.requeueable ? [["requeue", "Re-queue"]] : []),
+      ] as [string, string][], d.item.id)}`
+    : "";
   return page(d.item.title, `<h1>${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${form}${criteria}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}${
+${form}${controls}${criteria}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}${
     d.features.length
       ? `<h2>Signed-off scenarios</h2>${d.features.map((f) => `<h3>${escapeHtml(f.path)}</h3><pre>${escapeHtml(f.text)}</pre>`).join("")}`
       : ""
   }`, banner);
+}
+
+export type Phase0Row = { item_id: string; title: string; pr_url: string | null; merged_at: Date | null; cost: number; risk_tier: string | null; tier_reasons: string[] | null };
+
+const usd = (n: number) => `$${n.toFixed(2)}`;
+
+/** Spec §13's Phase 0 exit report for this database. The runbook adds the local and Azure figures together. */
+export function phase0Page(rows: Phase0Row[], banner: string | null): string {
+  const total = rows.reduce((sum, r) => sum + r.cost, 0);
+  const summary = `${rows.length} merged PR${rows.length === 1 ? "" : "s"}, ${usd(total)} in all, ${rows.length ? usd(total / rows.length) : "$0.00"} each on average.`;
+  const table = rows.length
+    ? `<table><thead><tr><th scope="col">Item</th><th scope="col">PR</th><th scope="col">Merged</th><th scope="col">Cost</th><th scope="col">Shadow tier</th></tr></thead><tbody>${rows
+        .map((r) => `<tr><td>${link(r.item_id, r.title)}</td><td>${r.pr_url ? `<a href="${escapeHtml(r.pr_url)}">${escapeHtml(r.pr_url)}</a>` : ""}</td><td>${escapeHtml(r.merged_at?.toISOString().slice(0, 10) ?? "")}</td><td>${usd(r.cost)}</td><td>${escapeHtml(r.risk_tier ?? "not classified")}${r.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</td></tr>`)
+        .join("")}</tbody></table>`
+    : `<p class="muted">No factory PR has merged yet.</p>`;
+  return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${table}`, banner);
 }

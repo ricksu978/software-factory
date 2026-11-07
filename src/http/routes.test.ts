@@ -3,6 +3,8 @@ import { request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
+import { fakeLauncher } from "../scheduler/launcher.ts";
+import { tick } from "../scheduler/scheduler.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { createAuth } from "./auth.ts";
 import { dashboardRoutes, tokenBanner } from "./routes.ts";
@@ -26,6 +28,7 @@ describe("dashboard routes", dbTest, () => {
   let host: ReturnType<typeof fakeRepoHost>;
   let sourceId: string;
   let routes: ReturnType<typeof dashboardRoutes> | null = null;
+  let blobs: Map<string, string>;
   const handler: Handler = (req, res) => (routes ? routes(req, res) : Promise.resolve(false));
 
   before(async () => {
@@ -45,7 +48,11 @@ describe("dashboard routes", dbTest, () => {
     fake = fakeBacklog();
     host = fakeRepoHost();
     sourceId = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
-    routes = dashboardRoutes({ pool: db.pool, auth: createAuth({ mode: "azure" }), origin, adapter: fake.adapter, sourceId, repoHost: host, env: {} });
+    blobs = new Map();
+    routes = dashboardRoutes({
+      pool: db.pool, auth: createAuth({ mode: "azure" }), origin, adapter: fake.adapter, sourceId, repoHost: host, env: {},
+      readBlob: async (path) => blobs.get(path) ?? null,
+    });
   });
 
   const as = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
@@ -294,5 +301,142 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await post("/users", "boss", "provider=google&subject=g1&role=viewer")).status, 303);
     assert.equal((await post("/users", "boss", "provider=github&subject=g2&role=viewer")).status, 400);
     assert.equal((await db.pool.query(`select count(*)::int as n from "user" where provider = 'google'`)).rows[0].n, 1);
+  });
+
+  // ---- PBI 15b (#89) ----
+
+  /** A Cucumber Messages report with one scenario per name, each tagged with `tag`. */
+  const report = (tag: string, results: Record<string, "PASSED" | "FAILED">) => Object.entries(results).flatMap(([name, status], i) => [
+    { pickle: { id: `${tag}p${i}`, name, tags: [{ name: tag }], steps: [{ id: `${tag}s${i}`, type: "Outcome", text: "it works" }] } },
+    { testCase: { id: `${tag}c${i}`, pickleId: `${tag}p${i}`, testSteps: [{ id: `${tag}t${i}`, pickleStepId: `${tag}s${i}` }] } },
+    { testCaseStarted: { id: `${tag}r${i}`, testCaseId: `${tag}c${i}` } },
+    { testStepFinished: { testCaseStartedId: `${tag}r${i}`, testStepId: `${tag}t${i}`, testStepResult: { status } } },
+  ].map((m) => JSON.stringify(m))).join("\n") + "\n";
+  const overrides = async () => (await db.pool.query("select scope, target_id, kind, reason from override where cleared_at is null order by created_at")).rows;
+
+  test("a viewer can't post an override, and an operator's needs a known kind and a reason", async () => {
+    await person("viewer", "viewer");
+    await person("op", "operator");
+    assert.equal((await post("/overrides", "viewer", "kind=pause&reason=lunch")).status, 403);
+    assert.equal((await post("/overrides", "op", "kind=pause&reason=+")).status, 400);
+    assert.equal((await post("/overrides", "op", "kind=launch&reason=x")).status, 400);
+    assert.deepEqual(await overrides(), []);
+  });
+
+  test("an operator's factory and item overrides are recorded with their reason", async () => {
+    const op = (await person("op", "operator")).rows[0].id;
+    const { id } = await item("InProgress", "busy");
+    assert.equal((await post("/overrides", "op", "kind=drain&reason=release+day")).status, 303);
+    const r = await post("/overrides", "op", `kind=hold&reason=checking&itemId=${id}`);
+    assert.equal(r.status, 303);
+    assert.equal(r.headers.get("location"), `/items/${id}`);
+    assert.equal((await post("/overrides", "op", "kind=hold&reason=checking")).status, 400, "an item override names its item");
+    assert.equal((await post("/overrides", "op", `kind=pause&reason=x&itemId=${id}`)).status, 400, "a factory override names none");
+    assert.deepEqual(await overrides(), [
+      { scope: "factory", target_id: null, kind: "drain", reason: "release day" },
+      { scope: "item", target_id: id, kind: "hold", reason: "checking" },
+    ]);
+    assert.equal((await db.pool.query("select count(*)::int as n from override where created_by = $1", [op])).rows[0].n, 2);
+  });
+
+  test("Re-queue needs a reason, only a Failed or Abandoned item takes it, and the next tick moves it back to Queued", async () => {
+    await person("op", "operator");
+    const failed = await item("Failed", "broke");
+    const busy = await item("InProgress", "busy");
+    assert.match((await get(`/items/${failed.id}`, "op")).html, /<input[^>]*name="reason"[^>]*required[\s\S]*Re-queue/);
+    assert.doesNotMatch((await get(`/items/${busy.id}`, "op")).html, /Re-queue/);
+    assert.equal((await post("/overrides", "op", `kind=requeue&reason=&itemId=${failed.id}`)).status, 400);
+    assert.equal((await post("/overrides", "op", `kind=requeue&reason=retry&itemId=${busy.id}`)).status, 409);
+    assert.equal((await post("/overrides", "op", `kind=requeue&reason=retry&itemId=${failed.id}`)).status, 303);
+    // No WIP, so the tick applies the re-queue and starts nothing.
+    await db.pool.query("update wip_policy set current_wip = 0");
+    try {
+      await tick({ pool: db.pool, launcher: fakeLauncher(), now: new Date(), killFlag: false, repoHost: host, backlogFor: () => fake.adapter,
+        secret: "s", controlUrl: "http://control", sopVersion: "0.1.0" });
+    } finally {
+      await db.pool.query("update wip_policy set current_wip = 1");
+    }
+    assert.equal((await db.pool.query("select state from item where id = $1", [failed.id])).rows[0].state, "Queued");
+  });
+
+  test("Floor badges an item's active override, not an expired one, and shows the factory's pause", async () => {
+    await person("op", "operator");
+    const held = await item("InProgress", "held item");
+    const stale = await item("InProgress", "stale item");
+    await db.pool.query("insert into override (scope, target_id, kind, reason) values ('item', $1, 'hold', 'x')", [held.id]);
+    await db.pool.query("insert into override (scope, target_id, kind, reason, expires_at) values ('item', $1, 'hold', 'x', now() - interval '1 minute')", [stale.id]);
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'lunch')");
+    const { html } = await get("/", "op");
+    const row = (title: string) => html.slice(html.indexOf(title), html.indexOf("</tr>", html.indexOf(title)));
+    assert.match(row("held item"), />override</);
+    assert.doesNotMatch(row("stale item"), />override</);
+    assert.match(html, /Paused: lunch/);
+    assert.match(html, /<form method="post" action="\/overrides">/);
+  });
+
+  test("Floor shows an in-flight item's newest agent message", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("InProgress", "talking item");
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'green') returning id", [id])).rows[0].id;
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, message, started_at, ended_at) values
+       ($1, 'red', 1, 'passed', 'Wrote the <stubs>', now() - interval '2 hours', now() - interval '1 hour'),
+       ($1, 'green', 1, 'failed', '', now() - interval '50 minutes', now() - interval '30 minutes'),
+       ($1, 'green', 2, 'started', null, now() - interval '20 minutes', null)`, [run],
+    );
+    const { html } = await get("/", "octo");
+    const row = html.slice(html.indexOf("talking item"), html.indexOf("</tr>", html.indexOf("talking item")));
+    assert.ok(row.includes("Wrote the &lt;stubs&gt;"), row);
+  });
+
+  test("Run detail shows each of the item's scenarios with its red and green verdict, and links each transcript", async () => {
+    await person("octo", "viewer");
+    const { id, ext } = await item("InReview", "evidence");
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'address') returning id", [id])).rows[0].id;
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, report_ref, transcript_ref, started_at) values
+       ($1, 'red', 1, 'passed', $2, $3, now() - interval '2 hours'), ($1, 'green', 1, 'passed', $4, null, now() - interval '1 hour')`,
+      [run, `reports/${run}/red-1.ndjson`, `transcripts/${run}/red-1.jsonl`, `reports/${run}/green-1.ndjson`],
+    );
+    blobs.set(`reports/${run}/red-1.ndjson`, report(`@pbi-${ext}`, { "Exports one month": "FAILED" }) + report("@pbi-other", { "Someone else's": "PASSED" }));
+    blobs.set(`reports/${run}/green-1.ndjson`, report(`@pbi-${ext}`, { "Exports one month": "PASSED" }));
+    blobs.set(`transcripts/${run}/red-1.jsonl`, '{"type":"assistant"}\n');
+    const { html } = await get(`/items/${id}`, "octo");
+    assert.match(html, /<td>Exports one month<\/td><td>red<\/td><td>green<\/td>/);
+    assert.doesNotMatch(html, /Someone else/);
+    assert.ok(html.includes(`<a href="/blobs/transcripts/${run}/red-1.jsonl">`), "transcript link");
+    const t = await fetch(`${origin}/blobs/transcripts/${run}/red-1.jsonl`, { headers: as("octo") });
+    assert.equal(t.status, 200);
+    assert.equal(await t.text(), '{"type":"assistant"}\n');
+    assert.equal((await fetch(`${origin}/blobs/transcripts/${run}/missing-1.jsonl`, { headers: as("octo") })).status, 404);
+    assert.equal((await fetch(`${origin}/blobs/secrets/${run}/red-1.jsonl`, { headers: as("octo") })).status, 404);
+    assert.equal((await fetch(`${origin}/blobs/transcripts/${run}/red-1.jsonl`)).status, 401);
+  });
+
+  test("/phase0 lists each merged run with its own cost and tier, under the count, total and mean", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("Done", "merged twice");
+    for (const [n, cost, tier, startedHoursAgo] of [[1, "1.50", "Low", 9], [2, "2.50", "High", 3], [3, "4.00", null, 2]] as const) {
+      const r = (await db.pool.query<{ id: string }>(
+        `insert into run (item_id, run_number, pr_url, merge_sha, risk_tier, tier_reasons, started_at)
+         values ($1, $2, $3, $4, $5, $6, now() - make_interval(hours => $7)) returning id`,
+        [id, n, `https://github.com/o/r/pull/${n}`, n === 3 ? null : `sha${n}`, tier, tier ? [`reason ${n}`] : null, startedHoursAgo],
+      )).rows[0].id;
+      await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, cost_usd) values ($1, 'green', 1, 'passed', $2)", [r, cost]);
+    }
+    // Run 1 merged 6 hours ago, run 2 an hour ago. The first merge after a run started is that run's.
+    await db.pool.query(
+      `insert into event (actor, actor_id, item_id, kind, payload, at) values
+       ('system', 'github', $1, 'transition', '{"from":"InReview","to":"Accepted","event":"merged"}', now() - interval '6 hours'),
+       ('system', 'github', $1, 'transition', '{"from":"InReview","to":"Accepted","event":"merged"}', now() - interval '1 hour')`, [id],
+    );
+    const { status, html } = await get("/phase0", "octo");
+    assert.equal(status, 200);
+    assert.match(html, /2 merged PRs, \$4\.00 in all, \$2\.00 each on average/);
+    const one = html.indexOf("https://github.com/o/r/pull/1");
+    const two = html.indexOf("https://github.com/o/r/pull/2");
+    assert.ok(one > 0 && two > one, "oldest merge first");
+    assert.ok(!html.includes("https://github.com/o/r/pull/3"), "an unmerged run isn't listed");
+    for (const want of ["$1.50", "Low", "reason 1", "$2.50", "High", "reason 2"]) assert.ok(html.includes(want), `${want} missing`);
   });
 });

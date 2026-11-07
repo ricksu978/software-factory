@@ -15,7 +15,7 @@ import { fakeBacklog, fakeRepoHost } from "./adapters/fake.ts";
 import type { FactoryWebhookEvent } from "./adapters/types.ts";
 import type { AgentArgs, AgentResult } from "./agent/run.ts";
 import { classify } from "./bdd/messages.ts";
-import { loadSop } from "./config/sop.ts";
+import { loadSop, stageAfter } from "./config/sop.ts";
 import { applyComment, decideAndAnnounce } from "./control/decisions.ts";
 import { mirrorBoard } from "./control/board.ts";
 import { cellApi } from "./control/cell-api.ts";
@@ -132,11 +132,9 @@ export async function startFactory(pool: pg.Pool) {
   await new Promise<void>((r) => blobServer.listen(0, "127.0.0.1", r));
   const blobBase = `http://127.0.0.1:${(blobServer.address() as AddressInfo).port}`;
 
-  const ids = sop.stages.map((s) => s.id);
   const api = cellApi({
     pool, secret: SECRET, repoHost: host, backlogFor,
-    // Phase 0's SOP order up to open-pr. Address hands the item back through pr_opened, and decide sets red.
-    stageAfter: (_v, stageId) => (stageId === "open-pr" || stageId === "address" ? null : ids[ids.indexOf(stageId as never) + 1] ?? null),
+    stageAfter: (_v, stageId) => stageAfter(sop, stageId),
     uploadUrl: async (path) => `${blobBase}/${path}`,
     gateway: { upstream: "http://127.0.0.1:1", ownerToken: () => "unused" },
     webToolsOf: () => [],

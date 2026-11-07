@@ -349,6 +349,22 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(rows.rows, [{ file: "dod", status: "person", checked_sha: "abc1234" }]);
   });
 
+  test("a stage's message is kept, cut to 500 characters", async () => {
+    const cell = await claimed();
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "passed", message: "x".repeat(600) });
+    const row = await db.pool.query<{ message: string }>("select message from stage_run where run_id = $1", [cell.runId]);
+    assert.equal(row.rows[0].message, "x".repeat(500));
+  });
+
+  test("an upload URL records its blob path on the stage's attempt, as the transcript or the report", async () => {
+    const cell = await claimed();
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "red", attempt: 2, status: "passed" });
+    await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "red", attempt: 2 });
+    await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "red", attempt: 2 });
+    const row = await db.pool.query("select transcript_ref, report_ref from stage_run where run_id = $1", [cell.runId]);
+    assert.deepEqual(row.rows[0], { transcript_ref: `transcripts/${cell.runId}/red-2.jsonl`, report_ref: `reports/${cell.runId}/red-2.ndjson` });
+  });
+
   test("an upload path can't carry a slash from the stage id", async () => {
     const cell = await claimed();
     assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "../x", attempt: 1 })).status, 400);
