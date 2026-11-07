@@ -24,7 +24,7 @@ The first PBI the factory took from its board and built itself, end to end, on 2
 | 10:30 | Blocked: "Self-review didn't approve in 5 rounds" |
 | 11:47 | Answered, after the first fix below, and the run resumed |
 | 16:23 | While this machine couldn't resolve `api.github.com`, the item was claimed again and its new cell exited without its context |
-| 16:30 | A third cell resumed the run |
+| 16:30 | Another cell resumed the run, the fifth since 08:52 |
 | 16:33 | PR opened |
 | 23:35 | Done, and the board's Auto-close workflow closed the issue a second later |
 
