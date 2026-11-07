@@ -71,7 +71,7 @@ export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waiti
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"]], null)}`
     : "";
   return page("Floor", `<h1>Floor</h1>${status}
-<p>${f.waitingCount} of ${f.capacity} waiting. <a href="/phase0">Phase 0 report</a></p>
+<p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a></p>
 <h2>Waiting on you</h2>
 ${list(f.waiting.map((w) => `<li>${link(w.id, w.title)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
@@ -174,4 +174,26 @@ export function phase0Page(rows: Phase0Row[], banner: string | null): string {
         .join("")}</tbody></table>`
     : `<p class="muted">No factory PR has merged yet.</p>`;
   return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${table}`, banner);
+}
+
+/** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload. */
+export type ActivityRow = { at: Date; external_id: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null };
+
+// Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
+const MOVES = new Set(["transition", "override"]);
+
+/** The factory's newest events, newest first, with the time in UTC (PBI 105). */
+export function activityPage(rows: ActivityRow[], banner: string | null): string {
+  const cell = (r: ActivityRow) => {
+    if (!MOVES.has(r.kind)) return "<td></td>";
+    const event = r.kind === "transition" && r.event ? ` <span class="muted">(${escapeHtml(r.event)})</span>` : "";
+    return `<td>${escapeHtml(r.from ?? "")} → ${escapeHtml(r.to ?? "")}${event}</td>`;
+  };
+  const time = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
+  const table = rows.length
+    ? `<table><thead><tr><th scope="col">Time (UTC)</th><th scope="col">Item</th><th scope="col">Title</th><th scope="col">Kind</th><th scope="col">Move</th></tr></thead><tbody>${rows
+        .map((r) => `<tr><td>${time(r.at)}</td><td>${escapeHtml(r.external_id)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.kind)}</td>${cell(r)}</tr>`)
+        .join("")}</tbody></table>`
+    : `<p class="muted">No event yet.</p>`;
+  return page("Activity", `<h1>Activity</h1><p class="muted">The 100 newest events, newest first.</p>${table}`, banner);
 }

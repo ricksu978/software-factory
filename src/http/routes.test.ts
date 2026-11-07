@@ -439,4 +439,23 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!html.includes("https://github.com/o/r/pull/3"), "an unmerged run isn't listed");
     for (const want of ["$1.50", "Low", "reason 1", "$2.50", "High", "reason 2"]) assert.ok(html.includes(want), `${want} missing`);
   });
+
+  test("/activity lists the 100 newest events, newest first, with only their states and event from the payload", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("Queued", "Export a month");
+    await db.pool.query(
+      `insert into event (actor, actor_id, item_id, kind, payload, at)
+       select 'system', 'unit', $1, 'transition', jsonb_build_object('from', 'Eligible', 'to', 'NotReady', 'event', 'readiness_failed', 'detail', 'secret-' || n),
+         timestamptz '2026-11-07 08:00Z' + make_interval(mins => n)
+       from generate_series(1, 105) n`, [id],
+    );
+    const { status, html } = await get("/activity", "octo");
+    assert.equal(status, 200);
+    const times = [...html.matchAll(/<time datetime="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(times.length, 100);
+    assert.equal(times[0], "2026-11-07T09:45:00.000Z");
+    assert.equal(times[99], "2026-11-07T08:06:00.000Z");
+    assert.ok(!html.includes("secret-"), "a payload field other than from, to and event reached the page");
+    assert.equal((await fetch(`${origin}/activity`)).status, 401);
+  });
 });
