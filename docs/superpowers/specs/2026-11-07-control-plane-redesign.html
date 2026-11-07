@@ -135,10 +135,10 @@ mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
 
 <main>
 <header class="top">
-  <div class="eyebrow">Draft spec · v0.2 · 2026-11-07</div>
+  <div class="eyebrow">Draft spec · v0.3 · 2026-11-07</div>
   <h1>Control plane redesign</h1>
   <p class="lead">The control plane splits into four services: a BFF that serves the dashboard and signs people in, an orchestrator API that owns every control action, a cell API that only cells can reach, and a worker that runs the background jobs. They share one Postgres and talk through it.</p>
-  <p>This replaces the single always-on control plane in the 2026-11-05 design: its architecture diagram, its dashboard sign-in and its control plane row in the Azure table. It also replaces that design's decision that sign-in accepts Google, personal Microsoft and work or school Microsoft accounts (2026-11-05 decision log). Which accounts can sign in now depends on the configured provider (§04). The item lifecycle, SOP, cells, safety rules and data model stay as they are, except where §08 here changes them.</p>
+  <p>This replaces the single always-on control plane in the 2026-11-05 design: its architecture diagram, its dashboard sign-in and its control plane row in the Azure table. It would also replace that design's decision that sign-in accepts Google, personal Microsoft and work or school Microsoft accounts (2026-11-05 decision log), once you confirm that in §14. Under the redesign, which accounts can sign in depends on the configured provider (§04). The item lifecycle, SOP, cells, safety rules and data model stay as they are, except where §08 here changes them.</p>
   <div class="legend">
     <span><span class="tag yours">Yours</span> you decided it</span>
     <span><span class="tag call">My call</span> a default you can override</span>
@@ -203,7 +203,7 @@ flowchart LR
       <tr><td>Claude OAuth token</td><td>Cell API, inside the model gateway. Worker, for the readiness judge, which runs the Agent SDK in-process (<code>src/main.ts:198</code>, <code>src/agent/run.ts:74</code>).</td><td>Anthropic</td></tr>
       <tr><td>GitHub App key</td><td>Worker and cell API</td><td>GitHub</td></tr>
       <tr><td>Project token, <code>GITHUB_PROJECT_TOKEN</code></td><td>Worker and cell API. It's the owner's own token, which a user-owned board needs (<code>src/adapters/github/backlog.ts:113</code>), and it can write anywhere the owner can.</td><td>GitHub</td></tr>
-      <tr><td>Database login</td><td>BFF as a new <code>factory_bff</code> role, limited to <code>session</code>. API, worker and cell API as <code>factory_app</code> (<code>db/migrations/001_init.sql:191</code>).</td><td>Postgres</td></tr>
+      <tr><td>Database login</td><td>BFF as a new <code>factory_bff</code> role, limited to <code>session</code>. API, worker and cell API as <code>factory_app</code> (<code>db/migrations/001_init.sql:191</code>). In Azure each service has its own Entra principal, mapped onto its role by migrate, where today one <code>FACTORY_APP_PRINCIPAL</code> maps onto <code>factory_app</code> (<code>src/store/migrate-cli.ts:70</code>).</td><td>Postgres</td></tr>
       <tr><td>Blob credential</td><td>API, to read transcripts and reports (<code>src/http/routes.ts:113</code>). Cell API, to sign upload URLs (<code>src/control/cell-api.ts:309</code>). Worker, for the egress allowlist (<code>src/main.ts:183</code>).</td><td>Blob Storage</td></tr>
     </tbody>
   </table></div>
@@ -223,8 +223,8 @@ flowchart LR
     <li>The SPA calls <code>/bff/v1/*</code>. Without a valid session the BFF answers 401, and the SPA sends the browser to <code>/auth/login</code>.</li>
     <li>The BFF starts the authorization code flow with PKCE at the configured issuer, found through OIDC discovery. State, nonce and the PKCE verifier go in a short-lived <code>HttpOnly</code> cookie with <code>SameSite=Lax</code>, so it survives the provider's redirect back, which is a cross-site navigation.</li>
     <li>The provider redirects to <code>/auth/callback</code>. The BFF exchanges the code, checks the ID token, and refuses the sign-in if the access token isn't a JWT.</li>
-    <li>The BFF writes a <code>session</code> row and sets the session cookie: a random id, <code>HttpOnly</code>, <code>SameSite=Strict</code>, <code>Path=/</code>, plus <code>Secure</code> in Azure.</li>
-    <li>On each <code>/bff/v1/*</code> call, the BFF loads the session, refreshes the access token when it expires within 60 seconds, and forwards the call to the API with <code>Authorization: Bearer</code>.</li>
+    <li>The BFF writes a <code>session</code> row holding the token's issuer and subject, and sets the session cookie: a random id, <code>HttpOnly</code>, <code>SameSite=Strict</code>, <code>Path=/</code>, plus <code>Secure</code> in Azure.</li>
+    <li>On each <code>/bff/v1/*</code> call, the BFF loads the session, refreshes the access token when it expires within 60 seconds, and forwards the call to the API with <code>Authorization: Bearer</code>. The API resolves the user from the token. If the person isn't in <code>user</code>, it answers 403 and the SPA shows a no-access page, as today's dashboard does (<code>src/http/routes.ts:287</code>).</li>
     <li><code>/auth/logout</code> deletes the session row and clears the cookie.</li>
   </ol>
   <h3>Provider configuration</h3>
@@ -309,7 +309,10 @@ flowchart LR
   <p>Today a transition's hooks run after commit, in whichever process made the transition (<code>src/store/items.ts:45</code>), and nothing retries a hook that fails (<code>src/control/board.ts:39</code>). Every transition and override already writes an event in the same transaction as the state change (<code>src/store/items.ts:44</code>, <code>:65</code>). A cursor over that event table can't work: <code>event.id</code> is a random <code>uuid</code> and <code>event.at</code> is taken at insert, not at commit (<code>db/migrations/001_init.sql:140</code>), so a cursor would skip events from transactions that commit late. <span class="tag call">My call</span></p>
   <ol>
     <li>In the same transaction as the event, <code>transitionItem</code>, <code>overrideItem</code>, decisions and webhook intake insert one <code>outbox</code> row per consumer, with a <code>bigserial</code> sequence.</li>
-    <li>The worker takes the oldest rows for each consumer with <code>for update skip locked</code>, handles each one, and deletes it in the same transaction as its bookkeeping.</li>
+    <li>The worker takes the oldest due rows for each consumer with <code>for update skip locked</code>, handles each one, and deletes it once every effect has succeeded.</li>
+    <li>A handler throws when any effect fails. Today's <code>mirror</code> logs each failure and carries on (<code>src/control/board.ts:41</code>), so that changes. The row stays, its attempt count goes up, and it's retried with backoff, doubling from 30 seconds up to 30 minutes.</li>
+    <li>A failing row holds back only the later rows for the same item and consumer, so one bad item never stalls the others.</li>
+    <li>After 10 attempts the row is marked failed and set aside. It's logged and counted on the floor next to the heartbeat, so someone sees it.</li>
     <li>A row from a transaction that hasn't committed is invisible until it commits. It's never skipped, so nothing is lost.</li>
     <li>Transitions on one item take that item's row lock (<code>src/store/items.ts:34</code>), so one item's rows are numbered in commit order and handled in that order.</li>
     <li>The outbox starts empty on the first deploy, so history isn't replayed onto old items.</li>
@@ -325,15 +328,17 @@ flowchart LR
     <thead><tr><th>Table</th><th>Change</th></tr></thead>
     <tbody>
       <tr><td><code>user</code></td><td>A new <code>issuer</code> column, any issuer URL, sits beside <code>provider</code>, which is limited to <code>google</code>, <code>microsoft</code> or <code>dev</code> today (<code>db/migrations/001_init.sql:31</code>). <code>(issuer, subject)</code> gets a unique key. <code>provider</code> is dropped in step 9 of §12, once nothing reads it. Today's readers are <code>src/http/routes.ts:286</code>, <code>src/store/migrate-cli.ts:43</code>, <code>scripts/seed-owner.ts:21</code> and <code>src/e2e.ts:117</code>.</td></tr>
-      <tr><td><code>session</code>, new</td><td>Hash of the cookie id, <code>user_id</code>, refresh token encrypted under the session key, current access token and its expiry, <code>created_at</code>, <code>last_seen_at</code>, <code>expires_at</code>.</td></tr>
-      <tr><td><code>outbox</code>, new</td><td><code>seq bigserial</code>, <code>consumer</code>, <code>event_id</code> (§07).</td></tr>
+      <tr><td><code>session</code>, new</td><td>Hash of the cookie id, the token's <code>issuer</code> and <code>subject</code>, refresh token encrypted under the session key, current access token and its expiry, <code>created_at</code>, <code>last_seen_at</code>, <code>expires_at</code>.</td></tr>
+      <tr><td><code>outbox</code>, new</td><td><code>seq bigserial</code>, <code>consumer</code>, <code>event_id</code>, <code>item_id</code>, <code>attempts</code>, <code>next_attempt_at</code>, <code>failed_at</code> (§07).</td></tr>
       <tr><td><code>worker_heartbeat</code>, new</td><td>One row, the time of the worker's last tick.</td></tr>
       <tr><td><code>run</code></td><td>A new <code>acceptance_criteria</code> column, stored with the scenarios sha (§06).</td></tr>
-      <tr><td><code>run_file</code>, new</td><td><code>run_id</code>, <code>path</code>, <code>text</code>: each locked file's text at the scenarios sha (§06).</td></tr>
+      <tr><td><code>run_file</code>, new</td><td><code>run_id</code>, <code>sha</code>, <code>path</code>, <code>text</code>: each locked file's text at the scenarios sha (§06). Each new scenarios sha replaces the run's rows, since a changes round can send a different file list (<code>src/control/cell-api.ts:272</code>).</td></tr>
     </tbody>
   </table></div>
   <ul>
-    <li><b>Grants.</b> A new <code>factory_bff</code> role gets select, insert, update and delete on <code>session</code> and nothing else. <code>factory_app</code> gets the other new tables.</li>
+    <li><b>Grants.</b> A new <code>factory_bff</code> role gets select, insert, update and delete on <code>session</code> and nothing else. <code>factory_app</code> gets the other new tables, plus usage on the outbox's sequence. That's the schema's first sequence, and table grants don't cover it, so Azure inserts would fail without the grant.</li>
+    <li><b>Principals.</b> In Azure, migrate maps one Entra principal per service onto its role, extending today's single mapping (<code>src/store/migrate-cli.ts:35</code>).</li>
+    <li><b>Backfill.</b> Runs that set a scenarios sha before step 4 have no snapshot. A one-off worker command reads them from GitHub once, so Run detail keeps showing their criteria and files.</li>
     <li><b>Owner seeding.</b> <code>seed-owner</code> takes <code>issuer=</code> as well as <code>provider=</code> (<code>scripts/seed-owner.ts:9</code>). Locally, migrate seeds the owner from the Keycloak realm's test user in step 5, alongside today's <code>FACTORY_DEV_LOGIN</code> owner (<code>src/store/migrate-cli.ts:74</code>), which goes in step 9. That needs the test user's subject known before anyone signs in. <span class="tag open">Open</span></li>
   </ul>
 </section>
@@ -393,18 +398,18 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>#</th><th>PBI</th><th>Needs</th></tr></thead>
     <tbody>
-      <tr><td class="num">1</td><td>Schema, additive only: <code>issuer</code> beside <code>provider</code>, the <code>session</code>, <code>outbox</code>, <code>worker_heartbeat</code> and <code>run_file</code> tables, <code>run.acceptance_criteria</code>, and the <code>factory_bff</code> role. Nothing reads them yet.</td><td></td></tr>
+      <tr><td class="num">1</td><td>Schema, additive only: <code>issuer</code> beside <code>provider</code>, the <code>session</code>, <code>outbox</code>, <code>worker_heartbeat</code> and <code>run_file</code> tables, <code>run.acceptance_criteria</code>, the <code>factory_bff</code> role, the outbox sequence grant, and one Azure principal per service. Nothing reads them yet.</td><td></td></tr>
       <tr><td class="num">2</td><td>Worker: the egress set-up, tick, poller and judge move out, with the advisory lock. It registers <code>mirrorBoard</code> until step 3 lands, so its transitions are still mirrored.</td><td>1</td></tr>
-      <tr><td class="num">3</td><td>Outbox: transitions, overrides, decisions and webhook intake write outbox rows. The worker handles mirroring, comment commands and announcements, with keys from the event id. <code>onTransition</code> hooks go away.</td><td>2</td></tr>
-      <tr><td class="num">4</td><td>Cell API: its own service on 7401, with the egress allowlist updated, and the Run detail snapshots. It registers <code>mirrorBoard</code> until step 3 lands. <code>src/main.ts</code> takes its own port from <code>PORT</code> instead of <code>CELL_CONTROL_URL</code> (<code>src/main.ts:162</code>), so the old dashboard stays on 7400.</td><td>1</td></tr>
-      <tr><td class="num">5</td><td>Keycloak on 7430 with the realm import, and migrate seeding its test owner</td><td>1</td></tr>
+      <tr><td class="num">3</td><td>Outbox: transitions, overrides, decisions and webhook intake write outbox rows. The worker handles mirroring, comment commands and announcements, with keys from the event id and retries with backoff. <code>onTransition</code> hooks go away. Today's dashboard switches from <code>decideAndAnnounce</code> to <code>decide</code> (<code>src/http/routes.ts:369</code>), so its decisions aren't announced twice.</td><td>2</td></tr>
+      <tr><td class="num">4</td><td>Cell API: its own service on 7401, with the egress allowlist updated, and the Run detail snapshots. It registers <code>mirrorBoard</code> until step 3 lands. <code>src/main.ts</code> takes its own port from <code>PORT</code> instead of <code>CELL_CONTROL_URL</code> (<code>src/main.ts:162</code>), so the old dashboard stays on 7400. The worker's one-off backfill fills snapshots for earlier runs.</td><td>1, 2</td></tr>
+      <tr><td class="num">5</td><td>Keycloak on 7430 with the realm import, and migrate seeding its test owner. The <code>dashboard</code> client allows redirects to both 7403 and 7400, so step 9's move doesn't break sign-in.</td><td>1</td></tr>
       <tr><td class="num">6</td><td>Orchestrator API on Hono: the <code>/v1</code> routes, JWT checks, role checks, events and webhook intake</td><td>3, 4, 5</td></tr>
       <tr><td class="num">7</td><td>BFF on Hono, on 7403: sign-in, sessions, forwarding and the webhook pass-through</td><td>5, 6</td></tr>
       <tr><td class="num">8</td><td>SPA: the floor, run detail and Phase 0 pages in React</td><td>7</td></tr>
       <tr><td class="num">9</td><td>Cut-over: the BFF moves to 7400 and takes over the webhook route. The dev token, <code>src/http/routes.ts</code>, <code>src/http/views.ts</code>, today's combined <code>src/main.ts</code>, the <code>dev</code> owner and the <code>provider</code> column go. The scenarios and docs in §11 follow.</td><td>8</td></tr>
     </tbody>
   </table></div>
-  <p>After step 1, steps 2, 4 and 5 don't depend on each other and can run in parallel.</p>
+  <p>After step 1, steps 2 and 5 can run in parallel, and step 4 can run beside step 3.</p>
 </section>
 
 <section id="open">
@@ -425,13 +430,13 @@ flowchart LR
 
 <section id="decisions">
   <h2><span class="n">14</span>Decision log</h2>
-  <p>You accepted every My call in v0.1 on 2026-11-07. The rows marked "Added in v0.2" came out of the first review and haven't been put to you yet.</p>
+  <p>You accepted every My call in v0.1 on 2026-11-07. Rows marked "Added" or "Changed" came out of review, with the version they came in, and haven't been put to you yet.</p>
   <div class="tbl"><table>
     <thead><tr><th>Topic</th><th>Decision</th><th></th></tr></thead>
     <tbody>
       <tr><td>Shape</td><td>BFF, orchestrator API, cell API and worker, each its own deployable</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Sessions in the BFF</td><td>The BFF holds the session and tokens. The browser holds only a cookie.</td><td><span class="tag yours">Yours</span></td></tr>
-      <tr><td>Identity provider</td><td>Any OIDC provider, configured. Keycloak locally. Providers are assumed to issue JWT access tokens. This replaces the 2026-11-05 sign-in decision.</td><td><span class="tag yours">Yours</span></td></tr>
+      <tr><td>Identity provider</td><td>Any OIDC provider, configured. Keycloak locally. Providers are assumed to issue JWT access tokens. Changed in v0.2: this would replace the 2026-11-05 sign-in decision, which needs your confirmation.</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>API token</td><td>The API validates the provider's own JWT access token</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Cell API</td><td>Its own service with the model gateway, accepting <code>RUN_TOKEN</code></td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Session storage</td><td>A Postgres table</td><td><span class="tag yours">Yours</span></td></tr>
@@ -443,12 +448,12 @@ flowchart LR
       <tr><td>Webhook ingress</td><td>Through the BFF, so the API keeps internal ingress</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Single worker</td><td>Session-level Postgres advisory lock</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Session expiry</td><td>Seven days idle, 30 days absolute</td><td><span class="tag call">My call</span></td></tr>
-      <tr><td>Local ports</td><td>BFF 7400, cell API 7401, API 7402</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Local ports</td><td>BFF 7400, cell API 7401, API 7402. Changed in v0.2: the BFF runs on 7403 until step 9.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Token separation</td><td>The cell API takes no user token, and the API takes no <code>RUN_TOKEN</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Cell egress</td><td>Only the cell API's port is on the allowlist</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Worker health</td><td>A heartbeat on the floor</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Runtime, repo, libraries, data</td><td>Node 26 with no build, one package, <code>openid-client</code>, <code>jose</code>, raw SQL through <code>pg</code></td><td><span class="tag call">My call</span></td></tr>
-      <tr><td>Migration order</td><td>Nine PBIs, each leaving the factory running</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Migration order</td><td>Nine PBIs, each leaving the factory running. Changed in v0.2 and v0.3: additive schema first, interim board mirroring, new dependencies, a snapshot backfill and the port moves.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Hooks to an outbox</td><td>Outbox rows written with each event, handled by the worker. Added in v0.2, replacing v0.1's event cursor.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Claude token in the worker</td><td>The readiness judge keeps running in-process. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Run detail snapshots</td><td>The cell API stores criteria and locked files, so the API never reads GitHub. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
@@ -456,6 +461,10 @@ flowchart LR
       <tr><td>Lost lock and standby</td><td>Exit on a lost lock, retry every 15 seconds as standby. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Event stream length</td><td>Five minutes, then reconnect. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Keycloak port</td><td>Pinned to 7430. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Outbox retries</td><td>Handlers throw on any failed effect. Backoff from 30 seconds to 30 minutes, set aside after 10 attempts, held back per item. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Session identity</td><td>The session stores issuer and subject, and the API resolves the user, so the BFF never reads <code>user</code>. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Azure principals</td><td>One Entra principal per service. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Snapshot backfill</td><td>A one-off worker command for runs before step 4. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
     </tbody>
   </table></div>
 </section>
