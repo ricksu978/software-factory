@@ -22,6 +22,7 @@ $store = if (Test-Path $file) { Get-Content $file -Raw | ConvertFrom-Json -AsHas
 if (-not $store) { $store = @{} }
 
 "Secrets file: $file"
+$changed = $false
 foreach ($name in $secret + $plain) {
   $key = "Parameters:$name"
   if ($MissingOnly -and $store.ContainsKey($key)) { continue }
@@ -36,12 +37,15 @@ foreach ($name in $secret + $plain) {
   } else {
     $value = Read-Host "$name ($state)"
   }
-  if ($value) { $store[$key] = $value; "  saved" } else { "  kept" }
+  if ($value) { $store[$key] = $value; $changed = $true; "  saved" } else { "  kept" }
 }
 
-New-Item -ItemType Directory -Force (Split-Path $file) | Out-Null
-# -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
-$store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
+# Written only when a value changed, so a run that asks nothing never rewrites the live token file.
+if ($changed) {
+  New-Item -ItemType Directory -Force (Split-Path $file) | Out-Null
+  # -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
+  $store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
+}
 $missing = ($secret + $plain) | Where-Object { -not $store.ContainsKey("Parameters:$_") }
 if ($missing) { "Still missing: $($missing -join ', ')"; exit 1 }
 "All $(($secret + $plain).Count) parameters are set."

@@ -20,5 +20,6 @@
       InReview: In review
       Accepted: In review
       Done: Done
-      Failed: null
-      Abandoned: null
+      # Backlog, so the board never shows an item the factory stopped on as still in progress.
+      Failed: Backlog
+      Abandoned: Backlog

@@ -8,7 +8,7 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 $branch = git branch --show-current
 if ($branch -eq 'main') {
   git pull --ff-only
-  if ($LASTEXITCODE) { throw 'git pull --ff-only failed, so main has diverged from origin. Sort that out first.' }
+  if ($LASTEXITCODE) { throw "git pull --ff-only failed. Git's message above says why." }
 } else {
   Write-Warning "On branch '$branch', not main, so it runs as it is."
 }
