@@ -38,6 +38,7 @@ foreach ($name in $secret + $plain) {
 }
 
 New-Item -ItemType Directory -Force (Split-Path $file) | Out-Null
-$store | ConvertTo-Json | Set-Content $file -Encoding utf8NoBOM
+# -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
+$store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
 $missing = ($secret + $plain) | Where-Object { -not $store.ContainsKey("Parameters:$_") }
 if ($missing) { "Still missing: $($missing -join ', ')" } else { "All $(($secret + $plain).Count) parameters are set." }
