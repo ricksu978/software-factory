@@ -135,10 +135,10 @@ mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
 
 <main>
 <header class="top">
-  <div class="eyebrow">Draft spec · v0.1 · 2026-11-07</div>
+  <div class="eyebrow">Draft spec · v0.2 · 2026-11-07</div>
   <h1>Control plane redesign</h1>
   <p class="lead">The control plane splits into four services: a BFF that serves the dashboard and signs people in, an orchestrator API that owns every control action, a cell API that only cells can reach, and a worker that runs the background jobs. They share one Postgres and talk through it.</p>
-  <p>This replaces the single always-on control plane in the 2026-11-05 design: its architecture diagram, its dashboard sign-in and its control plane row in the Azure table. The item lifecycle, SOP, cells, safety rules and data model stay as they are, except where §08 here changes them.</p>
+  <p>This replaces the single always-on control plane in the 2026-11-05 design: its architecture diagram, its dashboard sign-in and its control plane row in the Azure table. It also replaces that design's decision that sign-in accepts Google, personal Microsoft and work or school Microsoft accounts (2026-11-05 decision log). Which accounts can sign in now depends on the configured provider (§04). The item lifecycle, SOP, cells, safety rules and data model stay as they are, except where §08 here changes them.</p>
   <div class="legend">
     <span><span class="tag yours">Yours</span> you decided it</span>
     <span><span class="tag call">My call</span> a default you can override</span>
@@ -150,9 +150,9 @@ mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
   <h2><span class="n">01</span>Problem</h2>
   <p>Today one Node process on one port serves the cell API, the model gateway, GitHub's webhook and the dashboard, and runs the scheduler tick and the board poller (<code>src/main.ts:1</code>). Three problems come from that.</p>
   <ul>
-    <li><strong>Sign-in.</strong> Cells reach the same port, so the dashboard can't sit behind an ordinary sign-in. It prints a new one-time link at each start instead (<code>src/http/auth.ts:45</code>), so every restart signs the owner out.</li>
-    <li><strong>No API boundary.</strong> Dashboard handlers call the control functions in-process and check roles themselves (<code>src/http/routes.ts:317</code>, <code>:341</code>, <code>:369</code>). A CLI or chat bot would have to copy that code.</li>
-    <li><strong>One event loop for everything.</strong> A slow dashboard query, a busy cell and the scheduler tick compete for the same process, and deploying any one of them restarts all of them.</li>
+    <li><b>Sign-in.</b> Cells reach the same port, so the dashboard can't sit behind an ordinary sign-in. It prints a new one-time link at each start instead (<code>src/http/auth.ts:45</code>), so every restart signs the owner out.</li>
+    <li><b>No API boundary.</b> Dashboard handlers call the control functions in-process and check roles themselves (<code>src/http/routes.ts:317</code>, <code>:341</code>, <code>:369</code>). A CLI or chat bot would have to copy that code.</li>
+    <li><b>One event loop for everything.</b> A slow dashboard query, a busy cell and the scheduler tick compete for the same process, and deploying any one of them restarts all of them.</li>
   </ul>
 </section>
 
@@ -168,9 +168,10 @@ flowchart LR
   API --> DB[(Postgres)]
   W[Worker] --> DB
   W -->|start| C[Cells]
+  W -->|readiness judge| AN[Anthropic]
   C -->|RUN_TOKEN| CA[Cell API + model gateway]
   CA --> DB
-  CA -->|owner token| AN[Anthropic]
+  CA -->|owner token| AN
   W --> GHA[GitHub API]
   CA --> GHA
   </pre>
@@ -178,9 +179,9 @@ flowchart LR
     <thead><tr><th>Service</th><th>Job</th><th>Ingress</th></tr></thead>
     <tbody>
       <tr><td>BFF</td><td>Serves the React SPA, signs people in, holds sessions, forwards the SPA's calls to the API with the user's token, and passes GitHub webhooks through unchanged.</td><td>Public</td></tr>
-      <tr><td>Orchestrator API</td><td>Every dashboard read and control action, every role check, the live event stream and webhook intake.</td><td>Internal</td></tr>
-      <tr><td>Cell API and model gateway</td><td>Leases, stages, PRs, checks, uploads and model calls for cells. Moves out of today's process unchanged.</td><td>Internal, cells only</td></tr>
-      <tr><td>Worker</td><td>Scheduler tick, board poller, board mirroring, comment commands and decision announcements.</td><td>None</td></tr>
+      <tr><td>Orchestrator API</td><td>Every dashboard read and control action, every role check, the live event stream and webhook intake. It never calls GitHub.</td><td>Internal</td></tr>
+      <tr><td>Cell API and model gateway</td><td>Leases, stages, PRs, checks, uploads and model calls for cells. Moves out of today's process with its routes as they are.</td><td>Internal, cells only</td></tr>
+      <tr><td>Worker</td><td>Scheduler tick, board poller with the readiness judge, the egress proxy, board mirroring, comment commands and decision announcements.</td><td>None</td></tr>
     </tbody>
   </table></div>
   <p>Services talk only through Postgres, except the BFF's HTTP calls to the API. That already works today. The dashboard writes override rows and the scheduler reads them on each tick (<code>src/scheduler/scheduler.ts:57</code>). Every event goes out with <code>pg_notify</code> (<code>src/store/events.ts:11</code>), so any process can listen. No message bus is needed. <span class="tag call">My call</span></p>
@@ -195,19 +196,23 @@ flowchart LR
       <tr><td>Session cookie</td><td>Browser. A random id, nothing else.</td><td>BFF, against the <code>session</code> table</td></tr>
       <tr><td>OIDC client secret</td><td>BFF</td><td>The provider</td></tr>
       <tr><td>User access token, a JWT</td><td>BFF, inside the session row</td><td>API: signature through the issuer's JWKS, issuer, audience, expiry</td></tr>
-      <tr><td>Session key</td><td>BFF</td><td>BFF. It encrypts refresh tokens at rest.</td></tr>
+      <tr><td>Session key</td><td>BFF. It encrypts refresh tokens at rest.</td><td>Nobody. It's an encryption key.</td></tr>
       <tr><td>GitHub webhook secret</td><td>API</td><td>API, on <code>X-Hub-Signature-256</code> (<code>src/watcher/webhook.ts:11</code>)</td></tr>
       <tr><td><code>RUN_TOKEN</code></td><td>One cell</td><td>Cell API, against the run's current generation (<code>src/control/cell-api.ts:371</code>)</td></tr>
       <tr><td><code>CELL_SECRET</code></td><td>Worker, which mints <code>RUN_TOKEN</code>. Cell API, which checks it.</td><td>Nobody. It's the HMAC key (<code>src/control/cell-api.ts:15</code>).</td></tr>
-      <tr><td>Claude OAuth token</td><td>Cell API, inside the model gateway only</td><td>Anthropic</td></tr>
+      <tr><td>Claude OAuth token</td><td>Cell API, inside the model gateway. Worker, for the readiness judge, which runs the Agent SDK in-process (<code>src/main.ts:198</code>, <code>src/agent/run.ts:74</code>).</td><td>Anthropic</td></tr>
       <tr><td>GitHub App key</td><td>Worker and cell API</td><td>GitHub</td></tr>
+      <tr><td>Project token, <code>GITHUB_PROJECT_TOKEN</code></td><td>Worker and cell API. It's the owner's own token, which a user-owned board needs (<code>src/adapters/github/backlog.ts:113</code>), and it can write anywhere the owner can.</td><td>GitHub</td></tr>
+      <tr><td>Database login</td><td>BFF as a new <code>factory_bff</code> role, limited to <code>session</code>. API, worker and cell API as <code>factory_app</code> (<code>db/migrations/001_init.sql:191</code>).</td><td>Postgres</td></tr>
+      <tr><td>Blob credential</td><td>API, to read transcripts and reports (<code>src/http/routes.ts:113</code>). Cell API, to sign upload URLs (<code>src/control/cell-api.ts:309</code>). Worker, for the egress allowlist (<code>src/main.ts:183</code>).</td><td>Blob Storage</td></tr>
     </tbody>
   </table></div>
   <ol>
     <li>The cell API never accepts a user token, and the API never accepts a <code>RUN_TOKEN</code>. <span class="tag call">My call</span></li>
-    <li>Only the cell API's port is on the cells' egress allowlist (<code>src/scheduler/launcher.ts:117</code>), so cells can't reach the BFF or the API. <span class="tag call">My call</span></li>
-    <li>The API holds no GitHub credentials. Anything that posts to GitHub is an event the worker acts on. <span class="tag call">My call</span></li>
-    <li>The Claude token lives in one process, the cell API, away from anything with public ingress. <span class="tag yours">Yours</span></li>
+    <li>Only the cell API's port is on the cells' egress allowlist (<code>src/scheduler/launcher.ts:117</code>), so locally cells can't reach the BFF or the API. In Azure, internal ingress is open to the apps and jobs in the environment, so cells need their own egress limit there (§13). <span class="tag call">My call</span></li>
+    <li>The API holds no GitHub credentials. It neither posts to GitHub nor reads from it. Posting becomes work for the worker (§07), and Run detail reads snapshots the cell API stores (§05). <span class="tag call">My call</span></li>
+    <li>The Claude token and the project token are held only by the cell API and the worker, and neither has public ingress. <span class="tag call">My call</span></li>
+    <li>The BFF, the one service with public ingress, can't touch users, items or overrides in the database. Every change goes through the API's role checks. <span class="tag call">My call</span></li>
   </ol>
 </section>
 
@@ -216,7 +221,7 @@ flowchart LR
   <p>The BFF is the only OIDC client. The browser never sees a token. <span class="tag yours">Yours</span></p>
   <ol>
     <li>The SPA calls <code>/bff/v1/*</code>. Without a valid session the BFF answers 401, and the SPA sends the browser to <code>/auth/login</code>.</li>
-    <li>The BFF starts the authorization code flow with PKCE at the configured issuer, found through OIDC discovery. State, nonce and the PKCE verifier go in a short-lived <code>HttpOnly</code> cookie.</li>
+    <li>The BFF starts the authorization code flow with PKCE at the configured issuer, found through OIDC discovery. State, nonce and the PKCE verifier go in a short-lived <code>HttpOnly</code> cookie with <code>SameSite=Lax</code>, so it survives the provider's redirect back, which is a cross-site navigation.</li>
     <li>The provider redirects to <code>/auth/callback</code>. The BFF exchanges the code, checks the ID token, and refuses the sign-in if the access token isn't a JWT.</li>
     <li>The BFF writes a <code>session</code> row and sets the session cookie: a random id, <code>HttpOnly</code>, <code>SameSite=Strict</code>, <code>Path=/</code>, plus <code>Secure</code> in Azure.</li>
     <li>On each <code>/bff/v1/*</code> call, the BFF loads the session, refreshes the access token when it expires within 60 seconds, and forwards the call to the API with <code>Authorization: Bearer</code>.</li>
@@ -234,12 +239,13 @@ flowchart LR
     </tbody>
   </table></div>
   <p>The design assumes every provider issues JWT access tokens carrying the API's audience. <span class="tag yours">Yours</span> Not every provider does. Google's access tokens are opaque (<a href="https://www.rabbitmq.com/docs/oauth2-examples-google" target="_blank" rel="noopener">RabbitMQ's Google notes</a>). So both services fail fast: the API refuses to start when discovery has no <code>jwks_uri</code>, and the BFF refuses a sign-in whose access token isn't a JWT. Keycloak adds an audience through an Audience protocol mapper on a client scope (<a href="https://www.keycloak.org/admin-api/protocol-mappers" target="_blank" rel="noopener">Keycloak protocol mappers</a>).</p>
+  <p>Because of that assumption, Google accounts can't sign in through Google directly. Letting Google and Microsoft accounts in through one issuer needs a broker in front of them, such as Keycloak, which supports both as identity providers (<a href="https://www.keycloak.org/docs/latest/server_admin/index.html" target="_blank" rel="noopener">Keycloak server admin guide</a>). Picking the Azure broker is open (§13).</p>
   <h3>Sessions</h3>
   <ul>
-    <li><strong>Postgres, not memory.</strong> A restart of the BFF signs nobody out. <span class="tag yours">Yours</span></li>
-    <li><strong>Expiry.</strong> Seven days idle, 30 days absolute. <span class="tag call">My call</span></li>
-    <li><strong>Cross-site requests.</strong> Every state-changing <code>/bff/*</code> call must carry an <code>Origin</code> equal to the BFF's own, as today's dashboard requires (<code>src/http/routes.ts:292</code>).</li>
-    <li><strong>Losing access.</strong> The API reads the user's role on every request, as today's dashboard does (<code>src/http/routes.ts:286</code>). So removing someone ends their access on their next request, even with a live session.</li>
+    <li><b>Postgres, not memory.</b> A restart of the BFF signs nobody out. <span class="tag yours">Yours</span></li>
+    <li><b>Expiry.</b> Seven days idle, 30 days absolute. <span class="tag call">My call</span></li>
+    <li><b>Cross-site requests.</b> Every state-changing <code>/bff/*</code> call must carry an <code>Origin</code> equal to the BFF's own, as today's dashboard requires (<code>src/http/routes.ts:292</code>).</li>
+    <li><b>Losing access.</b> The API reads the user's role on every request, as today's dashboard does (<code>src/http/routes.ts:286</code>). So removing someone ends their access on their next request, even with a live session. The live event stream is one long request, so the API ends each stream after five minutes, and the browser's reconnect goes through the same check. <span class="tag call">My call</span></li>
   </ul>
 </section>
 
@@ -249,11 +255,11 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Today</th><th>New</th><th>Who may call</th></tr></thead>
     <tbody>
-      <tr><td><code>GET /</code></td><td><code>GET /v1/floor</code></td><td>Viewer</td></tr>
+      <tr><td><code>GET /</code></td><td><code>GET /v1/floor</code>, which also returns the Claude token banner from <code>CLAUDE_TOKEN_CREATED_AT</code> (<code>src/http/routes.ts:58</code>) and the worker's heartbeat</td><td>Viewer</td></tr>
       <tr><td><code>GET /phase0</code></td><td><code>GET /v1/phase0</code></td><td>Viewer</td></tr>
       <tr><td><code>GET /items/{id}</code></td><td><code>GET /v1/items/{id}</code></td><td>Viewer. The response says whether the caller may operate.</td></tr>
       <tr><td><code>GET /blobs/…</code></td><td><code>GET /v1/blobs/…</code>, same path pattern (<code>src/http/routes.ts:31</code>)</td><td>Viewer</td></tr>
-      <tr><td><code>GET /events</code></td><td><code>GET /v1/events</code>, server-sent events</td><td>Viewer</td></tr>
+      <tr><td><code>GET /events</code></td><td><code>GET /v1/events</code>, server-sent events, each stream ended after five minutes</td><td>Viewer</td></tr>
       <tr><td><code>POST /items/{id}/signoff</code>, <code>/answer</code></td><td><code>POST /v1/items/{id}/decisions</code></td><td>Today's rules in <code>src/control/decisions.ts</code></td></tr>
       <tr><td><code>POST /overrides</code></td><td><code>POST /v1/overrides</code></td><td>Operator</td></tr>
       <tr><td><code>POST /users</code></td><td><code>POST /v1/users</code></td><td>Owner</td></tr>
@@ -262,9 +268,10 @@ flowchart LR
     </tbody>
   </table></div>
   <ul>
-    <li><strong>Path safety.</strong> The API refuses any path whose raw form differs from its normalised form, or that contains <code>%2e</code>, <code>%2f</code> or <code>%5c</code>, as today (<code>src/http/routes.ts:268</code>). Hono's own path handling has to be checked against that. <span class="tag open">Open</span></li>
-    <li><strong>Decisions.</strong> Today <code>decideAndAnnounce</code> commits the decision and then posts the board comment in the same process (<code>src/control/decisions.ts:83</code>). The API keeps the commit and its event. The worker posts the comment.</li>
-    <li><strong>Webhooks.</strong> <code>handleWebhook</code> stays in the API as it is: it verifies, de-duplicates by delivery id and writes a <code>webhook</code> event (<code>src/watcher/webhook.ts:32</code>). The <code>onComment</code> step, which runs <code>/approve</code> and <code>/answer</code> commands, moves to the worker.</li>
+    <li><b>Path safety.</b> The API refuses any path whose raw form differs from its normalised form, or that contains <code>%2e</code>, <code>%2f</code> or <code>%5c</code>, as today (<code>src/http/routes.ts:269</code>). Hono's own path handling has to be checked against that. <span class="tag open">Open</span></li>
+    <li><b>Run detail without GitHub.</b> Today Run detail reads the acceptance criteria and the scenario files from GitHub on every view (<code>src/http/routes.ts:144</code>, <code>:171</code>). The cell API already records a run's scenarios sha and file list (<code>src/control/cell-api.ts:274</code>), and sign-off locks that same sha (<code>src/control/decisions.ts:59</code>). So at that moment the cell API also stores the criteria and the files' text in Postgres (§08), and Run detail reads those. <span class="tag call">My call</span></li>
+    <li><b>Decisions.</b> Today <code>decideAndAnnounce</code> commits the decision and then posts the board comment in the same process (<code>src/control/decisions.ts:83</code>). The API keeps the commit and its event. The worker posts the comment from that event.</li>
+    <li><b>Webhooks.</b> <code>handleWebhook</code> stays in the API as it is: it verifies, de-duplicates by delivery id and writes a <code>webhook</code> event (<code>src/watcher/webhook.ts:31</code>). The <code>onComment</code> step, which runs <code>/approve</code> and <code>/answer</code> commands, moves to the worker.</li>
   </ul>
 </section>
 
@@ -272,9 +279,10 @@ flowchart LR
   <h2><span class="n">06</span>Cell API and model gateway</h2>
   <p>It moves into its own service, with its routes as they are: <code>lease</code>, <code>github-token</code>, <code>context</code>, <code>policy-results</code>, <code>pr</code>, <code>checks</code>, <code>stage</code>, <code>transition</code> and <code>upload-url</code> (<code>src/control/cell-api.ts:122</code>), plus <code>/internal/model/*</code> (<code>src/control/cell-api.ts:353</code>). It stays on plain <code>node:http</code>, because it's written and tested and its generation check runs inside the transaction. <span class="tag yours">Yours</span></p>
   <ul>
-    <li><strong>Its own port.</strong> <code>CELL_CONTROL_URL</code> points here, and the egress allowlist names this port in place of today's control port.</li>
-    <li><strong>Probes.</strong> The local-only PBI 2 probes (<code>src/main.ts:92</code>) come along, since they test what cells can reach.</li>
-    <li><strong>Board mirroring.</strong> Transitions this service commits are mirrored by the worker, like everything else (§07).</li>
+    <li><b>Its own port.</b> <code>CELL_CONTROL_URL</code> points here, and the egress allowlist names this port in place of today's control port.</li>
+    <li><b>Snapshots for Run detail.</b> When it records a run's scenarios sha (<code>src/control/cell-api.ts:274</code>), it also stores the item's acceptance criteria and the text of each locked file.</li>
+    <li><b>Probes.</b> The local-only PBI 2 probes (<code>src/main.ts:92</code>) come along, since they test what cells can reach.</li>
+    <li><b>Board mirroring.</b> Transitions this service commits are mirrored by the worker, like everything else (§07).</li>
   </ul>
 </section>
 
@@ -283,17 +291,30 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Job</th><th>Today</th><th>In the worker</th></tr></thead>
     <tbody>
+      <tr><td>Egress proxy and launcher</td><td>Set up at start (<code>src/main.ts:183</code>)</td><td>Unchanged</td></tr>
       <tr><td>Scheduler tick</td><td><code>every(TICK_MS, …)</code> in <code>src/main.ts:195</code></td><td>Unchanged</td></tr>
-      <tr><td>Board poller</td><td>One loop per source, <code>src/main.ts:199</code></td><td>Unchanged</td></tr>
-      <tr><td>Board mirroring</td><td>In-process <code>onTransition</code> hooks (<code>src/control/board.ts:70</code>)</td><td>Reads transition events</td></tr>
-      <tr><td>Comment commands</td><td><code>onComment</code> in the webhook handler (<code>src/main.ts:83</code>)</td><td>Reads <code>webhook</code> events</td></tr>
-      <tr><td>Decision announcements</td><td>Inside <code>decideAndAnnounce</code></td><td>Reads decision events</td></tr>
+      <tr><td>Board poller and readiness judge</td><td>One loop per source, with the judge in-process (<code>src/main.ts:198</code>)</td><td>Unchanged, so the worker holds the Claude token (§03)</td></tr>
+      <tr><td>Board mirroring</td><td>In-process <code>onTransition</code> hooks (<code>src/control/board.ts:70</code>)</td><td>Outbox rows for transition and override events</td></tr>
+      <tr><td>Comment commands</td><td><code>onComment</code> in the webhook handler (<code>src/main.ts:83</code>), which calls <code>decideAndAnnounce</code> (<code>src/control/decisions.ts:114</code>)</td><td>Outbox rows for <code>webhook</code> events. It calls <code>decide</code> only, so each decision is announced once.</td></tr>
+      <tr><td>Decision announcements</td><td>Inside <code>decideAndAnnounce</code></td><td>Outbox rows for decision events</td></tr>
     </tbody>
   </table></div>
   <h3>Exactly one worker</h3>
-  <p>Two workers would launch every cell twice. The worker holds a session-level Postgres advisory lock on its own connection, taken with <code>pg_try_advisory_lock</code>, which returns false at once when another session holds it. Postgres releases the lock when the session ends, even on an unclean disconnect (<a href="https://www.postgresql.org/docs/current/functions-admin.html" target="_blank" rel="noopener">advisory lock functions</a>), so a crashed worker never blocks its replacement. <span class="tag call">My call</span></p>
-  <h3>Events in place of hooks</h3>
-  <p>Today a transition's hooks run after commit, in whichever process made the transition (<code>src/store/items.ts:45</code>), and nothing retries a hook that fails (<code>src/control/board.ts:39</code>). Every transition and override already writes an event in the same transaction as the state change (<code>src/store/items.ts:44</code>, <code>:65</code>). So the worker reads events after a stored cursor, acts on each one, then moves the cursor. A crash means the event is handled again, so every effect must be safe to repeat. Board comments already carry an idempotency key (<code>src/control/board.ts:56</code>). The other board calls need checking. <span class="tag open">Open</span></p>
+  <p>Two workers wouldn't claim the same item, because <code>claimNext</code> skips locked rows (<code>src/store/items.ts:104</code>). But each would claim its own, which overshoots the WIP limit, and each would poll and judge every item. So the worker holds a session-level Postgres advisory lock on its own connection, taken with <code>pg_try_advisory_lock</code>, which returns false at once when another session holds it. Postgres releases the lock when the session ends, even on an unclean disconnect (<a href="https://www.postgresql.org/docs/current/functions-admin.html" target="_blank" rel="noopener">advisory lock functions</a>). <span class="tag call">My call</span></p>
+  <ul>
+    <li><b>Lost lock.</b> If the lock's connection errors or closes, the worker stops ticking and exits, and the platform restarts it. It never keeps working through its pool without the lock.</li>
+    <li><b>Standby.</b> A worker that can't take the lock does nothing and retries every 15 seconds. That covers a revision swap, where the old and new worker overlap.</li>
+  </ul>
+  <h3>An outbox in place of hooks</h3>
+  <p>Today a transition's hooks run after commit, in whichever process made the transition (<code>src/store/items.ts:45</code>), and nothing retries a hook that fails (<code>src/control/board.ts:39</code>). Every transition and override already writes an event in the same transaction as the state change (<code>src/store/items.ts:44</code>, <code>:65</code>). A cursor over that event table can't work: <code>event.id</code> is a random <code>uuid</code> and <code>event.at</code> is taken at insert, not at commit (<code>db/migrations/001_init.sql:140</code>), so a cursor would skip events from transactions that commit late. <span class="tag call">My call</span></p>
+  <ol>
+    <li>In the same transaction as the event, <code>transitionItem</code>, <code>overrideItem</code>, decisions and webhook intake insert one <code>outbox</code> row per consumer, with a <code>bigserial</code> sequence.</li>
+    <li>The worker takes the oldest rows for each consumer with <code>for update skip locked</code>, handles each one, and deletes it in the same transaction as its bookkeeping.</li>
+    <li>A row from a transaction that hasn't committed is invisible until it commits. It's never skipped, so nothing is lost.</li>
+    <li>Transitions on one item take that item's row lock (<code>src/store/items.ts:34</code>), so one item's rows are numbered in commit order and handled in that order.</li>
+    <li>The outbox starts empty on the first deploy, so history isn't replayed onto old items.</li>
+  </ol>
+  <p>A crash between an effect and the delete means the row is handled again, so every effect must be safe to repeat. Every idempotency key comes from the event id, and every text comes from the event's payload, never from state read when the row is handled. Two keys change for this. The decision announcement's key includes <code>Date.now()</code> (<code>src/control/decisions.ts:83</code>), and the waiting comment's key and question text are read from the item's current state (<code>src/control/board.ts:26</code>, <code>:56</code>). Whether <code>setStatus</code>, <code>claim</code>, <code>release</code>, <code>close</code> and <code>linkPr</code> are safe to repeat needs checking. <span class="tag open">Open</span></p>
   <h3>Health</h3>
   <p>The worker records a heartbeat each tick. The API returns it with the floor, and the SPA shows "scheduler not ticking" when it goes stale, so a stopped worker doesn't look like a quiet factory. <span class="tag call">My call</span></p>
 </section>
@@ -303,12 +324,18 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Table</th><th>Change</th></tr></thead>
     <tbody>
-      <tr><td><code>user</code></td><td><code>provider</code>, today limited to <code>google</code>, <code>microsoft</code> or <code>dev</code> (<code>db/migrations/001_init.sql:31</code>), becomes <code>issuer</code>, any issuer URL. The unique key becomes <code>(issuer, subject)</code>. Existing <code>dev</code> rows move to the local Keycloak issuer.</td></tr>
+      <tr><td><code>user</code></td><td>A new <code>issuer</code> column, any issuer URL, sits beside <code>provider</code>, which is limited to <code>google</code>, <code>microsoft</code> or <code>dev</code> today (<code>db/migrations/001_init.sql:31</code>). <code>(issuer, subject)</code> gets a unique key. <code>provider</code> is dropped in step 9 of §12, once nothing reads it. Today's readers are <code>src/http/routes.ts:286</code>, <code>src/store/migrate-cli.ts:43</code>, <code>scripts/seed-owner.ts:21</code> and <code>src/e2e.ts:117</code>.</td></tr>
       <tr><td><code>session</code>, new</td><td>Hash of the cookie id, <code>user_id</code>, refresh token encrypted under the session key, current access token and its expiry, <code>created_at</code>, <code>last_seen_at</code>, <code>expires_at</code>.</td></tr>
-      <tr><td><code>worker_state</code>, new</td><td>One row per event consumer, with its last handled event id, plus the worker's heartbeat.</td></tr>
+      <tr><td><code>outbox</code>, new</td><td><code>seq bigserial</code>, <code>consumer</code>, <code>event_id</code> (§07).</td></tr>
+      <tr><td><code>worker_heartbeat</code>, new</td><td>One row, the time of the worker's last tick.</td></tr>
+      <tr><td><code>run</code></td><td>A new <code>acceptance_criteria</code> column, stored with the scenarios sha (§06).</td></tr>
+      <tr><td><code>run_file</code>, new</td><td><code>run_id</code>, <code>path</code>, <code>text</code>: each locked file's text at the scenarios sha (§06).</td></tr>
     </tbody>
   </table></div>
-  <p><code>seed-owner</code> takes <code>issuer=</code> in place of <code>provider=</code> (<code>scripts/seed-owner.ts:9</code>). Locally, migrate seeds the owner from the Keycloak realm's test user instead of <code>FACTORY_DEV_LOGIN</code> (<code>src/store/migrate-cli.ts:74</code>). That needs the test user's subject known before anyone signs in. <span class="tag open">Open</span></p>
+  <ul>
+    <li><b>Grants.</b> A new <code>factory_bff</code> role gets select, insert, update and delete on <code>session</code> and nothing else. <code>factory_app</code> gets the other new tables.</li>
+    <li><b>Owner seeding.</b> <code>seed-owner</code> takes <code>issuer=</code> as well as <code>provider=</code> (<code>scripts/seed-owner.ts:9</code>). Locally, migrate seeds the owner from the Keycloak realm's test user in step 5, alongside today's <code>FACTORY_DEV_LOGIN</code> owner (<code>src/store/migrate-cli.ts:74</code>), which goes in step 9. That needs the test user's subject known before anyone signs in. <span class="tag open">Open</span></li>
+  </ul>
 </section>
 
 <section id="stack">
@@ -335,47 +362,49 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Aspire resource</th><th>Port</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td><code>keycloak</code></td><td>Aspire picks</td><td><code>addKeycloak</code> with a realm import: the <code>dashboard</code> client, an audience mapper, a test owner, and an e2e client with direct access grants. The TypeScript integration is a preview package (<a href="https://aspire.dev/reference/api/typescript/aspire.hosting.keycloak/addkeycloak.md" target="_blank" rel="noopener">aspire.dev</a>).</td></tr>
+      <tr><td><code>keycloak</code></td><td>7430</td><td>Pinned, because the issuer URL contains the port and users are keyed on the issuer. <code>addKeycloak</code> with a realm import: the <code>dashboard</code> client, an audience mapper, a test owner, and an e2e client with direct access grants. The TypeScript integration is a preview package (<a href="https://aspire.dev/reference/api/typescript/aspire.hosting.keycloak/addkeycloak.md" target="_blank" rel="noopener">aspire.dev</a>).</td></tr>
       <tr><td><code>pg</code>, <code>storage</code>, <code>migrate</code></td><td>Azurite blobs on 7410</td><td>As today</td></tr>
-      <tr><td><code>bff</code></td><td>7400</td><td>Keeps today's dashboard address</td></tr>
+      <tr><td><code>bff</code></td><td>7400</td><td>Keeps today's dashboard address. Runs on 7403 until step 9 retires today's dashboard.</td></tr>
       <tr><td><code>cell-api</code></td><td>7401</td><td>The port on the egress allowlist</td></tr>
       <tr><td><code>api</code></td><td>7402</td><td>Reached by the BFF only</td></tr>
-      <tr><td><code>worker</code></td><td>None</td><td>Starts after <code>migrate</code></td></tr>
+      <tr><td><code>worker</code></td><td>None</td><td>Starts after <code>migrate</code>, and sets up the egress proxy</td></tr>
     </tbody>
   </table></div>
-  <p>Pinned ports follow today's reason, keeping the egress proxy's allowlist stable across restarts (<code>aspire-apphost/apphost.mts:7</code>). <span class="tag call">My call</span></p>
+  <p>Pinned ports follow today's reason, keeping the egress proxy's allowlist stable across restarts (<code>aspire-apphost/apphost.mts:7</code>). Under <code>FACTORY_FLOAT_PORTS=1</code> they float as today, and migrate then works out the Keycloak issuer from the live endpoint. <span class="tag call">My call</span></p>
   <h3>Azure</h3>
-  <p>Container Apps, one app per service. The BFF has external ingress. The API and the cell API have internal ingress. The worker has none. Cells stay Container Apps jobs. The IdP is whatever the four settings in §04 point at. Whether a job can reach an internal-ingress app in the same environment needs checking. <span class="tag open">Open</span></p>
+  <p>Container Apps, one app per service. The BFF has external ingress. The API and the cell API have internal ingress. The worker has none. Cells stay Container Apps jobs. The IdP is whatever the four settings in §04 point at. Two things need checking: whether a job can reach an internal-ingress app in the same environment, and how cells are kept from reaching the API there. <span class="tag open">Open</span></p>
 </section>
 
 <section id="testing">
   <h2><span class="n">11</span>Testing</h2>
   <ul>
-    <li><strong>Unit.</strong> <code>node:test</code> per service, as today.</li>
-    <li><strong>API end to end.</strong> Tests get a real token from Keycloak's e2e client by direct grant, with no browser. Direct access grants have to be enabled on that client (<a href="https://www.keycloak.org/docs/25.0.6/securing_apps/index.html" target="_blank" rel="noopener">Keycloak securing apps</a>), and only that client.</li>
-    <li><strong>BDD.</strong> The sign-in scenarios in <code>features/pbi-19-dashboard.feature</code> and <code>features/pbi-89-dashboard-wiring.feature</code> are rewritten for OIDC. Their steps today read the dev token (<code>features/steps/pbi-89.steps.ts:101</code>).</li>
-    <li><strong>UI end to end.</strong> Deferred. Add a browser driver when a flow only the UI can show needs a test.</li>
+    <li><b>Unit.</b> <code>node:test</code> per service, as today.</li>
+    <li><b>API end to end.</b> Tests get a real token from Keycloak's e2e client by direct grant, with no browser. Direct access grants have to be enabled on that client (<a href="https://www.keycloak.org/docs/25.0.6/securing_apps/index.html" target="_blank" rel="noopener">Keycloak securing apps</a>), and only that client.</li>
+    <li><b>Sign-in scenarios.</b> The ones in <code>features/pbi-19-dashboard.feature</code> and <code>features/pbi-89-dashboard-wiring.feature</code> are rewritten for OIDC. Their steps today read the dev token (<code>features/steps/pbi-89.steps.ts:101</code>).</li>
+    <li><b>Single-process scenarios.</b> These assume one <code>control</code> resource and change with the split: <code>features/pbi-89-dashboard-wiring.feature:30</code> starts the control plane from <code>src/main.ts</code>, and <code>features/steps/pbi-6.steps.ts:73</code> and <code>:118</code> look up <code>control</code>, call its probes and check that <code>CELL_CONTROL_URL</code> names its port.</li>
+    <li><b>Docs.</b> <code>README.md:55</code> and <code>scripts/factory.ps1:3</code> tell the owner to open the sign-in link from the <code>control</code> console. Both change in step 9.</li>
+    <li><b>UI end to end.</b> Deferred. Add a browser driver when a flow only the UI can show needs a test.</li>
   </ul>
 </section>
 
 <section id="migration">
   <h2><span class="n">12</span>Migration order</h2>
-  <p>Each step is one PBI and leaves the factory running. <span class="tag call">My call</span></p>
+  <p>Each step is one PBI and leaves the factory running. Until step 9, today's <code>src/main.ts</code> keeps serving the dashboard and the webhook. <span class="tag call">My call</span></p>
   <div class="tbl"><table>
     <thead><tr><th>#</th><th>PBI</th><th>Needs</th></tr></thead>
     <tbody>
-      <tr><td class="num">1</td><td>Schema: <code>user</code> keyed by <code>(issuer, subject)</code>, plus the <code>session</code> and <code>worker_state</code> tables</td><td></td></tr>
-      <tr><td class="num">2</td><td>Worker: the tick and poller move out, with the advisory lock</td><td>1</td></tr>
-      <tr><td class="num">3</td><td>Event consumers: board mirroring, comment commands and announcements read events. <code>onTransition</code> hooks go away.</td><td>2</td></tr>
-      <tr><td class="num">4</td><td>Cell API: its own service and port, with the egress allowlist updated</td><td></td></tr>
-      <tr><td class="num">5</td><td>Keycloak in the AppHost with the realm import</td><td></td></tr>
-      <tr><td class="num">6</td><td>Orchestrator API on Hono: the <code>/v1</code> routes, JWT checks, role checks, events and webhook intake</td><td>1, 3, 5</td></tr>
-      <tr><td class="num">7</td><td>BFF on Hono: sign-in, sessions, forwarding and the webhook pass-through</td><td>5, 6</td></tr>
+      <tr><td class="num">1</td><td>Schema, additive only: <code>issuer</code> beside <code>provider</code>, the <code>session</code>, <code>outbox</code>, <code>worker_heartbeat</code> and <code>run_file</code> tables, <code>run.acceptance_criteria</code>, and the <code>factory_bff</code> role. Nothing reads them yet.</td><td></td></tr>
+      <tr><td class="num">2</td><td>Worker: the egress set-up, tick, poller and judge move out, with the advisory lock. It registers <code>mirrorBoard</code> until step 3 lands, so its transitions are still mirrored.</td><td>1</td></tr>
+      <tr><td class="num">3</td><td>Outbox: transitions, overrides, decisions and webhook intake write outbox rows. The worker handles mirroring, comment commands and announcements, with keys from the event id. <code>onTransition</code> hooks go away.</td><td>2</td></tr>
+      <tr><td class="num">4</td><td>Cell API: its own service on 7401, with the egress allowlist updated, and the Run detail snapshots. It registers <code>mirrorBoard</code> until step 3 lands. <code>src/main.ts</code> takes its own port from <code>PORT</code> instead of <code>CELL_CONTROL_URL</code> (<code>src/main.ts:162</code>), so the old dashboard stays on 7400.</td><td>1</td></tr>
+      <tr><td class="num">5</td><td>Keycloak on 7430 with the realm import, and migrate seeding its test owner</td><td>1</td></tr>
+      <tr><td class="num">6</td><td>Orchestrator API on Hono: the <code>/v1</code> routes, JWT checks, role checks, events and webhook intake</td><td>3, 4, 5</td></tr>
+      <tr><td class="num">7</td><td>BFF on Hono, on 7403: sign-in, sessions, forwarding and the webhook pass-through</td><td>5, 6</td></tr>
       <tr><td class="num">8</td><td>SPA: the floor, run detail and Phase 0 pages in React</td><td>7</td></tr>
-      <tr><td class="num">9</td><td>Removal: the dev token, <code>src/http/routes.ts</code>, <code>src/http/views.ts</code> and today's combined <code>src/main.ts</code></td><td>8</td></tr>
+      <tr><td class="num">9</td><td>Cut-over: the BFF moves to 7400 and takes over the webhook route. The dev token, <code>src/http/routes.ts</code>, <code>src/http/views.ts</code>, today's combined <code>src/main.ts</code>, the <code>dev</code> owner and the <code>provider</code> column go. The scenarios and docs in §11 follow.</td><td>8</td></tr>
     </tbody>
   </table></div>
-  <p>Steps 1, 4 and 5 don't depend on each other and can run in parallel.</p>
+  <p>After step 1, steps 2, 4 and 5 don't depend on each other and can run in parallel.</p>
 </section>
 
 <section id="open">
@@ -383,10 +412,11 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Question</th><th>What settles it</th><th>Blocks</th></tr></thead>
     <tbody>
-      <tr><td>Can a Keycloak realm import fix a user's id, so the seeded owner's subject is known before first sign-in?</td><td>One realm import with a fixed id, then a sign-in</td><td>1, 5</td></tr>
+      <tr><td>Can a Keycloak realm import fix a user's id, so the seeded owner's subject is known before first sign-in?</td><td>One realm import with a fixed id, then a sign-in</td><td>5</td></tr>
       <tr><td>Does Hono's path handling keep today's raw-path guarantees?</td><td>The routing tests from <code>src/http/routes.test.ts</code>, run against a Hono app</td><td>6, 7</td></tr>
-      <tr><td>Are the board calls other than <code>comment</code> safe to repeat?</td><td>Reading each adapter call, then a test that delivers an event twice</td><td>3</td></tr>
-      <tr><td>Can a Container Apps job reach an internal-ingress app in the same environment?</td><td>The Container Apps networking docs, then one job in Azure</td><td>Azure</td></tr>
+      <tr><td>Are <code>setStatus</code>, <code>claim</code>, <code>release</code>, <code>close</code> and <code>linkPr</code> safe to repeat?</td><td>Reading each adapter call, then a test that hands the worker one outbox row twice</td><td>3</td></tr>
+      <tr><td>Can a Container Apps job reach an internal-ingress app in the same environment, and how are cells kept from reaching the API?</td><td>The Container Apps networking docs, then one job in Azure</td><td>Azure</td></tr>
+      <tr><td>Which broker lets Google and Microsoft accounts in through one issuer in Azure?</td><td>A choice between running Keycloak and a managed broker, once the accounts that must sign in are known</td><td>Azure</td></tr>
       <tr><td>Does a server-sent event stream pass cleanly through a Hono proxy in the BFF?</td><td>A one-route prototype</td><td>7</td></tr>
       <tr><td>Does <code>openid-client</code> run on Node 26? Its package declares no Node range.</td><td>One sign-in round trip against local Keycloak</td><td>7</td></tr>
     </tbody>
@@ -395,13 +425,13 @@ flowchart LR
 
 <section id="decisions">
   <h2><span class="n">14</span>Decision log</h2>
-  <p>You accepted every My call below on 2026-11-07. They stay tagged My call, so it's clear where each one came from.</p>
+  <p>You accepted every My call in v0.1 on 2026-11-07. The rows marked "Added in v0.2" came out of the first review and haven't been put to you yet.</p>
   <div class="tbl"><table>
     <thead><tr><th>Topic</th><th>Decision</th><th></th></tr></thead>
     <tbody>
       <tr><td>Shape</td><td>BFF, orchestrator API, cell API and worker, each its own deployable</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Sessions in the BFF</td><td>The BFF holds the session and tokens. The browser holds only a cookie.</td><td><span class="tag yours">Yours</span></td></tr>
-      <tr><td>Identity provider</td><td>Any OIDC provider, configured. Keycloak locally. Providers are assumed to issue JWT access tokens.</td><td><span class="tag yours">Yours</span></td></tr>
+      <tr><td>Identity provider</td><td>Any OIDC provider, configured. Keycloak locally. Providers are assumed to issue JWT access tokens. This replaces the 2026-11-05 sign-in decision.</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>API token</td><td>The API validates the provider's own JWT access token</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Cell API</td><td>Its own service with the model gateway, accepting <code>RUN_TOKEN</code></td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Session storage</td><td>A Postgres table</td><td><span class="tag yours">Yours</span></td></tr>
@@ -412,14 +442,25 @@ flowchart LR
       <tr><td>GitHub calls</td><td>Worker and cell API only. The API holds no GitHub credentials.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Webhook ingress</td><td>Through the BFF, so the API keeps internal ingress</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Single worker</td><td>Session-level Postgres advisory lock</td><td><span class="tag call">My call</span></td></tr>
-      <tr><td>Hooks to events</td><td>The worker handles transitions from the event log, after a cursor</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Session expiry</td><td>Seven days idle, 30 days absolute</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Local ports</td><td>BFF 7400, cell API 7401, API 7402</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Token separation</td><td>The cell API takes no user token, and the API takes no <code>RUN_TOKEN</code></td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Cell egress</td><td>Only the cell API's port is on the allowlist</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Worker health</td><td>A heartbeat on the floor</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Runtime, repo, libraries, data</td><td>Node 26 with no build, one package, <code>openid-client</code>, <code>jose</code>, raw SQL through <code>pg</code></td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Migration order</td><td>Nine PBIs, each leaving the factory running</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Hooks to an outbox</td><td>Outbox rows written with each event, handled by the worker. Added in v0.2, replacing v0.1's event cursor.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Claude token in the worker</td><td>The readiness judge keeps running in-process. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Run detail snapshots</td><td>The cell API stores criteria and locked files, so the API never reads GitHub. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>BFF database role</td><td><code>factory_bff</code>, limited to <code>session</code>. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Lost lock and standby</td><td>Exit on a lost lock, retry every 15 seconds as standby. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Event stream length</td><td>Five minutes, then reconnect. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Keycloak port</td><td>Pinned to 7430. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
     </tbody>
   </table></div>
 </section>
 
-<footer>Sources: <a href="https://www.keycloak.org/admin-api/protocol-mappers" target="_blank" rel="noopener">Keycloak protocol mappers</a> · <a href="https://www.keycloak.org/docs/25.0.6/securing_apps/index.html" target="_blank" rel="noopener">Keycloak securing apps</a> · <a href="https://aspire.dev/integrations/security/keycloak/" target="_blank" rel="noopener">Aspire Keycloak integration</a> · <a href="https://www.postgresql.org/docs/current/functions-admin.html" target="_blank" rel="noopener">Postgres advisory locks</a> · <a href="https://www.rabbitmq.com/docs/oauth2-examples-google" target="_blank" rel="noopener">Google opaque access tokens</a></footer>
+<footer>Sources: <a href="https://www.keycloak.org/admin-api/protocol-mappers" target="_blank" rel="noopener">Keycloak protocol mappers</a> · <a href="https://www.keycloak.org/docs/latest/server_admin/index.html" target="_blank" rel="noopener">Keycloak server admin guide</a> · <a href="https://www.keycloak.org/docs/25.0.6/securing_apps/index.html" target="_blank" rel="noopener">Keycloak securing apps</a> · <a href="https://aspire.dev/integrations/security/keycloak/" target="_blank" rel="noopener">Aspire Keycloak integration</a> · <a href="https://www.postgresql.org/docs/current/functions-admin.html" target="_blank" rel="noopener">Postgres advisory locks</a> · <a href="https://www.rabbitmq.com/docs/oauth2-examples-google" target="_blank" rel="noopener">Google opaque access tokens</a></footer>
 </main>
 </div>
 </body>
