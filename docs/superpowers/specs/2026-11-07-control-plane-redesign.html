@@ -312,6 +312,7 @@ flowchart LR
     <li>The worker takes the oldest due rows for each consumer with <code>for update skip locked</code>, handles each one, and deletes it once every effect has succeeded.</li>
     <li>A handler throws when any effect fails. Today's <code>mirror</code> logs each failure and carries on (<code>src/control/board.ts:41</code>), so that changes. The row stays, its attempt count goes up, and it's retried with backoff, doubling from 30 seconds up to 30 minutes.</li>
     <li>A failing row holds back only the later rows for the same item and consumer, so one bad item never stalls the others.</li>
+    <li>Webhook events carry no item today (<code>src/watcher/webhook.ts:53</code>), so webhook intake fills in the outbox row's <code>item_id</code>. For a comment it writes one row per item whose <code>external_id</code> the comment names, in any source, since <code>external_id</code> is unique only within a source (<code>db/migrations/001_init.sql:58</code>). The worker then runs <code>applyComment</code> for that item's source alone. A comment that names no known item gets no row, since <code>applyComment</code> would ignore it (<code>src/control/decisions.ts:109</code>). So comment commands on one item run in order, and a failing one holds back no other item.</li>
     <li>After 10 attempts the row is marked failed and set aside. It's logged and counted on the floor next to the heartbeat, so someone sees it.</li>
     <li>A row from a transaction that hasn't committed is invisible until it commits. It's never skipped, so nothing is lost.</li>
     <li>Transitions on one item take that item's row lock (<code>src/store/items.ts:34</code>), so one item's rows are numbered in commit order and handled in that order.</li>
@@ -467,6 +468,7 @@ flowchart LR
       <tr><td>Azure principals</td><td>One Entra principal per service. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Snapshot backfill</td><td>A one-off worker command for runs before step 4. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Owner's GitHub login</td><td>The dev owner holds it until step 9, which moves it onto the Keycloak owner as it deletes the dev owner. Added in v0.4.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Webhook outbox rows</td><td>Intake writes one row per item a comment names, so comment commands are ordered and held back per item. Added in v0.4.</td><td><span class="tag call">My call</span></td></tr>
     </tbody>
   </table></div>
 </section>
