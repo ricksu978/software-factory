@@ -437,13 +437,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await api.policyResults({ file: "pr-review", source: pr.source, stageId: "self-review", attempt: reviewRounds, checkedSha: await git.head(), verdicts });
       const last = lastLine(r.text);
       if (last === "DEADLOCK") throw new Blocked(`Self-review deadlocked:\n${r.text.slice(-2000)}`);
-      if (last === "APPROVED" && verdicts.every((v) => v.status === "passed")) {
+      // `OPEN: 0` says the same as APPROVED: no finding is open. A reviewer wrote it for five clean rounds on PBI 105.
+      if ((last === "APPROVED" || /^OPEN:\s*0$/.test(last)) && verdicts.every((v) => v.status === "passed")) {
         if (!(await lockHolds(`self-review(${tag}): fixes`))) throw new Blocked(lockFinding());
         await push();
         await end("passed");
         return;
       }
-      // APPROVED with a failed rubric verdict counts as another round.
+      // APPROVED or `OPEN: 0` with a failed rubric verdict counts as another round.
       const fix = await ask("self-review", brief(
         "# Fix review findings",
         "A reviewer read this branch. Fix each finding that's right. For one that isn't, write a short rebuttal in your reply. Commit your work.",
