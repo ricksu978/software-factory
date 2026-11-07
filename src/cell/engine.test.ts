@@ -376,7 +376,11 @@ describe("runCell", () => {
     const h = harness({ nextStage: "open-pr" });
     const marker = fwd(join(h.root, "setup-ran"));
     h.deps.config.commands.setup = `pwd > "${marker}"`;
+    // Open-pr re-runs dod.md, as dodCheckedSha is null. A setup that ran after it would fail this line and send the
+    // run back to green, which is PBI 105's failure.
+    h.deps.policies.dod = policy("dod", `- [ ] Dependencies are installed. \`run: test -f "${marker}"\`\n`);
     assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["open-pr"], "the dod.md check passed at open-pr, so green never ran again");
     assert.ok(existsSync(join(h.root, "setup-ran")), "setup ran");
     assert.equal(fwd(readFileSync(join(h.root, "setup-ran"), "utf8").trim()).endsWith("/work"), true, "in the checkout");
   });
