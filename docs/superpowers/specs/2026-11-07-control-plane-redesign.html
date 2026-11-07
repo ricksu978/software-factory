@@ -135,7 +135,7 @@ mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
 
 <main>
 <header class="top">
-  <div class="eyebrow">Draft spec · v0.3 · 2026-11-07</div>
+  <div class="eyebrow">Draft spec · v0.4 · 2026-11-07</div>
   <h1>Control plane redesign</h1>
   <p class="lead">The control plane splits into four services: a BFF that serves the dashboard and signs people in, an orchestrator API that owns every control action, a cell API that only cells can reach, and a worker that runs the background jobs. They share one Postgres and talk through it.</p>
   <p>This replaces the single always-on control plane in the 2026-11-05 design: its architecture diagram, its dashboard sign-in and its control plane row in the Azure table. It would also replace that design's decision that sign-in accepts Google, personal Microsoft and work or school Microsoft accounts (2026-11-05 decision log), once you confirm that in §14. Under the redesign, which accounts can sign in depends on the configured provider (§04). The item lifecycle, SOP, cells, safety rules and data model stay as they are, except where §08 here changes them.</p>
@@ -340,6 +340,7 @@ flowchart LR
     <li><b>Principals.</b> In Azure, migrate maps one Entra principal per service onto its role, extending today's single mapping (<code>src/store/migrate-cli.ts:35</code>).</li>
     <li><b>Backfill.</b> Runs that set a scenarios sha before step 4 have no snapshot. A one-off worker command reads them from GitHub once, so Run detail keeps showing their criteria and files.</li>
     <li><b>Owner seeding.</b> <code>seed-owner</code> takes <code>issuer=</code> as well as <code>provider=</code> (<code>scripts/seed-owner.ts:9</code>). Locally, migrate seeds the owner from the Keycloak realm's test user in step 5, alongside today's <code>FACTORY_DEV_LOGIN</code> owner (<code>src/store/migrate-cli.ts:74</code>), which goes in step 9. That needs the test user's subject known before anyone signs in. <span class="tag open">Open</span></li>
+    <li><b>The owner's GitHub login.</b> Two users can't share a login, because <code>lower(github_login)</code> is unique (<code>db/migrations/004_user_github_login_ci.sql:3</code>). So from step 5 the dev owner keeps <code>FACTORY_DEV_LOGIN</code> and the Keycloak owner has no login. Step 9 moves the login onto the Keycloak owner in the same transaction that deletes the dev owner. Without the move, the owner's <code>/approve</code> comments would get the refusal reply (<code>src/control/decisions.ts:112</code>), and their changes-requested reviews would stop counting (<code>src/watcher/webhook.ts:107</code>). <span class="tag call">My call</span></li>
   </ul>
 </section>
 
@@ -406,7 +407,7 @@ flowchart LR
       <tr><td class="num">6</td><td>Orchestrator API on Hono: the <code>/v1</code> routes, JWT checks, role checks, events and webhook intake</td><td>3, 4, 5</td></tr>
       <tr><td class="num">7</td><td>BFF on Hono, on 7403: sign-in, sessions, forwarding and the webhook pass-through</td><td>5, 6</td></tr>
       <tr><td class="num">8</td><td>SPA: the floor, run detail and Phase 0 pages in React</td><td>7</td></tr>
-      <tr><td class="num">9</td><td>Cut-over: the BFF moves to 7400 and takes over the webhook route. The dev token, <code>src/http/routes.ts</code>, <code>src/http/views.ts</code>, today's combined <code>src/main.ts</code>, the <code>dev</code> owner and the <code>provider</code> column go. The scenarios and docs in §11 follow.</td><td>8</td></tr>
+      <tr><td class="num">9</td><td>Cut-over: the BFF moves to 7400 and takes over the webhook route. The dev token, <code>src/http/routes.ts</code>, <code>src/http/views.ts</code>, today's combined <code>src/main.ts</code>, the <code>dev</code> owner and the <code>provider</code> column go, with the dev owner's GitHub login moved onto the Keycloak owner (§08). The scenarios and docs in §11 follow.</td><td>8</td></tr>
     </tbody>
   </table></div>
   <p>After step 1, steps 2 and 5 can run in parallel, and step 4 can run beside step 3.</p>
@@ -465,6 +466,7 @@ flowchart LR
       <tr><td>Session identity</td><td>The session stores issuer and subject, and the API resolves the user, so the BFF never reads <code>user</code>. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Azure principals</td><td>One Entra principal per service. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Snapshot backfill</td><td>A one-off worker command for runs before step 4. Added in v0.3.</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Owner's GitHub login</td><td>The dev owner holds it until step 9, which moves it onto the Keycloak owner as it deletes the dev owner. Added in v0.4.</td><td><span class="tag call">My call</span></td></tr>
     </tbody>
   </table></div>
 </section>
