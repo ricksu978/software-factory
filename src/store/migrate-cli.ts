@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type pg from "pg";
 import { parse } from "yaml";
+import { seedOwner } from "../../scripts/seed-owner.ts";
 import { createPool, migrate } from "./db.ts";
 
 type Source = { repo: string; installationId: number; owner: { type: "user" | "org"; login: string }; projectNumber: number; fieldMap: unknown };
@@ -47,17 +48,14 @@ async function upsertDevOwner(pool: pg.Pool, login: string): Promise<void> {
 
 export async function main(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   if (args[0] === "seed-owner") {
-    const seed = new URL("../../scripts/seed-owner.ts", import.meta.url);
-    if (!existsSync(seed)) {
-      console.error("seed-owner arrives with plan Task 15");
-      return 1;
-    }
     const pool = createPool(env.FACTORY_DB_URI);
     try {
       await migrate(pool);
-      const mod = (await import(seed.href)) as { seedOwner: (pool: pg.Pool, words: string[]) => Promise<void> };
-      await mod.seedOwner(pool, args.slice(1));
+      await seedOwner(pool, args.slice(1));
       return 0;
+    } catch (e) {
+      console.error((e as Error).message);
+      return 1;
     } finally {
       await pool.end();
     }

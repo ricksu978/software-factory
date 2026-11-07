@@ -1,14 +1,15 @@
-// Dashboard routes (plan Task 15): Floor, Run detail, sign-off and answers, users and the event stream.
-// The override controls and the Re-queue button wait for Task 13's setOverride.
+// Dashboard routes (plan Task 15): Floor, Run detail, sign-off and answers, overrides, users, the event stream,
+// the stored evidence and the Phase 0 exit report.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
-import { REGRESSION_TAG } from "../bdd/messages.ts";
+import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { nextUp } from "../store/items.ts";
+import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { floorPage, noAccessPage, runDetailPage, signInPage, type RunDetail, type Scenario } from "./views.ts";
+import { floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type Phase0Row, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -20,7 +21,14 @@ export type DashboardDeps = {
   /** Reads the signed-off feature files for the sign-off view. Without it, that view is left out. */
   repoHost?: RepoHost;
   env?: Record<string, string | undefined>;
+  /** Reads a stored transcript or report by its blob path, or null when it's missing. Without it, Run detail shows paths. */
+  readBlob?: (path: string) => Promise<string | null>;
 };
+
+const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill"];
+const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
+// The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
+const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
 type User = { id: string; role: Role; product_owner: boolean };
 
@@ -74,18 +82,58 @@ async function floor(pool: pg.Pool) {
        and p.at = (select max(at) from policy_result where item_id = i.id and file = 'dor')
      where i.state = 'NotReady' group by i.id, i.title order by i.title`,
   )).rows;
+  const overrides = await activeOverrides(pool, new Date());
+  const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
+  // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
   const active = (await pool.query(
     `select i.id, i.title, i.state, i.held, r.next_stage as stage,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
-       exists (select from override o where o.scope = 'item' and o.target_id = i.id and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())) as overridden
+       (select message from stage_run s where s.run_id = r.id and message <> '' order by ended_at desc nulls last, started_at desc limit 1) as message
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
-  )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(a.overridden ? ["override"] : [])] }));
+  )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
+  const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  return { active, waiting: [...waiting, ...reviews], waitingCount, capacity, next, notReady };
+  return { active, waiting: [...waiting, ...reviews], waitingCount, capacity, next, notReady, factory };
+}
+
+/**
+ * The item's own scenarios with their verdict in the latest red and the latest green report, read from the stored
+ * reports with classify. A report that's gone leaves its column empty.
+ */
+async function verdicts(deps: DashboardDeps, externalId: string, stages: { stage_id: string; report_ref: string | null }[]): Promise<RunDetail["verdicts"]> {
+  if (!deps.readBlob) return [];
+  const tag = `@pbi-${externalId}`;
+  const byName = new Map<string, { red: string; green: string }>();
+  for (const stage of ["red", "green"] as const) {
+    const ref = stages.filter((s) => s.stage_id === stage && s.report_ref).at(-1)?.report_ref;
+    const text = ref ? await deps.readBlob(ref) : null;
+    for (const r of text ? classify(text).values() : []) {
+      if (!r.tags.includes(tag)) continue;
+      const row = byName.get(r.name) ?? { red: "", green: "" };
+      row[stage] = r.verdict;
+      byName.set(r.name, row);
+    }
+  }
+  return [...byName].map(([name, v]) => ({ name, ...v }));
+}
+
+/**
+ * Spec §13's Phase 0 exit measure from this database: every run with a merge sha, oldest merge first. A run's merge
+ * date is the item's first move to Accepted after the run started, and its cost is its own stage runs' sum.
+ */
+async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
+  return (await pool.query<Phase0Row>(
+    `select * from (
+       select i.id as item_id, i.title, r.pr_url, r.risk_tier, r.tier_reasons,
+         (select min(e.at) from event e where e.item_id = r.item_id and e.kind = 'transition' and e.payload->>'to' = 'Accepted' and e.at >= r.started_at) as merged_at,
+         coalesce((select sum(s.cost_usd) from stage_run s where s.run_id = r.id), 0)::float8 as cost
+       from run r join item i on i.id = r.item_id where r.merge_sha is not null) m
+     order by merged_at nulls last`,
+  )).rows;
 }
 
 /**
@@ -127,7 +175,7 @@ async function lockedFeatures(deps: DashboardDeps, externalId: string, sha: stri
   return out;
 }
 
-async function runDetail(deps: DashboardDeps, id: string): Promise<RunDetail | null> {
+async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
   if (!item) return null;
@@ -146,7 +194,12 @@ async function runDetail(deps: DashboardDeps, id: string): Promise<RunDetail | n
   const question = waiting ? open : null;
   const criteria = item.state === "SignOff" && run?.scenarios_sha ? await criteriaView(deps, item.external_id, run.scenarios_sha, run.locked_files ?? []) : null;
   const features = run?.features_lock_sha ? await lockedFeatures(deps, item.external_id, run.features_lock_sha, run.locked_files ?? []) : [];
-  return { item, run, policies, stages, question, criteria, features };
+  const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
+  return {
+    item, run, policies, stages, question, criteria, features,
+    verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
+    controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
+  };
 }
 
 /**
@@ -243,7 +296,50 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     const banner = tokenBanner(env);
 
     if (req.method === "GET" && path === "/") {
-      send(res, 200, floorPage(await floor(deps.pool), banner));
+      send(res, 200, floorPage({ ...(await floor(deps.pool)), canOperate: requireRole(user, "operator") }, banner));
+      return true;
+    }
+    if (req.method === "GET" && path === "/phase0") {
+      send(res, 200, phase0Page(await phase0(deps.pool), banner));
+      return true;
+    }
+    const blob = BLOB_PATH.exec(path);
+    if (req.method === "GET" && blob) {
+      const text = deps.readBlob ? await deps.readBlob(blob[1]) : null;
+      if (text === null) send(res, 404, "No such file.");
+      else {
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
+        res.end(text);
+      }
+      return true;
+    }
+    if (req.method === "POST" && path === "/overrides") {
+      if (!requireRole(user, "operator")) {
+        send(res, 403, "Only an operator can override the factory.");
+        return true;
+      }
+      const b = await form(req);
+      const kind = b.kind as OverrideKind;
+      const itemId = b.itemId || null;
+      const known = itemId ? ITEM_KINDS.includes(kind) : FACTORY_KINDS.includes(kind);
+      if (!known || !(b.reason ?? "").trim() || (itemId !== null && !/^[0-9a-f-]{36}$/.test(itemId))) {
+        send(res, 400, "An override needs a kind that fits its scope and a reason.");
+        return true;
+      }
+      if (itemId) {
+        const state = (await deps.pool.query<{ state: string }>("select state from item where id = $1", [itemId])).rows[0]?.state;
+        if (!state) {
+          send(res, 404, "No such item.");
+          return true;
+        }
+        if (kind === "requeue" && state !== "Failed" && state !== "Abandoned") {
+          send(res, 409, "Only a Failed or Abandoned item can be re-queued.");
+          return true;
+        }
+      }
+      // The scheduler applies it on its next tick, every 15 seconds, and /lease reads pause, kill and stop_run directly.
+      await setOverride(deps.pool, { scope: itemId ? "item" : "factory", targetId: itemId, kind, reason: b.reason.trim(), createdBy: user.id, expiresAt: null });
+      send(res, 303, "", { location: itemId ? `/items/${itemId}` : "/" });
       return true;
     }
     if (req.method === "GET" && path === "/events") {
@@ -252,7 +348,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     }
     const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer))?$/.exec(path);
     if (itemPath && req.method === "GET" && !itemPath[2]) {
-      const detail = await runDetail(deps, itemPath[1]);
+      const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"));
       if (!detail) send(res, 404, "No such item.");
       else send(res, 200, runDetailPage(detail, banner));
       return true;

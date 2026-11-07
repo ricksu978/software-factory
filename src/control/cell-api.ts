@@ -39,6 +39,8 @@ export type CellApiDeps = {
 const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited"]);
 const NONE_AFTER_MS = 600_000;
 const USAGE_PAUSE_MS = 5 * 3_600_000;
+/** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
+const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
 const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -233,17 +235,18 @@ const routes: Record<string, Route> = {
     const num = (v: unknown) => (typeof v === "number" ? v : null);
     const text = (v: unknown) => (typeof v === "string" ? v : null);
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message))];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
-         cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11
+         cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
+         message = coalesce($12, message)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         values,
       );
     }
@@ -294,13 +297,16 @@ const routes: Record<string, Route> = {
     return { state: to };
   },
 
-  "POST upload-url": async (deps, { run, body }) => {
+  "POST upload-url": async (deps, { c, run, body }) => {
     const kind = oneOf(body.kind, "kind", ["transcript", "report"] as const);
     const stageId = str(body.stageId, "stageId");
     // The stage id lands in a blob path, so it can't carry a slash or a dot.
     if (!/^[a-z0-9-]+$/.test(stageId)) throw new BadRequest("stageId must be lowercase letters, digits and dashes");
     const attempt = int(body.attempt, "attempt");
-    return { url: await deps.uploadUrl(`${kind}s/${run.run_id}/${stageId}-${attempt}.${kind === "transcript" ? "jsonl" : "ndjson"}`) };
+    const path = `${kind}s/${run.run_id}/${stageId}-${attempt}.${kind === "transcript" ? "jsonl" : "ndjson"}`;
+    // Run detail reads the evidence back from here. Run contract 9 sends /stage first, so the attempt's row exists.
+    await c.query(`update stage_run set ${kind}_ref = $4 where run_id = $1 and stage_id = $2 and attempt = $3`, [run.run_id, stageId, attempt, path]);
+    return { url: await deps.uploadUrl(path) };
   },
 };
 

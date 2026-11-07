@@ -32,13 +32,14 @@ const devLogin = await builder.addParameter('dev-login');
 const appId = await builder.addParameter('github-app-id');
 const tokenCreatedAt = await builder.addParameter('claude-token-created-at');
 
-// Task 15 swaps in src/main.ts for control. migrate-cli still adds a probe_runs row locally, for PBI 2's restart scenario.
+// migrate-cli adds a probe_runs row locally, for PBI 2's restart scenario.
 const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli.ts')
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .waitFor(db);
 
 // Both apps share the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
-const control = await builder.addNodeApp('control', repo, 'spike/hello.ts')
+// The control plane (plan Task 15). Its console shows this start's dashboard sign-in link.
+const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withNpm({ install: false })
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7400, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
