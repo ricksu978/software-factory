@@ -14,6 +14,7 @@ import { haikuJudge } from "./agent/run.ts";
 import { parseRepoConfig } from "./config/repo-config.ts";
 import { loadSop, stageAfter } from "./config/sop.ts";
 import { mirrorBoard } from "./control/board.ts";
+import { logTransitions } from "./control/console-log.ts";
 import { blobUploadUrl, cellApi } from "./control/cell-api.ts";
 import { applyComment } from "./control/decisions.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
@@ -188,6 +189,7 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     uploadUrl: blobUploadUrl(blob, env.CELL_BLOB_HOST), readBlob: blobReader(blob),
   });
   mirrorBoard({ pool, backlogFor, repoHost });
+  logTransitions({ pool });
   // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
   await startServer(control.handlers, { port: Number(env.PORT ?? dashboardPort), host: "::" });
   console.log(`The control plane answers on port ${env.PORT ?? dashboardPort}.`);

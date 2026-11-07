@@ -5,7 +5,8 @@ import { describe, test } from "node:test";
 import { loadPolicy, parseCriteria, parseJudgement, PolicyError, readinessSha, type Policy, type ReadinessTexts } from "./policy.ts";
 
 const repoFiles = (files: Record<string, string>) => async (path: string) => files[path] ?? null;
-const defaultDor = readFileSync(join(import.meta.dirname, "..", "..", "policy", "dor.md"), "utf8");
+// The loader's own directory, so a cell that points FACTORY_POLICY_DIR at its image's copy compares like with like.
+const defaultDor = readFileSync(join(process.env.FACTORY_POLICY_DIR ?? join(import.meta.dirname, "..", "..", "policy"), "dor.md"), "utf8");
 
 describe("loadPolicy", () => {
   test("a repo with no dor.md gets the factory's default", async () => {

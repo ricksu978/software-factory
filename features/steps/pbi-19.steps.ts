@@ -51,6 +51,13 @@ function ctx(world: object): Ctx {
   return w.pbi19;
 }
 
+/** Records a response for this file's "the response is {int}" step, so other features' requests can share it. */
+export function recordResponse(world: object, status: number, page: string): void {
+  const c = ctx(world);
+  c.status = status;
+  c.page = page;
+}
+
 const azureHeaders = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 /** A fresh source, a fake board and a running dashboard in Azure mode. False while the modules don't exist. */
