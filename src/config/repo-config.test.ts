@@ -31,6 +31,13 @@ describe("parseRepoConfig", () => {
     assert.deepEqual(set.commands, { test: "npm test", lint: "npm run lint" });
   });
 
+  test("commands.setup is optional, reads through when set, and can't be empty", () => {
+    assert.equal(parseRepoConfig(valid).commands.setup, undefined);
+    assert.equal(parseRepoConfig(valid.replace("lint: npm run lint", "lint: npm run lint\n  setup: npm ci")).commands.setup, "npm ci");
+    assert.throws(() => parseRepoConfig(valid.replace("lint: npm run lint", "lint: npm run lint\n  setup: ''")),
+      (e: unknown) => e instanceof ConfigError && e.key === "commands.setup");
+  });
+
   test("web_tools defaults to none, takes the two known tools, and refuses anything else", () => {
     assert.deepEqual(parseRepoConfig(valid).webTools, []);
     assert.deepEqual(parseRepoConfig(`${valid}web_tools: [WebSearch]\n`).webTools, ["WebSearch"]);

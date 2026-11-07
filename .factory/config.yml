@@ -4,5 +4,7 @@ bdd:
   run: npm run bdd -- --tags "not @local"
   report: reports/bdd.ndjson
 commands:
+  # A cell's clone has no node_modules. The engine runs this before any stage, so every gate command finds its tools.
+  setup: npm ci
   test: npm test
   lint: node scripts/prose-lint.mjs $(git ls-files '*.md' '*.html')

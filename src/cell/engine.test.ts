@@ -2,7 +2,7 @@
 // git repo cloned from a bare origin, with a scripted agent, a recording cell API and a fake repo host.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, mock, test } from "node:test";
@@ -369,6 +369,26 @@ describe("runCell", () => {
     assert.equal(await s.run(), "waiting");
     const end = s.calls.slice(s.calls.findIndex((c) => c.route === "/stage" && c.body.status === "passed"));
     assert.deepEqual(end.map((c) => c.route), ["/stage", "/upload-url", "/upload-url", "/lease", "/transition"]);
+  });
+
+  // PBI 105: a cell that resumed past green started from a fresh clone, so open-pr's dod.md check exited 127.
+  test("commands.setup runs in the checkout before any stage, even on a resume at open-pr", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const marker = fwd(join(h.root, "setup-ran"));
+    h.deps.config.commands.setup = `pwd > "${marker}"`;
+    assert.equal(await h.run(), "done");
+    assert.ok(existsSync(join(h.root, "setup-ran")), "setup ran");
+    assert.equal(fwd(readFileSync(join(h.root, "setup-ran"), "utf8").trim()).endsWith("/work"), true, "in the checkout");
+  });
+
+  test("a failed commands.setup blocks the run with its exit code, and no stage starts", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.config.commands.setup = "echo no registry >&2; exit 3";
+    assert.equal(await h.run(), "waiting");
+    const t = h.transitions().at(-1);
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /commands\.setup exited 3: no registry/);
+    assert.deepEqual(h.started(), []);
   });
 
   test("at open-pr with HEAD at the checked commit, no dod.md command runs again", async () => {
