@@ -9,7 +9,7 @@ import { nextUp } from "../store/items.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type Phase0Row, type RunDetail, type Scenario } from "./views.ts";
+import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -133,6 +133,17 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
          coalesce((select sum(s.cost_usd) from stage_run s where s.run_id = r.id), 0)::float8 as cost
        from run r join item i on i.id = r.item_id where r.merge_sha is not null) m
      order by merged_at nulls last`,
+  )).rows;
+}
+
+/**
+ * The 100 newest events, newest first, for the activity log (PBI 105). Only `from`, `to` and `event` leave the
+ * payload, so a reason, a decision's text or a readiness detail never reaches the page. A factory-wide event has no item.
+ */
+async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
+  return (await pool.query<ActivityRow>(
+    `select e.at, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event
+     from event e left join item i on i.id = e.item_id order by e.at desc, e.id desc limit 100`,
   )).rows;
 }
 
@@ -297,6 +308,10 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
 
     if (req.method === "GET" && path === "/") {
       send(res, 200, floorPage({ ...(await floor(deps.pool)), canOperate: requireRole(user, "operator") }, banner));
+      return true;
+    }
+    if (req.method === "GET" && path === "/activity") {
+      send(res, 200, activityPage(await activity(deps.pool), banner));
       return true;
     }
     if (req.method === "GET" && path === "/phase0") {
