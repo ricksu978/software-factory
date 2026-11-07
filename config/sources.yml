@@ -1,0 +1,24 @@
+# The board the local factory reads (plan Task 18 Step 1). The migrate resource upserts each entry on every start.
+# statusFor names the board's Status option for each factory state, and null leaves the board's status as it is.
+- repo: ricksu978/software-factory
+  installationId: 179116800
+  owner: { type: user, login: ricksu978 }
+  projectNumber: 4
+  fieldMap:
+    acceptanceCriteriaHeading: Acceptance criteria
+    statusField: Status
+    optInLabel: factory
+    sprintField: null
+    readinessFields: []
+    statusFor:
+      Eligible: Backlog
+      NotReady: Backlog
+      Queued: Ready
+      InProgress: In progress
+      SignOff: In progress
+      NeedsInput: In progress
+      InReview: In review
+      Accepted: In review
+      Done: Done
+      Failed: null
+      Abandoned: null
