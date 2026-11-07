@@ -6,6 +6,7 @@
     "node": ">=26.13.0"
   },
   "scripts": {
+    "factory": "pwsh -NoProfile -File scripts/factory.ps1",
     "test": "node --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "bdd": "cucumber-js --import \"features/steps/**/*.ts\" --format message:reports/bdd.ndjson",

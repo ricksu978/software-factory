@@ -1,9 +1,10 @@
 # Prompts for each parameter the local AppHost declares (aspire-apphost/apphost.mts) and saves it in that checkout's
 # Aspire user secrets. Aspire keys user secrets by checkout path, so run it once per checkout or worktree.
-# Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>]
+# Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>] [-MissingOnly]
 # Secret values are typed hidden. Enter alone keeps the current value. github-app-key takes the path to the App's .pem.
 # Values go straight into secrets.json, never onto a command line, where other processes could read them.
-param([string]$AppHost = (Split-Path $PSScriptRoot -Parent))
+# -MissingOnly asks only for parameters not yet set, which is how scripts/factory.ps1 calls it. Exits 1 while any is missing.
+param([string]$AppHost = (Split-Path $PSScriptRoot -Parent), [switch]$MissingOnly)
 $ErrorActionPreference = 'Stop'
 
 $src = Get-Content (Join-Path $AppHost 'aspire-apphost/apphost.mts') -Raw
@@ -21,8 +22,10 @@ $store = if (Test-Path $file) { Get-Content $file -Raw | ConvertFrom-Json -AsHas
 if (-not $store) { $store = @{} }
 
 "Secrets file: $file"
+$changed = $false
 foreach ($name in $secret + $plain) {
   $key = "Parameters:$name"
+  if ($MissingOnly -and $store.ContainsKey($key)) { continue }
   $state = if ($store.ContainsKey($key)) { 'set' } else { 'missing' }
   if ($name -eq 'github-app-key') {
     # Trim the quotes that Explorer's "Copy as path" adds.
@@ -34,11 +37,15 @@ foreach ($name in $secret + $plain) {
   } else {
     $value = Read-Host "$name ($state)"
   }
-  if ($value) { $store[$key] = $value; "  saved" } else { "  kept" }
+  if ($value) { $store[$key] = $value; $changed = $true; "  saved" } else { "  kept" }
 }
 
-New-Item -ItemType Directory -Force (Split-Path $file) | Out-Null
-# -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
-$store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
+# Written only when a value changed, so a run that asks nothing never rewrites the live token file.
+if ($changed) {
+  New-Item -ItemType Directory -Force (Split-Path $file) | Out-Null
+  # -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
+  $store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
+}
 $missing = ($secret + $plain) | Where-Object { -not $store.ContainsKey("Parameters:$_") }
-if ($missing) { "Still missing: $($missing -join ', ')" } else { "All $(($secret + $plain).Count) parameters are set." }
+if ($missing) { "Still missing: $($missing -join ', ')"; exit 1 }
+"All $(($secret + $plain).Count) parameters are set."
