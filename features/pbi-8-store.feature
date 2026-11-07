@@ -2,7 +2,7 @@
 Feature: Schema, transitions and event log
   The store writes every state change and its event together, refuses moves the state machine
   doesn't allow, fences cells through the lease generation, and keeps the event log append-only.
-  Every scenario needs Postgres, so cells skip them and CI runs them.
+  Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   @ac-1
   Scenario: A legal transition writes the new state and exactly one event

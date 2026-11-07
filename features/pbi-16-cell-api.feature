@@ -5,7 +5,7 @@ Feature: Cell API fenced by lease generation
   cell that outlived its lease can't push, comment or move the item. A cell may move its item only
   along the five edges a cell owns. Every move, whoever makes it, shows on the board through the
   source's field map, so people who never open the dashboard can still follow along.
-  Every scenario needs Postgres, so cells skip them and CI runs them.
+  Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   Background:
     Given a backlog source whose field map sets these board statuses:

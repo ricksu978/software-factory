@@ -66,12 +66,13 @@ class Limited extends Error {
 class RenewalFailed extends Error {}
 
 /**
- * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI and the proxy variables, and none of the
- * cell's tokens (Run contract 11). It isn't a sandbox. The command runs as the cell's own user, as the agent does.
+ * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
+ * `startTestDb` can start its own server (PBI 22), and the proxy variables, and none of the cell's tokens (Run contract
+ * 11). It isn't a sandbox. The command runs as the cell's own user, as the agent does.
  */
 export function commandEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = { CI: "true" };
-  for (const k of ["PATH", "HOME", ...PROXY_VARS]) if (env[k] !== undefined) out[k] = env[k]!;
+  for (const k of ["PATH", "HOME", "FACTORY_PG_BIN", ...PROXY_VARS]) if (env[k] !== undefined) out[k] = env[k]!;
   return out;
 }
 

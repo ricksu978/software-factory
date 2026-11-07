@@ -17,7 +17,8 @@ function ctx(world: object): Ctx {
   return w.pbi5;
 }
 
-// FACTORY_DB_TESTS=skip keeps nested runs off Testcontainers, because a cell has no Docker daemon. CI's own npm test still runs the DB suites.
+// These nested runs check that the scripts work, such as npm test finding a test file. FACTORY_DB_TESTS=skip keeps them
+// from also running the DB suites, which the outer npm test already runs, in CI and in a cell alike.
 function run(command: string, cwd: string): Result {
   const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...process.env, FACTORY_DB_TESTS: "skip" } });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
