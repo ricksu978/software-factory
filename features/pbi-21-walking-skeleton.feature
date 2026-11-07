@@ -5,7 +5,7 @@ Feature: Walking skeleton end to end
   commit is green. A second item then does the same with the first item's scenarios already on main.
   That proves earlier items' scenarios keep guarding later ones without blocking a later item's Red.
   The cell runs in the control plane's process with a scripted agent, so no model is called. Every
-  scenario needs Postgres, so CI runs them and cells skip them.
+  scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   Background:
     Given a fake backlog, and a fake repo whose only policy files are .factory/config.yml and .factory/dod.md

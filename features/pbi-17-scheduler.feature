@@ -4,7 +4,7 @@ Feature: Scheduler, launcher and overrides
   WIP limit is free, holds new work back while too many items wait on a person, and never lets an answer
   wait behind that brake. Operators steer it with overrides: the kill switch stops every running cell, and
   stopping a run holds its item until someone re-queues it.
-  Every scenario needs Postgres, so cells skip them and CI runs them.
+  Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   Background:
     Given a fresh factory database with WIP 1 and a review capacity of 3

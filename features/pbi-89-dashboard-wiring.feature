@@ -3,8 +3,9 @@ Feature: Dashboard wiring, overrides and the rest of Task 15
   src/main.ts starts the control plane: the cell API, GitHub's webhook and the dashboard on one port,
   with the scheduler's tick and the board poller behind them. Operators steer the factory from the
   dashboard with overrides, Run detail shows the evidence a run stored, and /phase0 counts what merged.
-  Scenarios tagged @db need Postgres, so cells skip them and CI runs them. The @local one needs Docker,
-  the Aspire CLI and the owner's secrets, so the owner runs it and the PR records the run.
+  Scenarios tagged @db need Postgres, which each test starts for itself, so cells and CI both run them.
+  The @local one needs Docker, the Aspire CLI and the owner's secrets, so the owner runs it and the PR
+  records the run.
 
   @ac-1
   Scenario Outline: The control plane refuses to start when the dev identity guard fails

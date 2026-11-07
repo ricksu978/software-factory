@@ -3,7 +3,7 @@ Feature: Leases with generation fencing
   A claim hands one cell an item and raises the lease generation, so an older cell is fenced out.
   A renewal only counts with the current generation, and a lease that runs out sends the item back
   to Queued for a new cell to resume. Each call takes the time as an argument, so the scenarios name it.
-  Every scenario needs Postgres, so cells skip them and CI runs them.
+  Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   @ac-1
   Scenario Outline: A claim raises the generation by 1 and leases the item for 300 seconds

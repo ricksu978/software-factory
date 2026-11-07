@@ -3,8 +3,8 @@ Feature: Dashboard sign-in, Floor and sign-off
   The dashboard lets only allowlisted people in. Locally there's no sign-in provider, so each start
   prints a one-time link that sets a cookie. Floor shows what waits on the owner, what the factory
   takes next and what isn't ready. A product owner signs off scenarios from the dashboard or with a
-  /approve comment, and both do the same thing. Scenarios tagged @db need Postgres, so cells skip
-  them and CI runs them.
+  /approve comment, and both do the same thing. Scenarios tagged @db need Postgres, which each test
+  starts for itself, so cells and CI both run them.
 
   @ac-1 @db
   Scenario Outline: Only allowlisted people get past sign-in

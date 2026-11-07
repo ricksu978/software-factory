@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
+import { changedFiles, commandEnv, loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -153,6 +153,14 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   const started = () => calls.filter((c) => c.route === "/stage" && c.body.status === "started").map((c) => c.body.stageId);
   return { deps, calls, agentCalls, prs, routes, transitions, started, dir, origin, root, lockSha, run: () => runCell(deps) };
 }
+
+describe("commandEnv", () => {
+  test("passes FACTORY_PG_BIN to the gates' commands when the image sets it, and none of the cell's tokens", () => {
+    const cell = { PATH: "/usr/bin", HOME: "/home/factory", FACTORY_PG_BIN: "/usr/lib/postgresql/17/bin", RUN_TOKEN: "t", CLAUDE_CODE_OAUTH_TOKEN: "x" };
+    assert.deepEqual(commandEnv(cell), { CI: "true", PATH: "/usr/bin", HOME: "/home/factory", FACTORY_PG_BIN: "/usr/lib/postgresql/17/bin" });
+    assert.equal("FACTORY_PG_BIN" in commandEnv({ PATH: "/usr/bin" }), false, "absent when the image doesn't set it");
+  });
+});
 
 describe("changedFiles", () => {
   test("lists both sides of a rename and non-ASCII paths verbatim, so the risk floor sees them", async () => {

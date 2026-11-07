@@ -3,7 +3,7 @@ Feature: Poller
   Every five minutes the poller reads the board and the PRs the factory opened. It brings new items
   in, notices items a person withdrew, re-checks readiness when a team changes its rules, and moves
   items whose PR changed. The board, the repo and the readiness judge are fakes here. Every scenario
-  needs Postgres, so cells skip them and CI runs them.
+  needs Postgres, which each test starts for itself, so cells and CI both run them.
 
   @ac-1
   Scenario: A newly labelled item is Eligible after one poll
