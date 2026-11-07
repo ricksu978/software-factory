@@ -13,12 +13,12 @@ Feature: An activity log, so the owner can see what the factory is doing
     Scenario: Each row shows the event's time, item, kind and, for a move, its states
       Given item "95" titled "Export a month" was claimed at 09:00, moving from "Queued" to "InProgress" on "claimed"
       And an operator stopped item "95"'s run at 09:05, moving it from "InProgress" to "Failed"
-      And item "95" was asked for sign-off at 09:10
+      And the owner approved item "95"'s sign-off at 09:10, recorded as a "decision" event
       When a viewer opens the activity log
       Then the log lists 3 events, the 09:10 one first, then the 09:05 one, then the 09:00 one
       And the 09:00 row shows its time, "95", "Export a month", "transition", "Queued", "InProgress" and "claimed"
       And the 09:05 row shows its time, "95", "Export a month", "override", "InProgress" and "Failed"
-      And the 09:10 row shows its time, "95", "Export a month" and "sign_off", and no states
+      And the 09:10 row shows its time, "95", "Export a month" and "decision", and no states
 
     @ac-1 @db
     Scenario: Only the 100 most recent events are listed
@@ -84,11 +84,11 @@ Feature: An activity log, so the owner can see what the factory is doing
       And the page doesn't contain "secret-reason-91c2"
 
     @ac-3 @db
-    Scenario: The payload of an event of another kind stays off the page
-      Given item "95" has a "comment" event whose text is "comment-body-5d1e"
+    Scenario: A decision's text stays off the page
+      Given the owner approved item "95"'s sign-off with the text "decision-text-5d1e"
       When a viewer opens the activity log
-      Then the log lists the "comment" event
-      And the page doesn't contain "comment-body-5d1e"
+      Then the log lists the "decision" event
+      And the page doesn't contain "decision-text-5d1e"
 
     @ac-3 @db
     Scenario: An item's title shows as text, never as markup
