@@ -98,6 +98,8 @@ describe("githubRepoHost", () => {
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
     assert.equal((await host.prState("o/r", 3, ["owner"])).lastChangesRequestedAt, "2026-11-06T02:00:00Z", "the open thread, not the resolved or the stranger's");
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
+    threads.push(thread(false, comment("owner", new Date().toISOString())));
+    assert.equal((await host.prState("o/r", 3, ["owner"])).lastChangesRequestedAt, "2026-11-06T02:00:00Z", "a reply seconds old may be resolved next");
   });
 
   test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {

@@ -138,6 +138,9 @@ const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
 
 type Author = { __typename: string; login: string } | null;
 
+// ponytail: a fixed two minutes; a reviewer slower than that between reply and resolve can still block the item.
+const THREAD_SETTLE_MS = 120_000;
+
 /** GraphQL names a bot without the "[bot]" suffix REST adds. Adding it back keeps a user with the same name apart (issue #79). */
 function authorLogin(a: Author): string {
   if (!a) return "ghost";
@@ -191,10 +194,14 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
       // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
       // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
+      // A comment counts once it has stood for THREAD_SETTLE_MS. A reviewer replies to a thread and resolves it in two
+      // calls, and a poll between them would send the item to address with nothing left to read, which blocks it.
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
+      const settled = Date.now() - THREAD_SETTLE_MS;
       const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
         .filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
-        .filter((c) => c.pullRequestReview?.submittedAt && trusted.has(authorLogin(c.author).toLowerCase())).map((c) => c.pullRequestReview!.submittedAt!);
+        .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
+        .map((c) => c.pullRequestReview!.submittedAt!);
       const times = [...requested, ...open].sort();
       return {
         merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
