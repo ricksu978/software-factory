@@ -32,6 +32,7 @@ describe("dockerLauncher", () => {
       ANTHROPIC_BASE_URL: "http://host.docker.internal:7400/internal/model",
       CLAUDE_CODE_OAUTH_TOKEN: `sk-ant-oat01-${runId}.3.${token}`,
       HTTPS_PROXY: proxy, https_proxy: proxy, HTTP_PROXY: proxy, http_proxy: proxy,
+      NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
       NODE_USE_ENV_PROXY: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     };
     const e = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);

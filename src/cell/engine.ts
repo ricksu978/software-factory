@@ -49,7 +49,7 @@ const CHECKS_POLL_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 900_000;
 const WALL_CLOCK_MS = 8 * 3_600_000;
 const SOP_DIR = join(import.meta.dirname, "..", "..");
-const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
 const run = promisify(execFile);
 
 // How a run leaves runCell early. Each maps to one exit in `finish`.
