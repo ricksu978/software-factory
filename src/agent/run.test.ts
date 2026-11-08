@@ -129,6 +129,26 @@ test("cell mode denies each web tool the repo didn't choose", () => {
   assert.deepEqual(agentOptions({ ...base, mode: "cell", webTools: ["WebSearch"] }).disallowedTools, ["WebFetch"]);
 });
 
+test("a cell run of a factory agent passes the factory's own definition, which outranks the checkout's", () => {
+  const reviewer = agentOptions({ ...base, mode: "cell", agent: "factory-self-reviewer" });
+  const def = reviewer.agents?.["factory-self-reviewer"];
+  assert.ok(def, "no definition passed for the reviewer");
+  assert.deepEqual(def.tools, ["Read", "Grep", "Glob", "Bash"]);
+  assert.match(def.prompt, /^You review a branch that is about to become a pull request\./);
+  assert.doesNotMatch(def.prompt, /^---/);
+  assert.match(def.description, /pre-PR review/);
+  const addresser = agentOptions({ ...base, mode: "cell", agent: "factory-pr-addresser" }).agents?.["factory-pr-addresser"];
+  assert.ok(addresser, "no definition passed for the addresser");
+  assert.deepEqual(addresser.tools, ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]);
+  assert.match(addresser.prompt, /^You make one pass over a pull request's review feedback/);
+});
+
+test("a cell run with no agent, or one the factory doesn't ship, passes no definitions", () => {
+  assert.equal(agentOptions({ ...base, mode: "cell" }).agents, undefined);
+  assert.equal(agentOptions({ ...base, mode: "cell", agent: "someone-else" }).agents, undefined);
+  assert.equal(agentOptions({ ...base, mode: "judge", agent: "factory-self-reviewer" }).agents, undefined);
+});
+
 test("aborting the caller's signal aborts the query", () => {
   const caller = new AbortController();
   const o = agentOptions({ ...base, mode: "cell", signal: caller.signal });
