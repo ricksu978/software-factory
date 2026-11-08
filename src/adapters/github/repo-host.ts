@@ -250,6 +250,7 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async resolveThread(_repo, threadId) {
       // GitHub answers resolveReviewThread on a resolved thread with the thread as it stands, so a second call is a no-op.
+      // Checked live on 2026-11-09: isResolved and resolvedBy came back unchanged, with no error.
       await (await client()).graphql(RESOLVE, { thread: threadId });
     },
   };
