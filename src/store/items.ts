@@ -86,8 +86,8 @@ const CLAIMABLE = `from item i
 /** The first `limit` items claimNext would pick with the same `resumeOnly`, in order, without claiming or locking. */
 export async function nextUp(
   c: pg.Pool | pg.PoolClient, limit: number, opts: { resumeOnly?: boolean } = {},
-): Promise<{ id: string; title: string; state: ItemState }[]> {
-  return (await c.query<{ id: string; title: string; state: ItemState }>(`select i.id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
+): Promise<{ id: string; external_id: string; title: string; state: ItemState }[]> {
+  return (await c.query<{ id: string; external_id: string; title: string; state: ItemState }>(`select i.id, i.external_id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
 }
 
 /**

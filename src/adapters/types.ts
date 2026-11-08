@@ -69,6 +69,9 @@ export function standingSummaries(reviews: Review[]): ReviewComment[] {
     .map((r) => ({ threadId: r.id, path: null, line: null, author: r.author, body: r.body }));
 }
 
+/** One comment a review leaves on a line of the PR's new code. */
+export type LineComment = { path: string; line: number; body: string };
+
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
@@ -92,4 +95,12 @@ export interface RepoHost {
   replyToThread(repo: string, threadId: string, body: string): Promise<void>;
   /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */
   commentOnPr(repo: string, prNumber: number, body: string): Promise<void>;
+  /**
+   * Posts one review on the PR at `commitSha`, with a body and line comments on the new side of the diff. It's always a
+   * `COMMENT` review: nothing here can approve a PR or request changes on it, so the factory never stands in for a
+   * human reviewer (PBI 129).
+   */
+  postReview(p: { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[] }): Promise<void>;
+  /** Resolves one review thread by its id. Resolving a thread that's already resolved succeeds and changes nothing. */
+  resolveThread(repo: string, threadId: string): Promise<void>;
 }

@@ -39,9 +39,12 @@ export function signInPage(): string {
   return page("Sign in", "<h1>Sign in</h1><p>Sign in to use the factory dashboard.</p>");
 }
 
-export type ActiveRow = { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
-export type WaitingRow = { id: string; title: string; state: string; since: Date | null };
-export type NotReadyRow = { id: string; title: string; failed: string[] };
+/** The issue an item is: its number, and its GitHub repo as owner/name, or null when the factory can't tell (PBI 131). */
+export type Issue = { external_id: string; repo: string | null };
+
+export type ActiveRow = Issue & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
+export type WaitingRow = Issue & { id: string; title: string; state: string; since: Date | null };
+export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -53,6 +56,19 @@ export function age(since: Date | null, now = Date.now()): string {
 
 const link = (id: string, title: string) => `<a href="/items/${escapeHtml(id)}">${escapeHtml(title)}</a>`;
 
+/**
+ * "#N" for an item's issue, linked to it on GitHub when its repo is known. A number that isn't one, or an unknown
+ * repo, shows as plain text, since a link to the wrong issue is worse than none. An event with no item shows nothing.
+ */
+export function issueRef(externalId: string | null, repo: string | null): string {
+  if (externalId === null) return "";
+  const text = `#${escapeHtml(externalId)}`;
+  return repo && /^\d+$/.test(externalId) ? `<a href="https://github.com/${escapeHtml(repo)}/issues/${externalId}">${text}</a>` : text;
+}
+
+/** An item as a page names it: "#N", then its title linking to Run detail. */
+const named = (r: Issue & { id: string; title: string }) => `${issueRef(r.external_id, r.repo)} ${link(r.id, r.title)}`;
+
 /** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */
 function overrideForm(kinds: [kind: string, label: string][], itemId: string | null): string {
   const id = itemId ? `-${escapeHtml(itemId)}` : "";
@@ -63,7 +79,7 @@ function overrideForm(kinds: [kind: string, label: string][], itemId: string | n
 
 const factoryState: Record<string, string> = { pause: "Paused", drain: "Draining", kill: "Killed" };
 
-export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: { id: string; title: string }[];
+export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
   notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("");
@@ -73,14 +89,14 @@ export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waiti
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a></p>
 <h2>Waiting on you</h2>
-${list(f.waiting.map((w) => `<li>${link(w.id, w.title)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
+${list(f.waiting.map((w) => `<li>${named(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
-${list(f.next.map((n) => `<li>${link(n.id, n.title)}</li>`), "Nothing is ready to start.")}
+${list(f.next.map((n) => `<li>${named(n)}</li>`), "Nothing is ready to start.")}
 <h2>Not ready</h2>
-${list(f.notReady.map((n) => `<li>${link(n.id, n.title)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${link(a.id, a.title)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
+${f.active.map((a) => `<tr><td>${named(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
 ${controls}
 <script>
@@ -96,7 +112,7 @@ new EventSource("/events").onmessage = later;
 export type Scenario = { name: string; regression: boolean };
 
 export type RunDetail = {
-  item: { id: string; title: string; state: string };
+  item: Issue & { id: string; title: string; state: string };
   run: { sop_version: string | null; config_sha: string | null; scenarios_sha: string | null; features_lock_sha: string | null; risk_tier: string | null; tier_reasons: string[] | null; next_stage: string | null } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
   stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
@@ -148,7 +164,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         ...(c.requeueable ? [["requeue", "Re-queue"]] : []),
       ] as [string, string][], d.item.id)}`
     : "";
-  return page(d.item.title, `<h1>${escapeHtml(d.item.title)}</h1>
+  return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
@@ -160,7 +176,7 @@ ${form}${controls}${criteria}${verdicts}<h2>Policy results</h2>${policies}<h2>St
   }`, banner);
 }
 
-export type Phase0Row = { item_id: string; title: string; pr_url: string | null; merged_at: Date | null; cost: number; risk_tier: string | null; tier_reasons: string[] | null };
+export type Phase0Row = Issue & { item_id: string; title: string; pr_url: string | null; merged_at: Date | null; cost: number; risk_tier: string | null; tier_reasons: string[] | null };
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
@@ -170,14 +186,14 @@ export function phase0Page(rows: Phase0Row[], banner: string | null): string {
   const summary = `${rows.length} merged PR${rows.length === 1 ? "" : "s"}, ${usd(total)} in all, ${rows.length ? usd(total / rows.length) : "$0.00"} each on average.`;
   const table = rows.length
     ? `<table><thead><tr><th scope="col">Item</th><th scope="col">PR</th><th scope="col">Merged</th><th scope="col">Cost</th><th scope="col">Shadow tier</th></tr></thead><tbody>${rows
-        .map((r) => `<tr><td>${link(r.item_id, r.title)}</td><td>${r.pr_url ? `<a href="${escapeHtml(r.pr_url)}">${escapeHtml(r.pr_url)}</a>` : ""}</td><td>${escapeHtml(r.merged_at?.toISOString().slice(0, 10) ?? "")}</td><td>${usd(r.cost)}</td><td>${escapeHtml(r.risk_tier ?? "not classified")}${r.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</td></tr>`)
+        .map((r) => `<tr><td>${named({ ...r, id: r.item_id })}</td><td>${r.pr_url ? `<a href="${escapeHtml(r.pr_url)}">${escapeHtml(r.pr_url)}</a>` : ""}</td><td>${escapeHtml(r.merged_at?.toISOString().slice(0, 10) ?? "")}</td><td>${usd(r.cost)}</td><td>${escapeHtml(r.risk_tier ?? "not classified")}${r.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No factory PR has merged yet.</p>`;
   return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${table}`, banner);
 }
 
 /** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload. */
-export type ActivityRow = { at: Date; external_id: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null };
+export type ActivityRow = { at: Date; external_id: string | null; repo: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null };
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
 const MOVES = new Set(["transition", "override"]);
@@ -192,7 +208,7 @@ export function activityPage(rows: ActivityRow[], banner: string | null): string
   const time = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
   const table = rows.length
     ? `<table><thead><tr><th scope="col">Time (UTC)</th><th scope="col">Item</th><th scope="col">Title</th><th scope="col">Kind</th><th scope="col">Move</th></tr></thead><tbody>${rows
-        .map((r) => `<tr><td>${time(r.at)}</td><td>${escapeHtml(r.external_id)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.kind)}</td>${cell(r)}</tr>`)
+        .map((r) => `<tr><td>${time(r.at)}</td><td>${issueRef(r.external_id, r.repo)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.kind)}</td>${cell(r)}</tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No event yet.</p>`;
   return page("Activity", `<h1>Activity</h1><p class="muted">The 100 newest events, newest first.</p>${table}`, banner);

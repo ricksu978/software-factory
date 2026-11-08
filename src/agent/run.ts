@@ -24,8 +24,9 @@ const FALLBACK_WAIT_S = 5 * 3600;
 
 // The factory's own agents, read from the files the repo ships for the cell image. A cell run that names one gets its
 // definition through `agents`, which outranks a checkout's .claude/agents/ file of the same name (PBI 96, spec §6).
+// PBI 129 adds the PR reviewer.
 const FACTORY_AGENTS_DIR = new URL("../../cell/claude/agents/", import.meta.url);
-const FACTORY_AGENT_NAMES = ["factory-self-reviewer", "factory-pr-addresser"] as const;
+const FACTORY_AGENT_NAMES = ["factory-self-reviewer", "factory-pr-addresser", "factory-pr-reviewer"] as const;
 
 const toolList = (v: unknown): string[] | undefined =>
   v === undefined || v === null ? undefined : Array.isArray(v) ? v.map(String) : String(v).split(",").map((t) => t.trim()).filter(Boolean);
