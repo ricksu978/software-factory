@@ -205,5 +205,11 @@ export function fakeRepoHost(): RepoHost & {
     async commentOnPr(repo, n, body) {
       pr(repo, n).comments.push(body);
     },
+    async postReview() {
+      throw new Error("postReview is not implemented yet (PBI 129)");
+    },
+    async resolveThread() {
+      throw new Error("resolveThread is not implemented yet (PBI 129)");
+    },
   };
 }

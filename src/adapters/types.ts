@@ -92,4 +92,8 @@ export interface RepoHost {
   replyToThread(repo: string, threadId: string, body: string): Promise<void>;
   /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */
   commentOnPr(repo: string, prNumber: number, body: string): Promise<void>;
+  /** PBI 129 stub, with no shape or behaviour yet: posts one review at a commit, with a body and line comments, always as COMMENT. */
+  postReview(...args: unknown[]): Promise<void>;
+  /** PBI 129 stub, with no behaviour yet: resolves one review thread by its id. Resolving a resolved thread changes nothing. */
+  resolveThread(repo: string, threadId: string): Promise<void>;
 }

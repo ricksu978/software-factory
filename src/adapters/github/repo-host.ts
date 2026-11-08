@@ -236,6 +236,14 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         .map((v): Review => ({ id: v.id, author: authorLogin(v.author), state: v.state.toLowerCase() as Review["state"], body: v.body }));
       return [...comments, ...standingSummaries(reviews)];
     },
+
+    async postReview() {
+      throw new Error("postReview is not implemented yet (PBI 129)");
+    },
+
+    async resolveThread() {
+      throw new Error("resolveThread is not implemented yet (PBI 129)");
+    },
   };
 }
 
