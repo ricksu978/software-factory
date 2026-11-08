@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { standingSummaries, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -138,9 +138,6 @@ const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
 
 type Author = { __typename: string; login: string } | null;
 
-// ponytail: a fixed two minutes; a reviewer slower than that between reply and resolve can still block the item.
-const THREAD_SETTLE_MS = 120_000;
-
 /** GraphQL names a bot without the "[bot]" suffix REST adds. Adding it back keeps a user with the same name apart (issue #79). */
 function authorLogin(a: Author): string {
   if (!a) return "ghost";
@@ -194,8 +191,7 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
       // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
       // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
-      // A comment counts once it has stood for THREAD_SETTLE_MS. A reviewer replies to a thread and resolves it in two
-      // calls, and a poll between them would send the item to address with nothing left to read, which blocks it.
+      // A comment counts once it has stood for THREAD_SETTLE_MS.
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const settled = Date.now() - THREAD_SETTLE_MS;
       const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
