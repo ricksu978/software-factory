@@ -69,6 +69,11 @@ async function freshDatabase(c: Ctx): Promise<pg.Pool> {
   const [path, query] = base.split("?");
   c.url = `${path.slice(0, path.lastIndexOf("/"))}/${c.name}${query ? `?${query}` : ""}`;
   c.pool = new pg.Pool({ connectionString: c.url });
+  // pool.end() resolves before each idle client has closed (issue #88), so After's forced drop can still reach one,
+  // and the pool re-emits that admin shutdown (57P01) as its own error. Any other error still fails the scenario.
+  c.pool.on("error", (e: Error & { code?: string }) => {
+    if (e.code !== "57P01") throw e;
+  });
   return c.pool;
 }
 
