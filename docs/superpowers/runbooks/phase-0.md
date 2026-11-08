@@ -11,7 +11,7 @@ The first PBI the factory took from its board and built itself, end to end, on 2
 - **Item.** [#105](https://github.com/ricksu978/software-factory/issues/105), "An activity log, so the owner can see what the factory is doing".
 - **Run.** `3cd20dfc-5747-499a-903f-2eb2d55ac318`, on branch `factory/pbi-105-r1`. The id is the folder that holds the run's transcripts, `transcripts/<runId>/` (plan Task 12, `POST /upload-url`).
 - **PR.** [#108](https://github.com/ricksu978/software-factory/pull/108), merged at 23:30 as `1a4a355`. The item reached Done at 23:35, once CI on `main` passed.
-- **Cost.** $8.38 on `claude-opus-5-5`, from the dashboard's `/phase0` report. $3.65 of it went on attempts that failed or had to run again: Specify's first ($0.37), the first self-review ($1.26), the first open-pr ($0.42), and the Green rerun ($1.10) and second self-review ($0.49) that open-pr's failure forced.
+- **Cost.** $8.38 on `claude-opus-5-5`, from the dashboard's `/phase0` report. $3.64 of it went on attempts that failed or had to run again: Specify's first ($0.37), the first self-review ($1.26), the first open-pr ($0.42), and the Green rerun ($1.10) and second self-review ($0.49) that open-pr's failure forced.
 - **Shadow tier.** Medium.
 
 | Time | What happened |
