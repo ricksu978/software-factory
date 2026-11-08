@@ -43,10 +43,12 @@ export function parseAgentFile(text: string): AgentDefinition {
 }
 
 let factoryAgents: Record<string, AgentDefinition> | undefined;
-function factoryAgent(name: string): AgentDefinition | undefined {
+/** The `agents` option holding the factory's own definition of the named agent, or undefined when the factory has none. */
+function factoryAgent(name: string | undefined): Record<string, AgentDefinition> | undefined {
+  if (!name) return undefined;
   factoryAgents ??= Object.fromEntries(FACTORY_AGENT_NAMES.map((n) =>
     [n, parseAgentFile(readFileSync(new URL(`${n}.md`, FACTORY_AGENTS_DIR), "utf8"))]));
-  return Object.hasOwn(factoryAgents, name) ? factoryAgents[name] : undefined;
+  return Object.hasOwn(factoryAgents, name) ? { [name]: factoryAgents[name] } : undefined;
 }
 
 export function agentOptions(a: AgentArgs): Options {
@@ -63,9 +65,9 @@ export function agentOptions(a: AgentArgs): Options {
   // Safe only because a cell is a throwaway container holding a one-repo token. No sandbox: bubblewrap can't
   // start under Docker Desktop, so the egress proxy enforces the allowlist locally. Azure's probe is Task 19 Step 9.
   // The deny list only stops the model being offered a web tool. The model gateway is the fence (spec §6 "Web tools").
-  const own = a.agent ? factoryAgent(a.agent) : undefined;
+  const agents = factoryAgent(a.agent);
   return { ...common, settingSources: ["user", "project"], permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
-    disallowedTools: WEB_TOOLS.filter((t) => !a.webTools?.includes(t)), ...(own && a.agent ? { agents: { [a.agent]: own } } : {}) };
+    disallowedTools: WEB_TOOLS.filter((t) => !a.webTools?.includes(t)), ...(agents ? { agents } : {}) };
 }
 
 export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">> {

@@ -117,6 +117,7 @@ Given("a checkout holding its own {string} agent file, whose instructions differ
 
 Given("a checkout holding its own {string} agent file, which grants the tools {string}", function (name: string, tools: string) {
   writeCheckoutAgent(setUp(this), name, tools);
+  assert.notDeepEqual(list(tools), factory(name).tools);
 });
 
 Given("a checkout holding its own {string} and {string} agent files, whose instructions differ from the factory's", function (a: string, b: string) {
