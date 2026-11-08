@@ -2,10 +2,11 @@
 // files under .claude/agents/, sets up the stage's agent run there through agentOptions, with the arguments the engine
 // passes for that stage, and works out which definition the run gets.
 //
-// Which definition wins follows Claude Code's order for subagents of the same name
-// (https://code.claude.com/docs/en/sub-agents, "Choose the subagent scope"): one passed in the options' `agents`
-// (the --agents flag) outranks the project's .claude/agents/, which outranks the user's ~/.claude/agents/. The project
-// and user directories load only when settingSources names them.
+// Which definition wins follows the order for subagents of the same name. One passed in the options' `agents`
+// outranks any filesystem agent: "Programmatically defined agents take precedence over filesystem-based agents with
+// the same name" (https://code.claude.com/docs/en/agent-sdk/subagents, "Filesystem-based definition"). Among filesystem agents, the project's .claude/agents/
+// outranks the user's ~/.claude/agents/ (https://code.claude.com/docs/en/sub-agents, "Choose the subagent scope").
+// The project and user directories load only when settingSources names them.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
