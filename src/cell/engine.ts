@@ -106,6 +106,8 @@ export async function changedFiles(dir: string, range: string): Promise<string[]
   return [...new Set(stdout.split("\0").filter(Boolean))];
 }
 
+const lf = (text: string | undefined) => text?.replace(/\r\n/g, "\n");
+
 /** Every tracked or new .feature file in the checkout, by repo-relative path. */
 async function features(dir: string): Promise<Map<string, string>> {
   const { stdout } = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.feature"], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
@@ -346,6 +348,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let locked: string[] = [];
     const note = ctx.decision?.kind === "changes" ? `## The owner asked for changes at sign-off\n\n${fenced(ctx.decision.text)}` : "";
     const guide = `## The team's guide to writing scenarios\n\n${policies.scenarios.text}`;
+    // Taken once for the stage, not per attempt, so a retry is judged against the stage's start, which an earlier
+    // attempt's commit already moved past.
+    const stageStart = await features(dir);
     const findings = await attempts("specify", retriesOf("specify") + 1, async (_attempt, last) => {
       const r = await say("specify", brief(await promptOf("specify"), item(), note, guide, retryNote(last)));
       await git.commitAll(`specify(${tag}): scenarios`);
@@ -355,6 +360,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       // reason outside the file finds the file an earlier attempt committed, and rightly leaves it alone (PBI 95).
       const written = (await changedFiles(dir, `origin/${ctx.base}...HEAD`)).filter((p) => p.endsWith(".feature") && after.has(p));
       if (!written.length) out.push("no feature file was written");
+      // After /changes the signed-off file is already on the branch and differs from the base, so it would pass alone.
+      // Line endings alone don't count, since a checkout or an editor can flip them without touching a scenario.
+      else if (ctx.decision?.kind === "changes" && written.every((p) => lf(stageStart.get(p)) === lf(after.get(p))))
+        out.push("the owner asked for changes, and no feature file changed");
       for (const p of written) if (!featureTags(after.get(p)!).includes(tag)) out.push(`${p} doesn't carry ${tag} at Feature level`);
       const parse = await bdd("parse");
       if (parse.code !== 0) out.push(`bdd.parse exited ${parse.code}: ${parse.out.trim()}`);

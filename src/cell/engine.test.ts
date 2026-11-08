@@ -382,6 +382,23 @@ describe("runCell", () => {
     assert.equal(s.transitions().at(-1).event, "scenarios_written");
   });
 
+  // After /changes the branch already holds the signed-off feature file, which differs from the base. An agent that
+  // ignored the note would pass on that alone, so the owner's request needs a file changed during this stage.
+  test("after /changes, a specify that leaves every feature file as it was blocks", async () => {
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Split the first scenario." } } });
+    assert.equal(await s.run(), "waiting");
+    const t = s.transitions().at(-1);
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /the owner asked for changes, and no feature file changed/);
+  });
+
+  test("after /changes, a specify that revises the feature file posts the new scenarios", async () => {
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Split the first scenario." } },
+      script: (a, stage) => { if (stage === "specify") writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482, revised\n"); } });
+    assert.equal(await s.run(), "waiting");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
   // PBI 105: a cell that resumed past green started from a fresh clone, so open-pr's dod.md check exited 127.
   test("commands.setup runs in the checkout before any stage, even on a resume at open-pr", async () => {
     const h = harness({ nextStage: "open-pr" });
