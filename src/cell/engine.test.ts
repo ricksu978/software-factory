@@ -399,6 +399,17 @@ describe("runCell", () => {
     assert.equal(s.transitions().at(-1).event, "scenarios_written");
   });
 
+  test("after /changes, deleting a feature file the owner asked to drop counts as a change", async () => {
+    const extra = "features/pbi-482-more.feature";
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Drop the second feature file." } },
+      script: (a, stage) => { if (stage === "specify") rmSync(join(a.cwd, extra)); } });
+    writeFileSync(join(s.dir, extra), "@pbi-482\nFeature: Item 482, more\n");
+    git(s.dir, "add", "-A");
+    git(s.dir, "commit", "-q", "-m", "a second feature file");
+    assert.equal(await s.run(), "waiting");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
   // PBI 105: a cell that resumed past green started from a fresh clone, so open-pr's dod.md check exited 127.
   test("commands.setup runs in the checkout before any stage, even on a resume at open-pr", async () => {
     const h = harness({ nextStage: "open-pr" });

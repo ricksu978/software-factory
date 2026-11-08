@@ -361,8 +361,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const written = (await changedFiles(dir, `origin/${ctx.base}...HEAD`)).filter((p) => p.endsWith(".feature") && after.has(p));
       if (!written.length) out.push("no feature file was written");
       // After /changes the signed-off file is already on the branch and differs from the base, so it would pass alone.
-      // Line endings alone don't count, since a checkout or an editor can flip them without touching a scenario.
-      else if (ctx.decision?.kind === "changes" && written.every((p) => lf(stageStart.get(p)) === lf(after.get(p))))
+      // A deleted feature file counts, since the owner may ask for one to go. Line endings alone don't count, since a
+      // checkout or an editor can flip them without touching a scenario.
+      else if (ctx.decision?.kind === "changes" && written.every((p) => lf(stageStart.get(p)) === lf(after.get(p)))
+        && [...stageStart.keys()].every((p) => after.has(p)))
         out.push("the owner asked for changes, and no feature file changed");
       for (const p of written) if (!featureTags(after.get(p)!).includes(tag)) out.push(`${p} doesn't carry ${tag} at Feature level`);
       const parse = await bdd("parse");
