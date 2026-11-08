@@ -173,10 +173,12 @@ describe("githubRepoHost", () => {
     const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
     const old = ago(3 * 60_000);
     fake.reviewComments.set(`o/r#${pr.number}`, [
-      { threadId: "t1", path: "a.ts", line: 4, author: "owner", body: "Cite the probe.", submittedAt: old },
+      { threadId: "t1", path: "a.ts", line: 4, author: "Owner", body: "Cite the probe.", submittedAt: old },
       { threadId: "t1", path: "a.ts", line: 4, author: "owner", body: "Fixed.", submittedAt: ago(5_000) },
     ]);
     assert.equal((await fake.prState("o/r", pr.number, ["owner"])).lastChangesRequestedAt, old, "a reply seconds old may be resolved next");
+    await fake.closePr("o/r", pr.number, "");
+    assert.equal((await fake.prState("o/r", pr.number, ["owner"])).lastChangesRequestedAt, null, "a closed PR reads no threads");
   });
 
   test("replyToThread adds a reply to that one review thread", async () => {

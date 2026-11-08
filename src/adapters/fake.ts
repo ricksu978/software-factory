@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -111,7 +111,8 @@ type Status = "pending" | "success" | "failure";
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
  * `repo@sha`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
- * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as GitHub's does: on an open PR, once it has stood for THREAD_SETTLE_MS.
+ * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
+ * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -169,9 +170,10 @@ export function fakeRepoHost(): RepoHost & {
     async prState(repo, n, trustedLogins) {
       const p = pr(repo, n);
       const settled = Date.now() - THREAD_SETTLE_MS;
+      const trusted = new Set(trustedLogins.map(loginKey));
       const open = (p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [])
-        .filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trustedLogins.includes(c.author)).map((c) => c.submittedAt!);
-      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trustedLogins.includes(r.author)).map((r) => r.submittedAt), ...open].sort();
+        .filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
+      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author))).map((r) => r.submittedAt), ...open].sort();
       return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
     },
     async closePr(repo, n, comment) {
