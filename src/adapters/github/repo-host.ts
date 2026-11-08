@@ -189,7 +189,9 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       const trusted = new Set(trustedLogins.map((l) => l.toLowerCase()));
       const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())).map((v) => v.submitted_at as string);
       // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
-      const res = trusted.size ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
+      // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
+      // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
+      const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
         .filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
         .filter((c) => c.pullRequestReview?.submittedAt && trusted.has(authorLogin(c.author).toLowerCase())).map((c) => c.pullRequestReview!.submittedAt!);

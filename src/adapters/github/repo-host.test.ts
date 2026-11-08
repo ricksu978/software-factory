@@ -100,6 +100,14 @@ describe("githubRepoHost", () => {
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
   });
 
+  test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: true, merge_commit_sha: "m1", state: "closed", mergeable: null }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
+    }, () => { throw new Error("502 Bad Gateway"); });
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, lastChangesRequestedAt: null });
+  });
+
   test("openReviewComments returns every comment in unresolved threads and none from resolved ones", async () => {
     const thread = (id: string, isResolved: boolean, body: string) => ({ id, isResolved, path: "a.ts", line: 4, comments: { nodes: [{ author: { login: "dev" }, body }] } });
     const { host } = stubGitHub({}, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [thread("t1", true, "done"), thread("t2", false, "fix this")] }, reviews: { nodes: [] } } } }));
