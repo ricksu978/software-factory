@@ -5,9 +5,19 @@ import pg from "pg";
 
 const migrationsDir = join(import.meta.dirname, "..", "..", "db", "migrations");
 
-/** Locally the caller passes FACTORY_DB_URI. In Azure, with no URL, it signs in as the managed identity through Entra. */
+/**
+ * Locally the caller passes FACTORY_DB_URI. In Azure, with no URL, it signs in as the managed identity through Entra.
+ * Postgres can end an idle pool connection at any time (an administrator, a restart, the network). The pool then
+ * emits `error`, which with no listener would crash the process, so every pool logs it and carries on: the pool has
+ * already dropped that client, and the next query opens a fresh connection.
+ */
 export function createPool(url?: string): pg.Pool {
-  if (url) return new pg.Pool({ connectionString: url });
+  const pool = url ? new pg.Pool({ connectionString: url }) : azurePool();
+  pool.on("error", (e) => console.error("database connection lost, the pool will open a fresh one:", e.message));
+  return pool;
+}
+
+function azurePool(): pg.Pool {
   const credential = new DefaultAzureCredential();
   return new pg.Pool({
     host: process.env.PGHOST,
