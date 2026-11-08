@@ -189,6 +189,31 @@ describe("githubRepoHost", () => {
     assert.deepEqual(seen[0].v, { thread: "t2", body: "kept as is, because the name matches the spec" });
   });
 
+  test("postReview posts one review at the commit, with its body and line comments, as COMMENT", async () => {
+    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 1 }) });
+    await host.postReview({ repo: "o/r", prNumber: 3, commitSha: "abc", body: "Two things", comments: [{ path: "a.ts", line: 4, body: "Name it" }] });
+    assert.deepEqual(calls, [{ route: "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", params: {
+      owner: "o", repo: "r", pull_number: 3, commit_id: "abc", body: "Two things", event: "COMMENT",
+      comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "Name it" }] } }]);
+  });
+
+  test("postReview ignores an event a caller slips in", async () => {
+    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 1 }) });
+    const p = { repo: "o/r", prNumber: 3, commitSha: "abc", body: "Ship it", comments: [], event: "APPROVE" };
+    await host.postReview(p);
+    assert.equal(calls[0].params.event, "COMMENT");
+  });
+
+  test("resolveThread sends resolveReviewThread for that thread", async () => {
+    const seen: any[] = [];
+    const { calls, host } = stubGitHub({}, (q, v) => (seen.push({ q, v }), { resolveReviewThread: { thread: { id: v.thread, isResolved: true } } }));
+    await host.resolveThread("o/r", "t2");
+    assert.equal(seen.length, 1);
+    assert.match(seen[0].q, /resolveReviewThread/);
+    assert.deepEqual(seen[0].v, { thread: "t2" });
+    assert.deepEqual(calls, []);
+  });
+
   test("commentOnPr posts one comment on the PR's conversation", async () => {
     const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/issues/{issue_number}/comments": () => ({}) });
     await host.commentOnPr("o/r", 3, "> Split run.ts\n\nSplit in a1b2c3d.");

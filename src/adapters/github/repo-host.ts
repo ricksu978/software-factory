@@ -144,6 +144,9 @@ function authorLogin(a: Author): string {
   return a.__typename === "Bot" ? `${a.login}[bot]` : a.login;
 }
 
+const RESOLVE = `mutation($thread: ID!) {
+  resolveReviewThread(input: { threadId: $thread }) { thread { id isResolved } } }`;
+
 /** RepoHost on the App's installation token. The control plane alone holds the App key. */
 export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
   let cached: Promise<GitHubClient> | undefined;
@@ -237,12 +240,17 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return [...comments, ...standingSummaries(reviews)];
     },
 
-    async postReview() {
-      throw new Error("postReview is not implemented yet (PBI 129)");
+    async postReview({ repo, prNumber, commitSha, body, comments }) {
+      // Built field by field, so an event a caller slips in never reaches GitHub. Only COMMENT is ever sent.
+      await (await client()).request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
+        ...split(repo), pull_number: prNumber, commit_id: commitSha, body, event: "COMMENT",
+        comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })),
+      });
     },
 
-    async resolveThread() {
-      throw new Error("resolveThread is not implemented yet (PBI 129)");
+    async resolveThread(_repo, threadId) {
+      // GitHub answers resolveReviewThread on a resolved thread with the thread as it stands, so a second call is a no-op.
+      await (await client()).graphql(RESOLVE, { thread: threadId });
     },
   };
 }

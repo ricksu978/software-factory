@@ -79,6 +79,35 @@ describe("fakeRepoHost", () => {
     assert.equal((await host.prState(repo, number, [])).lastChangesRequestedAt, null);
   });
 
+  test("postReview records each review in order, always as COMMENT", async () => {
+    const host = fakeRepoHost();
+    assert.deepEqual(host.postedReviews, []);
+    const comments = [{ path: "a.ts", line: 4, body: "Name it" }];
+    await host.postReview({ repo, prNumber: 1, commitSha: "abc", body: "First", comments });
+    comments[0].body = "changed after";
+    await host.postReview({ repo, prNumber: 1, commitSha: "def", body: "Second", comments: [], event: "APPROVE" } as never);
+    assert.deepEqual(host.postedReviews, [
+      { repo, prNumber: 1, commitSha: "abc", body: "First", comments: [{ path: "a.ts", line: 4, body: "Name it" }], event: "COMMENT" },
+      { repo, prNumber: 1, commitSha: "def", body: "Second", comments: [], event: "COMMENT" },
+    ]);
+  });
+
+  test("resolveThread drops the thread from the open comments, records it once, and is a no-op the second time", async () => {
+    const host = fakeRepoHost();
+    const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });
+    host.reviewComments.set(`${repo}#${number}`, [
+      { threadId: "t1", path: "a.ts", line: 1, author: "r", body: "Rename this" },
+      { threadId: "t1", path: "a.ts", line: 1, author: "factory[bot]", body: "Done" },
+      { threadId: "t2", path: "a.ts", line: 2, author: "r", body: "Keep" },
+    ]);
+    assert.deepEqual(host.resolvedThreads, []);
+    await host.resolveThread(repo, "t1");
+    await host.resolveThread(repo, "t1");
+    assert.deepEqual((await host.openReviewComments(repo, number)).map((c) => c.body), ["Keep"]);
+    assert.deepEqual(host.resolvedThreads, [{ repo, threadId: "t1" }]);
+    await assert.rejects(host.resolveThread(repo, "nope"));
+  });
+
   test("checks, files and the default branch come from the state tests set", async () => {
     const host = fakeRepoHost();
     const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });

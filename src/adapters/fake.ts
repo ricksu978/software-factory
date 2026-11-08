@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -106,6 +106,8 @@ type FakePr = {
   reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body?: string }[];
 };
 type Status = "pending" | "success" | "failure";
+/** A review postReview recorded. Its event is always COMMENT, as on GitHub. */
+type PostedReview = { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[]; event: "COMMENT" };
 
 /**
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
@@ -113,6 +115,8 @@ type Status = "pending" | "success" | "failure";
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
  * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
  * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS.
+ * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
+ * once, so the engine's tests can read what a stage posted.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -121,7 +125,11 @@ export function fakeRepoHost(): RepoHost & {
   heads: Map<string, string>;
   branches: Map<string, string[]>;
   reviewComments: Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>;
+  postedReviews: PostedReview[];
+  resolvedThreads: { repo: string; threadId: string }[];
 } {
+  const postedReviews: PostedReview[] = [];
+  const resolvedThreads: { repo: string; threadId: string }[] = [];
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
   const files = new Map<string, string>();
@@ -136,7 +144,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, files, heads, branches, reviewComments,
+    prs, checks, files, heads, branches, reviewComments, postedReviews, resolvedThreads,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -205,11 +213,16 @@ export function fakeRepoHost(): RepoHost & {
     async commentOnPr(repo, n, body) {
       pr(repo, n).comments.push(body);
     },
-    async postReview() {
-      throw new Error("postReview is not implemented yet (PBI 129)");
+    async postReview({ repo, prNumber, commitSha, body, comments }) {
+      postedReviews.push({ repo, prNumber, commitSha, body, comments: comments.map(({ path, line, body }) => ({ path, line, body })), event: "COMMENT" });
     },
-    async resolveThread() {
-      throw new Error("resolveThread is not implemented yet (PBI 129)");
+    async resolveThread(repo, threadId) {
+      const thread = [...reviewComments.entries()].find(([k, cs]) => k.startsWith(`${repo}#`) && cs.some((c) => c.threadId === threadId))?.[1]
+        .filter((c) => c.threadId === threadId);
+      if (!thread) throw new Error(`no review thread ${threadId} in ${repo}`);
+      if (thread.every((c) => c.resolved)) return;
+      for (const c of thread) c.resolved = true;
+      resolvedThreads.push({ repo, threadId });
     },
   };
 }
