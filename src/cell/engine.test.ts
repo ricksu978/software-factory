@@ -371,6 +371,17 @@ describe("runCell", () => {
     assert.deepEqual(end.map((c) => c.route), ["/stage", "/upload-url", "/upload-url", "/lease", "/transition"]);
   });
 
+  // PBI 95: attempt 3 wrote and committed the feature file but its parse check failed, and attempt 4 left the file
+  // as it was, so "no feature file was written" failed it although the file was on the branch.
+  test("a specify retry passes on a feature file an earlier attempt wrote, when the parse check now passes", async () => {
+    const s = harness({ nextStage: "specify", signedOff: false });
+    const marker = fwd(join(s.root, "parsed-once"));
+    s.deps.config.bdd.parse = `if [ -f "${marker}" ]; then ${s.deps.config.bdd.parse}; else touch "${marker}"; echo "cucumber-js: not found" >&2; exit 127; fi`;
+    assert.equal(await s.run(), "waiting");
+    assert.deepEqual(s.started(), ["specify", "specify"], "the first attempt failed its parse check, the second passed");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
   // PBI 105: a cell that resumed past green started from a fresh clone, so open-pr's dod.md check exited 127.
   test("commands.setup runs in the checkout before any stage, even on a resume at open-pr", async () => {
     const h = harness({ nextStage: "open-pr" });

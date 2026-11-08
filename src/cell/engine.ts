@@ -347,12 +347,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const note = ctx.decision?.kind === "changes" ? `## The owner asked for changes at sign-off\n\n${fenced(ctx.decision.text)}` : "";
     const guide = `## The team's guide to writing scenarios\n\n${policies.scenarios.text}`;
     const findings = await attempts("specify", retriesOf("specify") + 1, async (_attempt, last) => {
-      const before = await features(dir);
       const r = await say("specify", brief(await promptOf("specify"), item(), note, guide, retryNote(last)));
       await git.commitAll(`specify(${tag}): scenarios`);
       const after = await features(dir);
       const out: string[] = r.ok ? [] : [`the agent didn't finish: ${r.text.slice(0, 500)}`];
-      const written = [...after.keys()].filter((p) => before.get(p) !== after.get(p));
+      // Written means different from the base, not changed in this attempt. A retry whose parse check failed for a
+      // reason outside the file finds the file an earlier attempt committed, and rightly leaves it alone (PBI 95).
+      const written = (await changedFiles(dir, `origin/${ctx.base}...HEAD`)).filter((p) => p.endsWith(".feature") && after.has(p));
       if (!written.length) out.push("no feature file was written");
       for (const p of written) if (!featureTags(after.get(p)!).includes(tag)) out.push(`${p} doesn't carry ${tag} at Feature level`);
       const parse = await bdd("parse");
