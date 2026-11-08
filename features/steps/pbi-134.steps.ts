@@ -65,6 +65,10 @@ class FakeClock implements Clock {
     this.t = end;
     await settle();
   }
+  /** How many timers are still waiting that were due by now. `advance` should leave none. */
+  overdue(): number {
+    return [...this.timers.values()].filter((v) => v.at <= this.t).length;
+  }
 }
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -353,6 +357,10 @@ Given("two boards, {string} and {string}", long, async function (a: string, b: s
   const c = ctx(this);
   await board(c, a);
   await board(c, b);
+  const { rows } = await pool().query<{ url: string }>(
+    "select url from backlog_source where adapter = 'fake' and url = any($1) order by url", [[`fake:${a}`, `fake:${b}`]],
+  );
+  assert.deepEqual(rows.map((r) => r.url), [`fake:${a}`, `fake:${b}`].sort(), `boards "${a}" and "${b}" weren't both created`);
 });
 
 Given("the poll of board {string} ends quickly", long, async function (name: string) {
@@ -450,7 +458,12 @@ Given("the cell's request to {} is answered after {int} seconds", long, async fu
 // --- time ----------------------------------------------------------------------------------------------------------
 
 When(/^(\d+) (?:more )?(minutes?|seconds?) pass$/, long, async function (n: string, unit: string) {
-  await ctx(this).clock.advance(Number(n) * (unit.startsWith("minute") ? 60_000 : 1000));
+  const clock = ctx(this).clock;
+  const ms = Number(n) * (unit.startsWith("minute") ? 60_000 : 1000);
+  const before = clock.now();
+  await clock.advance(ms);
+  assert.equal(clock.now() - before, ms, `the clock moved ${clock.now() - before} ms, not ${ms}`);
+  assert.equal(clock.overdue(), 0, "a timer due by now is still pending");
 });
 
 // --- the log -------------------------------------------------------------------------------------------------------
