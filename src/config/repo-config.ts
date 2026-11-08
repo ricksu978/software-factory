@@ -10,7 +10,8 @@ export type RepoConfig = {
   reviewers: string[];
   webTools: WebTool[];
   bdd: { parse: string; run: string; report: string };
-  commands: { test: string; lint: string };
+  /** `setup` installs the repo's dependencies in a fresh checkout. The engine runs it before any stage. */
+  commands: { test: string; lint: string; setup?: string };
 };
 
 /** Thrown for a missing or invalid config. `key` names the setting that's wrong. */
@@ -49,6 +50,14 @@ function webTools(doc: Record<string, unknown>): WebTool[] {
   return list as WebTool[];
 }
 
+/** `commands.setup` may be left out, but a present one must be a command. */
+function setup(doc: Record<string, unknown>): { setup?: string } {
+  const v = (doc.commands as Record<string, unknown> | undefined)?.setup;
+  if (v === undefined) return {};
+  if (typeof v !== "string" || v.trim() === "") throw new ConfigError("commands.setup");
+  return { setup: v };
+}
+
 /** Parses config.yml. Null means the repo has none, which fails on `bdd`, since such a repo can't run BDD. */
 export function parseRepoConfig(yamlText: string | null): RepoConfig {
   let doc: unknown = null;
@@ -65,6 +74,6 @@ export function parseRepoConfig(yamlText: string | null): RepoConfig {
     reviewers: strings(d, "reviewers"),
     webTools: webTools(d),
     bdd: section(d, "bdd", ["parse", "run", "report"] as const),
-    commands: section(d, "commands", ["test", "lint"] as const),
+    commands: { ...section(d, "commands", ["test", "lint"] as const), ...setup(d) },
   };
 }

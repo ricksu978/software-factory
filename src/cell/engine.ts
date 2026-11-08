@@ -587,6 +587,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await end("passed");
     }
 
+    // A fresh clone has none of the repo's dependencies, and a cell that resumes past green runs no agent that would
+    // install them, so the first gate command would fail (PBI 105's open-pr exited 127). Setup runs after the merge,
+    // which can change a lockfile, and before any stage.
+    if (config.commands.setup) {
+      const r = await sh(config.commands.setup, dir);
+      if (r.code !== 0) throw new Blocked(`commands.setup exited ${r.code}: ${r.out.trim()}`);
+    }
+
     const start = ctx.nextStage;
     if (start === "address") {
       await address(conflict.length > 0);
