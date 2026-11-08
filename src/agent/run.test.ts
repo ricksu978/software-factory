@@ -143,6 +143,15 @@ test("a cell run of a factory agent passes the factory's own definition, which o
   assert.match(addresser.prompt, /^You make one pass over a pull request's review feedback/);
 });
 
+test("a cell run of the PR reviewer passes the factory's read-only definition", () => {
+  const def = agentOptions({ ...base, mode: "cell", agent: "factory-pr-reviewer" }).agents?.["factory-pr-reviewer"];
+  assert.ok(def, "no definition passed for the PR reviewer");
+  assert.deepEqual(def.tools, ["Read", "Grep", "Glob", "Bash"]);
+  assert.match(def.description, /reviews a pull request/i);
+  assert.match(def.prompt, /`APPROVED`/);
+  assert.match(def.prompt, /`OPEN: <n>`/);
+});
+
 test("a cell run with no agent, or one the factory doesn't ship, passes no definitions", () => {
   assert.equal(agentOptions({ ...base, mode: "cell" }).agents, undefined);
   assert.equal(agentOptions({ ...base, mode: "cell", agent: "someone-else" }).agents, undefined);
