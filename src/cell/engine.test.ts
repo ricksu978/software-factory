@@ -371,6 +371,45 @@ describe("runCell", () => {
     assert.deepEqual(end.map((c) => c.route), ["/stage", "/upload-url", "/upload-url", "/lease", "/transition"]);
   });
 
+  // PBI 95: attempt 3 wrote and committed the feature file but its parse check failed, and attempt 4 left the file
+  // as it was, so "no feature file was written" failed it although the file was on the branch.
+  test("a specify retry passes on a feature file an earlier attempt wrote, when the parse check now passes", async () => {
+    const s = harness({ nextStage: "specify", signedOff: false });
+    const marker = fwd(join(s.root, "parsed-once"));
+    s.deps.config.bdd.parse = `if [ -f "${marker}" ]; then ${s.deps.config.bdd.parse}; else touch "${marker}"; echo "cucumber-js: not found" >&2; exit 127; fi`;
+    assert.equal(await s.run(), "waiting");
+    assert.deepEqual(s.started(), ["specify", "specify"], "the first attempt failed its parse check, the second passed");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
+  // After /changes the branch already holds the signed-off feature file, which differs from the base. An agent that
+  // ignored the note would pass on that alone, so the owner's request needs a file changed during this stage.
+  test("after /changes, a specify that leaves every feature file as it was blocks", async () => {
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Split the first scenario." } } });
+    assert.equal(await s.run(), "waiting");
+    const t = s.transitions().at(-1);
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /the owner asked for changes, and no feature file changed/);
+  });
+
+  test("after /changes, a specify that revises the feature file posts the new scenarios", async () => {
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Split the first scenario." } },
+      script: (a, stage) => { if (stage === "specify") writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482, revised\n"); } });
+    assert.equal(await s.run(), "waiting");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
+  test("after /changes, deleting a feature file the owner asked to drop counts as a change", async () => {
+    const extra = "features/pbi-482-more.feature";
+    const s = harness({ nextStage: "specify", signedOff: true, ctx: { decision: { kind: "changes", text: "Drop the second feature file." } },
+      script: (a, stage) => { if (stage === "specify") rmSync(join(a.cwd, extra)); } });
+    writeFileSync(join(s.dir, extra), "@pbi-482\nFeature: Item 482, more\n");
+    git(s.dir, "add", "-A");
+    git(s.dir, "commit", "-q", "-m", "a second feature file");
+    assert.equal(await s.run(), "waiting");
+    assert.equal(s.transitions().at(-1).event, "scenarios_written");
+  });
+
   // PBI 105: a cell that resumed past green started from a fresh clone, so open-pr's dod.md check exited 127.
   test("commands.setup runs in the checkout before any stage, even on a resume at open-pr", async () => {
     const h = harness({ nextStage: "open-pr" });
