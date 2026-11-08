@@ -38,6 +38,8 @@ type Ctx = {
   status?: number;
   html?: string;
   factory?: Factory;
+  /** Set by PBI 133's steps: the tick keeps the WIP limit, so it can take an item, and runs through `runTick`. */
+  runTick?: (once: () => Promise<unknown>) => Promise<void>;
 };
 
 function ctx(world: object): Ctx {
@@ -46,7 +48,12 @@ function ctx(world: object): Ctx {
   return w.pbi89;
 }
 
-const pool = () => need().pool;
+// PBI 133's scenarios run this control plane on a Postgres of their own, which they stop and restart.
+let poolOverride: import("pg").Pool | null = null;
+export function usePool(p: import("pg").Pool | null): void {
+  poolOverride = p;
+}
+const pool = () => poolOverride ?? need().pool;
 const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
 
 Before({ tags: "@pbi-89 and @db", ...long }, async function () {
@@ -222,6 +229,11 @@ When("the operator posts a {string} override with the reason {string}", async fu
 
 When("the scheduler ticks once", long, async function () {
   const c = ctx(this);
+  if (c.runTick) {
+    await c.runTick(() => tick({ pool: pool(), launcher: fakeLauncher(), now: new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => c.fake!.adapter,
+      secret: CELL_SECRET, controlUrl: "http://control.test", sopVersion: "0.1.0" }));
+    return;
+  }
   // No WIP, so the tick applies overrides and starts no cell.
   await pool().query("update wip_policy set current_wip = 0");
   try {

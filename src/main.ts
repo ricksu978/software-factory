@@ -124,14 +124,21 @@ function blobReader(connectionString: string): (path: string) => Promise<string 
   };
 }
 
+/** Runs `fn` once and logs a failure as "<what> failed:" instead of throwing. True when it succeeded. */
+export async function attempt(what: string, fn: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await fn();
+    return true;
+  } catch (e) {
+    console.error(`${what} failed:`, e);
+    return false;
+  }
+}
+
 /** Runs `fn` now and then `ms` after each run ends, so two runs never overlap. A failure is logged and the next run goes ahead. */
 function every(ms: number, what: string, fn: () => Promise<unknown>): void {
   const run = async () => {
-    try {
-      await fn();
-    } catch (e) {
-      console.error(`${what} failed:`, e);
-    }
+    await attempt(what, fn);
     setTimeout(run, ms);
   };
   void run();
