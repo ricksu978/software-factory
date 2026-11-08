@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
+import type { Slow } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { gate } from "../gate/readiness.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
@@ -17,6 +18,8 @@ export type PollDeps = {
   repoHost: RepoHost;
   judge: (item: FactoryItem, dor: Policy) => Promise<string>;
   sourceId: string;
+  /** Where a poll that runs long warns, and the clock that times it (PBI 134). */
+  slow?: Slow;
 };
 
 type Row = {

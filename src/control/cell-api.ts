@@ -10,6 +10,7 @@ import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
+import type { Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
 
 /** HMAC-SHA256(secret, runId + ":" + generation) in hex. The scheduler hands it to the cell as RUN_TOKEN. */
@@ -32,6 +33,8 @@ export type CellApiDeps = {
   /** True while the kill switch's env flag is on. Defaults to reading FACTORY_KILL=1. */
   killSwitch?: () => boolean;
   now?: () => Date;
+  /** Where a request still open after 60 seconds warns, and the clock that times it (PBI 134). */
+  slow?: Slow;
 };
 
 // The only events a cell may send. Everything else is the control plane's, such as merged, which a steered cell

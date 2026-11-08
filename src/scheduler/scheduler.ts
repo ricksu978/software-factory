@@ -5,6 +5,7 @@
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
+import type { Slow } from "../control/slow-work.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import type { Actor } from "../store/events.ts";
@@ -35,6 +36,8 @@ export type TickDeps = {
   controlUrl: string;
   /** The version of the loaded SOP file, pinned on a run's first claim. */
   sopVersion: string;
+  /** Where a tick that runs long warns, and the clock that times it (PBI 134). */
+  slow?: Slow;
 };
 export type TickResult = { started: string[]; stopped: string[]; expired: string[] };
 
