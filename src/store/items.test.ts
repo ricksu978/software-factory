@@ -177,4 +177,26 @@ describe("store", dbTest, () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("migrate-cli writes an entry's trustedBot to its repo, and an entry without one leaves it alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sources-"));
+    try {
+      const sources = join(dir, "sources.yml");
+      const write = (bot: string | null) =>
+        writeFileSync(sources, `- repo: octo/bot\n  installationId: 1\n  owner: { type: user, login: octo }\n  projectNumber: 5\n  fieldMap: {}\n${bot ? `  trustedBot: ${JSON.stringify(bot)}\n` : ""}`);
+      const run = () => spawnSync(process.execPath, ["src/store/migrate-cli.ts"], { env: { ...process.env, FACTORY_DB_URI: db.url, FACTORY_SOURCES: sources }, encoding: "utf8" });
+      const bot = async () => (await db.pool.query("select trusted_bot from repo where url = 'https://github.com/octo/bot'")).rows[0].trusted_bot;
+      write("app[bot]");
+      assert.equal(run().status, 0);
+      assert.equal(await bot(), "app[bot]");
+      write("renamed[bot]");
+      assert.equal(run().status, 0);
+      assert.equal(await bot(), "renamed[bot]");
+      write(null);
+      assert.equal(run().status, 0);
+      assert.equal(await bot(), "renamed[bot]");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
