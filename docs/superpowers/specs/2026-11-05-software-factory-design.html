@@ -713,7 +713,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
     <thead><tr><th>Table</th><th>Key fields</th></tr></thead>
     <tbody>
       <tr><td>backlog_source</td><td>id, adapter (github first), url, field map (acceptance criteria, status values, opt-in label, sprint field, and extra fields shown to the readiness check, such as size), label filter, repo map, paused</td></tr>
-      <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha, quarantined_at</td></tr>
+      <tr><td>repo</td><td>id, host_adapter (github first), url, trusted_bot, trusted_set_by, config_sha, quarantined_at. Migrate writes trusted_bot, the factory's own App's bot login, from the <code>trustedBot</code> of the repo's entry in <code>config/sources.yml</code>. An entry without one leaves it as it was</td></tr>
       <tr><td>user</td><td>id, provider (google, microsoft, or dev for the local dev identity), subject, tenant_id, email, github_login, role (viewer, operator, owner), product_owner, added_by, added_at</td></tr>
       <tr><td>item</td><td>id, source_id, external_id, title, state, backlog_rank, readiness_notes, readiness_policy_sha, readiness_item_hash, criteria_hash, blocked_by, lease_owner, lease_generation, lease_expires</td></tr>
       <tr><td>run</td><td>id, item_id, repo_id, sop_version, config_sha, started_at, ended_at, outcome, cost_usd, branch, pr_url, features_lock_sha, signed_off_by, signed_off_at, risk_tier, tier_reasons, merge_sha</td></tr>

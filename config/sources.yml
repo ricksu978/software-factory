@@ -2,6 +2,8 @@
 # statusFor names the board's Status option for each factory state, and null leaves the board's status as it is.
 - repo: ricksu978/software-factory
   installationId: 179116800
+  # The GitHub App's bot login. Migrate writes it to repo.trusted_bot, so the factory knows its own comments and closes.
+  trustedBot: ricksu978-software-factory[bot]
   owner: { type: user, login: ricksu978 }
   projectNumber: 4
   fieldMap:

@@ -6,15 +6,17 @@ import { parse } from "yaml";
 import { seedOwner } from "../../scripts/seed-owner.ts";
 import { createPool, migrate } from "./db.ts";
 
-type Source = { repo: string; installationId: number; owner: { type: "user" | "org"; login: string }; projectNumber: number; fieldMap: unknown };
+type Source = { repo: string; installationId: number; owner: { type: "user" | "org"; login: string }; projectNumber: number; fieldMap: unknown; trustedBot?: string };
 
 async function upsertSources(pool: pg.Pool, file: string): Promise<void> {
   const sources = (parse(readFileSync(file, "utf8")) ?? []) as Source[];
   for (const s of sources) {
     const repo = await pool.query<{ id: string }>(
-      `insert into repo (host_adapter, url, installation_id) values ('github', $1, $2)
-       on conflict (url) do update set installation_id = excluded.installation_id returning id`,
-      [`https://github.com/${s.repo}`, s.installationId],
+      // trustedBot names the App's bot login. An entry without one keeps whatever trusted_bot the row already holds.
+      `insert into repo (host_adapter, url, installation_id, trusted_bot) values ('github', $1, $2, $3)
+       on conflict (url) do update set installation_id = excluded.installation_id,
+         trusted_bot = coalesce(excluded.trusted_bot, repo.trusted_bot) returning id`,
+      [`https://github.com/${s.repo}`, s.installationId, s.trustedBot || null],
     );
     const projectUrl = `https://github.com/${s.owner.type === "org" ? "orgs" : "users"}/${s.owner.login}/projects/${s.projectNumber}`;
     await pool.query(
