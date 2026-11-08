@@ -10,10 +10,22 @@ const migrationsDir = join(import.meta.dirname, "..", "..", "db", "migrations");
  * Postgres can end an idle pool connection at any time (an administrator, a restart, the network). The pool then
  * emits `error`, which with no listener would crash the process, so every pool logs it and carries on: the pool has
  * already dropped that client, and the next query opens a fresh connection.
+ * pg-pool takes that listener off a client while it is checked out, so a connection lost mid-transaction (withTx,
+ * migrate, the webhook) would still emit an unhandled `error` on the client. Each client therefore gets its own
+ * listener when it connects. It logs only while the client is checked out, since the pool logs idle losses. The query in
+ * flight still rejects, and on release the pool drops the dead client because it is no longer queryable.
  */
 export function createPool(url?: string): pg.Pool {
   const pool = url ? new pg.Pool({ connectionString: url }) : azurePool();
   pool.on("error", (e) => console.error("database connection lost, the pool will open a fresh one:", e.message));
+  const checkedOut = new WeakSet<pg.PoolClient>();
+  pool.on("acquire", (c) => checkedOut.add(c));
+  pool.on("release", (_e, c) => checkedOut.delete(c));
+  pool.on("connect", (c) =>
+    c.on("error", (e) => {
+      if (checkedOut.has(c)) console.error("database connection lost on a checked-out client:", e.message);
+    }),
+  );
   return pool;
 }
 
