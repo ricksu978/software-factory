@@ -325,6 +325,21 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
   });
 
+  test("a review that only comments sends the item to address while its thread is open, and not once it's resolved", async () => {
+    await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
+    const { ext, pr, run } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    const p = host.prs.find((x) => x.number === pr)!;
+    p.reviews.push({ state: "commented", submittedAt: "2026-11-06T10:30:00Z", author: "octo" });
+    const thread = { threadId: "t1", path: "a.ts", line: 1, author: "octo", body: "Cite the probe.", submittedAt: "2026-11-06T10:30:00Z", resolved: true };
+    host.reviewComments.set(`${p.repo}#${pr}`, [thread]);
+    await poll();
+    assert.equal((await row(ext)).state, "InReview", "a resolved thread asks for nothing");
+    thread.resolved = false;
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
+  });
+
   test("a merge conflict sends an InReview item to address", async () => {
     const { ext, pr, run } = await held("InReview", { pr: true });
     host.prs.find((p) => p.number === pr)!.mergeable = false;
