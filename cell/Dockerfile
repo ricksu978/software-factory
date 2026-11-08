@@ -28,6 +28,9 @@ COPY spike ./spike
 COPY src ./src
 COPY sop ./sop
 COPY policy ./policy
+# src/agent/run.ts reads the factory's agents from /app/cell and passes them in the run's options, so a checkout's
+# .claude/agents/ file of the same name can't replace them (PBI 96). The user copy serves any other Claude Code run.
+COPY cell/claude/agents ./cell/claude/agents
 COPY --chown=factory:factory cell/claude/agents /home/factory/.claude/agents
 ENV FACTORY_POLICY_DIR=/app/policy
 USER factory

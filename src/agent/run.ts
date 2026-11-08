@@ -1,6 +1,8 @@
 // The only module that imports the Agent SDK (plan Task 11). Every model call goes through runAgent.
-import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type AgentDefinition, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { parse } from "yaml";
 import type { FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
 
@@ -20,6 +22,33 @@ const WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
 // Unix seconds, as the SDK reports resetsAt. A rejection with no reset time waits 5 hours, as Task 12 does for usage.
 const FALLBACK_WAIT_S = 5 * 3600;
 
+// The factory's own agents, read from the files the repo ships for the cell image. A cell run that names one gets its
+// definition through `agents`, which outranks a checkout's .claude/agents/ file of the same name (PBI 96, spec §6).
+const FACTORY_AGENTS_DIR = new URL("../../cell/claude/agents/", import.meta.url);
+const FACTORY_AGENT_NAMES = ["factory-self-reviewer", "factory-pr-addresser"] as const;
+
+const toolList = (v: unknown): string[] | undefined =>
+  v === undefined || v === null ? undefined : Array.isArray(v) ? v.map(String) : String(v).split(",").map((t) => t.trim()).filter(Boolean);
+
+export function parseAgentFile(text: string): AgentDefinition {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!m) throw new Error("an agent file without front matter");
+  const fm = (parse(m[1]) ?? {}) as Record<string, unknown>;
+  const def: AgentDefinition = { description: String(fm.description ?? ""), prompt: m[2].trim() };
+  const tools = toolList(fm.tools);
+  if (tools) def.tools = tools;
+  const disallowed = toolList(fm.disallowedTools);
+  if (disallowed) def.disallowedTools = disallowed;
+  return def;
+}
+
+let factoryAgents: Record<string, AgentDefinition> | undefined;
+function factoryAgent(name: string): AgentDefinition | undefined {
+  factoryAgents ??= Object.fromEntries(FACTORY_AGENT_NAMES.map((n) =>
+    [n, parseAgentFile(readFileSync(new URL(`${n}.md`, FACTORY_AGENTS_DIR), "utf8"))]));
+  return Object.hasOwn(factoryAgents, name) ? factoryAgents[name] : undefined;
+}
+
 export function agentOptions(a: AgentArgs): Options {
   const abortController = new AbortController();
   if (a.signal.aborted) abortController.abort(a.signal.reason);
@@ -34,8 +63,9 @@ export function agentOptions(a: AgentArgs): Options {
   // Safe only because a cell is a throwaway container holding a one-repo token. No sandbox: bubblewrap can't
   // start under Docker Desktop, so the egress proxy enforces the allowlist locally. Azure's probe is Task 19 Step 9.
   // The deny list only stops the model being offered a web tool. The model gateway is the fence (spec §6 "Web tools").
+  const own = a.agent ? factoryAgent(a.agent) : undefined;
   return { ...common, settingSources: ["user", "project"], permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true,
-    disallowedTools: WEB_TOOLS.filter((t) => !a.webTools?.includes(t)) };
+    disallowedTools: WEB_TOOLS.filter((t) => !a.webTools?.includes(t)), ...(own && a.agent ? { agents: { [a.agent]: own } } : {}) };
 }
 
 export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">> {
