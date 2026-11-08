@@ -278,7 +278,9 @@ Then("the user {string} is an owner and a product owner", async function (subjec
 });
 
 Then("no user {string} exists", async function (subject: string) {
-  assert.equal((await pool().query(`select 1 from "user" where subject = $1`, [subject])).rowCount, 0);
+  // PBI 117's scenarios each run in a database of their own, kept on the world.
+  const own = (this as { pbi117?: { pool?: import("pg").Pool } }).pbi117?.pool;
+  assert.equal((await (own ?? pool()).query(`select 1 from "user" where subject = $1`, [subject])).rowCount, 0);
 });
 
 // ---- Run detail, /phase0 and Floor ----
