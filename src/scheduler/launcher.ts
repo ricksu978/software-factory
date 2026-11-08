@@ -30,6 +30,9 @@ const egressEnv: Record<string, string> = {
   https_proxy: PROXY,
   HTTP_PROXY: PROXY,
   http_proxy: PROXY,
+  // A test's fetch to its own server on loopback stays in the container. Through the proxy it hangs (PBI 96's run).
+  NO_PROXY: "127.0.0.1,localhost",
+  no_proxy: "127.0.0.1,localhost",
   NODE_USE_ENV_PROXY: "1",
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   ENABLE_CLAUDEAI_MCP_SERVERS: "false",
