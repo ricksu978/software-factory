@@ -28,16 +28,37 @@ async function upsertSources(pool: pg.Pool, file: string): Promise<void> {
   }
 }
 
+/** Each service's principal setting and the role its principal gets (redesign §08). */
+const SERVICE_PRINCIPALS = [
+  ["FACTORY_BFF_PRINCIPAL", "factory_bff"],
+  ["FACTORY_API_PRINCIPAL", "factory_app"],
+  ["FACTORY_WORKER_PRINCIPAL", "factory_app"],
+  ["FACTORY_CELL_API_PRINCIPAL", "factory_app"],
+] as const;
+
+export type PrincipalGrant = { principal: string; role: "factory_app" | "factory_bff" };
+
 /**
- * Azure only: makes the control plane's Entra principal a member of factory_app, so the append-only grant applies
- * to the app. It runs as the database's Entra admin, the migrate job's identity. pgaadauth_create_principal exists
- * only on Azure Postgres, so it's called only when the role is missing, and only the Azure job sets the variable.
+ * The principals migrate makes members of a factory role. Each service's own setting maps onto its role. With none of
+ * them set, today's single FACTORY_APP_PRINCIPAL maps onto factory_app, so a deploy that hasn't split its identities
+ * keeps working.
+ */
+export function principalGrants(env: NodeJS.ProcessEnv): PrincipalGrant[] {
+  const grants: PrincipalGrant[] = SERVICE_PRINCIPALS.filter(([key]) => env[key]).map(([key, role]) => ({ principal: env[key]!, role }));
+  if (grants.length === 0 && env.FACTORY_APP_PRINCIPAL) grants.push({ principal: env.FACTORY_APP_PRINCIPAL, role: "factory_app" });
+  return grants;
+}
+
+/**
+ * Azure only: makes a service's Entra principal a member of its role, so that role's grants apply to the service. It
+ * runs as the database's Entra admin, the migrate job's identity. pgaadauth_create_principal exists only on Azure
+ * Postgres, so it's called only when the role is missing, and only the Azure job sets the principal settings.
  * https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-manage-azure-ad-users
  */
-async function ensureAppPrincipal(pool: pg.Pool, name: string): Promise<void> {
-  const exists = await pool.query("select 1 from pg_roles where rolname = $1", [name]);
-  if (exists.rowCount === 0) await pool.query("select * from pg_catalog.pgaadauth_create_principal($1, false, false)", [name]);
-  await pool.query(`grant factory_app to "${name.replaceAll('"', '""')}"`);
+async function ensurePrincipal(pool: pg.Pool, { principal, role }: PrincipalGrant): Promise<void> {
+  const exists = await pool.query("select 1 from pg_roles where rolname = $1", [principal]);
+  if (exists.rowCount === 0) await pool.query("select * from pg_catalog.pgaadauth_create_principal($1, false, false)", [principal]);
+  await pool.query(`grant ${role} to "${principal.replaceAll('"', '""')}"`);
 }
 
 async function upsertDevOwner(pool: pg.Pool, login: string): Promise<void> {
@@ -69,7 +90,7 @@ export async function main(args: string[], env: NodeJS.ProcessEnv): Promise<numb
   const pool = createPool(env.FACTORY_DB_URI);
   try {
     await migrate(pool);
-    if (env.FACTORY_APP_PRINCIPAL) await ensureAppPrincipal(pool, env.FACTORY_APP_PRINCIPAL);
+    for (const g of principalGrants(env)) await ensurePrincipal(pool, g);
     const sources = env.FACTORY_SOURCES ?? "config/sources.yml";
     if (existsSync(sources)) await upsertSources(pool, sources);
     if (env.FACTORY_ENV === "local") {
