@@ -8,9 +8,10 @@
 // A tick or a poll warns at 5 minutes and every 5 minutes after, naming the step it is in at that moment. A cell API
 // request warns at 60 seconds. Every warning stops once the work ends, whether it ended well or with an error.
 //
-// The tick's steps: "applying overrides", "expiring leases", "chasing questions", "polling merged CI" and "starting
-// the next item". The poll's steps: "listing new and changed items", "reading the PRs of items in review", "checking
-// the items the factory holds" and "checking readiness".
+// The tick's steps: "applying overrides", "stopping every cell", "expiring leases", "chasing questions", "polling
+// merged CI" and "starting the next item". The poll's steps: "reading the board", "listing new and changed items",
+// "reading the PRs of items in review", "checking the items the factory holds", "checking readiness" and "saving the
+// cursor".
 
 export const SLOW_TICK_MS = 300_000;
 export const SLOW_POLL_MS = 300_000;
@@ -36,10 +37,42 @@ export type Slow = { log?: (line: string) => void; clock?: Clock };
 export type Watch = { step(name: string): void; end(): void };
 
 /**
- * Starts timing `what`, such as "the scheduler tick", and warns after `firstMs` and then every `everyMs` until `end`.
- * A null `everyMs` warns once.
+ * Starts timing a piece of work and logs `say(runningMs, step)` after `firstMs`, then every `everyMs` until `end`. A
+ * null `everyMs` warns once. `step` is the name last passed to `Watch.step`, or "" before any.
  */
-export function watch(_what: string, _firstMs: number, _everyMs: number | null, _slow: Slow = {}): Watch {
-  // Stub (PBI 134 red): no warnings yet.
-  return { step() {}, end() {} };
+export function watch(firstMs: number, everyMs: number | null, say: (ms: number, step: string) => string, slow: Slow = {}): Watch {
+  const clock = slow.clock ?? realClock;
+  const log = slow.log ?? ((line: string) => console.warn(line));
+  const started = clock.now();
+  let step = "";
+  let handle: unknown = null;
+  const fire = () => {
+    handle = everyMs === null ? null : clock.setTimeout(fire, everyMs);
+    log(say(clock.now() - started, step));
+  };
+  handle = clock.setTimeout(fire, firstMs);
+  return {
+    step(name) {
+      step = name;
+    },
+    end() {
+      if (handle !== null) clock.clearTimeout(handle);
+      handle = null;
+    },
+  };
 }
+
+/** Runs `fn` under a watch and ends the watch however `fn` ends. */
+export async function watched<T>(w: Watch, fn: (w: Watch) => Promise<T>): Promise<T> {
+  try {
+    return await fn(w);
+  } finally {
+    w.end();
+  }
+}
+
+const count = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+/** "5 minutes", from a running time in milliseconds. */
+export const minutes = (ms: number) => count(Math.floor(ms / 60_000), "minute");
+/** "60 seconds", from a running time in milliseconds. */
+export const seconds = (ms: number) => count(Math.floor(ms / 1000), "second");

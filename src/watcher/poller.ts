@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
-import type { Slow } from "../control/slow-work.ts";
+import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { gate } from "../gate/readiness.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
@@ -145,11 +145,22 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null): Pr
  * never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
+  // A poll that runs for 5 minutes warns, and again every 5 minutes, naming its board and its step (PBI 134). The
+  // board is its source's id until the source's row is read, and its URL after.
+  const board = { name: deps.sourceId };
+  const say = (ms: number, step: string) => `slow: the poll of board ${board.name} has run for ${minutes(ms)}, in step "${step}"`;
+  const w = watch(SLOW_POLL_MS, SLOW_POLL_MS, say, deps.slow);
+  return watched(w, () => pollSteps(deps, w, board));
+}
+
+async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Promise<{ seen: number; cursor: string }> {
   const { pool, adapter, repoHost, judge, sourceId } = deps;
-  const src = (await pool.query<{ cursor: string | null; paused: boolean; label: string | null }>(
-    "select cursor, paused, field_map->>'optInLabel' as label from backlog_source where id = $1", [sourceId],
+  w.step("reading the board");
+  const src = (await pool.query<{ url: string; cursor: string | null; paused: boolean; label: string | null }>(
+    "select url, cursor, paused, field_map->>'optInLabel' as label from backlog_source where id = $1", [sourceId],
   )).rows[0];
   if (!src) throw new Error(`no backlog source ${sourceId}`);
+  board.name = src.url;
   if (src.paused) return { seen: 0, cursor: src.cursor ?? "" };
   // The same field Task 7's adapter lists by, so the two can't disagree about which items are in.
   const label = src.label ?? "factory";
@@ -160,6 +171,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     return fetched.get(ext)!;
   };
 
+  w.step("listing new and changed items");
   // 1. New and changed items. If any of them fails to go in, the cursor stays put so the next poll lists it again.
   const listed = await adapter.listEligible(src.cursor);
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
@@ -167,6 +179,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
   });
 
+  w.step("reading the PRs of items in review");
   // 2. PRs of InReview items, before withdrawal, so a merge just before the item closes still counts as a merge.
   //    Only reviews by allowlisted users count (Run contract 10).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
@@ -183,6 +196,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     }
   });
 
+  w.step("checking the items the factory holds");
   // 3. Items the factory holds. listEligible can't see one that lost its label or closed, so each is read back.
   //    A PR closes before its item moves, so a failed close is retried by the next poll.
   await each(await items(pool, sourceId, ACTIVE), (row) => `checking item ${row.external_id}`, async (row) => {
@@ -207,6 +221,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     }
   });
 
+  w.step("checking readiness");
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, open dependencies included, or when a
   //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: it has no withdrawn edge, and it must never reach Queued.
@@ -246,6 +261,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     });
   });
 
+  w.step("saving the cursor");
   if (unlisted > 0) return { seen: listed.items.length, cursor: src.cursor ?? "" };
   await pool.query("update backlog_source set cursor = $2 where id = $1", [sourceId, listed.cursor]);
   return { seen: listed.items.length, cursor: listed.cursor };
