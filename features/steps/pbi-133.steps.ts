@@ -163,6 +163,7 @@ type Stream = { status: number; text: string; done: boolean; abort: AbortControl
 type Ctx = {
   logs: string[];
   restoreConsole?: () => void;
+  restoreEnv?: () => void;
   pools: Watched[];
   target?: Watched;
   control?: Watched;
@@ -204,6 +205,7 @@ Before({ tags: "@pbi-133" }, function () {
     };
   }
   c.restoreConsole = () => Object.assign(console, originals);
+  c.restoreEnv = saveEnv(AZURE_ENV);
 });
 
 Before({ tags: "@pbi-133 and @db", ...long }, async function () {
@@ -239,6 +241,7 @@ After({ tags: "@pbi-133", ...long }, async function () {
   }
   for (const w of c.pools) await w.pool.end().catch(() => undefined);
   c.restoreConsole?.();
+  c.restoreEnv?.();
 });
 
 AfterAll(long, async function () {
@@ -247,6 +250,19 @@ AfterAll(long, async function () {
 });
 
 // ---- @ac-1: every pool createPool returns ----
+
+/** The libpq defaults madeFor sets for the Azure pool; the After hook puts them back. */
+const AZURE_ENV = ["PGHOST", "PGUSER", "PGDATABASE"] as const;
+
+function saveEnv(keys: readonly string[]): () => void {
+  const saved = keys.map((k) => [k, process.env[k]] as const);
+  return () => {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
 
 function madeFor(where: string): pg.Pool {
   if (where === "a local database URL") return createPool("postgresql://factory@127.0.0.1:1/factory");
