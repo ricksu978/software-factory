@@ -111,7 +111,7 @@ type Status = "pending" | "success" | "failure";
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
  * `repo@sha`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
- * resolved thread, and openReviewComments leaves it out.
+ * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as GitHub's does.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -119,14 +119,14 @@ export function fakeRepoHost(): RepoHost & {
   files: Map<string, string>;
   heads: Map<string, string>;
   branches: Map<string, string[]>;
-  reviewComments: Map<string, (ReviewComment & { resolved?: boolean })[]>;
+  reviewComments: Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>;
 } {
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
-  const reviewComments = new Map<string, (ReviewComment & { resolved?: boolean })[]>();
+  const reviewComments = new Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>();
   const pr = (repo: string, n: number) => {
     const found = prs.find((p) => p.repo === repo && p.number === n);
     if (!found) throw new Error(`no PR ${repo}#${n}`);
@@ -168,7 +168,8 @@ export function fakeRepoHost(): RepoHost & {
     },
     async prState(repo, n, trustedLogins) {
       const p = pr(repo, n);
-      const requested = p.reviews.filter((r) => r.state === "changes_requested" && trustedLogins.includes(r.author)).map((r) => r.submittedAt).sort();
+      const open = (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved && c.submittedAt && trustedLogins.includes(c.author)).map((c) => c.submittedAt!);
+      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trustedLogins.includes(r.author)).map((r) => r.submittedAt), ...open].sort();
       return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
     },
     async closePr(repo, n, comment) {
@@ -185,7 +186,7 @@ export function fakeRepoHost(): RepoHost & {
       return head;
     },
     async openReviewComments(repo, n) {
-      const comments = (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, ...c }) => c);
+      const comments = (reviewComments.get(`${repo}#${n}`) ?? []).filter((c) => !c.resolved).map(({ resolved: _, submittedAt: __, ...c }) => c);
       const reviews = [...(prs.find((p) => p.repo === repo && p.number === n)?.reviews ?? [])]
         .sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
         .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));

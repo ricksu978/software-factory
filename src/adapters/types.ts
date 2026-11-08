@@ -72,6 +72,7 @@ export interface RepoHost {
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
+  /** `lastChangesRequestedAt` is the newest trusted review that requests changes or comments in a still-open thread (Run contract 10). */
   prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{
     merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null;
   }>;
