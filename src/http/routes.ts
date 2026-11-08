@@ -5,6 +5,7 @@ import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
+import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
@@ -65,28 +66,28 @@ export function tokenBanner(env: Record<string, string | undefined>, now = Date.
 async function floor(pool: pg.Pool) {
   // One row per item, by its oldest open question, counted as the scheduler counts the waiting (Run contract 3).
   const waiting = (await pool.query(
-    `select i.id, i.title, i.state, min(q.asked_at) as since from item i
+    `select i.id, i.external_id, i.title, i.state, min(q.asked_at) as since from item i
      join question q on q.item_id = i.id and q.answer is null and q.closed_at is null
-     where i.state in ('SignOff', 'NeedsInput') group by i.id, i.title, i.state order by since`,
+     where i.state in ('SignOff', 'NeedsInput') group by i.id order by since`,
   )).rows;
   const reviews = (await pool.query(
-    `select i.id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since
+    `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since
      from item i where i.state = 'InReview' order by since nulls last, i.title`,
   )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
   // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
-  const notReady = (await pool.query<{ id: string; title: string; failed: string[] }>(
-    `select i.id, i.title, coalesce(array_agg(case when p.criterion_index > 0 then p.criterion else p.reason end order by p.criterion_index)
+  const notReady = (await pool.query<{ id: string; external_id: string; title: string; failed: string[] }>(
+    `select i.id, i.external_id, i.title, coalesce(array_agg(case when p.criterion_index > 0 then p.criterion else p.reason end order by p.criterion_index)
        filter (where p.id is not null), '{}') as failed
      from item i left join policy_result p on p.item_id = i.id and p.file = 'dor' and p.status = 'failed'
        and p.at = (select max(at) from policy_result where item_id = i.id and file = 'dor')
-     where i.state = 'NotReady' group by i.id, i.title order by i.title`,
+     where i.state = 'NotReady' group by i.id order by i.title`,
   )).rows;
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
   const active = (await pool.query(
-    `select i.id, i.title, i.state, i.held, r.next_stage as stage,
+    `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
        (select message from stage_run s where s.run_id = r.id and message <> '' order by ended_at desc nulls last, started_at desc limit 1) as message
@@ -97,7 +98,11 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  return { active, waiting: [...waiting, ...reviews], waitingCount, capacity, next, notReady, factory };
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...active, ...next].map((r) => r.id));
+  const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
+  return {
+    active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), factory,
+  };
 }
 
 /**
@@ -126,14 +131,16 @@ async function verdicts(deps: DashboardDeps, externalId: string, stages: { stage
  * date is the item's first move to Accepted after the run started, and its cost is its own stage runs' sum.
  */
 async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
-  return (await pool.query<Phase0Row>(
+  const rows = (await pool.query<Omit<Phase0Row, "repo">>(
     `select * from (
-       select i.id as item_id, i.title, r.pr_url, r.risk_tier, r.tier_reasons,
+       select i.id as item_id, i.external_id, i.title, r.pr_url, r.risk_tier, r.tier_reasons,
          (select min(e.at) from event e where e.item_id = r.item_id and e.kind = 'transition' and e.payload->>'to' = 'Accepted' and e.at >= r.started_at) as merged_at,
          coalesce((select sum(s.cost_usd) from stage_run s where s.run_id = r.id), 0)::float8 as cost
        from run r join item i on i.id = r.item_id where r.merge_sha is not null) m
      order by merged_at nulls last`,
   )).rows;
+  const repos = await issueRepos(pool, rows.map((r) => r.item_id));
+  return rows.map((r) => ({ ...r, repo: repos.get(r.item_id) ?? null }));
 }
 
 /**
@@ -141,10 +148,12 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
  * payload, so a reason, a decision's text or a readiness detail never reaches the page. A factory-wide event has no item.
  */
 async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
-  return (await pool.query<ActivityRow>(
-    `select e.at, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event
+  const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
+    `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event
      from event e left join item i on i.id = e.item_id order by e.at desc, e.id desc limit 100`,
   )).rows;
+  const repos = await issueRepos(pool, [...new Set(rows.flatMap((r) => (r.item_id ? [r.item_id] : [])))]);
+  return rows.map(({ item_id, ...r }) => ({ ...r, repo: item_id ? (repos.get(item_id) ?? null) : null }));
 }
 
 /**
@@ -207,7 +216,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const features = run?.features_lock_sha ? await lockedFeatures(deps, item.external_id, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
   return {
-    item, run, policies, stages, question, criteria, features,
+    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, question, criteria, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
   };

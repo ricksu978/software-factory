@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
+import { putNotReady } from "./pbi-131.steps.ts";
 
 // The repo is an in-memory file map behind `read`, the item lives in the fake backlog, and the judge is scripted.
 // Modules load lazily, so while they don't exist every scenario fails on its Then instead of crashing the run.
@@ -130,7 +131,9 @@ When("the factory loads the {string} policy from that repo", async function (nam
   }
 });
 
-Then("the item is not ready", function () {
+Then("the item is not ready", async function () {
+  // PBI 131 sets an item up as not ready with the same words.
+  if (await putNotReady(this)) return;
   assert.equal(checked(ctx(this)).ready, false);
 });
 

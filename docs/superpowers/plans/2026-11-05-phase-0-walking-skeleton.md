@@ -974,6 +974,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - The `comment` webhook event carries the repo, and `applyComment` ignores a comment that isn't on the item's own repo, since the same issue number exists in every installed repo. `onComment` runs after the delivery's client is back in the pool, and doesn't hold up the 204.
     - Migration `004` makes `github_login` unique whatever its case, so a comment maps to at most one user, and `POST /users` answers 400 for a login another user holds.
     - Run detail shows the signed-off feature files at `features_lock_sha`.
+    - **Issue numbers (PBI 131).** Floor's four lists, the Run detail heading, the Phase 0 report and Activity show each item's external id as `#N` before its title. `issueRef` in `views.ts` renders it. `issueRepos(pool, itemIds)` in `src/store/issues.ts` finds each item's GitHub repo. That's the repo of the item's newest run with a `repo_id`, or else the one repo in its board's `repo_map` when the map names exactly one. `#N` links to `https://github.com/<owner>/<repo>/issues/<N>` only when that repo is on GitHub and N is all digits. Otherwise it's plain text, never a link to a guessed repo. The title stays a separate link to Run detail.
 
 - [ ] **Step 1: Write failing tests:**
   - **Review Focus 4.**
