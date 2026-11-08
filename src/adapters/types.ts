@@ -41,6 +41,13 @@ export function loginKey(login: string): string {
   return login.toLowerCase();
 }
 
+/**
+ * How long an open thread comment stands before prState counts it. A reviewer replies to a thread and resolves it in
+ * two calls, and a poll between them would send the item to address with nothing left to read, which blocks it.
+ */
+// ponytail: a fixed two minutes; a reviewer slower than that between reply and resolve can still block the item.
+export const THREAD_SETTLE_MS = 120_000;
+
 /** The key of a repo's trusted bot, stored with or without its "[bot]" suffix. */
 export function botKey(login: string): string {
   const key = loginKey(login);
