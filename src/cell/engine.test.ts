@@ -160,6 +160,12 @@ describe("commandEnv", () => {
     assert.deepEqual(commandEnv(cell), { CI: "true", PATH: "/usr/bin", HOME: "/home/factory", FACTORY_PG_BIN: "/usr/lib/postgresql/17/bin" });
     assert.equal("FACTORY_PG_BIN" in commandEnv({ PATH: "/usr/bin" }), false, "absent when the image doesn't set it");
   });
+
+  test("passes the proxy variables with their loopback exemption, and not NODE_USE_ENV_PROXY", () => {
+    const p = "http://factory-egress:3128", lo = "127.0.0.1,localhost";
+    const proxy = { HTTPS_PROXY: p, https_proxy: p, HTTP_PROXY: p, http_proxy: p, NO_PROXY: lo, no_proxy: lo };
+    assert.deepEqual(commandEnv({ PATH: "/usr/bin", ...proxy, NODE_USE_ENV_PROXY: "1" }), { CI: "true", PATH: "/usr/bin", ...proxy });
+  });
 });
 
 describe("changedFiles", () => {
