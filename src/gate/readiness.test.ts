@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeBacklog } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
+import type { AgentArgs, AgentResult } from "../agent/run.ts";
+import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { loadPolicy, type Policy } from "../policy/policy.ts";
 import { gate, type GateContext } from "./readiness.ts";
+import type { SplitDeps } from "./split.ts";
 
 async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
   const fake = fakeBacklog();
@@ -149,5 +152,83 @@ describe("gate: an oversized item (PBI 143)", () => {
     const all = await s.fake.comments(s.id);
     assert.equal(all.length, 1);
     assert.match(all[0], /a split couldn't be proposed because the coding model's reply couldn't be read/);
+  });
+});
+
+describe("gate's readiness checks (PBI 132)", () => {
+  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const at = new Date("2026-11-09T10:15:00Z");
+
+  async function recorded(judge: GateContext["judge"]) {
+    const s = await setup("- [ ] Has a title\n");
+    const checks: unknown[] = [];
+    const run = gate(s.item, s.ctx("", { judge, now: () => at, recordCheck: async (i, c) => { checks.push({ id: i.externalId, ...c }); } }));
+    return { s, checks, run };
+  }
+
+  test("records the judge call's spend and start time against the item, whatever its verdict", async () => {
+    for (const reply of [passAll(1), "I am not sure"]) {
+      const { s, checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); return reply; });
+      await run;
+      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, kind: "judge", ranAt: at }]);
+    }
+  });
+
+  test("records a failed judge call's spend, then lets the failure through", async () => {
+    const { checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); throw new Error("readiness judge failed: usage limit"); });
+    await assert.rejects(run, /usage limit/);
+    assert.equal(checks.length, 1);
+  });
+
+  test("records nothing when an engine rule fails and the judge is never asked", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: [] });
+    const checks: unknown[] = [];
+    await gate(s.item, s.ctx(passAll(1), { recordCheck: async (_i, c) => { checks.push(c); } }));
+    assert.deepEqual(checks, []);
+  });
+
+  const oversized = [JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ flags: [], oversized: true })].join("\n");
+  const children = JSON.stringify({ children: [{ title: "A", body: "b", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
+  const splitDeps = (agent: SplitDeps["agent"]): SplitDeps => ({ sop: { models: { coding: "claude-opus-5-5" } }, agent, seen: new Map() });
+  const coded = (ok: boolean) => async (a: AgentArgs): Promise<AgentResult> =>
+    ({ ok, text: children, costUsd: 0.21, tokensIn: 4000, tokensOut: 600, model: a.model, limit: null, usage: null, transcript: "" });
+
+  test("records the split proposal's call as a split check, answered or failed, and a cached split as nothing", async () => {
+    for (const ok of [true, false]) {
+      const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+      const checks: ReadinessCheck[] = [];
+      const split = splitDeps(coded(ok));
+      const ctx = s.ctx(oversized, { judge: async (_i, _d, spent) => { spent?.(spend); return oversized; }, split, now: () => at,
+        recordCheck: async (_i, c) => { checks.push(c); } });
+      await gate(s.item, ctx);
+      assert.deepEqual(checks, [
+        { ...spend, kind: "judge", ranAt: at },
+        { model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, kind: "split", ranAt: at },
+      ], String(ok));
+      checks.length = 0;
+      await gate(s.item, ctx);
+      // An answered split is cached by item text, so the re-gate asks the coding model nothing and records no split.
+      assert.deepEqual(checks.map((c) => c.kind), ok ? ["judge"] : ["judge", "split"], String(ok));
+    }
+  });
+
+  test("records a split run that threw as a split check of nothing", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+    const checks: ReadinessCheck[] = [];
+    await gate(s.item, s.ctx(oversized, { split: splitDeps(async () => { throw new Error("never started"); }), now: () => at,
+      recordCheck: async (_i, c) => { checks.push(c); } }));
+    assert.deepEqual(checks, [{ model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0, kind: "split", ranAt: at }]);
+  });
+
+  test("a check that can't be recorded is logged, and the judge's reply or error still comes out", async () => {
+    const lines: string[] = [];
+    const broken = { recordCheck: async () => { throw new Error("database unavailable"); }, log: (l: string) => { lines.push(l); } };
+    const s = await setup("- [ ] Has a title\n");
+    const out = await gate(s.item, s.ctx("", { ...broken, judge: async (_i, _d, spent) => { spent?.(spend); return passAll(1); } }));
+    assert.equal(out.ready, true);
+    const failed = gate(s.item, s.ctx("", { ...broken, judge: async (_i, _d, spent) => { spent?.(spend); throw new Error("readiness judge failed: usage limit until 1"); } }));
+    await assert.rejects(failed, /usage limit/);
+    assert.equal(lines.length, 2);
+    for (const l of lines) assert.match(l, /couldn't record the judge call's cost .*database unavailable/);
   });
 });

@@ -80,6 +80,20 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(results, [{ file: "dor", source: "repo", criterion_index: 1, criterion: "Has a title", status: "passed", checked_sha: "c1" }]);
   });
 
+  test("each judge call's spend is stored for the item, a call that failed on a usage limit included (PBI 132)", async () => {
+    const spent = { model: "claude-haiku-4-5", tokensIn: 900, tokensOut: 0, costUsd: 0.0012 };
+    const limited = async (_item: FactoryItem, _dor: Policy, report?: (s: typeof spent) => void): Promise<string> => {
+      report?.(spent);
+      throw new Error("readiness judge failed: usage limit");
+    };
+    const ext = await seed();
+    await pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: limited, sourceId });
+    const r = await row(ext);
+    assert.equal(r.state, "Eligible");
+    const checks = (await db.pool.query("select model, tokens_in, tokens_out, cost_usd::float8 as cost from readiness_check where item_id = $1", [r.id])).rows;
+    assert.deepEqual(checks, [{ model: "claude-haiku-4-5", tokens_in: 900, tokens_out: 0, cost: 0.0012 }]);
+  });
+
   test("an oversized item whose split got no answer stays Eligible, and the next poll asks again and posts it", async () => {
     const big = async (item: FactoryItem, dor: Policy) =>
       [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");

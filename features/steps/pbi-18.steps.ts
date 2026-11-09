@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { next, type ItemEvent } from "../../src/core/states.ts";
+import { runMeteredCell } from "./pbi-132.steps.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../../src/policy/policy.ts";
 
 const repo = process.cwd();
@@ -254,6 +255,8 @@ function policy(name: PolicyName, text: string): Policy {
 
 // Real git and sh across up to four attempts outlast cucumber's 5-second default on a busy machine.
 When("the cell runs", { timeout: 60_000 }, async function () {
+  // PBI 132 runs a cell's agent calls through the engine's stage meter, with the same words.
+  if (await runMeteredCell(this)) return;
   await runTheCell(this);
 });
 

@@ -54,6 +54,11 @@ export function age(since: Date | null, now = Date.now()): string {
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
 }
 
+/** A time in UTC to the minute, with its full ISO form in the markup. */
+const utc = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
+/** A readiness judge call costs fractions of a cent, so its spend shows to four places. */
+const judgeUsd = (n: number) => `$${n.toFixed(4)}`;
+
 const link = (id: string, title: string) => `<a href="/items/${escapeHtml(id)}">${escapeHtml(title)}</a>`;
 
 /**
@@ -131,6 +136,8 @@ export type RunDetail = {
   run: { sop_version: string | null; config_sha: string | null; scenarios_sha: string | null; features_lock_sha: string | null; risk_tier: string | null; tier_reasons: string[] | null; next_stage: string | null } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
   stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
+  /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
+  readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The signed-off feature files at the lock sha. */
@@ -155,6 +162,11 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${escapeHtml(s.tokens_in ?? 0)} in, ${escapeHtml(s.tokens_out ?? 0)} out</td><td>$${escapeHtml(s.cost_usd ?? "0")}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
+  const readiness = d.readiness.length
+    ? `<table><thead><tr><th scope="col">Ran (UTC)</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>${d.readiness
+        .map((c) => `<tr><td>${utc(c.ranAt)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td><td>${escapeHtml(c.tokensIn)} in, ${escapeHtml(c.tokensOut)} out</td><td>${judgeUsd(c.costUsd)}</td></tr>`)
+        .join("")}</tbody></table>`
+    : `<p class="muted">No readiness check has run yet.</p>`;
   const criteria = d.criteria
     ? `<h2>Criteria and their scenarios</h2><ol>${d.criteria
         .map((c) => `<li>${escapeHtml(c.criterion)}${c.scenarios.length ? `<ul>${c.scenarios.map((s) => `<li>${escapeHtml(s.name)}${s.regression ? ` <strong>expected to pass at Red</strong>` : ""}</li>`).join("")}</ul>` : ` <strong>no scenario</strong>`}</li>`)
@@ -184,7 +196,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${form}${controls}${criteria}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}${
+${form}${controls}${criteria}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length
       ? `<h2>Signed-off scenarios</h2>${d.features.map((f) => `<h3>${escapeHtml(f.path)}</h3><pre>${escapeHtml(f.text)}</pre>`).join("")}`
       : ""
@@ -195,16 +207,21 @@ export type Phase0Row = Issue & { item_id: string; title: string; pr_url: string
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
-/** Spec §13's Phase 0 exit report for this database. The runbook adds the local and Azure figures together. */
-export function phase0Page(rows: Phase0Row[], banner: string | null): string {
+/**
+ * Spec §13's Phase 0 exit report for this database. The runbook adds the local and Azure figures together. Stage spend
+ * is the merged runs' stages. Readiness spend is every readiness check on every item, so the items the gate turned
+ * away count too (PBI 132).
+ */
+export function phase0Page(rows: Phase0Row[], readinessSpend: number, banner: string | null): string {
   const total = rows.reduce((sum, r) => sum + r.cost, 0);
   const summary = `${rows.length} merged PR${rows.length === 1 ? "" : "s"}, ${usd(total)} in all, ${rows.length ? usd(total / rows.length) : "$0.00"} each on average.`;
+  const spend = `<dl><dt>Stage spend</dt><dd>${usd(total)}</dd><dt>Readiness spend</dt><dd>${judgeUsd(readinessSpend)}</dd></dl>`;
   const table = rows.length
     ? `<table><thead><tr><th scope="col">Item</th><th scope="col">PR</th><th scope="col">Merged</th><th scope="col">Cost</th><th scope="col">Shadow tier</th></tr></thead><tbody>${rows
         .map((r) => `<tr><td>${named({ ...r, id: r.item_id })}</td><td>${r.pr_url ? `<a href="${escapeHtml(r.pr_url)}">${escapeHtml(r.pr_url)}</a>` : ""}</td><td>${escapeHtml(r.merged_at?.toISOString().slice(0, 10) ?? "")}</td><td>${usd(r.cost)}</td><td>${escapeHtml(r.risk_tier ?? "not classified")}${r.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No factory PR has merged yet.</p>`;
-  return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${table}`, banner);
+  return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${spend}${table}`, banner);
 }
 
 /** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload. */
@@ -220,10 +237,9 @@ export function activityPage(rows: ActivityRow[], banner: string | null): string
     const event = r.kind === "transition" && r.event ? ` <span class="muted">(${escapeHtml(r.event)})</span>` : "";
     return `<td>${escapeHtml(r.from ?? "")} → ${escapeHtml(r.to ?? "")}${event}</td>`;
   };
-  const time = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
   const table = rows.length
     ? `<table><thead><tr><th scope="col">Time (UTC)</th><th scope="col">Item</th><th scope="col">Title</th><th scope="col">Kind</th><th scope="col">Move</th></tr></thead><tbody>${rows
-        .map((r) => `<tr><td>${time(r.at)}</td><td>${issueRef(r.external_id, r.repo)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.kind)}</td>${cell(r)}</tr>`)
+        .map((r) => `<tr><td>${utc(r.at)}</td><td>${issueRef(r.external_id, r.repo)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.kind)}</td>${cell(r)}</tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No event yet.</p>`;
   return page("Activity", `<h1>Activity</h1><p class="muted">The 100 newest events, newest first.</p>${table}`, banner);
