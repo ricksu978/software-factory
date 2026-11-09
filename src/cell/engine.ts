@@ -27,6 +27,11 @@ export type CellContext = {
   trustedComments: ReviewComment[];
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
+  /**
+   * The attempt at the run's next stage that a stop cut short, when the run resumes from the work in progress that
+   * attempt pushed (PBI 140). Absent or null when the stage starts fresh.
+   */
+  resume?: { stageId: string; attempt: number } | null;
 };
 
 /** What a stage attempt is recorded under: an SOP stage, or the merge pass that opens a claim. */

@@ -2,7 +2,7 @@
 // item ones on its next tick, and the cell API's /lease reads pause, kill and stop_run directly.
 import type pg from "pg";
 
-export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill";
+export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart";
 export type Override = {
   id: string; scope: "factory" | "backlog" | "item"; targetId: string | null; kind: OverrideKind;
   reason: string; createdBy: string | null; createdAt: Date; expiresAt: Date | null;
@@ -48,3 +48,9 @@ export async function clearItemOverrides(c: pg.Pool | pg.PoolClient, itemId: str
     [itemId, kinds ?? null],
   );
 }
+
+/**
+ * Clears a restart override left from before this control plane started, so the restarted factory runs (PBI 140).
+ * ponytail: a stub until PBI 140's Green. It clears nothing yet.
+ */
+export async function clearRestartOnStart(_c: pg.Pool | pg.PoolClient): Promise<void> {}
