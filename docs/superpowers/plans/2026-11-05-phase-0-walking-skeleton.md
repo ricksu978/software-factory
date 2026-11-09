@@ -490,7 +490,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
 
 **Interfaces:**
 - Consumes: `BacklogAdapter`, `upsertItem`, `transitionItem`, and `gate`, `parseRepoConfig` and `loadPolicy` from Task 9.
-- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts and the readiness logic (Run contract 11). The optional `deps.logic: ReadinessLogic` names that logic, and defaults to `readinessLogic()` from `src/agent/run.ts` (PBI 149), which it also passes to `gate` as `ctx.readinessSha`. Also `POLL_INTERVAL_MS = 300_000`.
+- Produces: `pollOnce(deps: { pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: (item: FactoryItem, dor: Policy) => Promise<string>; sourceId: string }): Promise<{ seen: number; cursor: string }>`. It writes the gate's verdicts to `policy_result`, and stores `item.readiness_policy_sha` from `readinessSha` over the six raw readiness texts and the readiness logic (Run contract 11), which it also passes to `gate` as `ctx.readinessSha`. The optional `deps.logic: ReadinessLogic` names that logic and defaults to `readinessLogic()` from `src/agent/run.ts` (PBI 149). Also `POLL_INTERVAL_MS = 300_000`.
 - Each `pollOnce` does five things, in this order:
   - lists new and changed eligible items from the cursor;
   - reads `prState` for every InReview item, before any withdrawal, so a PR merged just before its item closed still counts as a merge;
