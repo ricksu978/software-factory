@@ -145,8 +145,12 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   // it will. A failed write throws, so the poller gates the parent again.
   const file = split?.proposed ? ctx.split?.file : undefined;
   const prior = split?.proposed && file ? await priorFiling(item, split.children, file.board) : null;
-  // PBI 159: the key holds the split prompt too, so a new prompt posts one fresh proposal for the same text.
-  if (split?.proposed && ctx.split) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), `split:${splitKey(item, ctx.split)}`);
+  // PBI 159: the key holds the split prompt too, so a new prompt posts one fresh proposal for the same text. A split
+  // that's saved for filing is never replaced, so a new prompt can't change it: its proposal is keyed on the item text
+  // alone, from the first gate that saves it, and a new prompt doesn't post the same children again.
+  const saved = filing && !!ctx.splits;
+  const proposalKey = saved ? `split:${itemTextHash(item)}` : ctx.split ? `split:${splitKey(item, ctx.split)}` : null;
+  if (split?.proposed && proposalKey) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), proposalKey);
   // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
   const filed = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : false;
   if (filed) return { ready: false, results, oversized, split, filed };
