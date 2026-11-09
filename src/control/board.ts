@@ -66,7 +66,10 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
   }
 }
 
-/** Registers mirroring for every transition from here on, and returns the call that stops it. */
+/**
+ * Registers mirroring for every transition committed through deps.pool from here on, and returns the call that stops
+ * it. The worker and the control plane each mirror their own until the outbox lands (redesign step 3).
+ */
 export function mirrorBoard(deps: BoardDeps): () => void {
-  return onTransition((itemId, _from, to, event) => mirror(deps, itemId, to, event));
+  return onTransition((itemId, _from, to, event) => mirror(deps, itemId, to, event), deps.pool);
 }

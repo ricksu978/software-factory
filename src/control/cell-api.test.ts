@@ -215,6 +215,15 @@ describe("cell API", dbTest, () => {
     assert.ok((await board.comments("7")).some((c) => c.includes("re-queue")));
   });
 
+  test("a passed self-review's scenario notes stay with the run, so a later claim's context hands them to open-pr", async () => {
+    const cell = await claimed("self-review");
+    const notes = ['"Criterion 1 holds" looks wrong.'];
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "self-review", attempt: 1, status: "passed", scenarioNotes: notes })).status, 200);
+    assert.deepEqual((await runRow(cell.runId)).scenario_notes, notes);
+    const { body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.deepEqual(body.scenarioNotes, notes);
+  });
+
   test("context after an approved sign-off hands red the lock", async () => {
     const cell = await claimed("red");
     await db.pool.query("update run set features_lock_sha = '5c3a1f0', locked_files = '{features/a.feature}', config_sha = 'cfg1' where id = $1", [cell.runId]);
@@ -232,6 +241,7 @@ describe("cell API", dbTest, () => {
       lockSha: "5c3a1f0", lockedFiles: ["features/a.feature"], prNumber: null, repo, base: "main", branch: "factory/pbi-7-r1",
       configSha: "cfg1", sopVersion: "default@1",
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
+      scenarioNotes: [],
       trustedComments: [],
       stageAttempts: { specify: 2 },
       resume: null,

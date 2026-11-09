@@ -14,6 +14,8 @@ export type StageReport = {
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
   /** The text of the stage's own prompted agent call, for Floor. The cell API keeps the first 500 characters. */
   message?: string;
+  /** A passed self-review's `SCENARIO NOTE:` lines, kept with the run for a later claim's PR body (PBI 152). */
+  scenarioNotes?: string[];
 };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;

@@ -52,6 +52,7 @@ type Run = {
   run_id: string; item_id: string; generation: number; state: string; source_id: string; external_id: string; title: string;
   run_number: number; started_at: Date; next_stage: string | null; branch: string | null; pr_number: number | null; locked_files: string[] | null;
   features_lock_sha: string | null; config_sha: string | null; sop_version: string | null; repo_url: string | null; trusted_bot: string | null;
+  scenario_notes: string[];
 };
 type Call = { c: pg.PoolClient; run: Run; body: Record<string, unknown>; query: URLSearchParams; now: Date };
 type Route = (deps: CellApiDeps, call: Call) => Promise<unknown>;
@@ -68,7 +69,7 @@ class Fenced extends Error {}
 async function lockRun(c: pg.PoolClient, runId: string): Promise<Run | null> {
   const r = await c.query<Run>(
     `select r.id as run_id, i.id as item_id, i.lease_generation as generation, i.state, i.source_id, i.external_id, i.title,
-       r.run_number, r.started_at, r.next_stage, r.branch, r.pr_number, r.locked_files, r.features_lock_sha, r.config_sha, r.sop_version,
+       r.run_number, r.started_at, r.next_stage, r.branch, r.pr_number, r.locked_files, r.features_lock_sha, r.config_sha, r.sop_version, r.scenario_notes,
        repo.url as repo_url, repo.trusted_bot
      from run r join item i on i.id = r.item_id left join repo on repo.id = r.repo_id
      where r.id = $1 for update of i`,
@@ -194,6 +195,7 @@ const routes: Record<string, Route> = {
       configSha: run.config_sha, sopVersion: run.sop_version,
       dodVerdicts: dod.rows.map((v) => ({ index: v.criterion_index, criterion: v.criterion, status: v.status, reason: v.reason ?? "" })),
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
+      scenarioNotes: run.scenario_notes ?? [],
       trustedComments,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       resume,
@@ -271,6 +273,11 @@ const routes: Record<string, Route> = {
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         values,
       );
+    }
+    // PBI 152: a passed self-review's scenario notes stay with the run, so an open-pr in a later claim still has them.
+    if (status === "passed" && stageId === "self-review") {
+      const notes = Array.isArray(body.scenarioNotes) ? body.scenarioNotes.filter((n): n is string => typeof n === "string") : [];
+      await c.query("update run set scenario_notes = $2 where id = $1", [run.run_id, notes]);
     }
     if (status === "passed") {
       const next = deps.stageAfter(run.sop_version, stageId);

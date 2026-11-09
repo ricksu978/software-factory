@@ -38,6 +38,8 @@ export type Ctx = {
   context?: Record<string, unknown>;
   /** Wraps the scripted agent, as PBI 128's steps do to script the PR reviewer and the PR addresser. */
   wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
+  /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
+  agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
 };
 
 function ctx(world: object): Ctx {
@@ -287,7 +289,7 @@ export async function runTheCell(world: object): Promise<void> {
         stageAttempts: {},
         ...c.context,
       },
-      agent: c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c),
+      agent: ((base) => c.agent ? (a: any) => c.agent!(a, base) : base)(c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c)),
       git: shellGit(c.dir, BRANCH),
       dir: c.dir,
       repoHost: c.repoHost ?? {

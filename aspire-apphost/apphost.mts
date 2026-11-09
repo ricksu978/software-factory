@@ -37,7 +37,7 @@ const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .waitFor(db);
 
-// Both apps share the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
+// Every app shares the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
 // The control plane (plan Task 15). Its console shows this start's dashboard sign-in link.
 const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withNpm({ install: false })
@@ -52,18 +52,36 @@ const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withEnvironment('GITHUB_APP_ID', appId)
   .withEnvironment('CLAUDE_TOKEN_CREATED_AT', tokenCreatedAt)
   .withEnvironment('FACTORY_POLICY_DIR', './policy')
-  .withEnvironment('CELL_IMAGE', 'factory-cell:local')
   .withEnvironment('CELL_BLOB_HOST', 'host.docker.internal')
   .waitForCompletion(migrate, { exitCode: 0 });
 // From control's own endpoint, so it follows the port whether pinned or picked by Aspire.
 const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
-await control.withEnvironment('CELL_CONTROL_URL', refExpr`http://host.docker.internal:${controlPort}`);
+const cellControlUrl = refExpr`http://host.docker.internal:${controlPort}`;
+await control.withEnvironment('CELL_CONTROL_URL', cellControlUrl);
+
+// The worker (redesign step 2): the egress proxy, the scheduler's tick, and the board poller with its judge. It has no
+// endpoint. It hands cells control's address and lets that port through the egress proxy.
+const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
+  .withNpm({ install: false })
+  .withEnvironment('FACTORY_DB_URI', dbUri)
+  .withEnvironment('FACTORY_BLOB', blobs)
+  .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
+  .withEnvironment('GITHUB_APP_KEY', appKey)
+  .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
+  .withEnvironment('CELL_SECRET', cellSecret)
+  .withEnvironment('GITHUB_APP_ID', appId)
+  .withEnvironment('FACTORY_POLICY_DIR', './policy')
+  .withEnvironment('CELL_IMAGE', 'factory-cell:local')
+  .withEnvironment('CELL_CONTROL_URL', cellControlUrl)
+  .waitForCompletion(migrate, { exitCode: 0 });
 
 // The dev identity exists only under `aspire run`, so nothing published from this AppHost carries it.
 if (runMode) {
   for (const app of [migrate, control]) {
     await app.withEnvironment('FACTORY_ENV', 'local').withEnvironment('FACTORY_DEV_LOGIN', devLogin);
   }
+  // The worker signs no one in, so it needs local mode but no dev login.
+  await worker.withEnvironment('FACTORY_ENV', 'local');
 }
 
 await builder.build().run();
