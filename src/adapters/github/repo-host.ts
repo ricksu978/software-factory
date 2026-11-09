@@ -1,4 +1,4 @@
-// GitHub as a RepoHost. The control plane runs it on the App's installation token; a cell gets only the two methods
+// GitHub as a RepoHost. The control plane runs it on the App's installation token; a cell gets only the PR methods
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
@@ -26,7 +26,7 @@ const split = (repo: string) => {
 };
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
-type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr">;
+type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -39,6 +39,32 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
 
     async commentOnPr(repo, prNumber, body) {
       await (await client()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...split(repo), issue_number: prNumber, body });
+    },
+
+    // A cell asks it too, with no trusted logins, to learn whether its branch's PR already merged (PBI 142).
+    async prState(repo, prNumber, trustedLogins) {
+      const gh = await client();
+      const r = split(repo);
+      const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
+      // ponytail: one page of 100 reviews; a PR with more would miss the newest ones.
+      const reviews = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...r, pull_number: prNumber, per_page: 100 })).data as { state: string; submitted_at: string | null; user: { login: string } | null }[];
+      const trusted = new Set(trustedLogins.map((l) => l.toLowerCase()));
+      const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())).map((v) => v.submitted_at as string);
+      // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
+      // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
+      // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
+      // A comment counts once it has stood for THREAD_SETTLE_MS.
+      const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
+      const settled = Date.now() - THREAD_SETTLE_MS;
+      const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
+        .filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
+        .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
+        .map((c) => c.pullRequestReview!.submittedAt!);
+      const times = [...requested, ...open].sort();
+      return {
+        merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
+        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: times.at(-1) ?? null,
+      };
     },
 
     async openOrUpdatePr({ repo, branch, base, title, body }) {
@@ -181,31 +207,6 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         if (notFound(e)) return false; // a sha GitHub doesn't know
         throw e;
       }
-    },
-
-    async prState(repo, prNumber, trustedLogins) {
-      const gh = await client();
-      const r = split(repo);
-      const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
-      // ponytail: one page of 100 reviews; a PR with more would miss the newest ones.
-      const reviews = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...r, pull_number: prNumber, per_page: 100 })).data as { state: string; submitted_at: string | null; user: { login: string } | null }[];
-      const trusted = new Set(trustedLogins.map((l) => l.toLowerCase()));
-      const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())).map((v) => v.submitted_at as string);
-      // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
-      // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
-      // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
-      // A comment counts once it has stood for THREAD_SETTLE_MS.
-      const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
-      const settled = Date.now() - THREAD_SETTLE_MS;
-      const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
-        .filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
-        .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
-        .map((c) => c.pullRequestReview!.submittedAt!);
-      const times = [...requested, ...open].sort();
-      return {
-        merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
-        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: times.at(-1) ?? null,
-      };
     },
 
     async closePr(repo, prNumber, comment) {

@@ -208,7 +208,9 @@ describe("scheduler", dbTest, () => {
     await db.pool.query("update wip_policy set current_wip = 0");
     await override("requeue", id);
     await run();
-    assert.equal((await db.pool.query("select next_stage from run where item_id = $1", [id])).rows[0].next_stage, "open-pr");
+    const r = (await db.pool.query("select next_stage, pr_number, pr_url from run where item_id = $1", [id])).rows[0];
+    // The closed PR is forgotten, so the poller doesn't withdraw the item again while open-pr opens a fresh one (PBI 142).
+    assert.deepEqual(r, { next_stage: "open-pr", pr_number: null, pr_url: null });
   });
 
   test("an item that names no repo is held with the reason", async () => {

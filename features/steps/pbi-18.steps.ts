@@ -29,6 +29,10 @@ export type Ctx = {
   dod: string; dodJudged: Map<string, string>; trusted: { author: string; body: string }[]; stranger: { author: string; body: string }[];
   ciOldOnly: boolean; secrets: Record<string, string | undefined> | null;
   calls: Call[]; agentCalls: AgentCall[]; stage: string; prBodies: string[]; result: string | null; error: unknown;
+  /** Replaces the default repo host, as PBI 142's steps do to hold a merged PR or to fail a call. */
+  repoHost?: Record<string, unknown>;
+  /** Replaces the cell API's answer about CI, as PBI 142's steps do to fail it. */
+  checks?: (sha: string) => Promise<string>;
 };
 
 function ctx(world: object): Ctx {
@@ -234,6 +238,7 @@ function cellApi(c: Ctx) {
     async pr(b: Record<string, any>) { record("/pr", b); },
     async checks(sha: string) {
       record("/checks", { sha });
+      if (c.checks) return c.checks(sha);
       if (c.ciOldOnly) return sha === c.startHead ? "success" : "failure";
       return "success";
     },
@@ -277,7 +282,7 @@ export async function runTheCell(world: object): Promise<void> {
       agent: agent(c),
       git: shellGit(c.dir, BRANCH),
       dir: c.dir,
-      repoHost: {
+      repoHost: c.repoHost ?? {
         async openOrUpdatePr(p: { body: string }) { c.prBodies.push(p.body); return { number: 7, url: "https://github.com/acme/app/pull/7" }; },
         async requestReviewers() { return []; },
         async openReviewComments() { return comments; },

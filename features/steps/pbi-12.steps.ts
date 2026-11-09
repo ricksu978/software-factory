@@ -7,8 +7,9 @@ import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // Shares PBI 4's database. Each scenario starts with empty item, source, repo and user tables, a fake board, a fake
 // repo host holding one repo with valid readiness files, and a judge whose answer the steps set. The poller loads
-// lazily, so while it doesn't exist every scenario fails on its first Then, which checks that a poll ran.
-const REPO = "octo/repo";
+// lazily, so while it doesn't exist every scenario fails on its first Then, which checks that a poll ran. PBI 142's
+// steps reuse this harness through the exports.
+export const REPO = "octo/repo";
 
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
@@ -16,7 +17,7 @@ type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }) => Prom
 type Poller = {
   pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string }) => Promise<unknown>;
 };
-type Ctx = {
+export type Ctx = {
   fake?: Fake;
   host?: Host;
   sourceId?: string;
@@ -27,7 +28,7 @@ type Ctx = {
   error?: unknown;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi12?: Ctx };
   w.pbi12 ??= { extIds: [], judge: "pass", polls: 0 };
   return w.pbi12;
@@ -51,7 +52,7 @@ function commit(host: Host, sha: string, files: Record<string, string>): void {
 }
 
 /** A fake board and repo host, one source row and one known repo. Null while the fake adapter doesn't exist. */
-async function setup(c: Ctx): Promise<boolean> {
+export async function setup(c: Ctx): Promise<boolean> {
   if (c.fake) return true;
   const mod = await load<{ fakeBacklog: () => Fake; fakeRepoHost: () => Host }>("src/adapters/fake.ts");
   const d = await testDb();
@@ -64,7 +65,7 @@ async function setup(c: Ctx): Promise<boolean> {
   return true;
 }
 
-async function poll(c: Ctx): Promise<void> {
+export async function poll(c: Ctx): Promise<void> {
   const poller = await load<Poller>("src/watcher/poller.ts");
   if (!poller?.pollOnce || !c.fake || !c.host || !c.sourceId) return;
   try {
@@ -75,12 +76,12 @@ async function poll(c: Ctx): Promise<void> {
   }
 }
 
-function polled(c: Ctx): void {
+export function polled(c: Ctx): void {
   assert.equal(c.error, undefined, `the poll failed: ${String(c.error)}`);
   assert.ok(c.polls > 0, "the poller didn't run");
 }
 
-async function stateOf(c: Ctx, extId: string): Promise<string | undefined> {
+export async function stateOf(c: Ctx, extId: string): Promise<string | undefined> {
   const r = await need().pool.query<{ state: string }>("select state from item where source_id = $1 and external_id = $2", [c.sourceId, extId]);
   return r.rows[0]?.state;
 }
