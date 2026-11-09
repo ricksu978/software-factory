@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { activityPage, floorPage, issueRef, phase0Page } from "./views.ts";
+import { activityPage, floorPage, issueRef, phase0Page, prLink, runDetailPage } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -96,5 +96,55 @@ describe("pages that name an item", () => {
   test("the activity log shows #N in the item's column", () => {
     const html = activityPage([{ at: new Date(), external_id: "131", repo: "acme/widgets", title: "Export a month", kind: "transition", from: "Queued", to: "InProgress", event: "claimed" }], null);
     assert.match(html, /<td><a href="https:\/\/github.com\/acme\/widgets\/issues\/131">#131<\/a><\/td><td>Export a month<\/td>/);
+  });
+});
+
+describe("prLink", () => {
+  // PBI 145: an InReview item shows "PR #N", linked to the PR its open run holds.
+  test("links PR #N to the open run's PR address, its text from the PR number", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: "https://github.example.com/acme/widgets/pull/42" }),
+      `<a href="https://github.example.com/acme/widgets/pull/42">PR #42</a>`);
+  });
+
+  test("shows nothing when the open run has no PR address or number, or the item isn't InReview", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: null }), "");
+    assert.equal(prLink({ state: "InReview", pr_number: null, pr_url: "https://github.com/acme/widgets/pull/42" }), "");
+    assert.equal(prLink({ state: "SignOff", pr_number: 42, pr_url: "https://github.com/acme/widgets/pull/42" }), "");
+    assert.equal(prLink({ state: "InReview" }), "");
+  });
+
+  test("escapes the address, so it never shows as markup", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: `https://x/pull/42"><b>x</b>` }), `<a href="https://x/pull/42&quot;&gt;&lt;b&gt;x&lt;/b&gt;">PR #42</a>`);
+  });
+
+  const pr = { state: "InReview", pr_number: 42, pr_url: "https://github.com/acme/widgets/pull/42" };
+  const linked = `<a href="https://github.com/acme/widgets/pull/42">PR #42</a>`;
+
+  test("Floor shows it under Waiting on you and in the In flight table", () => {
+    const row = { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets" };
+    const html = floorPage({
+      active: [{ ...row, ...pr, stage: "review", since: null, cost: "0", badges: [], message: null }],
+      waiting: [{ ...row, ...pr, since: null }], waitingCount: 1, capacity: 3, next: [], notReady: [], factory: [], canOperate: false,
+    }, null);
+    assert.match(html, new RegExp(`<li>[^\\n]*${linked}[^\\n]*</li>`));
+    assert.match(html, new RegExp(`<tr><td>[^\\n]*${linked}[^\\n]*</tr>`));
+  });
+
+  test("Run detail shows it on the line with the item's state", () => {
+    const html = runDetailPage({
+      item: { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets", state: "InReview" },
+      run: { sop_version: null, config_sha: null, scenarios_sha: null, features_lock_sha: null, risk_tier: null, tier_reasons: null, next_stage: "review", pr_number: 42, pr_url: pr.pr_url, open: true },
+      policies: [], stages: [], question: null, criteria: null, features: [], verdicts: [], linkBlobs: false, controls: null,
+    }, null);
+    assert.match(html, new RegExp(`<p>InReview[^<]*${linked}`));
+  });
+
+  test("Run detail shows no link when the latest run has ended", () => {
+    const html = runDetailPage({
+      item: { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets", state: "InReview" },
+      run: { sop_version: null, config_sha: null, scenarios_sha: null, features_lock_sha: null, risk_tier: null, tier_reasons: null, next_stage: null, pr_number: 42, pr_url: pr.pr_url, open: false },
+      policies: [], stages: [], question: null, criteria: null, features: [], verdicts: [], linkBlobs: false, controls: null,
+    }, null);
+    assert.doesNotMatch(html, /PR #42/);
   });
 });
