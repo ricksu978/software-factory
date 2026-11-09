@@ -115,6 +115,17 @@ describe("readiness spend (PBI 132)", () => {
     for (const v of ["claude-haiku-4-5", "1200 in, 80 out", "$0.0031"]) assert.ok(row.includes(v), v);
   });
 
+  test("Run detail names each check's call, the judge or the split proposal", () => {
+    const at = new Date("2026-11-09T10:15:00Z");
+    const html = runDetailPage(detail([
+      { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031, ranAt: at },
+      { kind: "split", model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, ranAt: at },
+    ]), null);
+    const rows = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(html.split("<h2>Readiness checks</h2>")[1])![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
+    assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5<\/td>/);
+    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*\$0\.2100/);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });

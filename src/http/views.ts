@@ -136,8 +136,8 @@ export type RunDetail = {
   run: { sop_version: string | null; config_sha: string | null; scenarios_sha: string | null; features_lock_sha: string | null; risk_tier: string | null; tier_reasons: string[] | null; next_stage: string | null } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
   stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
-  /** Every readiness judge call on the item, oldest first, a failed one's included (PBI 132). */
-  readiness: { model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
+  /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
+  readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The signed-off feature files at the lock sha. */
@@ -163,8 +163,8 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
-    ? `<table><thead><tr><th scope="col">Ran (UTC)</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>${d.readiness
-        .map((c) => `<tr><td>${utc(c.ranAt)}</td><td>${escapeHtml(c.model)}</td><td>${escapeHtml(c.tokensIn)} in, ${escapeHtml(c.tokensOut)} out</td><td>${judgeUsd(c.costUsd)}</td></tr>`)
+    ? `<table><thead><tr><th scope="col">Ran (UTC)</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>${d.readiness
+        .map((c) => `<tr><td>${utc(c.ranAt)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td><td>${escapeHtml(c.tokensIn)} in, ${escapeHtml(c.tokensOut)} out</td><td>${judgeUsd(c.costUsd)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No readiness check has run yet.</p>`;
   const criteria = d.criteria

@@ -338,6 +338,7 @@ Given("no factory PR has merged yet", long, async function () {
 Given("no readiness check has run for any item", long, async function () {
   // Nothing in this scenario recorded one; the report's sum must come out as nothing.
   await db(ctx(this));
+  assert.equal((await pool().query("select 1 from readiness_check")).rowCount, 0, "a readiness check has run");
 });
 
 // ---- the dashboard ----

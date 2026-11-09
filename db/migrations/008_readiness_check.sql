@@ -1,8 +1,10 @@
--- PBI 132: one row per readiness judge call, with what it spent, whether it answered or failed. Run detail lists an
--- item's checks and the Phase 0 report sums them across every item, the ones the gate turned away included.
+-- PBI 132: one row per readiness gate AI call, the judge's or the split proposal's (kind), with what it spent,
+-- whether it answered or failed. Run detail lists an item's checks and the Phase 0 report sums them across every
+-- item, the ones the gate turned away included.
 create table readiness_check (
   id uuid primary key default gen_random_uuid(),
   item_id uuid not null references item (id),
+  kind text not null default 'judge' check (kind in ('judge', 'split')),
   model text not null,
   tokens_in int not null,
   tokens_out int not null,
