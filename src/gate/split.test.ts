@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import type { SplitOutcome } from "./split.ts";
-import { checkSplit, itemTextHash, proposeSplit, SPLIT_HEADING, splitComment, splitPrompt } from "./split.ts";
+import { checkSplit, itemTextHash, proposeSplit, SPLIT_HEADING, splitComment, splitKey, splitPrompt } from "./split.ts";
 
 const item: FactoryItem = {
   externalId: "1", sourceId: "fake", title: "Checkout redesign", body: "See spec section §7.2.",
@@ -99,4 +99,23 @@ test("the proposal lists each child's title, criteria word for word and needs by
 test("the text hash follows the item's text, not its other fields", () => {
   assert.equal(itemTextHash(item), itemTextHash({ ...item, updatedAt: "later", labels: ["x"] }));
   assert.notEqual(itemTextHash(item), itemTextHash({ ...item, body: "changed" }));
+});
+
+test("a given prompt is what the coding model gets, and the split key and cache follow it (PBI 159)", async () => {
+  const asked: string[] = [];
+  const agent = async (a: AgentArgs): Promise<AgentResult> => {
+    asked.push(a.prompt);
+    return { ok: true, text: reply(valid), costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+  };
+  const sop = { models: { coding: "model-c" } };
+  const seen = new Map<string, SplitOutcome>();
+  const other = (i: FactoryItem) => `${splitPrompt(i)} Briefly.`;
+  await proposeSplit(item, { sop, agent, seen });
+  await proposeSplit(item, { sop, agent, seen, prompt: other });
+  await proposeSplit(item, { sop, agent, seen, prompt: other });
+  assert.deepEqual(asked, [splitPrompt(item), other(item)]);
+  assert.equal(splitKey(item, {}), splitKey(item, { prompt: splitPrompt }));
+  assert.notEqual(splitKey(item, {}), splitKey(item, { prompt: other }));
+  assert.equal(splitKey(item, {}), splitKey({ ...item, updatedAt: "later" }, {}));
+  assert.notEqual(splitKey(item, {}), splitKey({ ...item, body: "changed" }, {}));
 });

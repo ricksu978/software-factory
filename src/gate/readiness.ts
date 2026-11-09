@@ -4,7 +4,7 @@ import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { fileSplit, priorFiling } from "./file-split.ts";
-import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
+import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -130,7 +130,7 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
       results = [...parseJudgement(reply, dor), ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))];
     }
   }
-  // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
+  // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text and split prompt.
   // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
   // asked again and a filing that stopped partway is finished with the same children, after a restart too. A kept
   // split means filing started for this text, so it's read whatever this judge says: a judge that now answers not
@@ -145,7 +145,12 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   // it will. A failed write throws, so the poller gates the parent again.
   const file = split?.proposed ? ctx.split?.file : undefined;
   const prior = split?.proposed && file ? await priorFiling(item, split.children, file.board) : null;
-  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), `split:${itemTextHash(item)}`);
+  // PBI 159: the key holds the split prompt too, so a new prompt posts one fresh proposal for the same text. A split
+  // that's saved for filing is never replaced, so a new prompt can't change it: its proposal is keyed on the item text
+  // alone, from the first gate that saves it, and a new prompt doesn't post the same children again.
+  const saved = filing && !!ctx.splits;
+  const proposalKey = saved ? `split:${itemTextHash(item)}` : ctx.split ? `split:${splitKey(item, ctx.split)}` : null;
+  if (split?.proposed && proposalKey) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), proposalKey);
   // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
   const filed = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : false;
   if (filed) return { ready: false, results, oversized, split, filed };
