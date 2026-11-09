@@ -221,6 +221,22 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.deepEqual(b.labels, []);
   });
 
+  test("a filing that failed partway is finished even when the next judge says not oversized or isn't asked (PBI 144)", async () => {
+    for (const next of ["not oversized", "engine rule"] as const) {
+      const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
+      const b = restartBoard(new Set(["create:Bank"]));
+      await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, three), file: b.file } })), /refused Bank/);
+      assert.deepEqual(b.issues.map((i) => i.title), ["Card"], next);
+      const extra = next === "engine rule" ? { openDeps: ["#7"] } : {};
+      const out = await gate(s.item, s.ctx(judged(false, "passed"), { ...extra, splits: b.splits, split: { ...split(true, two), file: b.file } }));
+      assert.equal(out.ready, false, next);
+      assert.equal(out.filed, true, next);
+      assert.deepEqual(b.issues.map((i) => i.title), ["Card", "Bank", "Receipt"], next);
+      assert.deepEqual(b.subs, ["100", "101", "102"], next);
+      assert.deepEqual(b.labels, [], next);
+    }
+  });
+
   test("a filing whose link comment failed is finished after a restart, not taken for a split by hand (PBI 144)", async () => {
     const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
     const b = restartBoard(new Set());

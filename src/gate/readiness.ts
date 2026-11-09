@@ -132,9 +132,11 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
   // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
-  // asked again and a filing that stopped partway is finished with the same children, after a restart too.
+  // asked again and a filing that stopped partway is finished with the same children, after a restart too. A kept
+  // split means filing started for this text, so it's read whatever this judge says: a judge that now answers not
+  // oversized, an unreadable reply, or an engine rule that kept the judge from being asked still finishes the filing.
   const filing = !!ctx.split?.file;
-  const kept = oversized && filing && ctx.splits ? await ctx.splits.get(item) : null;
+  const kept = filing && ctx.splits ? await ctx.splits.get(item) : null;
   let split: SplitOutcome | null = kept ? { proposed: true, children: kept } : oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
   // A valid split is kept before any child is filed. When another gate kept one first, that one is filed instead.
   if (split?.proposed && filing && ctx.splits && !kept) split = { proposed: true, children: await ctx.splits.keep(item, split.children) };
