@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { activityPage, floorPage, issueRef, phase0Page, runDetailPage, type RunDetail } from "./views.ts";
+import { activityPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -99,11 +99,82 @@ describe("pages that name an item", () => {
   });
 });
 
+describe("prLink", () => {
+  // PBI 145: an InReview item shows "PR #N", linked to the PR its open run holds.
+  test("links PR #N to the open run's PR address, its text from the PR number", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: "https://github.example.com/acme/widgets/pull/42" }),
+      `<a href="https://github.example.com/acme/widgets/pull/42">PR #42</a>`);
+  });
+
+  test("shows nothing when the open run has no PR address or number, or the item isn't InReview", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: null }), "");
+    assert.equal(prLink({ state: "InReview", pr_number: null, pr_url: "https://github.com/acme/widgets/pull/42" }), "");
+    assert.equal(prLink({ state: "SignOff", pr_number: 42, pr_url: "https://github.com/acme/widgets/pull/42" }), "");
+    assert.equal(prLink({ state: "InReview" }), "");
+  });
+
+  test("escapes the address, so it never shows as markup", () => {
+    assert.equal(prLink({ state: "InReview", pr_number: 42, pr_url: `https://x/pull/42"><b>x</b>` }), `<a href="https://x/pull/42&quot;&gt;&lt;b&gt;x&lt;/b&gt;">PR #42</a>`);
+  });
+
+  const pr = { state: "InReview", pr_number: 42, pr_url: "https://github.com/acme/widgets/pull/42" };
+  const linked = `<a href="https://github.com/acme/widgets/pull/42">PR #42</a>`;
+
+  test("Floor shows it under Waiting on you and in the In flight table", () => {
+    const row = { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets" };
+    const html = floorPage({
+      active: [{ ...row, ...pr, stage: "review", since: null, cost: "0", badges: [], message: null }],
+      waiting: [{ ...row, ...pr, since: null }], waitingCount: 1, capacity: 3, next: [], notReady: [], factory: [], canOperate: false,
+    }, null);
+    assert.match(html, new RegExp(`<li>[^\\n]*${linked}[^\\n]*</li>`));
+    assert.match(html, new RegExp(`<tr><td>[^\\n]*${linked}[^\\n]*</tr>`));
+  });
+
+  test("Run detail shows it on the line with the item's state", () => {
+    const html = runDetailPage({
+      item: { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets", state: "InReview" },
+      run: { sop_version: null, config_sha: null, scenarios_sha: null, features_lock_sha: null, risk_tier: null, tier_reasons: null, next_stage: "review", pr_number: 42, pr_url: pr.pr_url, open: true },
+      policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null,
+    }, null);
+    assert.match(html, new RegExp(`<p>InReview[^<]*${linked}`));
+  });
+
+  test("Run detail shows no link when the latest run has ended", () => {
+    const html = runDetailPage({
+      item: { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets", state: "InReview" },
+      run: { sop_version: null, config_sha: null, scenarios_sha: null, features_lock_sha: null, risk_tier: null, tier_reasons: null, next_stage: null, pr_number: 42, pr_url: pr.pr_url, open: false },
+      policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null,
+    }, null);
+    assert.doesNotMatch(html, /PR #42/);
+  });
+});
+
+describe("runDetailPage at sign-off", () => {
+  const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000146", external_id: "146", repo: "octo/repo", title: "t", state: "SignOff" },
+    run: null, policies: [], stages: [], readiness: [], question: { kind: "sign_off", body: "q" },
+    criteria: [{ criterion: "The owner sees the scope", scenarios: [] }], scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+
+  test("shows the scope with its lines and escaped, then the criteria and the files, all before the buttons", () => {
+    const html = runDetailPage(detail({ scope: "## Why\n<b>bold</b>", pending: [{ path: "features/a.feature", text: "Feature: <i>a</i>" }] }), null);
+    const at = ["<h2>Scope</h2>", "Criteria and their scenarios", "<h3>features/a.feature</h3>", "Approve the scenarios", "Ask for changes"].map((s) => html.indexOf(s));
+    assert.ok(at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1])), JSON.stringify(at));
+    assert.match(html, /## Why\n&lt;b&gt;bold&lt;\/b&gt;/);
+    assert.match(html, /Feature: &lt;i&gt;a&lt;\/i&gt;/);
+  });
+
+  test("shows no Scope section when there's no scope", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Scope<\/h2>/);
+  });
+});
+
 describe("readiness spend (PBI 132)", () => {
   const detail = (readiness: RunDetail["readiness"]): RunDetail => ({
     item: { id: "i1", title: "Checkout redesign", state: "NotReady", external_id: "132", repo: null }, run: null, policies: [],
     stages: [{ stage_id: "specify", attempt: 1, model: "claude-opus-5-5", tokens_in: 5000, tokens_out: 900, cost_usd: "0.42", status: "passed", transcript_ref: null }],
-    readiness, question: null, criteria: null, features: [], verdicts: [], linkBlobs: false, controls: null,
+    readiness, question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null,
   });
 
   test("Run detail lists each readiness check right after the stages, with its time, model, tokens and cost", () => {

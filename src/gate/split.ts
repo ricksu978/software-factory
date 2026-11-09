@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { fenced } from "../core/fence.ts";
+import type { FileSplitDeps } from "./file-split.ts";
 import { jsonLines } from "../policy/policy.ts";
 
 /** One proposed child. `criteria` holds 1-based indices of the parent's acceptance criteria, `needs` 1-based child numbers. */
@@ -21,7 +22,8 @@ export type SplitOutcome = { proposed: true; children: SplitChild[] } | { propos
 /**
  * What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. `seen` holds each
  * answered outcome by split key (item text and prompt), so a re-gate of text already split under the same prompt (say
- * after a dor.md change) doesn't ask again.
+ * after a dor.md change) doesn't ask again. `file`, when set, files a valid split as child issues (PBI 144); without it
+ * the split is only proposed.
  */
 export type SplitDeps = {
   sop: { models: { coding: string } };
@@ -32,6 +34,7 @@ export type SplitDeps = {
    * splitPrompt in the poller's readiness logic, which the readiness fingerprint covers.
    */
   prompt?: (item: FactoryItem) => string;
+  file?: FileSplitDeps;
 };
 
 /** The most outcomes `seen` keeps. The oldest goes first, so a long-lived poller's memory stays bounded. */
@@ -141,15 +144,21 @@ async function askForSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOut
   return checkSplit(r.text, item.acceptanceCriteria.length);
 }
 
-/** The proposal comment: each child's title, its body, its criteria word for word and the children it needs by title. */
-export function splitComment(item: FactoryItem, children: SplitChild[]): string {
+/**
+ * The proposal comment: each child's title, its body, its criteria word for word and the children it needs by title.
+ * `filing` says the factory files the children too (PBI 144), so the comment doesn't claim it created nothing.
+ */
+export function splitComment(item: FactoryItem, children: SplitChild[], filing = false): string {
   const parts = children.map((ch, i) => {
     const criteria = ch.criteria.map((c) => `- ${item.acceptanceCriteria[c - 1]}`).join("\n");
     const needs = ch.needs.length === 0 ? "nothing" : ch.needs.map((n) => children[n - 1].title).join(", ");
     const body = ch.body.split("\n").map((l) => `> ${l}`).join("\n");
     return `### ${i + 1}. ${ch.title}\n\n${body}\n\nAcceptance criteria:\n${criteria}\n\nNeeds: ${needs}`;
   });
-  return `${SPLIT_HEADING}\n\n${parts.join("\n\n")}\n\nThis is a proposal for the team. The factory hasn't changed or created any item.\n`;
+  const close = filing
+    ? "The factory files each child as a sub-issue of this item for the team to approve. No child enters the factory until someone adds the opt-in label to it."
+    : "This is a proposal for the team. The factory hasn't changed or created any item.";
+  return `${SPLIT_HEADING}\n\n${parts.join("\n\n")}\n\n${close}\n`;
 }
 
 /** SHA-256 of the item's own text, so the same text gets one proposal whatever else changed. */

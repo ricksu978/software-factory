@@ -3,7 +3,8 @@ import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
-import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
+import { fileSplit, priorFiling } from "./file-split.ts";
+import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -24,15 +25,23 @@ export type GateContext = {
   policyErrors?: string[];
   /** How to ask for a split of an oversized item (PBI 143). */
   split?: SplitDeps;
+  /**
+   * Where the split being filed is kept (PBI 144). `get` reads the split kept for the item's text, or null. `keep` keeps
+   * one unless a split is kept already, and returns the kept one. The gate keeps a split before it files any child and
+   * reads it back before asking the coding model again, so a filing that stopped partway is finished after a restart
+   * with the children it started with.
+   */
+  splits?: { get: (item: FactoryItem) => Promise<SplitChild[] | null>; keep: (item: FactoryItem, children: SplitChild[]) => Promise<SplitChild[]> };
   /** Where a readiness check that couldn't be recorded is reported. Defaults to console.error. */
   log?: (line: string) => void;
 };
 
 /**
  * `oversized` is the judge's reading of the item's size, false when its last line doesn't say true. `split` is null
- * when the item isn't oversized or the judge was never asked.
+ * when the item isn't oversized or the judge was never asked. `filed` is true when the split was filed as child issues
+ * (PBI 144), which leaves the item not ready whatever its verdicts.
  */
-export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null };
+export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
 
@@ -97,7 +106,8 @@ function recordedSplit(item: FactoryItem, ctx: GateContext, deps: SplitDeps): Pr
 /**
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
- * after any readiness input changes posts a fresh one. The gate never edits the item.
+ * after any readiness input changes posts a fresh one. The gate never edits the item, except that filing a split takes
+ * the parent's opt-in label off once its children are filed (PBI 144).
  */
 export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
   let results = engineRules(item, ctx);
@@ -121,9 +131,25 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
     }
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text and split prompt.
-  const split = oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
+  // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
+  // asked again and a filing that stopped partway is finished with the same children, after a restart too. A kept
+  // split means filing started for this text, so it's read whatever this judge says: a judge that now answers not
+  // oversized, an unreadable reply, or an engine rule that kept the judge from being asked still finishes the filing.
+  const filing = !!ctx.split?.file;
+  const kept = filing && ctx.splits ? await ctx.splits.get(item) : null;
+  let split: SplitOutcome | null = kept ? { proposed: true, children: kept } : oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
+  // A valid split is kept before any child is filed. When another gate kept one first, that one is filed instead.
+  if (split?.proposed && filing && ctx.splits && !kept) split = { proposed: true, children: await ctx.splits.keep(item, split.children) };
+  // A valid split is filed as child issues, unless the parent is already split another way (by hand, or from an
+  // earlier text's split). That's read first, so the proposal comment only says the factory files the children when
+  // it will. A failed write throws, so the poller gates the parent again.
+  const file = split?.proposed ? ctx.split?.file : undefined;
+  const prior = split?.proposed && file ? await priorFiling(item, split.children, file.board) : null;
   // PBI 159: the key holds the split prompt too, so a new prompt posts one fresh proposal for the same text.
-  if (split?.proposed && ctx.split) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${splitKey(item, ctx.split)}`);
+  if (split?.proposed && ctx.split) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), `split:${splitKey(item, ctx.split)}`);
+  // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
+  const filed = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : false;
+  if (filed) return { ready: false, results, oversized, split, filed };
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));

@@ -5,8 +5,9 @@ import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { loadPolicy, type Policy } from "../policy/policy.ts";
+import type { SplitBoard } from "./file-split.ts";
 import { gate, type GateContext } from "./readiness.ts";
-import type { SplitDeps } from "./split.ts";
+import type { SplitChild, SplitDeps } from "./split.ts";
 
 async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
   const fake = fakeBacklog();
@@ -162,6 +163,123 @@ describe("gate: an oversized item (PBI 143)", () => {
     const all = await s.fake.comments(s.id);
     assert.equal(all.length, 1);
     assert.match(all[0], /a split couldn't be proposed because the coding model's reply couldn't be read/);
+  });
+
+  test("a filed split leaves the item not ready, with no readiness comment, and the proposal says it files the children (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let n = 0;
+    const board: SplitBoard = {
+      subIssues: async () => [], findIssues: async () => [], createIssue: async (_r, title) => ({ externalId: String(100 + n), title, url: `u${n++}` }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    const file = { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
+    assert.equal(out.ready, false);
+    assert.equal(out.filed, true);
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((b) => b.startsWith("The factory can't start")).length, 0);
+    assert.match(all.find((b) => b.startsWith("The factory proposes splitting"))!, /files each child as a sub-issue/);
+    assert.equal(all.filter((b) => b.startsWith("The factory filed this item's split")).length, 1);
+  });
+
+  // The reviewer's two restart traces: a filing stops partway, the process restarts (no `seen`), and the coding model
+  // answers a different split. The kept split is what's finished, so no criterion is dropped and the parent leaves.
+  const three = JSON.stringify({ children: [
+    { title: "Card", body: "b", criteria: [1], needs: [] }, { title: "Bank", body: "b", criteria: [2], needs: [1] },
+    { title: "Receipt", body: "b", criteria: [3], needs: [1, 2] },
+  ] });
+  const two = JSON.stringify({ children: [{ title: "Payments", body: "b", criteria: [1, 2], needs: [] }, { title: "Receipt", body: "b", criteria: [3], needs: [1] }] });
+  function restartBoard(fail: Set<string>) {
+    const issues: { externalId: string; title: string; url: string; body: string }[] = [];
+    const subs: string[] = [];
+    const labels = ["factory"];
+    const strip = ({ body: _, ...i }: (typeof issues)[number]) => i;
+    const board: SplitBoard = {
+      subIssues: async () => subs.map((id) => strip(issues.find((i) => i.externalId === id)!)),
+      findIssues: async (_r, text) => issues.filter((i) => i.body.includes(text)).map(strip),
+      createIssue: async (_r, title, body) => {
+        if (fail.delete(`create:${title}`)) throw new Error(`refused ${title}`);
+        const i = { externalId: String(100 + issues.length), title, url: `u${issues.length}`, body };
+        issues.push(i);
+        return strip(i);
+      },
+      addSubIssue: async (_p, id) => { subs.push(id); }, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [],
+      addBlockedBy: async () => {}, removeLabel: async (_id, l) => { labels.splice(labels.indexOf(l), 1); },
+    };
+    const kept = new Map<string, SplitChild[]>();
+    const splits: GateContext["splits"] = {
+      get: async (i) => kept.get(i.externalId) ?? null,
+      keep: async (i, children) => { if (!kept.has(i.externalId)) kept.set(i.externalId, children); return kept.get(i.externalId)!; },
+    };
+    return { issues, subs, labels, splits, file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } };
+  }
+
+  test("a filing that failed partway is finished after a restart with the split it started, not a new answer (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
+    const b = restartBoard(new Set(["create:Bank"]));
+    await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, three), file: b.file } })), /refused Bank/);
+    assert.deepEqual(b.issues.map((i) => i.title), ["Card"]);
+    // After the restart the coding model would answer two children. It isn't asked: the kept split is filed.
+    let asked = 0;
+    const after = { ...split(true, two), agent: async (a: { model: string }) => { asked++; return split(true, two).agent(a); }, file: b.file };
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: after }));
+    assert.equal(asked, 0);
+    assert.equal(out.filed, true);
+    assert.deepEqual(b.issues.map((i) => i.title), ["Card", "Bank", "Receipt"]);
+    assert.deepEqual(b.subs, ["100", "101", "102"]);
+    assert.deepEqual(b.labels, []);
+  });
+
+  test("a filing that failed partway is finished even when the next judge says not oversized or isn't asked (PBI 144)", async () => {
+    for (const next of ["not oversized", "engine rule"] as const) {
+      const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
+      const b = restartBoard(new Set(["create:Bank"]));
+      await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, three), file: b.file } })), /refused Bank/);
+      assert.deepEqual(b.issues.map((i) => i.title), ["Card"], next);
+      const extra = next === "engine rule" ? { openDeps: ["#7"] } : {};
+      const out = await gate(s.item, s.ctx(judged(false, "passed"), { ...extra, splits: b.splits, split: { ...split(true, two), file: b.file } }));
+      assert.equal(out.ready, false, next);
+      assert.equal(out.filed, true, next);
+      assert.deepEqual(b.issues.map((i) => i.title), ["Card", "Bank", "Receipt"], next);
+      assert.deepEqual(b.subs, ["100", "101", "102"], next);
+      assert.deepEqual(b.labels, [], next);
+    }
+  });
+
+  test("a filing whose link comment failed is finished after a restart, not taken for a split by hand (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
+    const b = restartBoard(new Set());
+    const refusing = { ...s.fake.adapter, comment: async (id: string, body: string, key: string) => {
+      if (key.startsWith("split-filed:")) throw new Error("comment refused");
+      return s.fake.adapter.comment(id, body, key);
+    } };
+    await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { adapter: refusing, splits: b.splits, split: { ...split(true, three), file: b.file } })), /comment refused/);
+    assert.deepEqual(b.subs, ["100", "101", "102"]);
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, two), file: b.file } }));
+    assert.equal(out.filed, true);
+    assert.equal(b.issues.length, 3);
+    assert.deepEqual(b.labels, []);
+    const filed = (await s.fake.comments(s.id)).find((c) => c.startsWith("The factory filed this item's split"))!;
+    assert.match(filed, /Card[\s\S]*Bank[\s\S]*Receipt/);
+  });
+
+  test("a parent already split another way gets a proposal that files nothing, and no child is filed (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let created = 0;
+    const board: SplitBoard = {
+      subIssues: async () => [{ externalId: "50", title: "by hand", url: "u50" }], findIssues: async () => [],
+      createIssue: async (_r, title) => ({ externalId: String(100 + created++), title, url: "u" }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    const file = { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
+    assert.equal(out.filed, undefined);
+    assert.equal(created, 0);
+    const proposal = (await s.fake.comments(s.id)).find((b) => b.startsWith("The factory proposes splitting"))!;
+    assert.doesNotMatch(proposal, /files each child/);
+    assert.match(proposal, /hasn't changed or created any item/);
   });
 });
 
