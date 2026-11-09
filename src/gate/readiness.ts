@@ -4,7 +4,7 @@ import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { fileSplit, priorFiling } from "./file-split.ts";
-import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
+import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -25,6 +25,13 @@ export type GateContext = {
   policyErrors?: string[];
   /** How to ask for a split of an oversized item (PBI 143). */
   split?: SplitDeps;
+  /**
+   * Where the split being filed is kept (PBI 144). `get` reads the split kept for the item's text, or null. `keep` keeps
+   * one unless a split is kept already, and returns the kept one. The gate keeps a split before it files any child and
+   * reads it back before asking the coding model again, so a filing that stopped partway is finished after a restart
+   * with the children it started with.
+   */
+  splits?: { get: (item: FactoryItem) => Promise<SplitChild[] | null>; keep: (item: FactoryItem, children: SplitChild[]) => Promise<SplitChild[]> };
   /** Where a readiness check that couldn't be recorded is reported. Defaults to console.error. */
   log?: (line: string) => void;
 };
@@ -124,10 +131,16 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
     }
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
-  const split = oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
-  // PBI 144: a valid split is filed as child issues, unless the parent is already split another way (by hand, or from
-  // an earlier text's split). That's read first, so the proposal comment only says the factory files the children
-  // when it will. A failed write throws, so the poller gates the parent again.
+  // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
+  // asked again and a filing that stopped partway is finished with the same children, after a restart too.
+  const filing = !!ctx.split?.file;
+  const kept = oversized && filing && ctx.splits ? await ctx.splits.get(item) : null;
+  let split: SplitOutcome | null = kept ? { proposed: true, children: kept } : oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
+  // A valid split is kept before any child is filed. When another gate kept one first, that one is filed instead.
+  if (split?.proposed && filing && ctx.splits && !kept) split = { proposed: true, children: await ctx.splits.keep(item, split.children) };
+  // A valid split is filed as child issues, unless the parent is already split another way (by hand, or from an
+  // earlier text's split). That's read first, so the proposal comment only says the factory files the children when
+  // it will. A failed write throws, so the poller gates the parent again.
   const file = split?.proposed ? ctx.split?.file : undefined;
   const prior = split?.proposed && file ? await priorFiling(item, split.children, file.board) : null;
   if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), `split:${itemTextHash(item)}`);
