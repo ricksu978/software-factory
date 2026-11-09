@@ -6,6 +6,7 @@ import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { gate } from "../gate/readiness.ts";
+import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
@@ -18,6 +19,8 @@ export type PollDeps = {
   repoHost: RepoHost;
   judge: (item: FactoryItem, dor: Policy) => Promise<string>;
   sourceId: string;
+  /** How the gate asks for a split of an oversized item (PBI 143). Without it, no split is asked for. */
+  split?: SplitDeps;
   /** Where a poll that runs long warns, and the clock that times it (PBI 134). */
   slow?: Slow;
 };
@@ -154,7 +157,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
 }
 
 async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Promise<{ seen: number; cursor: string }> {
-  const { pool, adapter, repoHost, judge, sourceId } = deps;
+  const { pool, adapter, repoHost, judge, sourceId, split } = deps;
   w.step("reading the board");
   const src = (await pool.query<{ url: string; cursor: string | null; paused: boolean; label: string | null }>(
     "select url, cursor, paused, field_map->>'optInLabel' as label from backlog_source where id = $1", [sourceId],
@@ -241,7 +244,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     if (readinessItemHash(fi, await depsOf(fi)) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
-  // Most often a failure here is the judge on a usage limit. The item stays Eligible and the next poll tries again.
+  // Most often a failure here is the judge, or the coding model asked for a split, on a usage limit. The item stays
+  // Eligible and the next poll tries again.
   await each(await items(pool, sourceId, ["Eligible"]), (row) => `the readiness check for item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
@@ -249,8 +253,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const openDeps = await depsOf(fi);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
-      openDeps, judge, adapter, policyErrors: r.policyErrors,
+      openDeps, judge, adapter, policyErrors: r.policyErrors, split,
     });
+    // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
+    // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.
+    if (splitUnanswered(out.split)) throw new Error("the coding model gave no answer for the item's split proposal");
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
       await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi, openDeps)]);
       for (const v of out.results) {

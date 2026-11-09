@@ -10,7 +10,7 @@ import type pg from "pg";
 import { githubBacklog, parseGitHubWebhook, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
-import { haikuJudge } from "./agent/run.ts";
+import { haikuJudge, runAgent } from "./agent/run.ts";
 import { parseRepoConfig } from "./config/repo-config.ts";
 import { loadSop, stageAfter } from "./config/sop.ts";
 import { mirrorBoard } from "./control/board.ts";
@@ -208,7 +208,9 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     pool, launcher, now: new Date(), killFlag: env.FACTORY_KILL === "1", repoHost, backlogFor, secret, controlUrl, sopVersion: sop.version,
   }));
   const judge = haikuJudge(sop);
-  for (const s of sources) every(POLL_INTERVAL_MS, `polling source ${s.id}`, () => pollOnce({ pool, adapter: s.adapter, repoHost, judge, sourceId: s.id }));
+  // One split cache for every poll, so a re-gate of item text already split doesn't ask the coding model again.
+  const split = { sop, agent: runAgent, seen: new Map() };
+  for (const s of sources) every(POLL_INTERVAL_MS, `polling source ${s.id}`, () => pollOnce({ pool, adapter: s.adapter, repoHost, judge, sourceId: s.id, split }));
 }
 
 if (import.meta.main) {
