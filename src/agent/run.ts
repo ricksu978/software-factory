@@ -134,8 +134,12 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
 
 const JUDGE_TIMEOUT_MS = 120_000;
 
+/** What one readiness judge call spent, reported whether the call answered or failed (PBI 132). */
+export type JudgeSpend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+
 export function haikuJudge(sop: JudgeSop, run: (a: AgentArgs) => Promise<AgentResult> = runAgent) {
-  return async (item: FactoryItem, dor: JudgePolicy): Promise<string> => {
+  // ponytail: PBI 132 stub. `spent` is accepted and not yet called.
+  return async (item: FactoryItem, dor: JudgePolicy, _spent?: (s: JudgeSpend) => void): Promise<string> => {
     const r = await run({ prompt: judgePrompt(item, dor), model: sop.models.triage, cwd: tmpdir(), maxTurns: 1, mode: "judge",
       signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS) });
     // A failed run isn't a reply, so the gate never reads a usage limit as the item failing. The poller retries next poll.

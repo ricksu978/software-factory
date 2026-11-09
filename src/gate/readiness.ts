@@ -1,5 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
+import type { JudgeSpend } from "../agent/run.ts";
+import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
@@ -11,7 +13,12 @@ export type GateContext = {
   configValid: boolean;
   repoKnown: boolean;
   openDeps: string[];
-  judge: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** `spent` hears what the call cost, whether it answers or throws (PBI 132). */
+  judge: (item: FactoryItem, dor: Policy, spent?: (s: JudgeSpend) => void) => Promise<string>;
+  /** Records each judge call's spend for the item, even when the call failed (PBI 132). */
+  recordCheck?: (item: FactoryItem, check: ReadinessCheck) => Promise<void>;
+  /** When a judge call runs. Defaults to the wall clock. */
+  now?: () => Date;
   adapter: BacklogAdapter;
   /** Each PolicyError the caller hit loading the five policy files, such as a run: line outside dod.md. */
   policyErrors?: string[];

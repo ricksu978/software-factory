@@ -141,6 +141,23 @@ export async function loadInputs(read: (path: string) => Promise<string | null>,
   }
 }
 
+/** What a stage attempt's agent calls cost, handed back when the stage closes. */
+export type MeteredStage = { stageId: string; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string };
+
+/**
+ * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
+ * is an error, and the model is never asked, so no call can go unrecorded.
+ */
+export function stageMeter(_agent: (a: AgentArgs) => Promise<AgentResult>): {
+  open(stageId: string, attempt: number): void;
+  close(): MeteredStage | null;
+  ask(a: AgentArgs): Promise<AgentResult>;
+} {
+  // ponytail: PBI 132 stub. runCell still charges calls itself.
+  const missing = () => { throw new Error("stageMeter is not implemented yet"); };
+  return { open: missing, close: missing, ask: async () => missing() };
+}
+
 export async function runCell(d: CellDeps): Promise<Outcome> {
   const { api, ctx, git, dir, sop, config, policies } = d;
   const tag = `@pbi-${ctx.externalId}`;
