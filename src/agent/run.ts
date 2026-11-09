@@ -135,15 +135,16 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
 
 /**
  * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md, and
- * READINESS_VERSION. The prompt is judgePrompt's own words, rendered around an empty item and an empty dor.md, so any
- * edit to those words changes it while the items and policy files stay out of it.
+ * READINESS_VERSION. The prompt is judgePrompt's own words, rendered around an empty item and a dor.md with no text and
+ * one empty criterion, so every line of the template, the per-criterion line included, is in it, and any edit to those
+ * words changes it while the items and policy files stay out of it.
  */
 export function readinessLogic(): ReadinessLogic {
   const empty: FactoryItem = {
     sourceId: "", externalId: "", title: "", body: "", acceptanceCriteria: [], labels: [], status: "", rank: 0,
     repo: null, fields: {}, closed: false, updatedAt: "",
   };
-  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [] }), version: READINESS_VERSION };
+  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }), version: READINESS_VERSION };
 }
 
 const JUDGE_TIMEOUT_MS = 120_000;

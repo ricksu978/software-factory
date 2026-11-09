@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readinessLogic } from "../../src/agent/run.ts";
 import { readinessSha, type ReadinessLogic, type ReadinessTexts } from "../../src/policy/policy.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
-import { baseFiles, ctx as pollCtx, poll, polled, REPO, setup, stateOf, type Ctx as PollCtx } from "./pbi-12.steps.ts";
+import { baseFiles, baseline, ctx as pollCtx, poll, polled, REPO, setup, stateOf, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 
 // ---- the fingerprint ----
 
@@ -84,6 +84,7 @@ async function gateIntoNotReady(world: object, c: PollCtx, state: string): Promi
   for (const ext of c.extIds) assert.equal(await stateOf(c, ext), state, "setup didn't reach the expected state");
   c.asked.clear();
   for (const ext of c.extIds) ctx(world).commentsBefore.set(ext, (await c.fake!.comments(ext)).length);
+  c.baseline = await baseline(c);
 }
 
 Given("the factory holds an item in state {string}, checked against the repo's current readiness files", long, async function (state: string) {
@@ -105,8 +106,11 @@ Given("the factory holds an item in state {string} in repo {string} and another 
   await gateIntoNotReady(this, c, state);
 });
 
-Given("neither the items nor the repo's readiness files change", function () {
-  // Nothing to do: the board and the repo host stay as the setup left them.
+Given("neither the items nor the repo's readiness files change", long, async function () {
+  const c = pollCtx(this);
+  polled(c);
+  assert.ok(c.baseline, "the setup recorded no baseline to compare against");
+  assert.deepEqual(await baseline(c), c.baseline, "an item or a repo's readiness files changed after the setup");
 });
 
 Given("the factory restarts with a judge prompt that differs by one word", function () {

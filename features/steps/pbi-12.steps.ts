@@ -32,6 +32,8 @@ export type Ctx = {
   asked: Map<string, number>;
   /** PBI 149: the readiness logic the factory runs with. Unset, the poller uses its own. */
   logic?: Logic;
+  /** PBI 149: each item's updatedAt and each of their repos' head and readiness files, as the setup left them. */
+  baseline?: Baseline;
   polls: number;
   error?: unknown;
 };
@@ -87,6 +89,24 @@ export async function poll(c: Ctx): Promise<void> {
   } catch (e) {
     c.error = e;
   }
+}
+
+export type Baseline = { items: Record<string, string>; repos: Record<string, { head?: string; files: Record<string, string> }> };
+
+/** What a later "nothing changed" step compares against: the board's items and their repos' readiness files. */
+export async function baseline(c: Ctx): Promise<Baseline> {
+  const b: Baseline = { items: {}, repos: {} };
+  for (const ext of c.extIds) {
+    const item = await c.fake!.adapter.getItem(ext);
+    assert.ok(item, `item ${ext} is not on the board`);
+    b.items[ext] = item.updatedAt;
+    const repo = item.repo ?? REPO;
+    const head = c.host!.heads.get(repo);
+    const files: Record<string, string> = {};
+    for (const [key, text] of c.host!.files) if (key.startsWith(`${repo}@${head}:`)) files[key.slice(`${repo}@${head}:`.length)] = text;
+    b.repos[repo] = { head, files };
+  }
+  return b;
 }
 
 export function polled(c: Ctx): void {
@@ -156,7 +176,9 @@ Given("the factory holds two items in state {string}, checked against the repo's
   // A failing judge gates both into NotReady, which records the readiness files they were checked against.
   c.judge = "fail";
   await poll(c);
-  if (c.polls > 0) for (const ext of c.extIds) assert.equal(await stateOf(c, ext), state, "setup didn't reach the expected state");
+  if (c.polls === 0) return;
+  for (const ext of c.extIds) assert.equal(await stateOf(c, ext), state, "setup didn't reach the expected state");
+  c.baseline = await baseline(c);
 });
 
 When("the poller runs once", long, async function () {
