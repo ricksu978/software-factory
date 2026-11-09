@@ -5,11 +5,20 @@ import { loadSop, SopError, stageAfter } from "./sop.ts";
 
 describe("stageAfter", () => {
   const def = loadSop(readFileSync(new URL("../../sop/default.yml", import.meta.url), "utf8"));
-  test("gives the next listed stage, and null for merge, open-pr, address and a stage the SOP doesn't list", () => {
+  test("gives the next listed stage, and null for merge, open-pr, pr-review, address and a stage the SOP doesn't list", () => {
     assert.equal(stageAfter(def, "understand"), "specify");
     assert.equal(stageAfter(def, "specify"), "sign-off");
     assert.equal(stageAfter(def, "self-review"), "open-pr");
-    for (const s of ["merge", "open-pr", "address", "deploy"]) assert.equal(stageAfter(def, s), null, s);
+    for (const s of ["merge", "open-pr", "pr-review", "address", "deploy"]) assert.equal(stageAfter(def, s), null, s);
+  });
+
+  test("lists pr-review after open-pr, run by the factory's PR reviewer for at most 5 rounds", () => {
+    const ids = def.stages.map((s) => s.id);
+    assert.equal(ids.indexOf("pr-review"), ids.indexOf("open-pr") + 1);
+    const stage = def.stages.find((s) => s.id === "pr-review")!;
+    assert.equal(stage.agent, "factory-pr-reviewer");
+    assert.equal(stage.max_rounds, 5);
+    assert.equal(stage.max_replies, 2);
   });
 });
 
