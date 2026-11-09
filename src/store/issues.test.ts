@@ -24,8 +24,8 @@ describe("issueRepos", dbTest, () => {
     (await db.pool.query<{ id: string }>("insert into repo (host_adapter, url) values ($1, $2) returning id", [host, url])).rows[0].id;
   const board = async (map: Record<string, string>) =>
     (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url, repo_map) values ('github', gen_random_uuid()::text, $1) returning id", [JSON.stringify(map)])).rows[0].id;
-  const item = async (source: string) =>
-    (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '131', 't', 'Queued') returning id", [source])).rows[0].id;
+  const item = async (source: string, stored: string | null = null) =>
+    (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state, repo) values ($1, '131', 't', 'Queued', $2) returning id", [source, stored])).rows[0].id;
   const run = (itemId: string, repoId: string | null) => db.pool.query("insert into run (item_id, repo_id) values ($1, $2)", [itemId, repoId]);
 
   let widgets: string;
@@ -41,24 +41,29 @@ describe("issueRepos", dbTest, () => {
     await db?.stop();
   });
 
-  test("an item with no run takes the one repo its board maps to", async () => {
-    const id = await item(await board({ "acme/widgets": widgets }));
-    assert.equal((await issueRepos(db.pool, [id])).get(id), "acme/widgets");
+  test("an item with no run takes the repo stored at intake, not its board's", async () => {
+    const id = await item(await board({ "acme/widgets": widgets }), "acme/gadgets");
+    assert.equal((await issueRepos(db.pool, [id])).get(id), "acme/gadgets");
   });
 
-  test("an item's run names its repo, over its board's", async () => {
-    const id = await item(await board({ "acme/widgets": widgets, "acme/gadgets": gadgets }));
+  test("an item's run names its repo, over the stored one", async () => {
+    const id = await item(await board({ "acme/widgets": widgets, "acme/gadgets": gadgets }), "acme/widgets");
     await run(id, gadgets);
     assert.equal((await issueRepos(db.pool, [id])).get(id), "acme/gadgets");
   });
 
-  test("names no repo when the board maps to none or several and no run names one", async () => {
-    const none = await item(await board({}));
+  test("names no repo when none is stored and no run names one, even on a board that maps to one repo", async () => {
+    const one = await item(await board({ "acme/widgets": widgets }));
     const several = await item(await board({ "acme/widgets": widgets, "acme/gadgets": gadgets }));
     await run(several, null);
-    const got = await issueRepos(db.pool, [none, several]);
-    assert.equal(got.get(none), null);
+    const got = await issueRepos(db.pool, [one, several]);
+    assert.equal(got.get(one), null);
     assert.equal(got.get(several), null);
+  });
+
+  test("names no repo for a stored repo that isn't owner/name", async () => {
+    const id = await item(await board({}), "acme/widgets/issues");
+    assert.equal((await issueRepos(db.pool, [id])).get(id), null);
   });
 
   test("names no repo when the run's repo isn't on GitHub", async () => {

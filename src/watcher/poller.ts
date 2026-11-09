@@ -179,8 +179,15 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const label = src.label ?? "factory";
   const eligible = (fi: FactoryItem | null): boolean => fi !== null && !fi.closed && fi.labels.includes(label);
   const fetched = new Map<string, FactoryItem | null>();
+  // Each item read back stores its issue's repo, so an item held from before repos were stored gets one (PBI 137).
   const itemOf = async (ext: string) => {
-    if (!fetched.has(ext)) fetched.set(ext, await adapter.getItem(ext));
+    if (!fetched.has(ext)) {
+      const fi = await adapter.getItem(ext);
+      fetched.set(ext, fi);
+      if (fi) {
+        await pool.query("update item set repo = $3 where source_id = $1 and external_id = $2 and repo is distinct from $3", [sourceId, ext, fi.repo]);
+      }
+    }
     return fetched.get(ext)!;
   };
 
@@ -189,7 +196,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const listed = await adapter.listEligible(src.cursor);
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
-    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
+    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo });
   });
 
   w.step("reading the PRs of items in review");

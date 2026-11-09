@@ -63,6 +63,14 @@ describe("store", dbTest, () => {
     assert.equal(a, b);
   });
 
+  test("upsertItem stores the item's repo, and a later upsert refreshes it", async () => {
+    const repo = async (id: string) => (await db.pool.query("select repo from item where id = $1", [id])).rows[0].repo;
+    const id = await upsertItem(db.pool, { sourceId: source, externalId: "moved", title: "t" });
+    assert.equal(await repo(id), null);
+    await upsertItem(db.pool, { sourceId: source, externalId: "moved", title: "t", repo: "acme/widgets" });
+    assert.equal(await repo(id), "acme/widgets");
+  });
+
   test("leaving InProgress raises the generation and clears the lease", async () => {
     const id = await item("InProgress");
     await withTx(db.pool, (c) => transitionItem(c, id, "pr_opened", system));
