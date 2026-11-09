@@ -136,10 +136,10 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null): Pr
 }
 
 /**
- * One pass over a backlog source. In order: new and edited items; the PRs of InReview items; withdrawals, criteria
- * changes and dependencies of the other items the factory holds; re-gates after a readiness input changed; and the
- * gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or one unreachable PR
- * never stops merge or withdrawal detection for the rest, and the cursor is always saved.
+ * One pass over a backlog source. In order: new and edited items; the PRs of InReview and InProgress items;
+ * withdrawals, criteria changes and dependencies of the other items the factory holds; re-gates after a readiness
+ * input changed; and the gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or
+ * one unreachable PR never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
   const { pool, adapter, repoHost, judge, sourceId } = deps;
@@ -164,10 +164,12 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
   });
 
-  // 2. PRs of InReview items, before withdrawal, so a merge just before the item closes still counts as a merge.
-  //    Only reviews by allowlisted users count (Run contract 10).
+  // 2. PRs of InReview items, and of InProgress items whose run has opened one, before withdrawal, so a merge just
+  //    before the item closes still counts as a merge. A merge or a close while the item is InProgress, during
+  //    address for example, is the fallback for a webhook that never came (PBI 142). Only an InReview item goes back
+  //    to address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
-  await each(await items(pool, sourceId, ["InReview"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
+  await each(await items(pool, sourceId, ["InReview", "InProgress"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const repo = (await itemOf(row.external_id))?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
     const pr = await repoHost.prState(repo, row.pr_number, trusted);
@@ -175,7 +177,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
       await move(pool, row.id, "merged", (c) => c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]));
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
+    } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
       await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
     }
   });

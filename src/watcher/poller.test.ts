@@ -302,6 +302,30 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m1");
   });
 
+  test("an InProgress item whose PR merged moves to Accepted with its merge commit, even if the item closed too", async () => {
+    const { ext, pr, run } = await held("InProgress", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === pr)!, { open: false, merged: true, mergeSha: "m2" });
+    await fake.adapter.close(ext);
+    await poll();
+    assert.equal((await row(ext)).state, "Accepted");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m2");
+  });
+
+  test("an InProgress item whose PR closed without a merge is withdrawn", async () => {
+    const { ext, pr, run } = await held("InProgress", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === pr)!, { open: false });
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, null);
+  });
+
+  test("an InProgress item with an open PR and a newer review stays InProgress", async () => {
+    const { ext, pr } = await held("InProgress", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    Object.assign(host.prs.find((p) => p.number === pr)!, { mergeable: false });
+    await poll();
+    assert.equal((await row(ext)).state, "InProgress");
+  });
+
   test("a PR whose board item was deleted is still closed, through the run's repo", async () => {
     const { ext, pr, run } = await held("InReview", { pr: true });
     const repoId = (await db.pool.query<{ id: string }>("select id from repo")).rows[0].id;

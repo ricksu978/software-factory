@@ -189,7 +189,9 @@ async function requeue(d: TickDeps, itemId: string) {
         [itemId],
       );
     } else if (row.run_id && prClosed) {
-      await c.query("update run set next_stage = 'open-pr' where id = $1", [row.run_id]);
+      // The closed PR is dropped, so the poller, which reads an InProgress run's PR, doesn't withdraw the item again
+      // while open-pr opens a fresh one from the kept branch (PBI 142).
+      await c.query("update run set next_stage = 'open-pr', pr_number = null, pr_url = null where id = $1", [row.run_id]);
     }
   });
 }

@@ -136,6 +136,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       requestReviewers: async (_r, _n, fallback) => (rec("/repo/requestReviewers", { fallback }), fallback),
       replyToThread: async (_r, threadId, body) => rec("/repo/replyToThread", { threadId, body }),
       commentOnPr: async (_r, prNumber, body) => rec("/repo/commentOnPr", { prNumber, body }),
+      prState: async () => (rec("/repo/prState"), { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: null }),
     },
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
@@ -351,6 +352,42 @@ describe("runCell", () => {
     assert.doesNotMatch(h.prs[0].body, /Closes/);
     assert.match(h.prs[0].body, /^- \[x\] Typecheck passes/m);
   });
+
+  test("open-pr on a branch whose PR already merged opens no PR, asks no reviewer, and fails naming the PR", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    h.deps.repoHost.prState = async () => ({ merged: true, mergeSha: "m7", open: false, mergeable: null, lastChangesRequestedAt: null });
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(h.prs, []);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"));
+    assert.ok(!h.routes().includes("/pr"));
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body;
+    assert.equal(last.status, "failed");
+    assert.match(last.message, /PR #7 .*merged/);
+    assert.deepEqual(h.transitions(), []);
+    assert.ok(!h.agentCalls.some((a) => a.stage === "open-pr"), "no agent ran for a PR that can't open");
+  });
+
+  test("open-pr with no PR yet doesn't ask about one", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { prNumber: null } });
+    await h.run();
+    assert.ok(!h.routes().includes("/repo/prState"));
+    assert.equal(h.prs.length, 1);
+  });
+
+  for (const [step, fail] of [
+    ["opening the PR", (h: ReturnType<typeof harness>) => { h.deps.repoHost.openOrUpdatePr = async () => { throw new Error("GitHub answered 502"); }; }],
+    ["asking for reviewers", (h: ReturnType<typeof harness>) => { h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); }; }],
+    ["reading CI", (h: ReturnType<typeof harness>) => { h.deps.api.checks = async () => { throw new Error("GitHub answered 502"); }; }],
+  ] as const) {
+    test(`an error while ${step} ends the open-pr attempt failed with its message, and still throws`, async () => {
+      const h = harness({ nextStage: "open-pr" });
+      fail(h);
+      await assert.rejects(h.run(), /GitHub answered 502/);
+      const statuses = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").map((c) => [c.body.status, c.body.message]);
+      assert.deepEqual(statuses.at(-1), ["failed", "GitHub answered 502"]);
+      assert.equal(statuses.filter(([s]) => s === "started").length, 1);
+    });
+  }
 
   test("each passed stage sends its own prompted call's text as message, never a judge's or the classifier's", async () => {
     const h = harness({
