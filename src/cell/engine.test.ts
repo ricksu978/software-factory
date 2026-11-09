@@ -44,7 +44,7 @@ type Script = (a: AgentArgs, stage: string) => Partial<AgentResult> | undefined 
 
 /** A signed-off run (or a fresh one) in a real repo, with every dependency recorded. */
 function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; ctx?: Partial<CellContext>; deps?: Partial<CellDeps>;
-  lease?: () => Promise<{ stop: boolean }>; failOn?: string; conflict?: boolean } = {}) {
+  lease?: () => Promise<{ stop: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "engine-"));
   roots.push(root);
   const origin = join(root, "origin.git");
@@ -106,7 +106,10 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       policyResults: async (b) => rec("/policy-results", b),
       pr: async (b) => rec("/pr", b),
       checks: async (sha) => (rec("/checks", { sha }), "success"),
-      upload: async (b) => rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }),
+      upload: async (b) => {
+        rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt });
+        if (o.failUpload) throw new Error(`upload ${b.kind} ${b.stageId}-${b.attempt}: 503`); // as the blob PUT failing does
+      },
     },
     ctx: {
       externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds"], nextStage: o.nextStage ?? "red",
@@ -699,11 +702,12 @@ describe("runCell", () => {
 
   // PBI 140: a cell stopped for a restart pushes its work in progress and reports its open attempt stopped, so the
   // restarted factory resumes the stage from that commit. One whose lease was lost pushes nothing.
-  const stopMidGreen = (leases: ("stop" | "lost")[]) => {
+  const stopMidGreen = (leases: ("stop" | "lost")[], failUpload = false) => {
     let n = 0;
     let armed = false;
     return harness({
       nextStage: "green",
+      failUpload,
       lease: async () => {
         if (!armed) return { stop: false };
         const answer = leases[Math.min(n++, leases.length - 1)];
@@ -740,6 +744,17 @@ describe("runCell", () => {
     const green = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "green")
       .map((c) => (c.route === "/stage" ? `stage ${c.body.status}` : `upload ${c.body.kind}`));
     assert.deepEqual(green, ["stage started", "upload transcript", "stage stopped"]);
+  });
+
+  test("a stopped attempt whose upload fails still reports itself stopped, so the item goes back to Queued", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"], true);
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "stopped"); } finally { logged.mock.restore(); }
+    const green = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "green")
+      .map((c) => (c.route === "/stage" ? `stage ${c.body.status}` : `upload ${c.body.kind}`));
+    assert.deepEqual(green, ["stage started", "upload transcript", "stage stopped"]);
+    assert.match(String(logged.mock.calls[0]?.arguments[0]), /transcript upload failed/);
   });
 
   test("a stop whose lease check before the push finds the lease lost pushes nothing and reports nothing", async () => {

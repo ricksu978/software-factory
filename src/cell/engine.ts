@@ -224,9 +224,19 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const c = current;
     if (!c) return;
     current = null;
+    // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
+    // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
+    const upload = async (kind: "transcript" | "report", body: string) => {
+      const sent = api.upload({ kind, stageId: c.stageId, attempt: c.attempt, body });
+      if (status !== "stopped") return sent;
+      await sent.catch((e) => {
+        if (e instanceof LeaseLost) throw e;
+        console.error(`stopped attempt ${c.stageId}-${c.attempt}: ${kind} upload failed, reporting stopped anyway:`, e);
+      });
+    };
     const uploads = async () => {
-      if (c.transcript) await api.upload({ kind: "transcript", stageId: c.stageId, attempt: c.attempt, body: c.transcript });
-      if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
+      if (c.transcript) await upload("transcript", c.transcript);
+      if (c.report !== null) await upload("report", c.report);
     };
     if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: c.tokensIn, tokensOut: c.tokensOut,

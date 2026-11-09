@@ -329,7 +329,8 @@ const routes: Record<string, Route> = {
     if (!/^[a-z0-9-]+$/.test(stageId)) throw new BadRequest("stageId must be lowercase letters, digits and dashes");
     const attempt = int(body.attempt, "attempt");
     const path = `${kind}s/${run.run_id}/${stageId}-${attempt}.${kind === "transcript" ? "jsonl" : "ndjson"}`;
-    // Run detail reads the evidence back from here. Run contract 9 sends /stage first, so the attempt's row exists.
+    // Run detail reads the evidence back from here. The attempt's row exists already: run contract 9 sends /stage
+    // first, and a stopped attempt, which uploads before its stopped report, has its row from its `started` report.
     await c.query(`update stage_run set ${kind}_ref = $4 where run_id = $1 and stage_id = $2 and attempt = $3`, [run.run_id, stageId, attempt, path]);
     return { url: await deps.uploadUrl(path) };
   },
