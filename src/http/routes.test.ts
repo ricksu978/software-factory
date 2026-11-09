@@ -64,8 +64,8 @@ describe("dashboard routes", dbTest, () => {
   };
   const post = (path: string, login: string, body: string) =>
     fetch(`${origin}${path}`, { method: "POST", headers: { ...as(login), origin, "content-type": "application/x-www-form-urlencoded" }, body, redirect: "manual" });
-  async function item(state: string, title = "t", extra: Partial<{ repo: string; criteria: string[] }> = {}) {
-    const ext = await fake.seed({ title, repo: extra.repo ?? null, acceptanceCriteria: extra.criteria ?? ["it works"] });
+  async function item(state: string, title = "t", extra: Partial<{ repo: string; criteria: string[]; body: string }> = {}) {
+    const ext = await fake.seed({ title, repo: extra.repo ?? null, acceptanceCriteria: extra.criteria ?? ["it works"], body: extra.body ?? "" });
     return { ext, id: (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, $2, $3, $4) returning id", [sourceId, ext, title, state])).rows[0].id };
   }
 
@@ -167,6 +167,26 @@ describe("dashboard routes", dbTest, () => {
     assert.match(view, /Other months are left out<\/li>/);
     assert.match(view, /Keeps the currency <strong>no scenario<\/strong>/);
     assert.match(html, /<label for="note">/);
+  });
+
+  test("the sign-off view shows the issue's body as scope and each file at the scenarios sha, a missing one said so", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("SignOff", "to sign", { repo: "octo/repo", body: "Why <b>this</b>" });
+    await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha, locked_files) values ($1, 1, 'sign-off', 'sc1', '{features/x.feature,features/gone.feature}')", [id]);
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    host.files.set("octo/repo@sc1:features/x.feature", "Feature: x\n  Scenario: at sc1\n");
+    const { html } = await get(`/items/${id}`, "octo");
+    assert.match(html, /<h2>Scope<\/h2><pre[^>]*>Why &lt;b&gt;this&lt;\/b&gt;<\/pre>/);
+    assert.match(html, /<h3>features\/x.feature<\/h3><pre>Feature: x\n  Scenario: at sc1\n<\/pre>/);
+    assert.match(html, /<h3>features\/gone.feature<\/h3><pre>\(missing at this commit\)<\/pre>/);
+  });
+
+  test("the sign-off view shows no Scope section for a blank body", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("SignOff", "to sign", { repo: "octo/repo", body: " \n\t\n" });
+    await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha, locked_files) values ($1, 1, 'sign-off', 'sc1', '{}')", [id]);
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    assert.doesNotMatch((await get(`/items/${id}`, "octo")).html, /<h2>Scope<\/h2>/);
   });
 
   test("the sign-off view marks every scenario of a feature tagged @regression", async () => {

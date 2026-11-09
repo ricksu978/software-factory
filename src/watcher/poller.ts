@@ -6,11 +6,13 @@ import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
-import { gate } from "../gate/readiness.ts";
-import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
+import { gate, type GateContext } from "../gate/readiness.ts";
+import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
+import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
+import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -18,7 +20,8 @@ export type PollDeps = {
   pool: pg.Pool;
   adapter: BacklogAdapter;
   repoHost: RepoHost;
-  judge: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** Reports what each call spent, so the gate records it as a readiness check (PBI 132). */
+  judge: GateContext["judge"];
   sourceId: string;
   /** How the gate asks for a split of an oversized item (PBI 143). Without it, no split is asked for. */
   split?: SplitDeps;
@@ -177,8 +180,15 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const label = src.label ?? "factory";
   const eligible = (fi: FactoryItem | null): boolean => fi !== null && !fi.closed && fi.labels.includes(label);
   const fetched = new Map<string, FactoryItem | null>();
+  // Each item read back stores its issue's repo, so an item held from before repos were stored gets one (PBI 137).
   const itemOf = async (ext: string) => {
-    if (!fetched.has(ext)) fetched.set(ext, await adapter.getItem(ext));
+    if (!fetched.has(ext)) {
+      const fi = await adapter.getItem(ext);
+      fetched.set(ext, fi);
+      if (fi) {
+        await pool.query("update item set repo = $3 where source_id = $1 and external_id = $2 and repo is distinct from $3", [sourceId, ext, fi.repo]);
+      }
+    }
     return fetched.get(ext)!;
   };
 
@@ -187,7 +197,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const listed = await adapter.listEligible(src.cursor);
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
-    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank });
+    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo });
   });
 
   w.step("reading the PRs of items in review");
@@ -263,6 +273,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
       openDeps, judge, adapter, policyErrors: r.policyErrors, split,
+      // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
+      recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
+      // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
+      splits: { get: (i) => keptSplit(pool, row.id, itemTextHash(i)), keep: (i, children) => keepSplit(pool, row.id, itemTextHash(i), children) },
     });
     // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.

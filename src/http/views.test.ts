@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { activityPage, floorPage, issueRef, phase0Page } from "./views.ts";
+import { activityPage, floorPage, issueRef, phase0Page, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -90,11 +90,69 @@ describe("pages that name an item", () => {
   });
 
   test("the Phase 0 report shows #N before the title", () => {
-    before(phase0Page([{ item_id: "i1", title: "Export a month", ...issue, pr_url: null, merged_at: null, cost: 0, risk_tier: null, tier_reasons: null }], null));
+    before(phase0Page([{ item_id: "i1", title: "Export a month", ...issue, pr_url: null, merged_at: null, cost: 0, risk_tier: null, tier_reasons: null }], 0, null));
   });
 
   test("the activity log shows #N in the item's column", () => {
     const html = activityPage([{ at: new Date(), external_id: "131", repo: "acme/widgets", title: "Export a month", kind: "transition", from: "Queued", to: "InProgress", event: "claimed" }], null);
     assert.match(html, /<td><a href="https:\/\/github.com\/acme\/widgets\/issues\/131">#131<\/a><\/td><td>Export a month<\/td>/);
+  });
+});
+
+describe("runDetailPage at sign-off", () => {
+  const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000146", external_id: "146", repo: "octo/repo", title: "t", state: "SignOff" },
+    run: null, policies: [], stages: [], readiness: [], question: { kind: "sign_off", body: "q" },
+    criteria: [{ criterion: "The owner sees the scope", scenarios: [] }], scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+
+  test("shows the scope with its lines and escaped, then the criteria and the files, all before the buttons", () => {
+    const html = runDetailPage(detail({ scope: "## Why\n<b>bold</b>", pending: [{ path: "features/a.feature", text: "Feature: <i>a</i>" }] }), null);
+    const at = ["<h2>Scope</h2>", "Criteria and their scenarios", "<h3>features/a.feature</h3>", "Approve the scenarios", "Ask for changes"].map((s) => html.indexOf(s));
+    assert.ok(at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1])), JSON.stringify(at));
+    assert.match(html, /## Why\n&lt;b&gt;bold&lt;\/b&gt;/);
+    assert.match(html, /Feature: &lt;i&gt;a&lt;\/i&gt;/);
+  });
+
+  test("shows no Scope section when there's no scope", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Scope<\/h2>/);
+  });
+});
+
+describe("readiness spend (PBI 132)", () => {
+  const detail = (readiness: RunDetail["readiness"]): RunDetail => ({
+    item: { id: "i1", title: "Checkout redesign", state: "NotReady", external_id: "132", repo: null }, run: null, policies: [],
+    stages: [{ stage_id: "specify", attempt: 1, model: "claude-opus-5-5", tokens_in: 5000, tokens_out: 900, cost_usd: "0.42", status: "passed", transcript_ref: null }],
+    readiness, question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null,
+  });
+
+  test("Run detail lists each readiness check right after the stages, with its time, model, tokens and cost", () => {
+    const html = runDetailPage(detail([{ model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031, ranAt: new Date("2026-11-09T10:15:00Z") }]), null);
+    const section = /<h2>Stages<\/h2>[\s\S]*?<h2>Readiness checks<\/h2>([\s\S]*?)(<h2>|<\/main>)/.exec(html)?.[1];
+    assert.ok(section, "no Readiness checks section right after Stages");
+    const row = /<tbody>([\s\S]*)<\/tbody>/.exec(section)![1];
+    assert.match(row, /<time datetime="2026-11-09T10:15:00.000Z">2026-11-09 10:15<\/time>/);
+    for (const v of ["claude-haiku-4-5", "1200 in, 80 out", "$0.0031"]) assert.ok(row.includes(v), v);
+  });
+
+  test("Run detail names each check's call, the judge or the split proposal", () => {
+    const at = new Date("2026-11-09T10:15:00Z");
+    const html = runDetailPage(detail([
+      { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031, ranAt: at },
+      { kind: "split", model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, ranAt: at },
+    ]), null);
+    const rows = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(html.split("<h2>Readiness checks</h2>")[1])![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
+    assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5<\/td>/);
+    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*\$0\.2100/);
+  });
+
+  test("Run detail says so when no readiness check has run", () => {
+    assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
+  });
+
+  test("the Phase 0 report shows readiness spend beside stage spend, to four places", () => {
+    const html = phase0Page([{ item_id: "i1", title: "Pay by card", external_id: "1", repo: null, pr_url: null, merged_at: null, cost: 2, risk_tier: null, tier_reasons: null }], 0.0092, null);
+    assert.match(html, /<dl><dt>Stage spend<\/dt><dd>\$2\.00<\/dd><dt>Readiness spend<\/dt><dd>\$0\.0092<\/dd><\/dl>/);
   });
 });

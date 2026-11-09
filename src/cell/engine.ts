@@ -146,6 +146,46 @@ export async function loadInputs(read: (path: string) => Promise<string | null>,
   }
 }
 
+/** What a stage attempt's agent calls cost, handed back when the stage closes. */
+export type MeteredStage = {
+  stageId: string; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string;
+  /** The last usage reading a call reported, or null when none did. */
+  usage: AgentResult["usage"];
+};
+
+/**
+ * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
+ * is an error, and the model is never asked, so no call can go unrecorded.
+ */
+export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
+  open(stageId: string, attempt: number): void;
+  close(): MeteredStage | null;
+  ask(a: AgentArgs): Promise<AgentResult>;
+} {
+  let open: MeteredStage | null = null;
+  return {
+    open(stageId, attempt) {
+      open = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+    },
+    close() {
+      const c = open;
+      open = null;
+      return c;
+    },
+    async ask(a) {
+      const stage = open;
+      if (!stage) throw new Error("An AI call was made while no stage was open, so its cost would go unrecorded");
+      const r = await agent(a);
+      stage.costUsd += r.costUsd;
+      stage.tokensIn += r.tokensIn;
+      stage.tokensOut += r.tokensOut;
+      stage.transcript += r.transcript;
+      if (r.usage) stage.usage = r.usage;
+      return r;
+    },
+  };
+}
+
 export async function runCell(d: CellDeps): Promise<Outcome> {
   const { api, ctx, git, dir, sop, config, policies } = d;
   const tag = `@pbi-${ctx.externalId}`;
@@ -177,8 +217,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const modelOf = (id: Recorded) => sop.models[stageOf(id === "merge" ? "green" : id).model ?? "coding"];
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
-  // The stage attempt in flight, with what its agent calls cost so far.
-  let current: { stageId: Recorded; attempt: number; costUsd: number; tokensIn: number; tokensOut: number; transcript: string; report: string | null; usage?: AgentResult["usage"]; message?: string } | null = null;
+  // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
+  const meter = stageMeter(d.agent);
+  // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
+  let current: { stageId: Recorded; attempt: number; report: string | null; message?: string } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
@@ -214,7 +256,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (d.now().getTime() - started > WALL_CLOCK_MS) throw new Blocked("the run used up its 8h wall clock");
     const attempt = (lastAttempt.get(stageId) ?? 0) + 1;
     lastAttempt.set(stageId, attempt);
-    current = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", report: null };
+    current = { stageId, attempt, report: null };
+    meter.open(stageId, attempt);
     await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0 });
     return attempt;
   };
@@ -226,6 +269,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const c = current;
     if (!c) return;
     current = null;
+    const m = meter.close()!;
     // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
     // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
     const upload = async (kind: "transcript" | "report", body: string) => {
@@ -237,19 +281,19 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       });
     };
     const uploads = async () => {
-      if (c.transcript) await upload("transcript", c.transcript);
+      if (m.transcript) await upload("transcript", m.transcript);
       if (c.report !== null) await upload("report", c.report);
     };
     if (status === "stopped") await uploads();
-    await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: c.tokensIn, tokensOut: c.tokensOut,
-      costUsd: c.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
+    await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
+      costUsd: m.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
-      ...(c.usage ? { usage: { utilization: c.usage.utilization, resetsAt: c.usage.resetsAt === null ? null : new Date(c.usage.resetsAt * 1000).toISOString() } } : {}) });
+      ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
   };
 
   const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> =>
-    settle(await d.agent({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal }));
+    settle(await meter.ask({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal }));
   // A stage's own prompted call, or the merge pass's. Its text is the stage's message on Floor, so a judge's or the
   // risk classifier's output, which go through ask or settle alone, never shows there.
   const say = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> => {
@@ -258,16 +302,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return r;
   };
 
-  // Every agent call, a stage's own or the risk classifier's, is charged to the current stage, and a stop or a usage
-  // limit leaves the run the same way.
+  // Every agent call, a stage's own or the risk classifier's, goes through the meter, and a stop or a usage limit
+  // leaves the run the same way.
   const settle = (r: AgentResult): AgentResult => {
-    if (current) {
-      current.costUsd += r.costUsd;
-      current.tokensIn += r.tokensIn;
-      current.tokensOut += r.tokensOut;
-      current.transcript += r.transcript;
-      if (r.usage) current.usage = r.usage;
-    }
     // An aborted runAgent returns ok:false and never throws, so the signal is what says the run stopped.
     if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
     if (r.limit) throw new Limited(r.limit.resetsAt);
@@ -531,7 +568,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const diff = (await run("git", ["diff", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
       return await classifyRisk(diff, files, {
         sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal,
-        agent: async (a) => settle(await d.agent(a)),
+        agent: async (a) => settle(await meter.ask(a)),
       });
     } catch (e) {
       // A limit or a stop leaves the run as any stage's does. Any other failure, an API error, a timeout or a diff too
