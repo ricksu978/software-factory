@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { loadPolicy, parseCriteria, parseJudgement, PolicyError, readinessSha, type Policy, type ReadinessTexts } from "./policy.ts";
+import { loadPolicy, parseCriteria, parseJudgement, PolicyError, readinessSha, type Policy, type ReadinessLogic, type ReadinessTexts } from "./policy.ts";
 
 const repoFiles = (files: Record<string, string>) => async (path: string) => files[path] ?? null;
 // The loader's own directory, so a cell that points FACTORY_POLICY_DIR at its image's copy compares like with like.
@@ -127,5 +127,19 @@ describe("readinessSha", () => {
 
   test("a missing file and one holding the word absent give different hashes", () => {
     for (const key of ["dod", "config"] as const) assert.notEqual(readinessSha({ ...texts, [key]: null }), readinessSha({ ...texts, [key]: "absent" }), key);
+  });
+
+  const logic: ReadinessLogic = { judgePrompt: "Judge the item.", version: 1 };
+
+  test("it covers the factory's readiness logic: the judge's prompt and the readiness version (PBI 149)", () => {
+    const base = readinessSha(texts, logic);
+    assert.equal(readinessSha({ ...texts }, { ...logic }), base);
+    assert.notEqual(base, readinessSha(texts), "the logic adds to the repo files alone");
+    assert.notEqual(readinessSha(texts, { ...logic, judgePrompt: "Judge the item briefly." }), base);
+    assert.notEqual(readinessSha(texts, { ...logic, version: 2 }), base);
+  });
+
+  test("text moved between the judge's prompt and the version changes the hash", () => {
+    assert.notEqual(readinessSha(texts, { judgePrompt: "p1", version: 1 }), readinessSha(texts, { judgePrompt: "p", version: 11 }));
   });
 });

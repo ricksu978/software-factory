@@ -446,6 +446,17 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(judged, []);
   });
 
+  test("a new readiness logic re-gates a NotReady item in an unknown repo too", async () => {
+    const ext = await seed({ repo: "someone/else" });
+    const pollWith = (version: number) => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge, sourceId, logic: { judgePrompt: "p", version } });
+    await pollWith(1);
+    await pollWith(2);
+    await pollWith(2);
+    const moves = (await db.pool.query("select payload->>'event' as e from event where item_id = $1 and kind = 'transition'", [(await row(ext)).id])).rows;
+    assert.equal(moves.filter((m) => m.e === "policy_changed").length, 1);
+    assert.equal((await row(ext)).state, "NotReady");
+  });
+
   test("an item in an unknown repo is told so, even when its host can't list dependencies", async () => {
     const ext = await seed({ repo: "someone/else" });
     fake.adapter.openDependencies = async () => {
@@ -500,5 +511,21 @@ describe("pollOnce", dbTest, () => {
       else process.env.FACTORY_POLICY_DIR = old;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {
+    verdict = "failed";
+    const ext = await seed();
+    const logic = { judgePrompt: "Judge it.", version: 1 };
+    const pollWith = (l: typeof logic) => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge, sourceId, logic: l });
+    await pollWith(logic);
+    await pollWith({ ...logic });
+    assert.deepEqual(judged, [ext], "the same logic doesn't re-gate");
+    await pollWith({ ...logic, version: 2 });
+    await pollWith({ ...logic, version: 2 });
+    assert.deepEqual(judged, [ext, ext], "a raised version re-gates once");
+    const moves = (await db.pool.query("select payload->>'event' as e from event where item_id = $1 and kind = 'transition'", [(await row(ext)).id])).rows;
+    assert.equal(moves.filter((m) => m.e === "policy_changed").length, 1);
+    assert.equal((await row(ext)).state, "NotReady");
   });
 });

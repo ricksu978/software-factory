@@ -36,7 +36,10 @@ export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boole
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
 
-/** The rules no policy file can weaken (spec §6). Any failure here means the judge is never asked. */
+/**
+ * The rules no policy file can weaken (spec §6). Any failure here means the judge is never asked.
+ * Raise READINESS_VERSION in src/policy/policy.ts whenever these rules change (PBI 149).
+ */
 function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
   const failed: Verdict[] = [];
   const policyErrors = ctx.policyErrors ?? [];
