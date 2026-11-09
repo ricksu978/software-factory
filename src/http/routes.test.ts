@@ -154,6 +154,22 @@ describe("dashboard routes", dbTest, () => {
     }
   });
 
+  test("an InReview item shows the open run's PR on Floor and Run detail, and an ended run's PR nowhere", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("InReview", "in review");
+    await db.pool.query(
+      `insert into run (item_id, run_number, started_at, ended_at, outcome, pr_number, pr_url)
+       values ($1, 1, now() - interval '2 days', now() - interval '1 day', 'failed', 40, 'https://github.com/o/r/pull/40')`, [id]);
+    await db.pool.query("insert into run (item_id, run_number, next_stage, pr_number, pr_url) values ($1, 2, 'review', 42, 'https://github.com/o/r/pull/42')", [id]);
+    const floor = (await get("/", "octo")).html;
+    assert.equal(floor.match(/<a href="https:\/\/github.com\/o\/r\/pull\/42">PR #42<\/a>/g)?.length, 2);
+    assert.doesNotMatch(floor, /pull\/40|PR #40/);
+    assert.match((await get(`/items/${id}`, "octo")).html, /<p>InReview <a href="https:\/\/github.com\/o\/r\/pull\/42">PR #42<\/a>/);
+    await db.pool.query("update run set pr_url = null where run_number = 2 and item_id = $1", [id]);
+    assert.doesNotMatch((await get("/", "octo")).html, /PR #4\d|pull\/4\d/);
+    assert.doesNotMatch((await get(`/items/${id}`, "octo")).html, /PR #4\d|pull\/4\d/);
+  });
+
   test("the sign-off view lists each criterion with its tagged scenarios, and marks one with none", async () => {
     await person("octo", "viewer");
     const { id } = await item("SignOff", "to sign", { repo: "octo/repo", criteria: ["Exports one month", "Keeps the currency"] });

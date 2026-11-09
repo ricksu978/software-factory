@@ -989,6 +989,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - Migration `004` makes `github_login` unique whatever its case, so a comment maps to at most one user, and `POST /users` answers 400 for a login another user holds.
     - Run detail shows the signed-off feature files at `features_lock_sha`.
     - **Issue numbers (PBI 131).** Floor's four lists, the Run detail heading, the Phase 0 report and Activity show each item's external id as `#N` before its title. `issueRef` in `views.ts` renders it. `issueRepos(pool, itemIds)` in `src/store/issues.ts` finds each item's GitHub repo. That's the repo of the item's newest run with a `repo_id`, or else `item.repo`, which intake stores from the issue (PBI 137). The board's `repo_map` never decides, since one board can hold issues from several repos. `#N` links to `https://github.com/<owner>/<repo>/issues/<N>` only when that repo is on GitHub and N is all digits. Otherwise it's plain text, never a link to a guessed repo. The title stays a separate link to Run detail.
+    - **PR links (PBI 145).** An InReview item shows `PR #N` as its own link under "Waiting on you", in the "In flight" table, and after the state on Run detail's state line. `prLink` in `views.ts` renders it from the open run's `pr_number` and `pr_url`, the run with `ended_at` null. With no open run, no `pr_url` or no `pr_number`, it renders nothing, and an ended run's PR never stands in.
 
 - [ ] **Step 1: Write failing tests:**
   - **Review Focus 4.**
