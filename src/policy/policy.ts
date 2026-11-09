@@ -84,11 +84,21 @@ export function parseJudgement(reply: string, policy: Policy): Verdict[] {
 export type ReadinessTexts = Record<"dor" | "scenarios" | "pr-review" | "risk" | "dod" | "config", string | null>;
 
 /**
+ * The factory's own readiness logic (PBI 149): the prompt it gives the judge, and the version of the engine rules no
+ * policy file can weaken. A change to either re-checks every NotReady item.
+ */
+export type ReadinessLogic = { judgePrompt: string; version: number };
+
+/** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
+export const READINESS_VERSION = 1;
+
+/**
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its
  * UTF-8 byte length, a colon and the text, so no text can slide across into the next file. A missing file goes in
  * as `-;`, which no length prefix starts with, so it never matches a file whose text is `absent` or anything else.
  */
-export function readinessSha(texts: ReadinessTexts): string {
+export function readinessSha(texts: ReadinessTexts, _logic?: ReadinessLogic): string {
+  // PBI 149 stub: the logic isn't covered yet.
   const hash = createHash("sha256");
   for (const key of ["dor", "scenarios", "pr-review", "risk", "dod", "config"] as const) {
     const text = texts[key];

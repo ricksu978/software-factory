@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import type { FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
+import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
 
 export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
@@ -130,6 +131,14 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
     'Set "oversized" to true when the item is too big for one Sprint, or false when it fits. Size is never a flag.',
     "Write nothing else.",
   ].join("\n");
+}
+
+/**
+ * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md, and
+ * READINESS_VERSION. PBI 149 stub: the prompt isn't filled in yet.
+ */
+export function readinessLogic(): ReadinessLogic {
+  return { judgePrompt: "", version: READINESS_VERSION };
 }
 
 const JUDGE_TIMEOUT_MS = 120_000;

@@ -10,12 +10,14 @@ import { load, long, need, testDb } from "./pbi-8.steps.ts";
 // lazily, so while it doesn't exist every scenario fails on its first Then, which checks that a poll ran. PBI 142's
 // steps reuse this harness through the exports.
 export const REPO = "octo/repo";
+export { baseFiles };
 
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
 type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }) => Promise<string>;
+export type Logic = { judgePrompt: string; version: number };
 type Poller = {
-  pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string }) => Promise<unknown>;
+  pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic }) => Promise<unknown>;
 };
 export type Ctx = {
   fake?: Fake;
@@ -24,20 +26,31 @@ export type Ctx = {
   extIds: string[];
   pr?: number;
   judge: "pass" | "fail" | "throw";
+  /** PBI 149: a judge that fails only this line, with this reason. Only read while `judge` is "fail". */
+  failLine?: { index: number; reason: string };
+  /** PBI 149: how often the judge was asked about each item, by external id. */
+  asked: Map<string, number>;
+  /** PBI 149: the readiness logic the factory runs with. Unset, the poller uses its own. */
+  logic?: Logic;
   polls: number;
   error?: unknown;
 };
 
 export function ctx(world: object): Ctx {
   const w = world as { pbi12?: Ctx };
-  w.pbi12 ??= { extIds: [], judge: "pass", polls: 0 };
+  w.pbi12 ??= { extIds: [], judge: "pass", asked: new Map(), polls: 0 };
   return w.pbi12;
 }
 
-const judge = (c: Ctx): Judge => async (_item, dor) => {
+const judge = (c: Ctx): Judge => async (item, dor) => {
+  c.asked.set(item.externalId, (c.asked.get(item.externalId) ?? 0) + 1);
   if (c.judge === "throw") throw new Error("usage limit reached");
-  const status = c.judge === "pass" ? "passed" : "failed";
-  return [...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status, reason: status })), JSON.stringify({ flags: [] })].join("\n");
+  const line = (index: number) => {
+    const failed = c.judge === "fail" && (!c.failLine || c.failLine.index === index);
+    const reason = failed ? (c.failLine?.reason ?? "failed") : "passed";
+    return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
+  };
+  return [...dor.criteria.map((cr) => line(cr.index)), JSON.stringify({ flags: [] })].join("\n");
 };
 
 const baseFiles: Record<string, string> = {
@@ -69,7 +82,7 @@ export async function poll(c: Ctx): Promise<void> {
   const poller = await load<Poller>("src/watcher/poller.ts");
   if (!poller?.pollOnce || !c.fake || !c.host || !c.sourceId) return;
   try {
-    await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId });
+    await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId, ...(c.logic ? { logic: c.logic } : {}) });
     c.polls++;
   } catch (e) {
     c.error = e;

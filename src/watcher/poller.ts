@@ -7,7 +7,7 @@ import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "..
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { gate } from "../gate/readiness.ts";
 import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
-import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
+import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
 
@@ -23,6 +23,11 @@ export type PollDeps = {
   split?: SplitDeps;
   /** Where a poll that runs long warns, and the clock that times it (PBI 134). */
   slow?: Slow;
+  /**
+   * The factory's own readiness logic, the judge's prompt and the readiness version (PBI 149). The fingerprint covers
+   * it, so a restart with new logic re-checks every NotReady item. PBI 149 stub: not read yet.
+   */
+  logic?: ReadinessLogic;
 };
 
 type Row = {
