@@ -7,10 +7,10 @@ import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
-import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type RunDetail, type Scenario } from "./views.ts";
+import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -26,7 +26,7 @@ export type DashboardDeps = {
   readBlob?: (path: string) => Promise<string | null>;
 };
 
-const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill"];
+const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
 const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
 const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
@@ -95,6 +95,14 @@ async function floor(pool: pg.Pool) {
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
   )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
   const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
+  // A restart being prepared (PBI 140) counts down its wrap-up while any cell still holds a live lease.
+  const prepared = overrides.find((o) => o.scope === "factory" && o.kind === "restart");
+  let restart: Restart | null = null;
+  if (prepared) {
+    const running = (await pool.query<{ n: number }>("select count(*)::int as n from item where state = 'InProgress' and lease_expires > now()")).rows[0].n;
+    const left = prepared.createdAt.getTime() + restartWaitMs() - Date.now();
+    restart = { running, minutesLeft: Math.max(0, Math.ceil(left / 60_000)), reason: prepared.reason };
+  }
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
@@ -102,6 +110,7 @@ async function floor(pool: pg.Pool) {
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), factory,
+    restart,
   };
 }
 
@@ -361,8 +370,9 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
           return true;
         }
       }
-      // The scheduler applies it on its next tick, every 15 seconds, and /lease reads pause, kill and stop_run directly.
+      // The scheduler applies it on its next tick, every 15 seconds, and /lease reads pause, kill, restart and stop_run directly.
       await setOverride(deps.pool, { scope: itemId ? "item" : "factory", targetId: itemId, kind, reason: b.reason.trim(), createdBy: user.id, expiresAt: null });
+      console.log(`override: ${identity.subject} set the ${itemId ? `${kind} on item ${itemId}` : `factory ${kind}`}: ${JSON.stringify(b.reason.trim())}`);
       send(res, 303, "", { location: itemId ? `/items/${itemId}` : "/" });
       return true;
     }

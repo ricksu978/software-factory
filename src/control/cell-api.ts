@@ -125,12 +125,13 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
 const routes: Record<string, Route> = {
   "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
-    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13). Either one tells every cell to stop.
+    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13). Either one tells every cell to stop, as a pause and
+    // a restart being prepared do (PBI 140).
     if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) return { ok: true, stop: true };
     const r = await c.query<{ stop: boolean }>(
       `select exists (select from override o
          where o.cleared_at is null and (o.expires_at is null or o.expires_at > $3)
-           and ((o.scope = 'factory' and o.kind in ('pause', 'kill'))
+           and ((o.scope = 'factory' and o.kind in ('pause', 'kill', 'restart'))
              or (o.scope = 'backlog' and o.target_id = $2 and o.kind = 'pause')
              or (o.scope = 'item' and o.target_id = $1 and o.kind = 'stop_run'))) as stop`,
       [run.item_id, run.source_id, now],
@@ -159,6 +160,13 @@ const routes: Record<string, Route> = {
       "select stage_id, max(attempt) as attempt from stage_run where run_id = $1 group by stage_id",
       [run.run_id],
     );
+    // PBI 140: when the next stage's last attempt was stopped, by a restart's wrap-up or the launcher, the cell resumes
+    // it from the work in progress on the branch instead of starting the stage over.
+    const last = await c.query<{ attempt: number; status: string }>(
+      "select attempt, status from stage_run where run_id = $1 and stage_id = $2 order by attempt desc limit 1",
+      [run.run_id, run.next_stage],
+    );
+    const resume = last.rows[0]?.status === "stopped" ? { stageId: run.next_stage, attempt: last.rows[0].attempt } : null;
     let trustedComments: ReviewComment[] = [];
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief.
     if (run.next_stage === "address" && run.pr_number !== null) {
@@ -179,6 +187,7 @@ const routes: Record<string, Route> = {
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       trustedComments,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
+      resume,
     };
   },
 
@@ -234,7 +243,8 @@ const routes: Record<string, Route> = {
   "POST stage": async (deps, { c, run, body, now }) => {
     const stageId = str(body.stageId, "stageId");
     const attempt = int(body.attempt, "attempt");
-    const status = oneOf(body.status, "status", ["started", "passed", "failed"] as const);
+    // `stopped` is an attempt a stop cut short (PBI 140). It counts against none of the stage's retries.
+    const status = oneOf(body.status, "status", ["started", "passed", "failed", "stopped"] as const);
     const num = (v: unknown) => (typeof v === "number" ? v : null);
     const text = (v: unknown) => (typeof v === "string" ? v : null);
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
@@ -256,6 +266,18 @@ const routes: Record<string, Route> = {
     if (status === "passed") {
       const next = deps.stageAfter(run.sop_version, stageId);
       if (next) await c.query("update run set next_stage = $2 where id = $1", [run.run_id, next]);
+    }
+    // A cell that stops while a restart is being prepared has pushed its work and is about to exit, so its claim ends
+    // here. The item goes back to Queued at the stage it was in, and the restarted factory starts it again at once
+    // instead of waiting out the lease. Under a pause or a stop_run the claim stays, so the scheduler's handling holds.
+    if (status === "stopped") {
+      const restart = await c.query(
+        "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
+        [now],
+      );
+      if (restart.rowCount) {
+        await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
+      }
     }
     const usage = body.usage as { utilization?: unknown; resetsAt?: unknown } | undefined;
     if (typeof usage?.utilization === "number") {

@@ -483,7 +483,9 @@ Then("Floor shows {string}", function (text: string) {
   assert.ok(unescape(floorHtml(this)).includes(text), `Floor doesn't show "${text}"`);
 });
 
-Then("Floor doesn't show {string}", function (text: string) {
+Then("Floor doesn't show {string}", long, async function (text: string) {
+  // Opened afresh, since a scenario can reach this step straight after a POST, with no Floor page to read yet.
+  await open(p89(this), "/");
   assert.ok(!unescape(floorHtml(this)).includes(text), `Floor shows "${text}"`);
 });
 

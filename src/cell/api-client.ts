@@ -10,7 +10,7 @@ export class LeaseLost extends Error {
 
 export type CheckStatus = "pending" | "success" | "failure" | "none";
 export type StageReport = {
-  stageId: string; attempt: number; status: "started" | "passed" | "failed"; model: string;
+  stageId: string; attempt: number; status: "started" | "passed" | "failed" | "stopped"; model: string;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
   /** The text of the stage's own prompted agent call, for Floor. The cell API keeps the first 500 characters. */
   message?: string;

@@ -697,6 +697,59 @@ describe("runCell", () => {
     assert.ok(!h.transitions().length);
   });
 
+  // PBI 140: a cell stopped for a restart pushes its work in progress and reports its open attempt stopped, so the
+  // restarted factory resumes the stage from that commit. One whose lease was lost pushes nothing.
+  const stopMidGreen = (leases: ("stop" | "lost")[]) => {
+    let n = 0;
+    let armed = false;
+    return harness({
+      nextStage: "green",
+      lease: async () => {
+        if (!armed) return { stop: false };
+        const answer = leases[Math.min(n++, leases.length - 1)];
+        if (answer === "lost") throw new LeaseLost("fenced");
+        return { stop: true };
+      },
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        writeFileSync(join(a.cwd, "app.txt"), "half done\n");
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+  };
+
+  test("a stop pushes the work-in-progress commit, then reports the open attempt stopped, not failed", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"]);
+    assert.equal(await h.run(), "stopped");
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), git(h.dir, "rev-parse", "HEAD"));
+    assert.equal(git(h.root, "--git-dir", h.origin, "show", `${BRANCH}:app.txt`), "half done");
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status);
+    assert.deepEqual(green, ["started", "stopped"]);
+    assert.ok(!h.transitions().length);
+  });
+
+  test("a stop whose lease check before the push finds the lease lost pushes nothing and reports nothing", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop", "lost"]);
+    assert.equal(await h.run(), "stopped");
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), h.lockSha);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+  });
+
+  test("a stage resumed after a stop tells the agent its work is on the branch, and numbers on from the stopped attempt", async () => {
+    const h = harness({ nextStage: "green", ctx: { stageAttempts: { green: 1 }, resume: { stageId: "green", attempt: 1 } } });
+    assert.equal(await h.run(), "done");
+    const green = h.agentCalls.filter((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"));
+    assert.ok(green.length);
+    for (const a of green) assert.match(a.prompt, /already on the branch[\s\S]*carry on/i);
+    assert.doesNotMatch(h.agentCalls.find((a) => a.stage === "self-review")!.prompt, /already on the branch/);
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.attempt), [2]);
+  });
+
   test("a 409 from the cell API stops the run at once, with no push and no further calls", async () => {
     const h = harness({ failOn: "/policy-results" });
     assert.equal(await h.run(), "stopped");
