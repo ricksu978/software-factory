@@ -1,6 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
+import type { SplitDeps, SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -14,7 +15,15 @@ export type GateContext = {
   adapter: BacklogAdapter;
   /** Each PolicyError the caller hit loading the five policy files, such as a run: line outside dod.md. */
   policyErrors?: string[];
+  /** How to ask for a split of an oversized item (PBI 143). */
+  split?: SplitDeps;
 };
+
+/**
+ * `oversized` is the judge's reading of the item's size, false when its last line doesn't say true. `split` is null
+ * when the item isn't oversized or the judge was never asked.
+ */
+export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
 
@@ -37,7 +46,7 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
  * after any readiness input changes posts a fresh one. The gate never edits the item.
  */
-export async function gate(item: FactoryItem, ctx: GateContext): Promise<{ ready: boolean; results: Verdict[] }> {
+export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
   let results = engineRules(item, ctx);
   if (results.length === 0 && ctx.dor) {
     const dor = ctx.dor;
