@@ -17,22 +17,29 @@ type PolicyModule = { loadPolicy?: (read: (path: string) => Promise<string | nul
 type GateModule = {
   gate?: (item: FactoryItem, ctx: {
     readinessSha: string; dor: Policy | null; dodExists: boolean; configValid: boolean; repoKnown: boolean; openDeps: string[];
-    judge: (item: FactoryItem, dor: Policy) => Promise<string>; adapter: BacklogAdapter;
+    judge: Judge; adapter: BacklogAdapter; recordCheck?: RecordCheck; now?: () => Date;
   }) => Promise<{ ready: boolean; results: Verdict[] }>;
 };
+/** PBI 132: the judge hears what each call spent, and the gate records each call as a readiness check. */
+export type Spend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+export type Judge = (item: FactoryItem, dor: Policy, spent?: (s: Spend) => void) => Promise<string>;
+export type RecordCheck = (item: FactoryItem, check: Spend & { ranAt: Date }) => Promise<void>;
 type Fake = { adapter: BacklogAdapter; seed(item: Partial<FactoryItem>): Promise<string>; comments(id: string): Promise<string[]> };
 
-type Ctx = {
+export type Ctx = {
   files: Map<string, string>;
   fake?: Fake;
   itemId?: string;
-  judge?: (item: FactoryItem, dor: Policy) => Promise<string>;
+  judge?: Judge;
+  /** Set by PBI 132's steps. */
+  recordCheck?: RecordCheck;
+  now?: () => Date;
   outcome?: { ready: boolean; results: Verdict[] };
   policy?: Policy | null;
   error?: unknown;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi13?: Ctx };
   w.pbi13 ??= { files: new Map() };
   return w.pbi13;
@@ -45,7 +52,7 @@ async function load<T>(path: string): Promise<T | null> {
 
 const read = (c: Ctx) => async (path: string) => c.files.get(path) ?? null;
 
-async function item(c: Ctx, partial: Partial<FactoryItem>): Promise<void> {
+export async function item(c: Ctx, partial: Partial<FactoryItem>): Promise<void> {
   const mod = await load<{ fakeBacklog: () => Fake }>("src/adapters/fake.ts");
   if (!mod) return;
   c.fake = mod.fakeBacklog();
@@ -103,21 +110,29 @@ Given("a judge that passes every line and flags {string}", function (flag: strin
   ctx(this).judge = scriptedJudge(null, "", [flag]);
 });
 
-When("the readiness gate checks the item", async function () {
-  const c = ctx(this);
+/** One run of the gate over the item as the fake backlog holds it now. PBI 132 runs it more than once. */
+export async function checkItem(world: object): Promise<void> {
+  const c = ctx(world);
   const policy = await load<PolicyModule>("src/policy/policy.ts");
   const gate = await load<GateModule>("src/gate/readiness.ts");
   if (!policy?.loadPolicy || !gate?.gate || !c.fake || !c.itemId || !c.judge) return;
+  c.outcome = undefined;
+  c.error = undefined;
   try {
     const dor = await policy.loadPolicy(read(c), "dor");
     const found = await c.fake.adapter.getItem(c.itemId);
     assert.ok(found);
     c.outcome = await gate.gate(found, {
       readinessSha: "scenario", dor, dodExists: true, configValid: true, repoKnown: true, openDeps: [], judge: c.judge, adapter: c.fake.adapter,
+      ...(c.recordCheck ? { recordCheck: c.recordCheck } : {}), ...(c.now ? { now: c.now } : {}),
     });
   } catch (e) {
     c.error = e;
   }
+}
+
+When("the readiness gate checks the item", async function () {
+  await checkItem(this);
 });
 
 When("the factory loads the {string} policy from that repo", async function (name: string) {

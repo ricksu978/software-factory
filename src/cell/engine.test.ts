@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, commandEnv, loadInputs, runCell, type CellContext, type CellDeps } from "./engine.ts";
+import { changedFiles, commandEnv, loadInputs, runCell, stageMeter, type CellContext, type CellDeps } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -196,6 +196,34 @@ describe("changedFiles", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("stageMeter", () => {
+  const result = (cost: number): AgentResult => ({
+    ok: true, text: "done", costUsd: cost, tokensIn: 10, tokensOut: 2, model: "m", limit: null, usage: { utilization: 0.4, resetsAt: null }, transcript: `{"c":${cost}}\n`,
+  });
+  const args = (prompt: string): AgentArgs => ({ prompt, model: "m", cwd: ".", mode: "cell", signal: new AbortController().signal });
+
+  test("charges each call to the open stage and hands the sum back when it closes", async () => {
+    const meter = stageMeter(async (a) => result(a.prompt === "one" ? 0.25 : 0.5));
+    meter.open("green", 2);
+    await meter.ask(args("one"));
+    await meter.ask(args("two"));
+    assert.deepEqual(meter.close(), {
+      stageId: "green", attempt: 2, costUsd: 0.75, tokensIn: 20, tokensOut: 4, transcript: '{"c":0.25}\n{"c":0.5}\n', usage: { utilization: 0.4, resetsAt: null },
+    });
+    assert.equal(meter.close(), null);
+  });
+
+  test("a call while no stage is open throws, and the model is never asked", async () => {
+    const asked: string[] = [];
+    const meter = stageMeter(async (a) => { asked.push(a.prompt); return result(0.1); });
+    await assert.rejects(meter.ask(args("before")), /AI call was made while no stage was open/);
+    meter.open("specify", 1);
+    meter.close();
+    await assert.rejects(meter.ask(args("between")), /AI call was made while no stage was open/);
+    assert.deepEqual(asked, []);
   });
 });
 

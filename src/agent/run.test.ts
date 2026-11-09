@@ -210,3 +210,19 @@ test("haikuJudge throws when the run fails, so a usage limit never reads as the 
   const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => reply({ ok: false, text: "limit", limit: { resetsAt: 1 } }));
   await assert.rejects(judge(item, dor), /readiness judge failed/);
 });
+
+test("haikuJudge reports what a call spent, whether it answers or fails (PBI 132)", async () => {
+  const spend = { model: "claude-haiku-5-5", tokensIn: 900, tokensOut: 40, costUsd: 0.0012 };
+  for (const r of [reply({ ...spend, text: "raw" }), reply({ ...spend, ok: false, text: "API Error: 500" }), reply({ ...spend, ok: false, limit: { resetsAt: 1 } })]) {
+    const heard: unknown[] = [];
+    await haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => r)(item, dor, (s) => heard.push(s)).catch(() => {});
+    assert.deepEqual(heard, [spend]);
+  }
+});
+
+test("haikuJudge reports a spend of nothing when the run itself throws, then throws", async () => {
+  const heard: unknown[] = [];
+  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => { throw new Error("spawn failed"); });
+  await assert.rejects(judge(item, dor, (s) => heard.push(s)), /spawn failed/);
+  assert.deepEqual(heard, [{ model: "claude-haiku-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 }]);
+});

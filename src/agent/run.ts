@@ -149,10 +149,22 @@ export function readinessLogic(): ReadinessLogic {
 
 const JUDGE_TIMEOUT_MS = 120_000;
 
+/** What one readiness judge call spent, reported whether the call answered or failed (PBI 132). */
+export type JudgeSpend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+
 export function haikuJudge(sop: JudgeSop, run: (a: AgentArgs) => Promise<AgentResult> = runAgent) {
-  return async (item: FactoryItem, dor: JudgePolicy): Promise<string> => {
-    const r = await run({ prompt: judgePrompt(item, dor), model: sop.models.triage, cwd: tmpdir(), maxTurns: 1, mode: "judge",
-      signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS) });
+  return async (item: FactoryItem, dor: JudgePolicy, spent?: (s: JudgeSpend) => void): Promise<string> => {
+    const model = sop.models.triage;
+    let r: AgentResult;
+    try {
+      r = await run({ prompt: judgePrompt(item, dor), model, cwd: tmpdir(), maxTurns: 1, mode: "judge", signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS) });
+    } catch (e) {
+      // runAgent folds its own failures, so a throw here means the run never started. It spent nothing, and says so.
+      spent?.({ model, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+      throw e;
+    }
+    // What the call spent is reported before its outcome is read, so a failed call is counted too (PBI 132).
+    spent?.({ model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
     // A failed run isn't a reply, so the gate never reads a usage limit as the item failing. The poller retries next poll.
     if (!r.ok) throw new Error(`readiness judge failed: ${r.limit ? `usage limit until ${r.limit.resetsAt}` : r.text}`);
     return r.text;
