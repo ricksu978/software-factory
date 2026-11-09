@@ -2,11 +2,12 @@
 // the stored evidence and the Phase 0 exit report.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
-import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
+import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
+import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -71,8 +72,10 @@ async function floor(pool: pg.Pool) {
      where i.state in ('SignOff', 'NeedsInput') group by i.id order by since`,
   )).rows;
   const reviews = (await pool.query(
-    `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since
-     from item i where i.state = 'InReview' order by since nulls last, i.title`,
+    `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since,
+       r.pr_number, r.pr_url
+     from item i left join lateral (select pr_number, pr_url from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
+     where i.state = 'InReview' order by since nulls last, i.title`,
   )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
   // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
@@ -87,7 +90,7 @@ async function floor(pool: pg.Pool) {
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
   const active = (await pool.query(
-    `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage,
+    `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
        (select message from stage_run s where s.run_id = r.id and message <> '' order by ended_at desc nulls last, started_at desc limit 1) as message
@@ -166,17 +169,17 @@ async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
 }
 
 /**
- * Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. A
- * scenario carrying @regression, itself or through its feature, is marked, since Red expects it to pass.
+ * Acceptance criteria with the scenarios tagged @ac-N under each, parsed from the feature files already read at the
+ * scenarios sha, so each file costs one read for both the criteria list and its full text. A scenario carrying
+ * @regression, itself or through its feature, is marked, since Red expects it to pass.
  */
-async function criteriaView(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["criteria"]> {
-  const fi = await deps.adapter.getItem(externalId);
+function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, files: RunDetail["features"]): RunDetail["criteria"] {
   if (!fi || !deps.repoHost || !fi.repo) return null;
   const byAc = new Map<number, Scenario[]>();
-  for (const path of files) {
+  for (const { text } of files) {
     let tags: string[] = [];
     let featureTags: string[] = [];
-    for (const line of ((await deps.repoHost.readFile(fi.repo, sha, path)) ?? "").split(/\r?\n/)) {
+    for (const line of text.split(/\r?\n/)) {
       const t = line.trim();
       if (t.startsWith("@")) tags.push(...t.split(/\s+/));
       else if (/^Feature:/.test(t)) {
@@ -195,9 +198,8 @@ async function criteriaView(deps: DashboardDeps, externalId: string, sha: string
   return fi.acceptanceCriteria.map((criterion, i) => ({ criterion, scenarios: byAc.get(i + 1) ?? [] }));
 }
 
-/** The signed-off feature files, read at the lock sha. */
-async function lockedFeatures(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["features"]> {
-  const fi = await deps.adapter.getItem(externalId);
+/** The item's feature files as they stand at `sha`: the lock sha once signed off, the scenarios sha while waiting. */
+async function featuresAt(deps: DashboardDeps, fi: FactoryItem | null, sha: string, files: string[]): Promise<RunDetail["features"]> {
   if (!fi?.repo || !deps.repoHost) return [];
   const out: RunDetail["features"] = [];
   for (const path of files) out.push({ path, text: (await deps.repoHost.readFile(fi.repo, sha, path)) ?? "(missing at this commit)" });
@@ -209,7 +211,8 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
   if (!item) return null;
   const run = (await pool.query(
-    `select id, sop_version, config_sha, scenarios_sha, features_lock_sha, risk_tier, tier_reasons, next_stage, locked_files
+    `select id, sop_version, config_sha, scenarios_sha, features_lock_sha, risk_tier, tier_reasons, next_stage, locked_files,
+       pr_number, pr_url, ended_at is null as open
      from run where item_id = $1 order by run_number desc, started_at desc limit 1`, [id],
   )).rows[0] ?? null;
   const policies = (await pool.query(
@@ -221,11 +224,16 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const open = (await pool.query("select kind, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [id])).rows[0] ?? null;
   const waiting = item.state === "SignOff" || item.state === "NeedsInput" || (item.state === "Abandoned" && (await revivable(pool, id)));
   const question = waiting ? open : null;
-  const criteria = item.state === "SignOff" && run?.scenarios_sha ? await criteriaView(deps, item.external_id, run.scenarios_sha, run.locked_files ?? []) : null;
-  const features = run?.features_lock_sha ? await lockedFeatures(deps, item.external_id, run.features_lock_sha, run.locked_files ?? []) : [];
+  // While the sign-off form shows, the owner gets the criteria, the issue's body and the files at the scenarios sha.
+  const signing: string | null = (item.state === "SignOff" || question?.kind === "sign_off") && run?.scenarios_sha ? run.scenarios_sha : null;
+  const fi = signing || run?.features_lock_sha ? await deps.adapter.getItem(item.external_id) : null;
+  const pending = signing ? await featuresAt(deps, fi, signing, run.locked_files ?? []) : [];
+  const criteria = signing ? criteriaView(deps, fi, pending) : null;
+  const scope = signing && fi?.body.trim() ? fi.body : null;
+  const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
   return {
-    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, question, criteria, features,
+    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
   };
@@ -333,7 +341,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       return true;
     }
     if (req.method === "GET" && path === "/phase0") {
-      send(res, 200, phase0Page(await phase0(deps.pool), banner));
+      send(res, 200, phase0Page(await phase0(deps.pool), await readinessSpend(deps.pool), banner));
       return true;
     }
     const blob = BLOB_PATH.exec(path);

@@ -169,15 +169,17 @@ export async function releaseLease(c: pg.PoolClient, itemId: string, generation:
   );
 }
 
-export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number };
+/** `repo` is the `owner/name` of the repo the item's issue is in, or null for a board item in no repo (PBI 137). */
+export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number; repo?: string | null };
 
-/** Inserts an item as Eligible, or refreshes its title and backlog rank, keyed on (source_id, external_id). */
+/** Inserts an item as Eligible, or refreshes its title, backlog rank and repo, keyed on (source_id, external_id). */
 export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Promise<string> {
   const r = await c.query<{ id: string }>(
-    `insert into item (source_id, external_id, title, state, backlog_rank) values ($1, $2, $3, 'Eligible', $4)
-     on conflict (source_id, external_id) do update set title = excluded.title, backlog_rank = coalesce(excluded.backlog_rank, item.backlog_rank)
+    `insert into item (source_id, external_id, title, state, backlog_rank, repo) values ($1, $2, $3, 'Eligible', $4, $5)
+     on conflict (source_id, external_id) do update set title = excluded.title, backlog_rank = coalesce(excluded.backlog_rank, item.backlog_rank),
+       repo = excluded.repo
      returning id`,
-    [item.sourceId, item.externalId, item.title, item.rank ?? null],
+    [item.sourceId, item.externalId, item.title, item.rank ?? null, item.repo ?? null],
   );
   return r.rows[0].id;
 }

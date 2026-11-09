@@ -105,9 +105,11 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
     if (!ticked) console.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs)];
+  // Each board files its splits as child issues on itself (PBI 144).
   for (const s of d.sources) {
+    const split = d.split && { ...d.split, file: s.file };
     loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
-      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split: d.split }), runs));
+      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split }), runs));
   }
   return {
     runs,

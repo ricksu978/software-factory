@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import type pg from "pg";
-import { githubBacklog, parseGitHubWebhook, type FieldMap } from "./adapters/github/backlog.ts";
+import { githubBacklog, parseGitHubWebhook, splitFiling, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
 import { parseRepoConfig } from "./config/repo-config.ts";
@@ -18,6 +18,7 @@ import { mirrorBoard } from "./control/board.ts";
 import { logTransitions } from "./control/console-log.ts";
 import { blobUploadUrl, cellApi } from "./control/cell-api.ts";
 import { applyComment } from "./control/decisions.ts";
+import type { FileSplitDeps } from "./gate/file-split.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
 import { dashboardRoutes } from "./http/routes.ts";
 import { BadRequest, json, startServer, type Handler } from "./http/server.ts";
@@ -25,7 +26,8 @@ import { createPool } from "./store/db.ts";
 import { clearRestartOnStart } from "./store/overrides.ts";
 import { handleWebhook } from "./watcher/webhook.ts";
 
-export type Source = { id: string; adapter: BacklogAdapter };
+/** `file`, when set, files each valid split on this board as child issues (PBI 144). */
+export type Source = { id: string; adapter: BacklogAdapter; file?: FileSplitDeps };
 
 export type ControlDeps = {
   pool: pg.Pool;
@@ -130,10 +132,10 @@ export async function githubSources(pool: pg.Pool, app: App, projectToken: strin
        (select r.installation_id from repo r where r.id::text in (select value from jsonb_each_text(s.repo_map)) and r.installation_id is not null limit 1) as installation_id
      from backlog_source s where s.adapter = 'github' order by s.url`,
   )).rows;
-  const sources = rows.filter((r) => r.installation_id !== null).map((r) => ({
-    id: r.id,
-    adapter: githubBacklog({ app, installationId: Number(r.installation_id), owner: { type: r.owner_type, login: r.owner_login }, projectToken, projectNumber: r.project_number, fieldMap: r.field_map }),
-  }));
+  const sources = rows.filter((r) => r.installation_id !== null).map((r) => {
+    const adapter = githubBacklog({ app, installationId: Number(r.installation_id), owner: { type: r.owner_type, login: r.owner_login }, projectToken, projectNumber: r.project_number, fieldMap: r.field_map });
+    return { id: r.id, adapter, file: splitFiling(adapter.splitBoard, r.field_map) };
+  });
   // ponytail: one GitHub App installation serves every repo in Phase 0. Key the repo host by installation when that changes.
   const installationId = rows.find((r) => r.installation_id !== null)?.installation_id;
   return { sources, installationId: installationId ? Number(installationId) : null };
