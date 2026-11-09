@@ -118,6 +118,37 @@ describe("pollOnce", dbTest, () => {
     assert.ok(all.some((b) => b.startsWith("The factory can't start") && !b.includes("gave no answer")), "no corrected readiness comment");
   });
 
+  test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
+    const a = await seed();
+    const b = await seed({ repo: "other/tools" });
+    const c = await seed({ repo: null });
+    await poll();
+    const repo = async (ext: string) => (await db.pool.query("select repo from item where source_id = $1 and external_id = $2", [sourceId, ext])).rows[0].repo;
+    assert.equal(await repo(a), REPO);
+    assert.equal(await repo(b), "other/tools");
+    assert.equal(await repo(c), null);
+  });
+
+  test("an item held with no repo gets its repo from the next poll that reads it, whatever its state", async () => {
+    const queued = await held("Queued");
+    const notReady = await held("NotReady");
+    const inProgress = await held("InProgress");
+    const gone = await held("Queued");
+    // The cursor is past every seeded item, so the poll only reads them back.
+    await db.pool.query("update backlog_source set cursor = '999' where id = $1", [sourceId]);
+    const { getItem } = fake.adapter;
+    fake.adapter.getItem = async (id) => {
+      if (id === gone.ext) throw new Error("unreachable");
+      return getItem(id);
+    };
+    await poll();
+    const repo = async (id: string) => (await db.pool.query("select repo from item where id = $1", [id])).rows[0].repo;
+    assert.equal(await repo(queued.id), REPO);
+    assert.equal(await repo(notReady.id), REPO);
+    assert.equal(await repo(inProgress.id), REPO);
+    assert.equal(await repo(gone.id), null);
+  });
+
   test("an item that fails the gate is NotReady with a reasons comment", async () => {
     verdict = "failed";
     const ext = await seed();
