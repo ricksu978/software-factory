@@ -1,7 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
-import type { SplitDeps, SplitOutcome } from "./split.ts";
+import { itemTextHash, proposeSplit, splitComment, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -48,6 +48,7 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
  */
 export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
   let results = engineRules(item, ctx);
+  let oversized = false;
   if (results.length === 0 && ctx.dor) {
     const dor = ctx.dor;
     const reply = await ctx.judge(item, dor);
@@ -61,14 +62,20 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
       ];
     } else {
       const flags = [...new Set(flagLines.flatMap((o) => (o.flags as unknown[]).map(String)))];
+      // Only a literal true on the last flags line counts. Size never becomes a verdict, so it can't fail the item.
+      oversized = flagLines.at(-1)!.oversized === true;
       results = [...parseJudgement(reply, dor), ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))];
     }
   }
+  // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
+  const split = oversized && ctx.split ? await proposeSplit(item, ctx.split) : null;
+  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${itemTextHash(item)}`);
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));
-    const body = `The factory can't start this item yet. It failed these readiness checks:\n\n${lines.join("\n")}\n`;
+    const noSplit = split && !split.proposed ? `\nThe judge found the item too big for one Sprint, but a split couldn't be proposed because ${split.reason}.\n` : "";
+    const body = `The factory can't start this item yet. It failed these readiness checks:\n\n${lines.join("\n")}\n${noSplit}`;
     await ctx.adapter.comment(item.externalId, body, `readiness:${item.updatedAt}:${ctx.readinessSha}`);
   }
-  return { ready: failed.length === 0, results };
+  return { ready: failed.length === 0, results, oversized, split };
 }

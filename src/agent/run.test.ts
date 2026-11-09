@@ -180,6 +180,7 @@ test("the judge prompt fences the item so its text can't close the fence", () =>
   assert.equal(JSON.parse(data).body, item.body);
   assert.match(p, /\{"index":1,"criterion":"Has a Size of 5 or less"\}/);
   assert.match(p, /\{"flags":\[\]\}/);
+  assert.match(p, /last line \{"flags":\[\.\.\.\],"oversized":true\|false\}/);
 });
 
 const reply = (r: Partial<AgentResult>): AgentResult => ({ ok: true, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0,

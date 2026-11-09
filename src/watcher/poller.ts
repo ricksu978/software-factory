@@ -5,6 +5,7 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { parseRepoConfig } from "../config/repo-config.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { gate } from "../gate/readiness.ts";
+import type { SplitDeps } from "../gate/split.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
@@ -17,6 +18,8 @@ export type PollDeps = {
   repoHost: RepoHost;
   judge: (item: FactoryItem, dor: Policy) => Promise<string>;
   sourceId: string;
+  /** How the gate asks for a split of an oversized item (PBI 143). Without it, no split is asked for. */
+  split?: SplitDeps;
 };
 
 type Row = {
@@ -142,7 +145,7 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null): Pr
  * never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
-  const { pool, adapter, repoHost, judge, sourceId } = deps;
+  const { pool, adapter, repoHost, judge, sourceId, split } = deps;
   const src = (await pool.query<{ cursor: string | null; paused: boolean; label: string | null }>(
     "select cursor, paused, field_map->>'optInLabel' as label from backlog_source where id = $1", [sourceId],
   )).rows[0];
@@ -229,7 +232,7 @@ export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: 
     const openDeps = await depsOf(fi);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
-      openDeps, judge, adapter, policyErrors: r.policyErrors,
+      openDeps, judge, adapter, policyErrors: r.policyErrors, split,
     });
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
       await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi, openDeps)]);

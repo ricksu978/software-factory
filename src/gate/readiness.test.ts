@@ -112,3 +112,42 @@ describe("gate", () => {
     assert.deepEqual(await s.fake.comments(s.id), []);
   });
 });
+
+describe("gate: an oversized item (PBI 143)", () => {
+  const split = (ok: boolean, text: string) => ({
+    sop: { models: { coding: "c" } },
+    agent: async (a: { model: string }) => ({ ok, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" }),
+  });
+  const valid = JSON.stringify({ children: [{ title: "A", body: "b", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
+  const judged = (oversized: unknown, status = "passed") =>
+    [JSON.stringify({ index: 1, status, reason: "No title" }), JSON.stringify({ flags: [], oversized })].join("\n");
+
+  test("only a literal true reads as oversized, and size alone never fails the item", async () => {
+    for (const [v, want] of [[true, true], [false, false], ["yes", false], [undefined, false]] as const) {
+      const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+      const out = await gate(s.item, s.ctx(judged(v), { split: split(true, valid) }));
+      assert.equal(out.oversized, want, String(v));
+      assert.equal(out.ready, true);
+      assert.equal(out.split === null, !want);
+    }
+  });
+
+  test("a valid split is posted once per item text, apart from the readiness comment", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, valid) }));
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, valid), readinessSha: "other" }));
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((b) => b.startsWith("The factory proposes splitting")).length, 1);
+    assert.equal(all.filter((b) => b.startsWith("The factory can't start")).length, 2);
+    assert.ok(all.every((b) => !b.includes("couldn't be proposed")));
+  });
+
+  test("an invalid split posts nothing and the readiness comment says why", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, "no") }));
+    assert.deepEqual(out.split, { proposed: false, reason: "the coding model's reply couldn't be read" });
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.length, 1);
+    assert.match(all[0], /a split couldn't be proposed because the coding model's reply couldn't be read/);
+  });
+});
