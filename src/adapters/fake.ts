@@ -20,7 +20,8 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
     const item = get(id);
     change(item);
     item.seq = ++seq;
-    item.updatedAt = new Date().toISOString();
+    // Always later than before, even within one millisecond, so a test can't miss a change of updatedAt.
+    item.updatedAt = new Date(Math.max(Date.now(), Date.parse(item.updatedAt) + 1)).toISOString();
   };
   // Items go in and out as deep copies, so neither a caller's arrays nor a returned item can reach the stored state.
   const copy = ({ seq: _, ...item }: FactoryItem & { seq: number }): FactoryItem => structuredClone(item);
@@ -59,8 +60,11 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
       async comment(id, body, key) {
         get(id);
         const list = comments.get(id) ?? [];
-        if (!list.some((c) => c.key === key)) list.push({ body, key });
+        if (list.some((c) => c.key === key)) return;
+        list.push({ body, key });
         comments.set(id, list);
+        // A new comment bumps the item's updatedAt, as it does on GitHub.
+        touch(id, () => {});
       },
       async setStatus(id, status) {
         touch(id, (i) => {

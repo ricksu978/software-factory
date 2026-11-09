@@ -92,6 +92,10 @@ describe("pollOnce", dbTest, () => {
     await pollBig();
     assert.equal((await row(ext)).state, "Eligible");
     assert.match((await fake.comments(ext)).join("\n"), /the coding model gave no answer/);
+    // The coding model stays down. The comment bumped updatedAt, but the no-answer comment isn't posted again.
+    await pollBig();
+    assert.equal((await row(ext)).state, "Eligible");
+    assert.equal((await fake.comments(ext)).filter((b) => b.includes("gave no answer")).length, 1);
     answer = true;
     await pollBig();
     assert.equal((await row(ext)).state, "NotReady");

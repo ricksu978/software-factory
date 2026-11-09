@@ -75,9 +75,13 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));
     const noSplit = split && !split.proposed ? `\nThe judge found the item too big for one Sprint, but a split couldn't be proposed because ${split.reason}.\n` : "";
     const body = `The factory can't start this item yet. It failed these readiness checks:\n\n${lines.join("\n")}\n${noSplit}`;
-    // A comment that says the coding model gave no answer gets its own key, so the re-gate that gets an answer posts
-    // a readiness comment without that line instead of being deduplicated against it.
-    const key = `readiness:${item.updatedAt}:${ctx.readinessSha}${splitUnanswered(split) ? ":split-unanswered" : ""}`;
+    // A comment that says the coding model gave no answer is keyed on the item text, not updatedAt: the poller keeps
+    // that item Eligible and gates it again, and the comment itself bumps updatedAt on GitHub, so an updatedAt key
+    // would post it again on every poll. Its own key also lets the re-gate that gets an answer post a readiness
+    // comment without that line instead of being deduplicated against it.
+    const key = splitUnanswered(split)
+      ? `readiness:split-unanswered:${itemTextHash(item)}:${ctx.readinessSha}`
+      : `readiness:${item.updatedAt}:${ctx.readinessSha}`;
     await ctx.adapter.comment(item.externalId, body, key);
   }
   return { ready: failed.length === 0, results, oversized, split };
