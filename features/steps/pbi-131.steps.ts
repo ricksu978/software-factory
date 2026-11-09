@@ -87,10 +87,11 @@ async function board(c: Ctx, repos: [name: string, id: string][]): Promise<strin
   return id;
 }
 
-async function addItem(c: Ctx, ext: string, title: string, sourceId: string, repoId: string | null): Promise<Item> {
+/** `stored` is the repo intake took from the item's issue, as owner/name (PBI 137). */
+async function addItem(c: Ctx, ext: string, title: string, sourceId: string, repoId: string | null, stored: string | null = null): Promise<Item> {
   const id = (await pool().query<{ id: string }>(
-    "insert into item (source_id, external_id, title, state) values ($1, $2, $3, 'Eligible') returning id",
-    [sourceId, ext, title],
+    "insert into item (source_id, external_id, title, state, repo) values ($1, $2, $3, 'Eligible', $4) returning id",
+    [sourceId, ext, title, stored],
   )).rows[0].id;
   const it = { id, ext, title, sourceId, repoId };
   c.items.push(it);
@@ -99,7 +100,8 @@ async function addItem(c: Ctx, ext: string, title: string, sourceId: string, rep
 
 async function inGitHubRepo(c: Ctx, ext: string, title: string, fullName: string): Promise<Item> {
   const repoId = await repoRow(`https://github.com/${fullName}`);
-  return addItem(c, ext, title, await board(c, [[fullName, repoId]]), repoId);
+  // An issue in a repo has that repo stored at intake, so "#N" links to it even before a run names it.
+  return addItem(c, ext, title, await board(c, [[fullName, repoId]]), repoId, fullName);
 }
 
 function lastItem(c: Ctx): Item {
