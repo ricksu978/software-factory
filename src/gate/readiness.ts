@@ -1,6 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
+import { fileSplit } from "./file-split.ts";
 import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
@@ -70,6 +71,8 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
   const split = oversized && ctx.split ? await proposeSplit(item, ctx.split) : null;
   if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${itemTextHash(item)}`);
+  // PBI 144: a valid split is filed as child issues. A failed write throws, so the poller gates the parent again.
+  if (split?.proposed && ctx.split?.file) await fileSplit(item, split.children, ctx.adapter, ctx.split.file);
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));

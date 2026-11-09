@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { fenced } from "../core/fence.ts";
+import type { FileSplitDeps } from "./file-split.ts";
 import { jsonLines } from "../policy/policy.ts";
 
 /** One proposed child. `criteria` holds 1-based indices of the parent's acceptance criteria, `needs` 1-based child numbers. */
@@ -21,8 +22,11 @@ export type SplitOutcome = { proposed: true; children: SplitChild[] } | { propos
 /**
  * What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. `seen` holds each
  * answered outcome by item text hash, so a re-gate of text already split (say after a dor.md change) doesn't ask again.
+ * `file`, when set, files a valid split as child issues (PBI 144); without it the split is only proposed.
  */
-export type SplitDeps = { sop: { models: { coding: string } }; agent: (a: AgentArgs) => Promise<AgentResult>; seen?: Map<string, SplitOutcome> };
+export type SplitDeps = {
+  sop: { models: { coding: string } }; agent: (a: AgentArgs) => Promise<AgentResult>; seen?: Map<string, SplitOutcome>; file?: FileSplitDeps;
+};
 
 /** The most outcomes `seen` keeps. The oldest goes first, so a long-lived poller's memory stays bounded. */
 export const SPLIT_SEEN_MAX = 1000;
