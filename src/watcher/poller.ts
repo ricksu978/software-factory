@@ -28,8 +28,9 @@ export type PollDeps = {
   /** Where a poll that runs long warns, and the clock that times it (PBI 134). */
   slow?: Slow;
   /**
-   * The factory's own readiness logic, the judge's prompt and the readiness version (PBI 149). The fingerprint covers
-   * it, so a restart with new logic re-checks every NotReady item. Unset, the poller uses the code's own, readinessLogic().
+   * The factory's own readiness logic: the judge's prompt and the readiness version (PBI 149), and the split prompt
+   * (PBI 159). The fingerprint covers it, so a restart with new logic re-checks every NotReady item. Unset, the
+   * poller uses the code's own, readinessLogic().
    */
   logic?: ReadinessLogic;
 };

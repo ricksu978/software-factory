@@ -135,10 +135,11 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
 }
 
 /**
- * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md, and
- * READINESS_VERSION, and since PBI 159 the split prompt, rendered around an empty item with one empty criterion. The prompt is judgePrompt's own words, rendered around an empty item and a dor.md with no text and
- * one empty criterion, so every line of the template, the per-criterion line included, is in it, and any edit to those
- * words changes it while the items and policy files stay out of it.
+ * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md,
+ * READINESS_VERSION, and since PBI 159 the split prompt. The judge's prompt is judgePrompt's own words, rendered around
+ * an empty item and a dor.md with no text and one empty criterion. The split prompt is splitPrompt's, around an empty
+ * item with one empty criterion. So every line of each template, the per-criterion line included, is in the logic, and
+ * any edit to those words changes it while the items and policy files stay out of it.
  */
 export function readinessLogic(): ReadinessLogic {
   const empty: FactoryItem = {
