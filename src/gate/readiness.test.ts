@@ -151,3 +151,36 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.match(all[0], /a split couldn't be proposed because the coding model's reply couldn't be read/);
   });
 });
+
+describe("gate's readiness checks (PBI 132)", () => {
+  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const at = new Date("2026-11-09T10:15:00Z");
+
+  async function recorded(judge: GateContext["judge"]) {
+    const s = await setup("- [ ] Has a title\n");
+    const checks: unknown[] = [];
+    const run = gate(s.item, s.ctx("", { judge, now: () => at, recordCheck: async (i, c) => { checks.push({ id: i.externalId, ...c }); } }));
+    return { s, checks, run };
+  }
+
+  test("records the judge call's spend and start time against the item, whatever its verdict", async () => {
+    for (const reply of [passAll(1), "I am not sure"]) {
+      const { s, checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); return reply; });
+      await run;
+      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, ranAt: at }]);
+    }
+  });
+
+  test("records a failed judge call's spend, then lets the failure through", async () => {
+    const { checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); throw new Error("readiness judge failed: usage limit"); });
+    await assert.rejects(run, /usage limit/);
+    assert.equal(checks.length, 1);
+  });
+
+  test("records nothing when an engine rule fails and the judge is never asked", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: [] });
+    const checks: unknown[] = [];
+    await gate(s.item, s.ctx(passAll(1), { recordCheck: async (_i, c) => { checks.push(c); } }));
+    assert.deepEqual(checks, []);
+  });
+});

@@ -5,11 +5,12 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
-import { gate } from "../gate/readiness.ts";
+import { gate, type GateContext } from "../gate/readiness.ts";
 import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
+import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -17,7 +18,8 @@ export type PollDeps = {
   pool: pg.Pool;
   adapter: BacklogAdapter;
   repoHost: RepoHost;
-  judge: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** Reports what each call spent, so the gate records it as a readiness check (PBI 132). */
+  judge: GateContext["judge"];
   sourceId: string;
   /** How the gate asks for a split of an oversized item (PBI 143). Without it, no split is asked for. */
   split?: SplitDeps;
@@ -254,6 +256,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
       openDeps, judge, adapter, policyErrors: r.policyErrors, split,
+      // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
+      recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
     });
     // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.

@@ -49,6 +49,20 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
 }
 
 /**
+ * Asks the judge, then records what the call spent as a readiness check, whether it answered or threw (PBI 132). A
+ * judge that reports no spend records nothing.
+ */
+async function judged(item: FactoryItem, dor: Policy, ctx: GateContext): Promise<string> {
+  const ranAt = (ctx.now ?? (() => new Date()))();
+  let spend: JudgeSpend | null = null;
+  try {
+    return await ctx.judge(item, dor, (s) => { spend = s; });
+  } finally {
+    if (spend && ctx.recordCheck) await ctx.recordCheck(item, { ...(spend as JudgeSpend), ranAt });
+  }
+}
+
+/**
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
  * after any readiness input changes posts a fresh one. The gate never edits the item.
@@ -58,7 +72,7 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   let oversized = false;
   if (results.length === 0 && ctx.dor) {
     const dor = ctx.dor;
-    const reply = await ctx.judge(item, dor);
+    const reply = await judged(item, dor, ctx);
     // Every flags line counts, so an early or echoed {"flags":[]} can't cancel a real flag later in the reply.
     const flagLines = jsonLines(reply).filter((o) => Array.isArray(o.flags));
     if (flagLines.length === 0) {
