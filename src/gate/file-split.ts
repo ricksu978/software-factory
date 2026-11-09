@@ -58,15 +58,14 @@ export function filedComment(filed: ChildIssue[], optInLabel: string): string {
     + `None of them carries the \`${optInLabel}\` label. Add it to a child when it should enter the factory. This item has left the factory.\n`;
 }
 
+/** What an earlier filing of this split left: the parent's sub-issues, and each child already filed, by position. */
+export type PriorFiling = { subs: string[]; found: (ChildIssue | undefined)[] };
+
 /**
- * Files `children` for `parent`, safe to repeat. A parent that already has a sub-issue this split didn't file gets no
- * second set, and a filing that stopped partway is finished without filing any child twice. Only once every child is
- * filed, linked, placed and blocked does the parent get its one link comment, through `adapter.comment`, and lose its
- * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
- * poll. Returns true when the split is filed, false when the parent was already split another way.
+ * Reads what an earlier filing of this split left behind. Returns null when the parent already has a sub-issue this
+ * split didn't file, by hand or from an earlier text's split: the parent is already split, so it gets no second set.
  */
-export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps): Promise<boolean> {
-  const { board } = deps;
+export async function priorFiling(parent: FactoryItem, children: SplitChild[], board: SplitBoard): Promise<PriorFiling | null> {
   const repo = parent.repo;
   if (!repo) throw new Error(`item ${parent.externalId} has no repo to file its split in`);
   const key = splitKey(parent);
@@ -74,8 +73,25 @@ export async function fileSplit(parent: FactoryItem, children: SplitChild[], ada
   const found: (ChildIssue | undefined)[] = [];
   for (const n of children.keys()) found.push((await board.findIssues(repo, splitMarker(key, n + 1)))[0]);
   const ours = new Set(found.filter((f) => f !== undefined).map((f) => f.externalId));
-  // Any other sub-issue, by hand or from an earlier text's split, means the parent is already split.
-  if (subs.some((id) => !ours.has(id))) return false;
+  return subs.some((id) => !ours.has(id)) ? null : { subs, found };
+}
+
+/**
+ * Files `children` for `parent`, safe to repeat. A parent that already has a sub-issue this split didn't file gets no
+ * second set, and a filing that stopped partway is finished without filing any child twice. Only once every child is
+ * filed, linked, placed and blocked does the parent get its one link comment, through `adapter.comment`, and lose its
+ * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
+ * poll. Returns true when the split is filed, false when the parent was already split another way. `known` is a
+ * `priorFiling` the caller already read, so the gate can word its proposal comment without reading twice.
+ */
+export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps,
+  known?: PriorFiling | null): Promise<boolean> {
+  const { board } = deps;
+  const prior = known === undefined ? await priorFiling(parent, children, board) : known;
+  if (!prior) return false;
+  const repo = parent.repo!;
+  const key = splitKey(parent);
+  const { subs, found } = prior;
   const filed: ChildIssue[] = [];
   for (const [i, child] of children.entries()) {
     const issue = found[i] ?? (await board.createIssue(repo, child.title, childBody(parent, child, i + 1, deps.criteriaHeading)));

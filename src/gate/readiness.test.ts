@@ -169,4 +169,22 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.match(all.find((b) => b.startsWith("The factory proposes splitting"))!, /files each child as a sub-issue/);
     assert.equal(all.filter((b) => b.startsWith("The factory filed this item's split")).length, 1);
   });
+
+  test("a parent already split another way gets a proposal that files nothing, and no child is filed (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let created = 0;
+    const board: SplitBoard = {
+      subIssues: async () => [{ externalId: "50", title: "by hand", url: "u50" }], findIssues: async () => [],
+      createIssue: async (_r, title) => ({ externalId: String(100 + created++), title, url: "u" }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    const file = { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
+    assert.equal(out.filed, undefined);
+    assert.equal(created, 0);
+    const proposal = (await s.fake.comments(s.id)).find((b) => b.startsWith("The factory proposes splitting"))!;
+    assert.doesNotMatch(proposal, /files each child/);
+    assert.match(proposal, /hasn't changed or created any item/);
+  });
 });

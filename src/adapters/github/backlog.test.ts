@@ -67,12 +67,14 @@ describe("githubBacklog: the split board (PBI 144)", () => {
     const calls: { route: string; params: Record<string, any> }[] = [];
     const recent: any[] = [
       { id: 900, node_id: "N9", number: 9, title: "planted", body: "factory-split-k-1", html_url: "u9", user: { type: "User" } },
-      { id: 800, node_id: "N8", number: 8, title: "a PR", body: "factory-split-k-1", html_url: "u8", user: { type: "Bot" }, pull_request: {} },
-      { id: 300, node_id: "N3", number: 3, title: "Card", body: "x factory-split-k-1", html_url: "u3", user: { type: "Bot" } },
+      { id: 800, node_id: "N8", number: 8, title: "a PR", body: "factory-split-k-1", html_url: "u8", user: { type: "Bot", login: "factory[bot]" }, pull_request: {} },
+      { id: 700, node_id: "N7", number: 70, title: "other bot", body: "factory-split-k-1", html_url: "u70", user: { type: "Bot", login: "github-actions[bot]" } },
+      { id: 300, node_id: "N3", number: 3, title: "Card", body: "x factory-split-k-1", html_url: "u3", user: { type: "Bot", login: "factory[bot]" } },
     ];
     const client = {
       async request(route: string, params: Record<string, any> = {}) {
         calls.push({ route, params });
+        if (route === "GET /app") return { data: { id: 42, slug: "factory" } };
         if (route === "GET /repos/{owner}/{repo}/issues") return { data: recent };
         if (route === "POST /repos/{owner}/{repo}/issues") return { data: { id: 500, node_id: "N5", number: 5, title: params.title, html_url: "u5" } };
         if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number } };
@@ -96,7 +98,7 @@ describe("githubBacklog: the split board (PBI 144)", () => {
     return { board: adapter.splitBoard, calls };
   }
 
-  test("findIssues counts only a bot's issues, never a person's or a PR", async () => {
+  test("findIssues counts only the factory App's own issues, never a person's, another bot's or a PR", async () => {
     const { board } = splitClient();
     assert.deepEqual(await board.findIssues("o/r", "factory-split-k-1"), [{ externalId: "3", title: "Card", url: "u3" }]);
   });

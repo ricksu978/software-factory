@@ -126,7 +126,7 @@ export function splitFiling(board: SplitBoard, fieldMap: FieldMap): FileSplitDep
   return { board, optInLabel: fieldMap.optInLabel, backlogStatus, criteriaHeading: fieldMap.acceptanceCriteriaHeading };
 }
 
-type RestIssue = { id: number; node_id: string; number: number; title: string; body?: string | null; html_url: string; user?: { type?: string }; pull_request?: unknown; repository_url?: string };
+type RestIssue = { id: number; node_id: string; number: number; title: string; body?: string | null; html_url: string; user?: { type?: string; login?: string }; pull_request?: unknown; repository_url?: string };
 
 export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
   if (cfg.owner.type === "user" && !cfg.projectToken) {
@@ -213,6 +213,13 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
     repoOf.set(String(i.number), repo);
     return { externalId: String(i.number), title: i.title, url: i.html_url };
   };
+  // The App's own bot login, read once with the App's JWT. Filing trusts only the issues this App opened.
+  let appLogin: Promise<string> | undefined;
+  const ownLogin = () => (appLogin ??= cfg.app.octokit.request("GET /app").then(({ data }) => {
+    const slug = (data as { slug?: string } | null)?.slug;
+    if (!slug) throw new Error("GET /app returned no slug, so the factory can't tell its own issues apart");
+    return `${slug}[bot]`;
+  }).catch((e) => { appLogin = undefined; throw e; }));
   const rest = async (externalId: string) => (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}", await ref(externalId))).data as RestIssue;
   const repoFromApi = (url: string | undefined, fallback: string) => url?.match(/\/repos\/([^/]+\/[^/]+)$/)?.[1] ?? fallback;
 
@@ -227,8 +234,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       // ponytail: the repo's newest 100 issues, not search, which can lag a just-filed child by minutes. A child
       // filed more than 100 issues ago and never linked would be filed again.
       const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues", { owner, repo: name, state: "all", sort: "created", direction: "desc", per_page: 100 })).data as RestIssue[];
-      // Only a bot's issue counts, so a person can't plant a marker and stop a child from being filed.
-      return list.filter((i) => !i.pull_request && i.user?.type === "Bot" && (i.title.includes(text) || (i.body ?? "").includes(text))).reverse().map((i) => child(repo, i));
+      // Only this App's own issues count. The marker can be worked out from public data, so a person or another App
+      // (say github-actions in a workflow) could otherwise plant one and stop a child from being filed.
+      const own = await ownLogin();
+      return list.filter((i) => !i.pull_request && i.user?.type === "Bot" && i.user.login === own && (i.title.includes(text) || (i.body ?? "").includes(text))).reverse().map((i) => child(repo, i));
     },
     async createIssue(repo, title, body) {
       const [owner, name] = repo.split("/");

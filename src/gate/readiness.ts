@@ -1,7 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
-import { fileSplit } from "./file-split.ts";
+import { fileSplit, priorFiling } from "./file-split.ts";
 import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
@@ -72,10 +72,14 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
   const split = oversized && ctx.split ? await proposeSplit(item, ctx.split) : null;
-  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!ctx.split?.file), `split:${itemTextHash(item)}`);
-  // PBI 144: a valid split is filed as child issues. A failed write throws, so the poller gates the parent again.
+  // PBI 144: a valid split is filed as child issues, unless the parent is already split another way (by hand, or from
+  // an earlier text's split). That's read first, so the proposal comment only says the factory files the children
+  // when it will. A failed write throws, so the poller gates the parent again.
+  const file = split?.proposed ? ctx.split?.file : undefined;
+  const prior = split?.proposed && file ? await priorFiling(item, split.children, file.board) : null;
+  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!prior), `split:${itemTextHash(item)}`);
   // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
-  const filed = split?.proposed && ctx.split?.file ? await fileSplit(item, split.children, ctx.adapter, ctx.split.file) : false;
+  const filed = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : false;
   if (filed) return { ready: false, results, oversized, split, filed };
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
