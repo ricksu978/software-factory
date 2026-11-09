@@ -693,15 +693,20 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const text = summary.ok ? summary.text : "";
     const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(text, risk) });
     await api.pr({ prNumber: pr.number, prUrl: pr.url });
-    await d.repoHost.requestReviewers(ctx.repo, pr.number, config.reviewers);
     opened = { number: pr.number, url: pr.url, summary: text, risk };
     const ci = await waitForChecks(head);
     if (ci === "none") throw new Blocked("no CI ran on the PR");
     if (ci === "failure") { await end("failed"); return [`CI failed on ${head}`]; }
+    if (!reviews) await askReviewers();
     await end("passed");
     if (!reviews) await handOver();
     return null;
   };
+
+  // People are asked to look only once the factory's own review is done (spec §6 row 8), so this runs at the end of
+  // pr-review, or of open-pr when the repo host has no review methods. It runs inside that stage's attempt, so a
+  // failure ends the attempt failed with its message.
+  const askReviewers = async () => { await d.repoHost.requestReviewers(ctx.repo, opened!.number, config.reviewers); };
 
   // The PR goes to people: the item moves to InReview with the shadow tier open-pr recorded.
   const handOver = async () => {
@@ -768,6 +773,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
       if (!review.findings.length && !threads.length) {
         await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(pr.summary, pr.risk) });
+        await askReviewers();
         await end("passed");
         await handOver();
         return null;

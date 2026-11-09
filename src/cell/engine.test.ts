@@ -413,9 +413,32 @@ describe("runCell", () => {
     assert.equal(h.prs.length, 2);
   });
 
+  test("reviewers are asked only once the PR review passes, after every review the factory posts", async () => {
+    const h = harness();
+    assert.equal(await h.run(), "done");
+    const r = h.routes();
+    const asked = r.indexOf("/repo/requestReviewers");
+    const passed = h.calls.findIndex((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "passed");
+    assert.ok(asked > r.lastIndexOf("/repo/postReview"), "no reviewer is asked while the factory's rounds run");
+    assert.ok(asked < passed, "asked inside the pr-review attempt");
+    assert.equal(r.filter((x) => x === "/repo/requestReviewers").length, 1);
+  });
+
+  test("an error while asking for reviewers ends the pr-review attempt failed with its message, and moves no item", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); };
+    await assert.rejects(h.run(), /GitHub answered 502/);
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "pr-review").at(-1)!.body;
+    assert.deepEqual([last.status, last.message], ["failed", "GitHub answered 502"]);
+    assert.deepEqual(h.transitions(), []);
+  });
+
   for (const [step, fail] of [
     ["opening the PR", (h: ReturnType<typeof harness>) => { h.deps.repoHost.openOrUpdatePr = async () => { throw new Error("GitHub answered 502"); }; }],
-    ["asking for reviewers", (h: ReturnType<typeof harness>) => { h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); }; }],
+    ["asking for reviewers on a host with no review methods", (h: ReturnType<typeof harness>) => {
+      delete (h.deps.repoHost as { postReview?: unknown }).postReview;
+      h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); };
+    }],
     ["reading CI", (h: ReturnType<typeof harness>) => { h.deps.api.checks = async () => { throw new Error("GitHub answered 502"); }; }],
   ] as const) {
     test(`an error while ${step} ends the open-pr attempt failed with its message, and still throws`, async () => {
