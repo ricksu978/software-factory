@@ -2,7 +2,7 @@
 // the stored evidence and the Phase 0 exit report.
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
-import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
+import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
@@ -169,8 +169,7 @@ async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
  * Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. A
  * scenario carrying @regression, itself or through its feature, is marked, since Red expects it to pass.
  */
-async function criteriaView(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["criteria"]> {
-  const fi = await deps.adapter.getItem(externalId);
+async function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, sha: string, files: string[]): Promise<RunDetail["criteria"]> {
   if (!fi || !deps.repoHost || !fi.repo) return null;
   const byAc = new Map<number, Scenario[]>();
   for (const path of files) {
@@ -195,9 +194,8 @@ async function criteriaView(deps: DashboardDeps, externalId: string, sha: string
   return fi.acceptanceCriteria.map((criterion, i) => ({ criterion, scenarios: byAc.get(i + 1) ?? [] }));
 }
 
-/** The signed-off feature files, read at the lock sha. */
-async function lockedFeatures(deps: DashboardDeps, externalId: string, sha: string, files: string[]): Promise<RunDetail["features"]> {
-  const fi = await deps.adapter.getItem(externalId);
+/** The item's feature files as they stand at `sha`: the lock sha once signed off, the scenarios sha while waiting. */
+async function featuresAt(deps: DashboardDeps, fi: FactoryItem | null, sha: string, files: string[]): Promise<RunDetail["features"]> {
   if (!fi?.repo || !deps.repoHost) return [];
   const out: RunDetail["features"] = [];
   for (const path of files) out.push({ path, text: (await deps.repoHost.readFile(fi.repo, sha, path)) ?? "(missing at this commit)" });
@@ -221,11 +219,16 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const open = (await pool.query("select kind, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [id])).rows[0] ?? null;
   const waiting = item.state === "SignOff" || item.state === "NeedsInput" || (item.state === "Abandoned" && (await revivable(pool, id)));
   const question = waiting ? open : null;
-  const criteria = item.state === "SignOff" && run?.scenarios_sha ? await criteriaView(deps, item.external_id, run.scenarios_sha, run.locked_files ?? []) : null;
-  const features = run?.features_lock_sha ? await lockedFeatures(deps, item.external_id, run.features_lock_sha, run.locked_files ?? []) : [];
+  // While the sign-off form shows, the owner gets the criteria, the issue's body and the files at the scenarios sha.
+  const signing: string | null = (item.state === "SignOff" || question?.kind === "sign_off") && run?.scenarios_sha ? run.scenarios_sha : null;
+  const fi = signing || run?.features_lock_sha ? await deps.adapter.getItem(item.external_id) : null;
+  const criteria = signing ? await criteriaView(deps, fi, signing, run.locked_files ?? []) : null;
+  const pending = signing ? await featuresAt(deps, fi, signing, run.locked_files ?? []) : [];
+  const scope = signing && fi?.body.trim() ? fi.body : null;
+  const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
   return {
-    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, question, criteria, features,
+    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
   };

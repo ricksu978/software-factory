@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { activityPage, floorPage, issueRef, phase0Page } from "./views.ts";
+import { activityPage, floorPage, issueRef, phase0Page, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -96,5 +96,26 @@ describe("pages that name an item", () => {
   test("the activity log shows #N in the item's column", () => {
     const html = activityPage([{ at: new Date(), external_id: "131", repo: "acme/widgets", title: "Export a month", kind: "transition", from: "Queued", to: "InProgress", event: "claimed" }], null);
     assert.match(html, /<td><a href="https:\/\/github.com\/acme\/widgets\/issues\/131">#131<\/a><\/td><td>Export a month<\/td>/);
+  });
+});
+
+describe("runDetailPage at sign-off", () => {
+  const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000146", external_id: "146", repo: "octo/repo", title: "t", state: "SignOff" },
+    run: null, policies: [], stages: [], question: { kind: "sign_off", body: "q" },
+    criteria: [{ criterion: "The owner sees the scope", scenarios: [] }], scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+
+  test("shows the scope with its lines and escaped, then the criteria and the files, all before the buttons", () => {
+    const html = runDetailPage(detail({ scope: "## Why\n<b>bold</b>", pending: [{ path: "features/a.feature", text: "Feature: <i>a</i>" }] }), null);
+    const at = ["<h2>Scope</h2>", "Criteria and their scenarios", "<h3>features/a.feature</h3>", "Approve the scenarios", "Ask for changes"].map((s) => html.indexOf(s));
+    assert.ok(at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1])), JSON.stringify(at));
+    assert.match(html, /## Why\n&lt;b&gt;bold&lt;\/b&gt;/);
+    assert.match(html, /Feature: &lt;i&gt;a&lt;\/i&gt;/);
+  });
+
+  test("shows no Scope section when there's no scope", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Scope<\/h2>/);
   });
 });

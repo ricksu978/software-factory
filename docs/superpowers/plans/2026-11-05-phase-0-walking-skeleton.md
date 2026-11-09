@@ -1016,7 +1016,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - "Next up", the first five items `claimNext` would pick;
     - "Not ready", each NotReady item with the `dor.md` lines it failed;
     - the waiting count beside the WIP number, as "3 of 3 waiting".
-  - **Sign-off view.** For a SignOff item, Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it, and marks a criterion with no scenario "no scenario". It also marks each `@regression` scenario "expected to pass at Red", so the person signing off approves the exemption knowingly.
+  - **Sign-off view.** For a SignOff item, Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it, and marks a criterion with no scenario "no scenario". It also marks each `@regression` scenario "expected to pass at Red", so the person signing off approves the exemption knowingly. Above the criteria comes a Scope section with the issue's body as written, shown as text with its lines kept, and none when the body is blank (PBI 146). Below them come the files in `locked_files` in full, each under its path, read at `scenarios_sha`. A file absent there shows "(missing at this commit)". All of it comes before the Approve and Ask for changes buttons. An Abandoned item that timed out and still shows the sign-off form shows the same view.
   - **Re-queue.** Failed and Abandoned items in Run detail show a Re-queue button that posts a `requeue` override, which needs a reason.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
