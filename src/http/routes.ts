@@ -167,16 +167,17 @@ async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
 }
 
 /**
- * Acceptance criteria with the scenarios tagged @ac-N under each, read from the files at the scenarios sha. A
- * scenario carrying @regression, itself or through its feature, is marked, since Red expects it to pass.
+ * Acceptance criteria with the scenarios tagged @ac-N under each, parsed from the feature files already read at the
+ * scenarios sha, so each file costs one read for both the criteria list and its full text. A scenario carrying
+ * @regression, itself or through its feature, is marked, since Red expects it to pass.
  */
-async function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, sha: string, files: string[]): Promise<RunDetail["criteria"]> {
+function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, files: RunDetail["features"]): RunDetail["criteria"] {
   if (!fi || !deps.repoHost || !fi.repo) return null;
   const byAc = new Map<number, Scenario[]>();
-  for (const path of files) {
+  for (const { text } of files) {
     let tags: string[] = [];
     let featureTags: string[] = [];
-    for (const line of ((await deps.repoHost.readFile(fi.repo, sha, path)) ?? "").split(/\r?\n/)) {
+    for (const line of text.split(/\r?\n/)) {
       const t = line.trim();
       if (t.startsWith("@")) tags.push(...t.split(/\s+/));
       else if (/^Feature:/.test(t)) {
@@ -223,8 +224,8 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   // While the sign-off form shows, the owner gets the criteria, the issue's body and the files at the scenarios sha.
   const signing: string | null = (item.state === "SignOff" || question?.kind === "sign_off") && run?.scenarios_sha ? run.scenarios_sha : null;
   const fi = signing || run?.features_lock_sha ? await deps.adapter.getItem(item.external_id) : null;
-  const criteria = signing ? await criteriaView(deps, fi, signing, run.locked_files ?? []) : null;
   const pending = signing ? await featuresAt(deps, fi, signing, run.locked_files ?? []) : [];
+  const criteria = signing ? criteriaView(deps, fi, pending) : null;
   const scope = signing && fi?.body.trim() ? fi.body : null;
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
