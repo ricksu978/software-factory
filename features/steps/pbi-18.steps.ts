@@ -33,6 +33,8 @@ export type Ctx = {
   repoHost?: Record<string, unknown>;
   /** Replaces the cell API's answer about CI, as PBI 142's steps do to fail it. */
   checks?: (sha: string) => Promise<string>;
+  /** Extra fields for the cell's context, as PBI 140's steps add to resume a stage a restart cut short. */
+  context?: Record<string, unknown>;
 };
 
 function ctx(world: object): Ctx {
@@ -278,6 +280,7 @@ export async function runTheCell(world: object): Promise<void> {
         // The control plane's filter (Run contract 10): only trusted authors reach the cell's context.
         trustedComments: comments.filter((x) => x.author === "owner"),
         stageAttempts: {},
+        ...c.context,
       },
       agent: agent(c),
       git: shellGit(c.dir, BRANCH),
