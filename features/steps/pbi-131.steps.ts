@@ -37,7 +37,7 @@ type Ctx = {
   last?: { scope: string; n: string; title: string };
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi131?: Ctx };
   w.pbi131 ??= { items: [], boards: new Map() };
   return w.pbi131;
@@ -97,7 +97,7 @@ async function addItem(c: Ctx, ext: string, title: string, sourceId: string, rep
   return it;
 }
 
-async function inGitHubRepo(c: Ctx, ext: string, title: string, fullName: string): Promise<Item> {
+export async function inGitHubRepo(c: Ctx, ext: string, title: string, fullName: string): Promise<Item> {
   const repoId = await repoRow(`https://github.com/${fullName}`);
   return addItem(c, ext, title, await board(c, [[fullName, repoId]]), repoId);
 }
@@ -259,7 +259,7 @@ async function dashboard(c: Ctx): Promise<void> {
   c.close = handler.close;
 }
 
-async function open(world: object, path: string): Promise<void> {
+export async function open(world: object, path: string): Promise<void> {
   const c = ctx(world);
   await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer', 'viewer', 'viewer') on conflict (provider, subject) do nothing`);
   await dashboard(c);
@@ -284,7 +284,7 @@ When("a viewer opens the Phase 0 report", long, async function () {
 // ---- reading the page ----
 
 /** The last page any of these steps or PBI 105's opened. */
-function page(world: object): string {
+export function page(world: object): string {
   const w = world as { pbi131?: Ctx; pbi19?: { status?: number; page?: string } };
   const got = w.pbi19?.page !== undefined ? w.pbi19 : w.pbi131;
   assert.ok(got?.page !== undefined, "no page came back");
@@ -300,9 +300,9 @@ const decodeEntity = (e: string): string => {
 };
 
 /** A place's text, character by character, with the href of the link each character sits in (or null). */
-type Rendered = { text: string; hrefs: (string | null)[]; links: { href: string; text: string }[] };
+export type Rendered = { text: string; hrefs: (string | null)[]; links: { href: string; text: string }[] };
 
-function render(html: string): Rendered {
+export function render(html: string): Rendered {
   let text = "";
   const hrefs: (string | null)[] = [];
   const links: { href: string; text: string }[] = [];
@@ -339,7 +339,7 @@ function render(html: string): Rendered {
 const SECTIONS = ["Waiting on you", "Next up", "Not ready", "In flight"];
 
 /** The html of a place on the page. */
-function scope(html: string, place: string): string {
+export function scope(html: string, place: string): string {
   const floor = /^(?:Floor's )?"([^"]+)"$/.exec(place)?.[1];
   if (floor) {
     assert.ok(SECTIONS.includes(floor), `unknown Floor section "${floor}"`);
@@ -391,7 +391,7 @@ function hrefAt(r: Rendered, hash: number, n: string): string | null {
   return [...hs][0];
 }
 
-function placeText(r: Rendered): string {
+export function placeText(r: Rendered): string {
   return r.text.replace(/\s+/g, " ").trim().slice(0, 600);
 }
 
@@ -405,7 +405,7 @@ function showsBefore(world: object, place: string, n: string, title: string): nu
   return hash;
 }
 
-function issueHref(world: object, place: string, n: string, title: string): string | null {
+export function issueHref(world: object, place: string, n: string, title: string): string | null {
   const r = render(scope(page(world), place));
   const hash = showsBefore(world, place, n, title);
   return hrefAt(r, hash, n);
@@ -413,7 +413,8 @@ function issueHref(world: object, place: string, n: string, title: string): stri
 
 const PLACE = `(Floor's "[^"]+"|"[^"]+"|the Run detail heading|the Phase 0 report|the activity log)`;
 
-Then(new RegExp(`^${PLACE} shows "([^"]*)" for the item$`), function (place: string, n: string) {
+// A "PR #N" is PBI 145's, which reads it as a link in the item's row rather than a number before its title.
+Then(new RegExp(`^${PLACE} shows "((?!PR #)[^"]*)" for the item$`), function (place: string, n: string) {
   showsBefore(this, place, n, lastItem(ctx(this)).title);
 });
 
