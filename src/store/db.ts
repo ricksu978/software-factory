@@ -68,10 +68,16 @@ export async function migrate(pool: pg.Pool): Promise<void> {
 }
 
 const afterCommit = new WeakMap<pg.PoolClient, (() => Promise<void>)[]>();
+const poolOf = new WeakMap<pg.PoolClient, pg.Pool>();
 
 /** True when c is a client inside withTx. */
 export function inTx(c: pg.PoolClient): boolean {
   return afterCommit.has(c);
+}
+
+/** The pool a withTx client came from, so a process's hooks can tell its own transactions from another's. */
+export function txPool(c: pg.PoolClient): pg.Pool | undefined {
+  return poolOf.get(c);
 }
 
 /** Queues work that must run only once the surrounding withTx commits, such as onTransition hooks. */
@@ -89,6 +95,7 @@ export async function withTx<T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise
   const c = await pool.connect();
   const queue: (() => Promise<void>)[] = [];
   afterCommit.set(c, queue);
+  poolOf.set(c, pool);
   let result: T;
   try {
     await c.query("begin");
@@ -99,6 +106,7 @@ export async function withTx<T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise
     throw e;
   } finally {
     afterCommit.delete(c);
+    poolOf.delete(c);
     c.release();
   }
   for (const job of queue) {

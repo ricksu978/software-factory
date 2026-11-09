@@ -62,10 +62,11 @@ export function restartWaitMs(env: Record<string, string | undefined> = process.
 }
 
 /**
- * Clears a restart override left from before this control plane started, so the restarted factory runs (PBI 140). A
- * pause, drain or kill stays: only the restart was meant to end with the restart.
+ * Clears a restart override left from before this process started, so the restarted factory runs (PBI 140). The
+ * control plane and the worker each call it, since either can restart on its own. A pause, drain or kill stays: only
+ * the restart was meant to end with the restart.
  */
 export async function clearRestartOnStart(c: pg.Pool | pg.PoolClient): Promise<void> {
   const r = await c.query("update override set cleared_at = now() where cleared_at is null and scope = 'factory' and kind = 'restart'");
-  if (r.rowCount) console.log("override: cleared the factory restart left from before this control plane started");
+  if (r.rowCount) console.log("override: cleared the factory restart left from before this process started");
 }
