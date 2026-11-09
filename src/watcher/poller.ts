@@ -7,7 +7,8 @@ import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "..
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
-import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
+import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
+import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
@@ -274,6 +275,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       openDeps, judge, adapter, policyErrors: r.policyErrors, split,
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
+      // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
+      splits: { get: (i) => keptSplit(pool, row.id, itemTextHash(i)), keep: (i, children) => keepSplit(pool, row.id, itemTextHash(i), children) },
     });
     // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.
