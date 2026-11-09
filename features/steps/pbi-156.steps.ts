@@ -239,11 +239,17 @@ async function startWorker(world: object, n: number): Promise<void> {
   await waitFor(world, n);
 }
 
+/**
+ * Waits for the start-up poll of each board, then for `n` ticks that ran wholly after it. A tick beside the poll can
+ * find an item's row locked by it, and claimNext skips locked rows, so its claim waits for the next tick.
+ */
 async function waitFor(world: object, n: number): Promise<void> {
   const c = ctx(world);
   const w = c.worker!;
-  await until(`the worker ticks ${n} time(s)`, () => ticks(w) >= n);
   for (const b of c.boards) await until(`the worker polls board ${b.name}`, () => (w.runs.get(`polling source ${b.id}`) ?? 0) >= 1);
+  // The tick under way as the poll ended started beside it, so it doesn't count.
+  const base = ticks(w) + 1;
+  await until(`the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
   await learnItems(world);
 }
 
@@ -263,7 +269,7 @@ async function startControl(world: object): Promise<void> {
 }
 
 function started(c: Ctx): void {
-  assert.ok(!c.missing, c.missing);
+  if (c.missing) assert.fail(c.missing);
 }
 
 // ---- Given ----

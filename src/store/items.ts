@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { next, overrideTo, type ItemEvent, type ItemState } from "../core/states.ts";
-import { inTx, runAfterCommit } from "./db.ts";
+import { inTx, runAfterCommit, txPool } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
 
 export class IllegalTransition extends Error {
@@ -12,15 +12,25 @@ export class IllegalTransition extends Error {
 
 // "override" marks an operator's move through overrideItem, which follows no edge of the state machine.
 type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent | "override") => Promise<void>;
-const hooks: Hook[] = [];
+const hooks: { hook: Hook; pool?: pg.Pool }[] = [];
 
-/** Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is one (Run contract 8). */
-export function onTransition(hook: Hook): () => void {
-  hooks.push(hook);
+/**
+ * Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is
+ * one (Run contract 8). Given a pool, the hook runs only for transitions committed through that pool, so a process
+ * handles the transitions it made, and two in one test process don't each handle the other's.
+ */
+export function onTransition(hook: Hook, pool?: pg.Pool): () => void {
+  const entry = { hook, pool };
+  hooks.push(entry);
   return () => {
-    const i = hooks.indexOf(hook);
+    const i = hooks.indexOf(entry);
     if (i !== -1) hooks.splice(i, 1);
   };
+}
+
+function runHooks(c: pg.PoolClient, ...args: Parameters<Hook>): void {
+  const pool = txPool(c);
+  for (const h of hooks) if (!h.pool || h.pool === pool) runAfterCommit(c, () => h.hook(...args));
 }
 
 /**
@@ -42,7 +52,7 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
     await c.query("update item set state = $2 where id = $1", [itemId, to]);
   }
   await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
-  for (const hook of hooks) runAfterCommit(c, () => hook(itemId, from, to, event));
+  runHooks(c, itemId, from, to, event);
   return to;
 }
 
@@ -63,7 +73,7 @@ export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemSta
     await c.query("update item set state = $2 where id = $1", [itemId, target]);
   }
   await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
-  for (const hook of hooks) runAfterCommit(c, () => hook(itemId, from, target, "override"));
+  runHooks(c, itemId, from, target, "override");
   return target;
 }
 

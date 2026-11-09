@@ -1,16 +1,17 @@
 // The control plane's entry point (plan Task 15). One process on one port serves the cell API and the model gateway,
-// GitHub's webhook and the dashboard, and runs the scheduler's tick and the board poller. `aspire run` starts it as
-// the control resource. Every decision lives in the database, so a restart picks up where the last process stopped.
+// GitHub's webhook and the dashboard. `aspire run` starts it as the control resource. The scheduler's tick, the board
+// poller and the egress proxy run in the worker, src/worker/main.ts (redesign step 2). Every decision lives in the
+// database, so a restart picks up where the last process stopped.
 import { App } from "@octokit/app";
 import { BlobServiceClient } from "@azure/storage-blob";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import type { Server } from "node:http";
 import { join } from "node:path";
 import type pg from "pg";
 import { githubBacklog, parseGitHubWebhook, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
-import { haikuJudge, runAgent } from "./agent/run.ts";
 import { parseRepoConfig } from "./config/repo-config.ts";
 import { loadSop, stageAfter } from "./config/sop.ts";
 import { mirrorBoard } from "./control/board.ts";
@@ -20,11 +21,8 @@ import { applyComment } from "./control/decisions.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
 import { dashboardRoutes } from "./http/routes.ts";
 import { BadRequest, json, startServer, type Handler } from "./http/server.ts";
-import { dockerLauncher, ensureEgress } from "./scheduler/launcher.ts";
-import { tick, TICK_MS } from "./scheduler/scheduler.ts";
 import { createPool } from "./store/db.ts";
 import { clearRestartOnStart } from "./store/overrides.ts";
-import { pollOnce, POLL_INTERVAL_MS } from "./watcher/poller.ts";
 import { handleWebhook } from "./watcher/webhook.ts";
 
 export type Source = { id: string; adapter: BacklogAdapter };
@@ -49,10 +47,10 @@ export type ControlDeps = {
 // GitHub caps a webhook payload at 25 MB.
 const MAX_WEBHOOK = 25 * 1024 * 1024;
 // The SOP this image carries. A run's first claim pins its version, and the cell API moves runs along its stages.
-const sop = loadSop(readFileSync(join(import.meta.dirname, "..", "sop", "default.yml"), "utf8"));
+export const sop = loadSop(readFileSync(join(import.meta.dirname, "..", "sop", "default.yml"), "utf8"));
 
 /** Stands in for a board or repo host that isn't configured yet. It answers every call with an error naming why. */
-function missing<T extends object>(why: string): T {
+export function missing<T extends object>(why: string): T {
   return new Proxy({} as T, { get: () => async () => { throw new Error(why); } });
 }
 
@@ -125,28 +123,8 @@ function blobReader(connectionString: string): (path: string) => Promise<string 
   };
 }
 
-/** Runs `fn` once and logs a failure as "<what> failed:" instead of throwing. True when it succeeded. */
-export async function attempt(what: string, fn: () => Promise<unknown>): Promise<boolean> {
-  try {
-    await fn();
-    return true;
-  } catch (e) {
-    console.error(`${what} failed:`, e);
-    return false;
-  }
-}
-
-/** Runs `fn` now and then `ms` after each run ends, so two runs never overlap. A failure is logged and the next run goes ahead. */
-function every(ms: number, what: string, fn: () => Promise<unknown>): void {
-  const run = async () => {
-    await attempt(what, fn);
-    setTimeout(run, ms);
-  };
-  void run();
-}
-
 /** The GitHub boards migrate-cli seeded from config/sources.yml, each with the installation of the first repo it maps. */
-async function githubSources(pool: pg.Pool, app: App, projectToken: string | null): Promise<{ sources: Source[]; installationId: number | null }> {
+export async function githubSources(pool: pg.Pool, app: App, projectToken: string | null): Promise<{ sources: Source[]; installationId: number | null }> {
   const rows = (await pool.query<{ id: string; owner_type: "user" | "org"; owner_login: string; project_number: number; field_map: FieldMap; installation_id: string | null }>(
     `select s.id, s.owner_type, s.owner_login, s.project_number, s.field_map,
        (select r.installation_id from repo r where r.id::text in (select value from jsonb_each_text(s.repo_map)) and r.installation_id is not null limit 1) as installation_id
@@ -159,6 +137,27 @@ async function githubSources(pool: pg.Pool, app: App, projectToken: string | nul
   // ponytail: one GitHub App installation serves every repo in Phase 0. Key the repo host by installation when that changes.
   const installationId = rows.find((r) => r.installation_id !== null)?.installation_id;
   return { sources, installationId: installationId ? Number(installationId) : null };
+}
+
+/**
+ * The control plane once its settings are read: its handlers on `port`, and board mirroring and the console log for
+ * the transitions it commits. It runs no background job. Those are the worker's.
+ */
+export async function serveControl(d: ControlDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
+  const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
+  const control = controlHandlers(d);
+  const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
+  // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
+  const server = await startServer(control.handlers, { port, host: "::" });
+  return {
+    server,
+    async stop() {
+      for (const off of hooks) off();
+      await control.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 export async function start(env: NodeJS.ProcessEnv): Promise<void> {
@@ -178,39 +177,22 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     if (!v) throw new Error(`${name} is not set`);
     return v;
   };
-  const [dbUri, blob, secret, webhookSecret, appId, appKey, claudeToken, image, controlUrl] =
-    ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CELL_IMAGE", "CELL_CONTROL_URL"].map(need);
+  const [dbUri, blob, secret, webhookSecret, appId, appKey, claudeToken] =
+    ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN"].map(need);
 
   const pool = createPool(dbUri);
   // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
   await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
-  if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
-  const backlogFor = (id: string) => sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
 
-  // Cells reach nothing but GitHub, npm and this process, through the egress proxy (Task 13).
-  await ensureEgress({ image, controlUrl, blob });
-  const launcher = dockerLauncher({ image });
-
-  const control = controlHandlers({
+  const port = Number(env.PORT ?? dashboardPort);
+  await serveControl({
     pool, local: true, auth, origin, sources, repoHost, secret, webhookSecret, claudeToken,
     uploadUrl: blobUploadUrl(blob, env.CELL_BLOB_HOST), readBlob: blobReader(blob),
-  });
-  mirrorBoard({ pool, backlogFor, repoHost });
-  logTransitions({ pool });
-  // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
-  await startServer(control.handlers, { port: Number(env.PORT ?? dashboardPort), host: "::" });
-  console.log(`The control plane answers on port ${env.PORT ?? dashboardPort}.`);
-
-  every(TICK_MS, "scheduler tick", () => tick({
-    pool, launcher, now: new Date(), killFlag: env.FACTORY_KILL === "1", repoHost, backlogFor, secret, controlUrl, sopVersion: sop.version,
-  }));
-  const judge = haikuJudge(sop);
-  // One split cache for every poll, so a re-gate of item text already split doesn't ask the coding model again.
-  const split = { sop, agent: runAgent, seen: new Map() };
-  for (const s of sources) every(POLL_INTERVAL_MS, `polling source ${s.id}`, () => pollOnce({ pool, adapter: s.adapter, repoHost, judge, sourceId: s.id, split }));
+  }, port);
+  console.log(`The control plane answers on port ${port}.`);
 }
 
 if (import.meta.main) {
