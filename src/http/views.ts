@@ -23,6 +23,8 @@ th, td { border-bottom: 1px solid var(--line); padding: .35rem .5rem; text-align
 .badge { border: 1px solid var(--line); border-radius: 1rem; font-size: .8rem; padding: 0 .5rem; }
 .banner { background: var(--warn-bg); color: var(--warn-fg); padding: .5rem 1rem; }
 label { display: block; margin: .5rem 0 .25rem; }
+pre { overflow-x: auto; }
+pre.scope { font: inherit; white-space: pre-wrap; }
 `;
 
 export function page(title: string, body: string, banner: string | null = null): string {
@@ -140,6 +142,10 @@ export type RunDetail = {
   readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
+  /** The issue's body as written on GitHub, shown at sign-off, or null when it's blank or no form shows. */
+  scope: string | null;
+  /** The feature files up for sign-off, at the scenarios sha, while the sign-off form shows. */
+  pending: { path: string; text: string }[];
   /** The signed-off feature files at the lock sha. */
   features: { path: string; text: string }[];
   /** The item's scenarios with their verdicts in the latest red and green reports. */
@@ -172,6 +178,10 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .map((c) => `<li>${escapeHtml(c.criterion)}${c.scenarios.length ? `<ul>${c.scenarios.map((s) => `<li>${escapeHtml(s.name)}${s.regression ? ` <strong>expected to pass at Red</strong>` : ""}</li>`).join("")}</ul>` : ` <strong>no scenario</strong>`}</li>`)
         .join("")}</ol>`
     : "";
+  const files = (fs: { path: string; text: string }[]) => fs.map((f) => `<h3>${escapeHtml(f.path)}</h3><pre>${escapeHtml(f.text)}</pre>`).join("");
+  // The owner reads what the item is for, the criteria and the scenarios in full before reaching the buttons.
+  const scope = d.scope ? `<h2>Scope</h2><pre class="scope">${escapeHtml(d.scope)}</pre>` : "";
+  const pending = d.pending.length ? `<h2>Scenarios up for sign-off</h2>${files(d.pending)}` : "";
   const id = escapeHtml(d.item.id);
   const form = d.question?.kind === "sign_off"
     ? `<h2>Sign off</h2><form method="post" action="/items/${id}/signoff"><label for="note">Note for the factory</label><textarea id="note" name="note"></textarea>
@@ -196,10 +206,8 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${form}${controls}${criteria}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
-    d.features.length
-      ? `<h2>Signed-off scenarios</h2>${d.features.map((f) => `<h3>${escapeHtml(f.path)}</h3><pre>${escapeHtml(f.text)}</pre>`).join("")}`
-      : ""
+${scope}${criteria}${pending}${form}${controls}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
+    d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }`, banner);
 }
 
