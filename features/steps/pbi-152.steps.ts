@@ -226,10 +226,16 @@ function saysUndone(prompt: string, what: string) {
   assert.ok(sentences(prompt).some((s) => UNDONE.test(s) && /\blocked\b/i.test(s)), `${what} doesn't say the factory undoes a change to a locked feature file`);
 }
 
+// The standing "## The locked feature files" section names every locked file and says a change is undone, so it
+// would satisfy these checks on its own. Only what's outside it can say this edit was undone.
+const withoutLockedSection = (prompt: string) => prompt.replace(/^## The locked feature files\n[\s\S]*?(?=^## |(?![\s\S]))/m, "");
+
 function saysEditUndone(prompt: string, path: string, what: string) {
-  assert.ok(prompt.includes(path), `${what} doesn't name ${path}`);
-  assert.ok(UNDONE.test(prompt), `${what} doesn't say the edit to ${path} was undone`);
-  assert.ok(WHY.test(prompt), `${what} doesn't say why: that the file is locked since sign-off`);
+  const rest = sentences(withoutLockedSection(prompt)).filter((s) => s.includes(path));
+  assert.ok(rest.length, `${what} doesn't name ${path} outside its standing note on the locked files`);
+  const undone = rest.filter((s) => UNDONE.test(s));
+  assert.ok(undone.length, `${what} doesn't say the edit to ${path} was undone`);
+  assert.ok(undone.some((s) => WHY.test(s)), `${what} doesn't say why: that the file is locked since sign-off`);
 }
 
 // ---- the run ----
