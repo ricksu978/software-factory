@@ -144,7 +144,8 @@ export function readinessLogic(): ReadinessLogic {
     sourceId: "", externalId: "", title: "", body: "", acceptanceCriteria: [], labels: [], status: "", rank: 0,
     repo: null, fields: {}, closed: false, updatedAt: "",
   };
-  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }), version: READINESS_VERSION };
+  // PBI 159 stub: the split prompt isn't rendered yet.
+  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }), version: READINESS_VERSION, splitPrompt: "" };
 }
 
 const JUDGE_TIMEOUT_MS = 120_000;

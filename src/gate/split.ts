@@ -22,7 +22,16 @@ export type SplitOutcome = { proposed: true; children: SplitChild[] } | { propos
  * What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. `seen` holds each
  * answered outcome by item text hash, so a re-gate of text already split (say after a dor.md change) doesn't ask again.
  */
-export type SplitDeps = { sop: { models: { coding: string } }; agent: (a: AgentArgs) => Promise<AgentResult>; seen?: Map<string, SplitOutcome> };
+export type SplitDeps = {
+  sop: { models: { coding: string } };
+  agent: (a: AgentArgs) => Promise<AgentResult>;
+  seen?: Map<string, SplitOutcome>;
+  /**
+   * The coding model's instructions for an item (PBI 159). Unset, the factory's own splitPrompt. It must match the
+   * splitPrompt in the poller's readiness logic, which the readiness fingerprint covers. Not read yet (PBI 159 stub).
+   */
+  prompt?: (item: FactoryItem) => string;
+};
 
 /** The most outcomes `seen` keeps. The oldest goes first, so a long-lived poller's memory stays bounded. */
 export const SPLIT_SEEN_MAX = 1000;

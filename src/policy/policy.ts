@@ -85,9 +85,10 @@ export type ReadinessTexts = Record<"dor" | "scenarios" | "pr-review" | "risk" |
 
 /**
  * The factory's own readiness logic (PBI 149): the prompt it gives the judge, and the version of the engine rules no
- * policy file can weaken. A change to either re-checks every NotReady item.
+ * policy file can weaken. A change to either re-checks every NotReady item. Since PBI 159 it also holds the prompt the
+ * factory gives the coding model when it splits an oversized item, rendered independent of any one item.
  */
-export type ReadinessLogic = { judgePrompt: string; version: number };
+export type ReadinessLogic = { judgePrompt: string; version: number; splitPrompt: string };
 
 /** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
 export const READINESS_VERSION = 1;
