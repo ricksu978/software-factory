@@ -732,6 +732,16 @@ describe("runCell", () => {
     assert.ok(!h.transitions().length);
   });
 
+  // A stopped report during a restart ends the claim, so the stopped attempt's uploads go first, while its token holds.
+  test("a stopped attempt uploads its transcript before it reports itself stopped", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"]);
+    assert.equal(await h.run(), "stopped");
+    const green = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "green")
+      .map((c) => (c.route === "/stage" ? `stage ${c.body.status}` : `upload ${c.body.kind}`));
+    assert.deepEqual(green, ["stage started", "upload transcript", "stage stopped"]);
+  });
+
   test("a stop whose lease check before the push finds the lease lost pushes nothing and reports nothing", async () => {
     mock.timers.enable({ apis: ["setInterval"] });
     const h = stopMidGreen(["stop", "lost"]);

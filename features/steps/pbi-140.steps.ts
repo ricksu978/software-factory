@@ -62,6 +62,8 @@ type Engine = {
   mode: "uncommitted" | "commit" | "fail";
   /** The renewals' answers in order. The last one repeats, and none means carry on. */
   leases: ("stop" | "lost")[];
+  /** A restart is being prepared, so a renewal with no scripted answer says stop. */
+  restarting?: boolean;
   /** Each stage attempt the control plane holds, by "stage:attempt", across both cells of a scenario. */
   rows: Map<string, string>;
   calls: Recorded[];
@@ -263,8 +265,10 @@ Given("an operator paused the factory with the reason {string}", long, async fun
   await setOverride(need().pool, { scope: "factory", targetId: null, kind: "pause", reason, createdBy: (await operatorId(this)) as string, expiresAt: null });
 });
 
-Given("no cell is running", function () {
-  // Nothing is set up: the factory has no item in flight.
+Given("no cell is running", long, async function () {
+  // A cell is running while its item is InProgress under a lease that hasn't run out.
+  const live = await need().pool.query("select id from item where state = 'InProgress' and lease_expires > $1", [ctx(this).clock]);
+  assert.equal(live.rowCount, 0, `items ${live.rows.map((r) => r.id).join(", ")} have a cell running`);
 });
 
 When("an operator prepares a restart with the reason {string}", long, async function (reason: string) {
@@ -688,7 +692,7 @@ async function runEngine(world: object): Promise<void> {
   const api = {
     async lease() {
       e.calls.push({ route: "/lease", body: {} });
-      const answer = e.leases.length ? e.leases[Math.min(leaseCalls++, e.leases.length - 1)] : null;
+      const answer = e.leases.length ? e.leases[Math.min(leaseCalls++, e.leases.length - 1)] : e.restarting ? "stop" : null;
       if (answer === "lost") throw new LeaseLost("the lease generation moved on");
       return { stop: answer === "stop" };
     },
@@ -713,7 +717,7 @@ async function runEngine(world: object): Promise<void> {
         e.committed = git(a.cwd, "rev-parse", "HEAD");
       }
       // The next renewal arrives while the agent is mid-stage.
-      if (e.leases.length) {
+      if (e.leases.length || e.restarting) {
         mock.timers.tick(60_000);
         await flush();
       }
@@ -782,7 +786,11 @@ Given("a run for item {int} that is at green's first attempt", function (_item: 
 });
 
 Given("the factory is preparing to restart", function () {
-  // The cell learns of it only through its lease renewals, which this scenario scripts.
+  // The cell learns of it only through its lease renewals: from now on each one says stop, unless a later step
+  // scripts another answer, such as a lost lease, which the control plane's 409 gives ahead of the stop.
+  const e = engine(this);
+  assert.equal(e.ran, false, "the cell already ran");
+  e.restarting = true;
 });
 
 // A Given in one scenario and the When in others. It runs the cell unless a later step scripts another renewal first.

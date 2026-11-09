@@ -297,6 +297,22 @@ describe("cell API", dbTest, () => {
     assert.equal((await runRow(cell.runId)).next_stage, "green");
   });
 
+  // Run contract 9: a stopped attempt uploads before its /stage, since that report ends the claim during a restart.
+  test("a stopped attempt's uploads during a restart keep their refs, and an upload after the report is fenced", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "green", attempt: 1 })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "green", attempt: 1 })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "stopped" })).status, 200);
+    const s = (await db.pool.query("select status, transcript_ref, report_ref from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.equal(s.status, "stopped");
+    assert.equal(s.transcript_ref, `transcripts/${cell.runId}/green-1.jsonl`);
+    assert.equal(s.report_ref, `reports/${cell.runId}/green-1.ndjson`);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "green", attempt: 1 })).status, 409);
+  });
+
   test("a stopped attempt reported under a pause keeps the claim, so the lease runs out as before", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");

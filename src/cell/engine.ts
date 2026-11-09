@@ -217,17 +217,23 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return attempt;
   };
   // Run contract 9: /stage, then every upload. The caller sends /pr and the transition after. A stopped attempt is
-  // one a stop cut short (PBI 140), which uses up none of the stage's retries.
+  // one a stop cut short (PBI 140), which uses up none of the stage's retries. It uploads first and sends /stage last,
+  // because a stopped report during a restart ends the claim and raises the generation, so an upload after it gets 409.
+  // Its row exists already, from the attempt's `started` report.
   const end = async (status: "passed" | "failed" | "stopped") => {
     const c = current;
     if (!c) return;
     current = null;
+    const uploads = async () => {
+      if (c.transcript) await api.upload({ kind: "transcript", stageId: c.stageId, attempt: c.attempt, body: c.transcript });
+      if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
+    };
+    if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: c.tokensIn, tokensOut: c.tokensOut,
       costUsd: c.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(c.usage ? { usage: { utilization: c.usage.utilization, resetsAt: c.usage.resetsAt === null ? null : new Date(c.usage.resetsAt * 1000).toISOString() } } : {}) });
-    if (c.transcript) await api.upload({ kind: "transcript", stageId: c.stageId, attempt: c.attempt, body: c.transcript });
-    if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
+    if (status !== "stopped") await uploads();
   };
 
   const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> =>
