@@ -146,6 +146,16 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.ok(all.every((b) => !b.includes("couldn't be proposed")));
   });
 
+  test("a new split prompt posts one fresh proposal for the same item text (PBI 159)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+    const prompt = () => "Split it briefly.";
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, valid) }));
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), prompt }, readinessSha: "new" }));
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), prompt }, readinessSha: "newer" }));
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((b) => b.startsWith("The factory proposes splitting")).length, 2);
+  });
+
   test("an invalid split posts nothing and the readiness comment says why", async () => {
     const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
     const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, "no") }));
@@ -252,6 +262,21 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.deepEqual(b.labels, []);
     const filed = (await s.fake.comments(s.id)).find((c) => c.startsWith("The factory filed this item's split"))!;
     assert.match(filed, /Card[\s\S]*Bank[\s\S]*Receipt/);
+  });
+
+  test("a saved split is proposed once, whatever split prompt is set later (PBI 159)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["card", "bank", "receipt"], repo: "o/r" });
+    const b = restartBoard(new Set(["create:Bank"]));
+    await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, three), file: b.file } })), /refused Bank/);
+    const prompt = () => "Split it briefly.";
+    await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), {
+      splits: b.splits, split: { ...split(true, two), prompt, file: { ...b.file, board: { ...b.file.board, createIssue: async () => { throw new Error("refused"); } } } },
+      readinessSha: "new",
+    })), /refused/);
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, two), prompt, file: b.file }, readinessSha: "newer" }));
+    assert.equal(out.filed, true);
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((c) => c.startsWith("The factory proposes splitting")).length, 1);
   });
 
   test("a parent already split another way gets a proposal that files nothing, and no child is filed (PBI 144)", async () => {

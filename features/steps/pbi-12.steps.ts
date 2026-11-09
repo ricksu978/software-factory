@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type pg from "pg";
 import type { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../../src/adapters/types.ts";
+import type { SplitDeps } from "../../src/gate/split.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // Shares PBI 4's database. Each scenario starts with empty item, source, repo and user tables, a fake board, a fake
@@ -15,9 +16,9 @@ export { baseFiles };
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
 type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }) => Promise<string>;
-export type Logic = { judgePrompt: string; version: number };
+export type Logic = { judgePrompt: string; version: number; splitPrompt: string };
 type Poller = {
-  pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic }) => Promise<unknown>;
+  pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic; split?: SplitDeps }) => Promise<unknown>;
 };
 export type Ctx = {
   fake?: Fake;
@@ -32,6 +33,10 @@ export type Ctx = {
   asked: Map<string, number>;
   /** PBI 149: the readiness logic the factory runs with. Unset, the poller uses its own. */
   logic?: Logic;
+  /** PBI 159: what the judge's last line says of the item's size. Unset, the line has no "oversized" key. */
+  oversized?: boolean;
+  /** PBI 159: how the poller asks the coding model for a split. Unset, it asks for none. */
+  split?: SplitDeps;
   /** PBI 149: each item's updatedAt and each of their repos' head and readiness files, as the setup left them. */
   baseline?: Baseline;
   polls: number;
@@ -52,7 +57,8 @@ const judge = (c: Ctx): Judge => async (item, dor) => {
     const reason = failed ? (c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
-  return [...dor.criteria.map((cr) => line(cr.index)), JSON.stringify({ flags: [] })].join("\n");
+  const last = c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized };
+  return [...dor.criteria.map((cr) => line(cr.index)), JSON.stringify(last)].join("\n");
 };
 
 const baseFiles: Record<string, string> = {
@@ -84,7 +90,8 @@ export async function poll(c: Ctx): Promise<void> {
   const poller = await load<Poller>("src/watcher/poller.ts");
   if (!poller?.pollOnce || !c.fake || !c.host || !c.sourceId) return;
   try {
-    await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId, ...(c.logic ? { logic: c.logic } : {}) });
+    await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId,
+      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}) });
     c.polls++;
   } catch (e) {
     c.error = e;
