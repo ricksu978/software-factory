@@ -10,6 +10,7 @@ import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
+import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
 
 /** HMAC-SHA256(secret, runId + ":" + generation) in hex. The scheduler hands it to the cell as RUN_TOKEN. */
@@ -32,6 +33,8 @@ export type CellApiDeps = {
   /** True while the kill switch's env flag is on. Defaults to reading FACTORY_KILL=1. */
   killSwitch?: () => boolean;
   now?: () => Date;
+  /** Where a request still open after 60 seconds warns, and the clock that times it (PBI 134). */
+  slow?: Slow;
 };
 
 // The only events a cell may send. Everything else is the control plane's, such as merged, which a steered cell
@@ -361,23 +364,28 @@ export function cellApi(deps: CellApiDeps): Handler {
       json(res, 404);
       return true;
     }
-    // The body is read before the token check but judged after it, so a fenced cell always gets 409, never 400.
-    const body = await readJson(req).catch((e: unknown) => e as Error);
-    const auth = req.headers.authorization ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
-    try {
-      const result = await withTx(deps.pool, async (c) => {
-        const run = uuid.test(m[1]) ? await lockRun(c, m[1]) : null;
-        if (!current(deps.secret, run, token)) throw new Fenced();
-        if (body instanceof Error) throw body;
-        return route(deps, { c, run, body, query: url.searchParams, now: now() });
-      });
-      json(res, 200, result);
-    } catch (e) {
-      if (e instanceof Fenced) json(res, 409, { error: "this run's lease generation has moved on" });
-      else throw e;
-    }
-    return true;
+    // A request still open after 60 seconds warns once, naming its route and run (PBI 134).
+    const name = `${req.method} /${m[2]}`;
+    const w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the cell API request ${name} for run ${m[1]} has been open for ${seconds(ms)}`, deps.slow);
+    return watched(w, async () => {
+      // The body is read before the token check but judged after it, so a fenced cell always gets 409, never 400.
+      const body = await readJson(req).catch((e: unknown) => e as Error);
+      const auth = req.headers.authorization ?? "";
+      const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+      try {
+        const result = await withTx(deps.pool, async (c) => {
+          const run = uuid.test(m[1]) ? await lockRun(c, m[1]) : null;
+          if (!current(deps.secret, run, token)) throw new Fenced();
+          if (body instanceof Error) throw body;
+          return route(deps, { c, run, body, query: url.searchParams, now: now() });
+        });
+        json(res, 200, result);
+      } catch (e) {
+        if (e instanceof Fenced) json(res, 409, { error: "this run's lease generation has moved on" });
+        else throw e;
+      }
+      return true;
+    });
   };
 }
 
