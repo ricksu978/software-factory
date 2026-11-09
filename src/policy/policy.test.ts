@@ -139,6 +139,13 @@ describe("readinessSha", () => {
     assert.notEqual(readinessSha(texts, { ...logic, version: 2 }), base);
   });
 
+  test("it covers the split prompt too (PBI 159)", () => {
+    const base = readinessSha(texts, logic);
+    assert.notEqual(readinessSha(texts, { ...logic, splitPrompt: "Split the item briefly." }), base);
+    assert.equal(readinessSha(texts, { ...logic, splitPrompt: "Split the item." }), base);
+    assert.notEqual(readinessSha(texts, { ...logic, version: 1, splitPrompt: "1" }), readinessSha(texts, { ...logic, version: 11, splitPrompt: "" }));
+  });
+
   test("text moved between the judge's prompt and the version changes the hash", () => {
     assert.notEqual(readinessSha(texts, { judgePrompt: "p1", version: 1, splitPrompt: "s" }), readinessSha(texts, { judgePrompt: "p", version: 11, splitPrompt: "s" }));
   });

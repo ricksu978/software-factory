@@ -3,7 +3,7 @@ import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
-import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
+import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -120,9 +120,10 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
       results = [...parseJudgement(reply, dor), ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))];
     }
   }
-  // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
+  // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text and split prompt.
   const split = oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
-  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${itemTextHash(item)}`);
+  // PBI 159: the key holds the split prompt too, so a new prompt posts one fresh proposal for the same text.
+  if (split?.proposed && ctx.split) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${splitKey(item, ctx.split)}`);
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));

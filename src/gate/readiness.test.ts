@@ -145,6 +145,16 @@ describe("gate: an oversized item (PBI 143)", () => {
     assert.ok(all.every((b) => !b.includes("couldn't be proposed")));
   });
 
+  test("a new split prompt posts one fresh proposal for the same item text (PBI 159)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
+    const prompt = () => "Split it briefly.";
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, valid) }));
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), prompt }, readinessSha: "new" }));
+    await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), prompt }, readinessSha: "newer" }));
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((b) => b.startsWith("The factory proposes splitting")).length, 2);
+  });
+
   test("an invalid split posts nothing and the readiness comment says why", async () => {
     const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"] });
     const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: split(true, "no") }));

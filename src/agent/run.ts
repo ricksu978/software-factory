@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import type { FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
+import { splitPrompt } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
 
 export type AgentResult = {
@@ -135,7 +136,7 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
 
 /**
  * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md, and
- * READINESS_VERSION. The prompt is judgePrompt's own words, rendered around an empty item and a dor.md with no text and
+ * READINESS_VERSION, and since PBI 159 the split prompt, rendered around an empty item with one empty criterion. The prompt is judgePrompt's own words, rendered around an empty item and a dor.md with no text and
  * one empty criterion, so every line of the template, the per-criterion line included, is in it, and any edit to those
  * words changes it while the items and policy files stay out of it.
  */
@@ -144,8 +145,11 @@ export function readinessLogic(): ReadinessLogic {
     sourceId: "", externalId: "", title: "", body: "", acceptanceCriteria: [], labels: [], status: "", rank: 0,
     repo: null, fields: {}, closed: false, updatedAt: "",
   };
-  // PBI 159 stub: the split prompt isn't rendered yet.
-  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }), version: READINESS_VERSION, splitPrompt: "" };
+  return {
+    judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }),
+    version: READINESS_VERSION,
+    splitPrompt: splitPrompt({ ...empty, acceptanceCriteria: [""] }),
+  };
 }
 
 const JUDGE_TIMEOUT_MS = 120_000;

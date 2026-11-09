@@ -97,8 +97,8 @@ export const READINESS_VERSION = 1;
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its
  * UTF-8 byte length, a colon and the text, so no text can slide across into the next file. A missing file goes in
  * as `-;`, which no length prefix starts with, so it never matches a file whose text is `absent` or anything else.
- * Given the factory's readiness logic (PBI 149), the judge's prompt and the readiness version follow the files the
- * same way, so a change to either gives a new sha for the same repo files.
+ * Given the factory's readiness logic (PBI 149), the judge's prompt, the readiness version and (PBI 159) the split
+ * prompt follow the files the same way, so a change to any of them gives a new sha for the same repo files.
  */
 export function readinessSha(texts: ReadinessTexts, logic?: ReadinessLogic): string {
   const hash = createHash("sha256");
@@ -108,7 +108,7 @@ export function readinessSha(texts: ReadinessTexts, logic?: ReadinessLogic): str
     else hash.update(`${Buffer.byteLength(text, "utf8")}:`).update(text, "utf8");
   }
   if (logic) {
-    for (const text of [logic.judgePrompt, String(logic.version)]) hash.update(`${Buffer.byteLength(text, "utf8")}:`).update(text, "utf8");
+    for (const text of [logic.judgePrompt, String(logic.version), logic.splitPrompt]) hash.update(`${Buffer.byteLength(text, "utf8")}:`).update(text, "utf8");
   }
   return hash.digest("hex");
 }

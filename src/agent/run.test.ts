@@ -194,6 +194,13 @@ test("the readiness logic holds the judge prompt's own words, with no item or do
   assert.deepEqual(readinessLogic(), logic, "the same code gives the same logic on every restart");
 });
 
+test("the readiness logic holds the split prompt's own words, with no item in it (PBI 159)", () => {
+  const { splitPrompt } = readinessLogic();
+  assert.match(splitPrompt, /Propose splitting it into 2 to 4 smaller child items\./);
+  assert.ok(splitPrompt.includes('{"index":1,"criterion":""}'), "the per-criterion line's template is in the logic");
+  assert.ok(!splitPrompt.includes(item.title));
+});
+
 const reply = (r: Partial<AgentResult>): AgentResult => ({ ok: true, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0,
   model: "claude-haiku-5-5", limit: null, usage: null, transcript: "", ...r });
 

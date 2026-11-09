@@ -20,7 +20,8 @@ export type SplitOutcome = { proposed: true; children: SplitChild[] } | { propos
 
 /**
  * What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. `seen` holds each
- * answered outcome by item text hash, so a re-gate of text already split (say after a dor.md change) doesn't ask again.
+ * answered outcome by split key (item text and prompt), so a re-gate of text already split under the same prompt (say
+ * after a dor.md change) doesn't ask again.
  */
 export type SplitDeps = {
   sop: { models: { coding: string } };
@@ -28,7 +29,7 @@ export type SplitDeps = {
   seen?: Map<string, SplitOutcome>;
   /**
    * The coding model's instructions for an item (PBI 159). Unset, the factory's own splitPrompt. It must match the
-   * splitPrompt in the poller's readiness logic, which the readiness fingerprint covers. Not read yet (PBI 159 stub).
+   * splitPrompt in the poller's readiness logic, which the readiness fingerprint covers.
    */
   prompt?: (item: FactoryItem) => string;
 };
@@ -104,10 +105,10 @@ export function checkSplit(reply: string, criterionCount: number): SplitOutcome 
 /**
  * Asks the SOP's coding model for a split and checks it. A failed or thrown run is no answer, never a split, and isn't
  * kept: the poller leaves that item Eligible so the next poll asks again (see `splitUnanswered`). Any other outcome is
- * kept in `deps.seen` by item text hash and returned from there for the same text, without a new run.
+ * kept in `deps.seen` by split key and returned from there for the same text, without a new run.
  */
 export async function proposeSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOutcome> {
-  const key = itemTextHash(item);
+  const key = splitKey(item, deps);
   const known = deps.seen?.get(key);
   if (known) return known;
   const out = await askForSplit(item, deps);
@@ -131,7 +132,7 @@ async function askForSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOut
   let r: AgentResult;
   try {
     // Judge mode: the parent's text is untrusted and this runs in the control plane, so the model gets no tool.
-    r = await deps.agent({ prompt: splitPrompt(item), model: deps.sop.models.coding, cwd: tmpdir(), maxTurns: 1, mode: "judge",
+    r = await deps.agent({ prompt: promptFor(item, deps), model: deps.sop.models.coding, cwd: tmpdir(), maxTurns: 1, mode: "judge",
       signal: AbortSignal.timeout(SPLIT_TIMEOUT_MS) });
   } catch {
     return { proposed: false, reason: NO_ANSWER };
@@ -154,4 +155,14 @@ export function splitComment(item: FactoryItem, children: SplitChild[]): string 
 /** SHA-256 of the item's own text, so the same text gets one proposal whatever else changed. */
 export function itemTextHash(item: FactoryItem): string {
   return createHash("sha256").update(JSON.stringify([item.title, item.body, item.acceptanceCriteria])).digest("hex");
+}
+
+const promptFor = (item: FactoryItem, deps: Pick<SplitDeps, "prompt">): string => (deps.prompt ?? splitPrompt)(item);
+
+/**
+ * The item's text hash and the hash of the prompt the coding model gets for it (PBI 159). The gate keys the proposal
+ * comment by it, so the same text under the same prompt gets one proposal, and a new split prompt gets one fresh one.
+ */
+export function splitKey(item: FactoryItem, deps: Pick<SplitDeps, "prompt">): string {
+  return `${itemTextHash(item)}:${createHash("sha256").update(promptFor(item, deps)).digest("hex")}`;
 }
