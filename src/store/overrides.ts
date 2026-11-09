@@ -1,8 +1,8 @@
 // Operator overrides (plan Task 13). A row stays active until it's cleared or expires. The scheduler applies the
-// item ones on its next tick, and the cell API's /lease reads pause, kill and stop_run directly.
+// item ones on its next tick, and the cell API's /lease reads pause, kill, restart and stop_run directly.
 import type pg from "pg";
 
-export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill";
+export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart";
 export type Override = {
   id: string; scope: "factory" | "backlog" | "item"; targetId: string | null; kind: OverrideKind;
   reason: string; createdBy: string | null; createdAt: Date; expiresAt: Date | null;
@@ -15,11 +15,11 @@ export async function setOverride(
 ): Promise<void> {
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   if ((o.scope === "item") !== (o.targetId !== null)) throw new Error("an item override names its item, and a factory override names none");
-  // resume clears the factory's pause, drain and kill, recording who cleared them, and keeps its own row for the audit trail
-  // (spec §8). That row is cleared from the start, so it's never active.
+  // resume clears the factory's pause, drain, kill and restart, recording who cleared them, and keeps its own row for the
+  // audit trail (spec §8). That row is cleared from the start, so it's never active.
   const resume = o.kind === "resume";
   if (resume) {
-    await c.query("update override set cleared_at = now(), cleared_by = $1 where cleared_at is null and scope = 'factory' and kind in ('pause', 'drain', 'kill')", [o.createdBy]);
+    await c.query("update override set cleared_at = now(), cleared_by = $1 where cleared_at is null and scope = 'factory' and kind in ('pause', 'drain', 'kill', 'restart')", [o.createdBy]);
   }
   await c.query(
     `insert into override (scope, target_id, kind, reason, created_by, expires_at, cleared_at, cleared_by)
@@ -47,4 +47,25 @@ export async function clearItemOverrides(c: pg.Pool | pg.PoolClient, itemId: str
     "update override set cleared_at = now() where cleared_at is null and scope = 'item' and target_id = $1 and ($2::text[] is null or kind = any($2))",
     [itemId, kinds ?? null],
   );
+}
+
+const RESTART_WAIT_MINUTES = 15;
+
+/**
+ * How long a prepared restart lets cells wrap up before the scheduler stops them (PBI 140): FACTORY_RESTART_WAIT_MINUTES,
+ * or 15 minutes when it's unset or isn't a number of minutes.
+ */
+export function restartWaitMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.FACTORY_RESTART_WAIT_MINUTES?.trim();
+  const n = raw ? Number(raw) : NaN;
+  return (Number.isFinite(n) && n >= 0 ? n : RESTART_WAIT_MINUTES) * 60_000;
+}
+
+/**
+ * Clears a restart override left from before this control plane started, so the restarted factory runs (PBI 140). A
+ * pause, drain or kill stays: only the restart was meant to end with the restart.
+ */
+export async function clearRestartOnStart(c: pg.Pool | pg.PoolClient): Promise<void> {
+  const r = await c.query("update override set cleared_at = now() where cleared_at is null and scope = 'factory' and kind = 'restart'");
+  if (r.rowCount) console.log("override: cleared the factory restart left from before this control plane started");
 }
