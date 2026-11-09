@@ -27,6 +27,11 @@ export type CellContext = {
   trustedComments: ReviewComment[];
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
+  /**
+   * The attempt at the run's next stage that a stop cut short, when the run resumes from the work in progress that
+   * attempt pushed (PBI 140). Absent or null when the stage starts fresh.
+   */
+  resume?: { stageId: string; attempt: number } | null;
 };
 
 /** What a stage attempt is recorded under: an SOP stage, or the merge pass that opens a claim. */
@@ -211,17 +216,34 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0 });
     return attempt;
   };
-  // Run contract 9: /stage, then every upload. The caller sends /pr and the transition after.
-  const end = async (status: "passed" | "failed") => {
+  // Run contract 9: /stage, then every upload. The caller sends /pr and the transition after. A stopped attempt is
+  // one a stop cut short (PBI 140), which uses up none of the stage's retries. It uploads first and sends /stage last,
+  // because a stopped report during a restart ends the claim and raises the generation, so an upload after it gets 409.
+  // Its row exists already, from the attempt's `started` report.
+  const end = async (status: "passed" | "failed" | "stopped") => {
     const c = current;
     if (!c) return;
     current = null;
+    // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
+    // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
+    const upload = async (kind: "transcript" | "report", body: string) => {
+      const sent = api.upload({ kind, stageId: c.stageId, attempt: c.attempt, body });
+      if (status !== "stopped") return sent;
+      await sent.catch((e) => {
+        if (e instanceof LeaseLost) throw e;
+        console.error(`stopped attempt ${c.stageId}-${c.attempt}: ${kind} upload failed, reporting stopped anyway:`, e);
+      });
+    };
+    const uploads = async () => {
+      if (c.transcript) await upload("transcript", c.transcript);
+      if (c.report !== null) await upload("report", c.report);
+    };
+    if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: c.tokensIn, tokensOut: c.tokensOut,
       costUsd: c.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(c.usage ? { usage: { utilization: c.usage.utilization, resetsAt: c.usage.resetsAt === null ? null : new Date(c.usage.resetsAt * 1000).toISOString() } } : {}) });
-    if (c.transcript) await api.upload({ kind: "transcript", stageId: c.stageId, attempt: c.attempt, body: c.transcript });
-    if (c.report !== null) await api.upload({ kind: "report", stageId: c.stageId, attempt: c.attempt, body: c.report });
+    if (status !== "stopped") await uploads();
   };
 
   const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> =>
@@ -272,6 +294,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
   const retryNote = (findings: string[]) => findings.length ? `## Your last attempt failed\n\n${findings.map((f) => `- ${f}`).join("\n")}` : "";
   const brief = (...parts: string[]) => parts.filter(Boolean).join("\n\n");
+  // PBI 140: a stage whose last attempt a stop cut short resumes from the work in progress that attempt pushed.
+  const resumed = (id: StageId) => ctx.resume?.stageId === id
+    ? `## Carry on from the earlier work\n\nAn earlier attempt at this stage was stopped before it finished, so the factory could restart. Its work in progress is already on the branch, in the commits since \`origin/${ctx.base}\`, the last one of which may be \`work in progress, stopped\`. Read it and carry on from it instead of starting over. Don't reset or discard it.`
+    : "";
 
   // Runs a stage until an attempt has no findings or its retries run out. Returns the last findings, empty on a pass.
   const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>) => {
@@ -354,7 +380,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // attempt's commit already moved past.
     const stageStart = await features(dir);
     const findings = await attempts("specify", retriesOf("specify") + 1, async (_attempt, last) => {
-      const r = await say("specify", brief(await promptOf("specify"), item(), note, guide, retryNote(last)));
+      const r = await say("specify", brief(await promptOf("specify"), item(), note, guide, resumed("specify"), retryNote(last)));
       await git.commitAll(`specify(${tag}): scenarios`);
       const after = await features(dir);
       const out: string[] = r.ok ? [] : [`the agent didn't finish: ${r.text.slice(0, 500)}`];
@@ -388,7 +414,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   const red = async () => {
     const findings = await attempts("red", retriesOf("red") + 1, async (_attempt, last) => {
-      await say("red", brief(await promptOf("red"), item(), `The locked feature files: ${ctx.lockedFiles.join(", ")}.`, retryNote(last)));
+      await say("red", brief(await promptOf("red"), item(), `The locked feature files: ${ctx.lockedFiles.join(", ")}.`, resumed("red"), retryNote(last)));
       if (!(await lockHolds(`red(${tag}): step definitions`))) return [lockFinding()];
       const parse = await bdd("parse");
       if (parse.code !== 0) return [`bdd.parse exited ${parse.code}: ${parse.out.trim()}`];
@@ -411,7 +437,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (greenTries >= max) throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
     const findings = await attempts("green", max - greenTries, async (attempt, last) => {
       greenTries++;
-      await say("green", brief(await promptOf("green"), item(), dodText, retryNote(last.length ? last : carried)));
+      await say("green", brief(await promptOf("green"), item(), dodText, resumed("green"), retryNote(last.length ? last : carried)));
       if (!(await lockHolds(`green(${tag}): implementation`))) return [lockFinding()];
       const run = await bdd("run");
       if (current) current.report = run.report;
@@ -446,7 +472,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let history = "";
     for (let round = 1; round <= rounds; round++) {
       reviewRounds++;
-      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, rubric, history), "factory-self-reviewer");
+      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, rubric, resumed("self-review"), history), "factory-self-reviewer");
       const verdicts = parseJudgement(r.text, pr);
       await api.policyResults({ file: "pr-review", source: pr.source, stageId: "self-review", attempt: reviewRounds, checkedSha: await git.head(), verdicts });
       const last = lastLine(r.text);
@@ -652,13 +678,34 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     clearInterval(renew);
   }
 
+  /**
+   * A stop from the control plane, for a restart, a pause or an operator (PBI 140): commit what the agent left, check
+   * the lease once more, then push and report the open attempt stopped. The restarted factory resumes the stage from
+   * that commit. A lease that's lost, or that can't be checked, pushes nothing: another cell may own the branch now.
+   */
+  async function wrapUp(): Promise<Outcome> {
+    await git.commitAll("work in progress, stopped").catch(() => {});
+    try {
+      await api.lease();
+    } catch {
+      return "stopped";
+    }
+    // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
+    // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
+    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
+    if (locked) console.error(`not pushing the work in progress: ${lockFinding()}`);
+    // A push that fails leaves the branch at the last commit pushed, which is where the next cell carries on.
+    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
+    // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
+    if (current) await end("stopped");
+    else await api.release();
+    return "stopped";
+  }
+
   async function finish(e: unknown): Promise<Outcome> {
     if (e instanceof LeaseLost || lost) return "stopped"; // fenced: no push and no further calls
     if (e instanceof RenewalFailed) throw e;
-    if (e instanceof Stop) {
-      await git.commitAll("work in progress, stopped").catch(() => {});
-      return "stopped";
-    }
+    if (e instanceof Stop) return wrapUp();
     if (e instanceof Limited) {
       await git.commitAll("work in progress, usage limit").catch(() => {});
       await end("failed");

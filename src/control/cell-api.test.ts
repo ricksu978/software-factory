@@ -234,6 +234,7 @@ describe("cell API", dbTest, () => {
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       trustedComments: [],
       stageAttempts: { specify: 2 },
+      resume: null,
     });
   });
 
@@ -269,6 +270,76 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(await lease(), { ok: true, stop: false });
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'kill', 'incident')");
     assert.deepEqual(await lease(), { ok: true, stop: true });
+  });
+
+  // PBI 140: a restart being prepared tells every live cell to stop at its next renewal, and the cell API keeps
+  // answering it, so it can push and report its attempt stopped. That report ends the claim, so the restarted factory
+  // can start the item again at once, at the stage it was in.
+  test("lease says stop while a restart is being prepared, and carry on again once it's cleared", async () => {
+    const cell = await claimed();
+    const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.deepEqual(await lease(), { ok: true, stop: true });
+    await db.pool.query("update override set cleared_at = now() where kind = 'restart'");
+    assert.deepEqual(await lease(), { ok: true, stop: false });
+  });
+
+  test("a stopped attempt reported while a restart is being prepared ends the claim and keeps the stage", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/github-token")).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "stopped" })).status, 200);
+    const s = (await db.pool.query("select status, ended_at from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.equal(s.status, "stopped");
+    assert.ok(s.ended_at);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    assert.equal((await runRow(cell.runId)).next_stage, "green");
+  });
+
+  // Run contract 9: a stopped attempt uploads before its /stage, since that report ends the claim during a restart.
+  test("a stopped attempt's uploads during a restart keep their refs, and an upload after the report is fenced", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "green", attempt: 1 })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "report", stageId: "green", attempt: 1 })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "stopped" })).status, 200);
+    const s = (await db.pool.query("select status, transcript_ref, report_ref from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.equal(s.status, "stopped");
+    assert.equal(s.transcript_ref, `transcripts/${cell.runId}/green-1.jsonl`);
+    assert.equal(s.report_ref, `reports/${cell.runId}/green-1.ndjson`);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "green", attempt: 1 })).status, 409);
+  });
+
+  test("a stopped attempt reported under a pause keeps the claim, so the lease runs out as before", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "stopped" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
+  // A cell a restart stopped between a stage's passed report and its transition has no attempt to report stopped.
+  test("release ends the claim while a restart is being prepared, keeps the stage, and changes nothing under a pause", async () => {
+    const paused = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 200);
+    assert.equal((await item(paused.itemId)).state, "InProgress");
+    await db.pool.query("update override set cleared_at = now() where kind = 'pause'");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 200);
+    assert.equal((await item(paused.itemId)).state, "Queued");
+    assert.equal((await runRow(paused.runId)).next_stage, "green");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 409);
+  });
+
+  test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'red', 1, 'passed'), ($1, 'green', 1, 'stopped')", [cell.runId]);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'green', 2, 'failed')", [cell.runId]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
   });
 
   test("lease says stop while the kill switch's env flag is on", async () => {

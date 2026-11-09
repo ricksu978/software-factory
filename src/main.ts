@@ -23,6 +23,7 @@ import { BadRequest, json, startServer, type Handler } from "./http/server.ts";
 import { dockerLauncher, ensureEgress } from "./scheduler/launcher.ts";
 import { tick, TICK_MS } from "./scheduler/scheduler.ts";
 import { createPool } from "./store/db.ts";
+import { clearRestartOnStart } from "./store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS } from "./watcher/poller.ts";
 import { handleWebhook } from "./watcher/webhook.ts";
 
@@ -181,6 +182,8 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CELL_IMAGE", "CELL_CONTROL_URL"].map(need);
 
   const pool = createPool(dbUri);
+  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
+  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");

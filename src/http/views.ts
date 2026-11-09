@@ -79,12 +79,27 @@ function overrideForm(kinds: [kind: string, label: string][], itemId: string | n
 
 const factoryState: Record<string, string> = { pause: "Paused", drain: "Draining", kill: "Killed" };
 
+/** A restart being prepared (PBI 140): the minutes left in its wrap-up and how many cells still run. */
+export type Restart = { minutesLeft: number; running: number; reason?: string };
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** Floor's line for a restart being prepared: a countdown while a cell still runs, then that it's safe to restart. */
+function restartStatus(r: Restart): string {
+  const why = r.reason ? ` Reason: ${escapeHtml(r.reason)}.` : "";
+  const text = r.running > 0
+    ? `Preparing to restart: ${plural(r.running, "cell is", "cells are")} wrapping up, with ${plural(r.minutesLeft, "minute", "minutes")} left before the factory stops ${r.running === 1 ? "it" : "them"}.`
+    : "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker.";
+  return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
+}
+
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean }, banner: string | null): string {
+  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
-  const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("");
+  const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
+    + (f.restart ? restartStatus(f.restart) : "");
   const controls = f.canOperate
-    ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"]], null)}`
+    ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
     : "";
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a></p>

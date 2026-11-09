@@ -24,12 +24,19 @@ type Fakes = {
 type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill";
 type SetOverride = (c: pg.PoolClient, o: { scope: "factory" | "item"; targetId: string | null; kind: OverrideKind; reason: string; createdBy: string; expiresAt: Date | null }) => Promise<void>;
 
-type Ctx = {
+export type Ctx = {
   items: Record<string, string>; operator?: string; started: Record<string, string>[]; stopped: string[]; ticked: boolean; ranks: number;
   backlog?: ReturnType<Fakes["fakeBacklog"]>; repoHost?: ReturnType<Fakes["fakeRepoHost"]>;
+  /** The scheduler's clock and the one leases are set from. PBI 140's steps set it to their own; otherwise NOW. */
+  now?: Date;
+  /** Cells whose launcher.stop throws, as PBI 140's steps set. */
+  failStop?: Set<string>;
 };
 
-function ctx(world: object): Ctx {
+/** `n` minutes after the scenario's clock. */
+const at = (c: Ctx, n: number) => new Date((c.now ?? NOW).getTime() + n * 60_000);
+
+export function ctx(world: object): Ctx {
   const w = world as { pbi17?: Ctx };
   w.pbi17 ??= { items: {}, started: [], stopped: [], ticked: false, ranks: 0 };
   return w.pbi17;
@@ -42,19 +49,20 @@ function recorder(c: Ctx): Launcher {
       return `exec-${c.started.length}`;
     },
     async stop(name) {
+      if (c.failStop?.has(name)) throw new Error(`the launcher couldn't stop ${name}`);
       c.stopped.push(name);
     },
   };
 }
 
-async function tick(c: Ctx, killFlag = false) {
+export async function tick(c: Ctx, killFlag = false) {
   const scheduler = await load<{ tick: Tick }>("src/scheduler/scheduler.ts");
   if (!scheduler || !c.backlog || !c.repoHost) return;
   c.started = [];
   c.stopped = [];
   const backlog = c.backlog.adapter;
   await scheduler.tick({
-    pool: need().pool, launcher: recorder(c), now: NOW, killFlag, repoHost: c.repoHost, backlogFor: () => backlog,
+    pool: need().pool, launcher: recorder(c), now: c.now ?? NOW, killFlag, repoHost: c.repoHost, backlogFor: () => backlog,
     secret: "scenario-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
   });
   c.ticked = true;
@@ -72,7 +80,7 @@ async function override(c: Ctx, kind: OverrideKind, item: string | null) {
 }
 
 // Each item gets its own backlog source and an external id named after its letter.
-async function newItem(c: Ctx, name: string, state: string, extra: { rank?: number; owner?: string; expires?: Date } = {}): Promise<string> {
+export async function newItem(c: Ctx, name: string, state: string, extra: { rank?: number; owner?: string; expires?: Date } = {}): Promise<string> {
   const pool = need().pool;
   const source = await pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:' || gen_random_uuid()) returning id");
   const r = await pool.query<{ id: string }>(
@@ -106,13 +114,18 @@ function ran(c: Ctx) {
 }
 
 Given("a fresh factory database with WIP 1 and a review capacity of 3", long, async function () {
+  await freshDb(this, 1);
+});
+
+/** A fresh factory database with the given WIP and a review capacity of 3. PBI 140's steps reuse it with WIP 2. */
+export async function freshDb(world: object, wip: number): Promise<void> {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   await d.pool.query("truncate item, override, \"user\", repo cascade");
-  await d.pool.query("update wip_policy set mode = 'fixed', current_wip = 1, review_capacity = 3, usage_paused_until = null");
+  await d.pool.query("update wip_policy set mode = 'fixed', current_wip = $1, review_capacity = 3, usage_paused_until = null", [wip]);
   await d.pool.query("insert into repo (host_adapter, url) values ('github', $1)", [`https://github.com/${REPO}`]);
   const u = await d.pool.query<{ id: string }>("insert into \"user\" (provider, subject, role) values ('dev', 'operator', 'operator') returning id");
-  const c = ctx(this);
+  const c = ctx(world);
   c.operator = u.rows[0].id;
   // The backlog and repo host the scheduler reads, as Task 6's in-memory fakes. Absent fakes leave the tick unrun.
   const fakes = await load<Fakes>("src/adapters/fake.ts");
@@ -121,16 +134,16 @@ Given("a fresh factory database with WIP 1 and a review capacity of 3", long, as
     c.repoHost = fakes.fakeRepoHost();
     c.repoHost.heads.set(REPO, "c0ffee0");
   }
-});
+}
 
 Given("item {string} is running in cell {string} with a live lease", long, async function (name: string, cell: string) {
-  const id = await newItem(ctx(this), name, "InProgress", { owner: cell, expires: minutes(4) });
+  const id = await newItem(ctx(this), name, "InProgress", { owner: cell, expires: at(ctx(this), 4) });
   const run = await openRun(id, "green", cell);
   await need().pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'understand', 1, 'passed')", [run]);
 });
 
 Given("item {string} is running in cell {string} with a lease that ran out", long, async function (name: string, cell: string) {
-  const id = await newItem(ctx(this), name, "InProgress", { owner: cell, expires: minutes(-1) });
+  const id = await newItem(ctx(this), name, "InProgress", { owner: cell, expires: at(ctx(this), -1) });
   await openRun(id, "green", cell);
 });
 
