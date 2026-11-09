@@ -22,9 +22,10 @@ export type GateContext = {
 
 /**
  * `oversized` is the judge's reading of the item's size, false when its last line doesn't say true. `split` is null
- * when the item isn't oversized or the judge was never asked.
+ * when the item isn't oversized or the judge was never asked. `filed` is true when the split was filed as child issues
+ * (PBI 144), which leaves the item not ready whatever its verdicts.
  */
-export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null };
+export type GateResult = { ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
 
@@ -45,7 +46,8 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
 /**
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
- * after any readiness input changes posts a fresh one. The gate never edits the item.
+ * after any readiness input changes posts a fresh one. The gate never edits the item, except that filing a split takes
+ * the parent's opt-in label off once its children are filed (PBI 144).
  */
 export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
   let results = engineRules(item, ctx);
@@ -70,9 +72,11 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
   const split = oversized && ctx.split ? await proposeSplit(item, ctx.split) : null;
-  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${itemTextHash(item)}`);
+  if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children, !!ctx.split?.file), `split:${itemTextHash(item)}`);
   // PBI 144: a valid split is filed as child issues. A failed write throws, so the poller gates the parent again.
-  if (split?.proposed && ctx.split?.file) await fileSplit(item, split.children, ctx.adapter, ctx.split.file);
+  // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
+  const filed = split?.proposed && ctx.split?.file ? await fileSplit(item, split.children, ctx.adapter, ctx.split.file) : false;
+  if (filed) return { ready: false, results, oversized, split, filed };
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));

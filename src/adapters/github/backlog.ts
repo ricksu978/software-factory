@@ -3,6 +3,7 @@
 import { Octokit } from "@octokit/core";
 import type { ItemState } from "../../core/states.ts";
 import { CLAIM_MARKER } from "../contract.ts";
+import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../gate/file-split.ts";
 import type { BacklogAdapter, FactoryItem, FactoryWebhookEvent } from "../types.ts";
 import type { AppLike, GitHubClient } from "./repo-host.ts";
 
@@ -49,6 +50,9 @@ const ITEMS = `query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV
 
 const SET_STATUS = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } } }`;
+
+const ADD_TO_PROJECT = `mutation($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } } }`;
 
 /** The list items under the `heading` heading of an issue body, up to the next heading. */
 export function acceptanceCriteria(body: string, heading: string): string[] {
@@ -109,7 +113,22 @@ export function parseGitHubWebhook(headers: Record<string, string>, body: unknow
   }
 }
 
-export function githubBacklog(cfg: GitHubBacklogConfig): BacklogAdapter {
+/** A GitHub backlog, with the board and repo writes that filing a split needs (PBI 144). */
+export type GitHubBacklog = BacklogAdapter & { splitBoard: SplitBoard };
+
+/**
+ * What filing a split needs from a board's field map. A child goes in the status the board shows Eligible items in,
+ * or NotReady ones. A field map with neither leaves the board alone, so its splits are only proposed.
+ */
+export function splitFiling(board: SplitBoard, fieldMap: FieldMap): FileSplitDeps | undefined {
+  const backlogStatus = fieldMap.statusFor?.Eligible ?? fieldMap.statusFor?.NotReady ?? null;
+  if (!backlogStatus) return undefined;
+  return { board, optInLabel: fieldMap.optInLabel, backlogStatus, criteriaHeading: fieldMap.acceptanceCriteriaHeading };
+}
+
+type RestIssue = { id: number; node_id: string; number: number; title: string; body?: string | null; html_url: string; user?: { type?: string }; pull_request?: unknown; repository_url?: string };
+
+export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
   if (cfg.owner.type === "user" && !cfg.projectToken) {
     throw new Error("githubBacklog: a user-owned project needs the github-project-token secret, and projectToken is null");
   }
@@ -174,8 +193,83 @@ export function githubBacklog(cfg: GitHubBacklogConfig): BacklogAdapter {
     return { owner, repo, issue_number: Number(externalId) };
   };
 
+  const setItemStatus = async (itemId: string, status: string) => {
+    const p = await resolve();
+    const field = p.fields.find((f) => f.name === cfg.fieldMap.statusField);
+    const option = field?.options?.find((o) => o.name === status);
+    if (!field || !option) throw new Error(`project ${cfg.projectNumber} has no ${cfg.fieldMap.statusField} option "${status}"`);
+    await (await board()).graphql(SET_STATUS, { project: p.id, item: itemId, field: field.id, option: option.id });
+  };
+
+  // A child the factory just filed isn't on the board yet, so filing remembers each issue's repo as it learns it.
+  const repoOf = new Map<string, string>();
+  const ref = async (externalId: string) => {
+    const known = repoOf.get(externalId);
+    if (!known) return issue(externalId);
+    const [owner, repo] = known.split("/");
+    return { owner, repo, issue_number: Number(externalId) };
+  };
+  const child = (repo: string, i: RestIssue): ChildIssue => {
+    repoOf.set(String(i.number), repo);
+    return { externalId: String(i.number), title: i.title, url: i.html_url };
+  };
+  const rest = async (externalId: string) => (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}", await ref(externalId))).data as RestIssue;
+  const repoFromApi = (url: string | undefined, fallback: string) => url?.match(/\/repos\/([^/]+\/[^/]+)$/)?.[1] ?? fallback;
+
+  const splitBoard: SplitBoard = {
+    async subIssues(parentId) {
+      const p = await ref(parentId);
+      const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...p, per_page: 100 })).data as RestIssue[];
+      return list.map((i) => child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i));
+    },
+    async findIssues(repo, text) {
+      const [owner, name] = repo.split("/");
+      // ponytail: the repo's newest 100 issues, not search, which can lag a just-filed child by minutes. A child
+      // filed more than 100 issues ago and never linked would be filed again.
+      const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues", { owner, repo: name, state: "all", sort: "created", direction: "desc", per_page: 100 })).data as RestIssue[];
+      // Only a bot's issue counts, so a person can't plant a marker and stop a child from being filed.
+      return list.filter((i) => !i.pull_request && i.user?.type === "Bot" && (i.title.includes(text) || (i.body ?? "").includes(text))).reverse().map((i) => child(repo, i));
+    },
+    async createIssue(repo, title, body) {
+      const [owner, name] = repo.split("/");
+      const created = (await (await app()).request("POST /repos/{owner}/{repo}/issues", { owner, repo: name, title, body })).data as RestIssue;
+      return child(repo, created);
+    },
+    async addSubIssue(parentId, childId) {
+      const { id } = await rest(childId);
+      await (await app()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...(await ref(parentId)), sub_issue_id: id });
+    },
+    async boardStatus(externalId) {
+      const repo = repoOf.get(externalId);
+      const found = (await scan()).find((l) => l.item.externalId === externalId && (!repo || l.item.repo === repo));
+      return found ? found.item.status : null;
+    },
+    async addToBoard(externalId, status) {
+      const p = await resolve();
+      // Adding an issue that's already on the board returns its existing item, so a retry only sets the status.
+      const res: any = await (await board()).graphql(ADD_TO_PROJECT, { project: p.id, content: (await rest(externalId)).node_id });
+      await setItemStatus(res.addProjectV2ItemById.item.id, status);
+    },
+    async blockedBy(externalId) {
+      const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", { ...(await ref(externalId)), per_page: 100 })).data as RestIssue[];
+      return list.map((i) => String(i.number));
+    },
+    async addBlockedBy(externalId, blockerId) {
+      const { id } = await rest(blockerId);
+      await (await app()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", { ...(await ref(externalId)), issue_id: id });
+    },
+    async removeLabel(externalId, label) {
+      try {
+        await (await app()).request("DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}", { ...(await ref(externalId)), name: label });
+      } catch (e) {
+        if ((e as { status?: number }).status !== 404) throw e;
+      }
+    },
+  };
+
   return {
     capabilities: { webhooks: true },
+    splitBoard,
 
     async listEligible(cursor) {
       const all = await scan();
@@ -221,12 +315,8 @@ export function githubBacklog(cfg: GitHubBacklogConfig): BacklogAdapter {
     },
 
     async setStatus(externalId, status) {
-      const p = await resolve();
-      const field = p.fields.find((f) => f.name === cfg.fieldMap.statusField);
-      const option = field?.options?.find((o) => o.name === status);
-      if (!field || !option) throw new Error(`project ${cfg.projectNumber} has no ${cfg.fieldMap.statusField} option "${status}"`);
       const { itemId } = await locate(externalId);
-      await (await board()).graphql(SET_STATUS, { project: p.id, item: itemId, field: field.id, option: option.id });
+      await setItemStatus(itemId, status);
     },
 
     async linkPr(externalId, prUrl) {

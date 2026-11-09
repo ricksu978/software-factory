@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { acceptanceCriteria, githubBacklog, parseGitHubWebhook, type FieldMap } from "./backlog.ts";
+import { acceptanceCriteria, githubBacklog, parseGitHubWebhook, splitFiling, type FieldMap } from "./backlog.ts";
 
 const fieldMap: FieldMap = {
   acceptanceCriteriaHeading: "Acceptance criteria", statusField: "Status", optInLabel: "factory", sprintField: null, readinessFields: ["Size"],
@@ -59,6 +59,74 @@ describe("githubBacklog", () => {
     const body = "Intro\n\n## Acceptance criteria\n\n- [ ] First thing\n- Second thing\n* [x] Third\n\nNot a criterion.\n\n## Notes\n- not this";
     assert.deepEqual(acceptanceCriteria(body, "Acceptance criteria"), ["First thing", "Second thing", "Third"]);
     assert.deepEqual(acceptanceCriteria("no heading", "Acceptance criteria"), []);
+  });
+});
+
+describe("githubBacklog: the split board (PBI 144)", () => {
+  function splitClient() {
+    const calls: { route: string; params: Record<string, any> }[] = [];
+    const recent: any[] = [
+      { id: 900, node_id: "N9", number: 9, title: "planted", body: "factory-split-k-1", html_url: "u9", user: { type: "User" } },
+      { id: 800, node_id: "N8", number: 8, title: "a PR", body: "factory-split-k-1", html_url: "u8", user: { type: "Bot" }, pull_request: {} },
+      { id: 300, node_id: "N3", number: 3, title: "Card", body: "x factory-split-k-1", html_url: "u3", user: { type: "Bot" } },
+    ];
+    const client = {
+      async request(route: string, params: Record<string, any> = {}) {
+        calls.push({ route, params });
+        if (route === "GET /repos/{owner}/{repo}/issues") return { data: recent };
+        if (route === "POST /repos/{owner}/{repo}/issues") return { data: { id: 500, node_id: "N5", number: 5, title: params.title, html_url: "u5" } };
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number } };
+        if (route.startsWith("DELETE")) throw Object.assign(new Error("Label does not exist"), { status: 404 });
+        return { data: [] };
+      },
+      async graphql(query: string, vars: Record<string, any> = {}) {
+        calls.push({ route: "graphql", params: { query, ...vars } });
+        if (query.includes("projectV2(number")) {
+          return { organization: { projectV2: { id: "P1", fields: { nodes: [{ id: "F1", name: "Status", options: [{ id: "O1", name: "Backlog" }] }] } } } };
+        }
+        if (query.includes("addProjectV2ItemById")) return { addProjectV2ItemById: { item: { id: "I5" } } };
+        if (query.includes("updateProjectV2ItemFieldValue")) return {};
+        return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
+          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
+          content: { number: 7, title: "parent", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
+        }] } } };
+      },
+    };
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    return { board: adapter.splitBoard, calls };
+  }
+
+  test("findIssues counts only a bot's issues, never a person's or a PR", async () => {
+    const { board } = splitClient();
+    assert.deepEqual(await board.findIssues("o/r", "factory-split-k-1"), [{ externalId: "3", title: "Card", url: "u3" }]);
+  });
+
+  test("a filed child is linked by its id, put on the board in the status and blocked by its blocker's id, off the board", async () => {
+    const { board, calls } = splitClient();
+    await board.findIssues("o/r", "factory-split-k-1");
+    const c = await board.createIssue("o/r", "Bank", "body");
+    assert.deepEqual(calls.at(-1)!.params, { owner: "o", repo: "r", title: "Bank", body: "body" });
+    assert.equal(await board.boardStatus(c.externalId), null);
+    await board.addSubIssue("7", c.externalId);
+    assert.deepEqual(calls.at(-1), { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", params: { owner: "o", repo: "r", issue_number: 7, sub_issue_id: 500 } });
+    await board.addToBoard(c.externalId, "Backlog");
+    const gql = calls.filter((x) => x.route === "graphql").map((x) => x.params);
+    assert.ok(gql.some((v) => v.query.includes("addProjectV2ItemById") && v.content === "N5" && v.project === "P1"));
+    assert.ok(gql.some((v) => v.query.includes("updateProjectV2ItemFieldValue") && v.item === "I5" && v.option === "O1"));
+    await board.addBlockedBy(c.externalId, "3");
+    assert.deepEqual(calls.at(-1), { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", params: { owner: "o", repo: "r", issue_number: 5, issue_id: 300 } });
+  });
+
+  test("taking off a label the parent lacks succeeds", async () => {
+    const { board } = splitClient();
+    await board.removeLabel("7", "factory");
+  });
+
+  test("splitFiling uses the board's Eligible status, and a field map without one only proposes", () => {
+    const { board } = splitClient();
+    const withBacklog = { ...fieldMap, statusFor: { ...fieldMap.statusFor, Eligible: "Backlog" } };
+    assert.deepEqual(splitFiling(board, withBacklog), { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" });
+    assert.equal(splitFiling(board, fieldMap), undefined);
   });
 });
 

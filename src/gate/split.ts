@@ -135,15 +135,21 @@ async function askForSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOut
   return checkSplit(r.text, item.acceptanceCriteria.length);
 }
 
-/** The proposal comment: each child's title, its body, its criteria word for word and the children it needs by title. */
-export function splitComment(item: FactoryItem, children: SplitChild[]): string {
+/**
+ * The proposal comment: each child's title, its body, its criteria word for word and the children it needs by title.
+ * `filing` says the factory files the children too (PBI 144), so the comment doesn't claim it created nothing.
+ */
+export function splitComment(item: FactoryItem, children: SplitChild[], filing = false): string {
   const parts = children.map((ch, i) => {
     const criteria = ch.criteria.map((c) => `- ${item.acceptanceCriteria[c - 1]}`).join("\n");
     const needs = ch.needs.length === 0 ? "nothing" : ch.needs.map((n) => children[n - 1].title).join(", ");
     const body = ch.body.split("\n").map((l) => `> ${l}`).join("\n");
     return `### ${i + 1}. ${ch.title}\n\n${body}\n\nAcceptance criteria:\n${criteria}\n\nNeeds: ${needs}`;
   });
-  return `${SPLIT_HEADING}\n\n${parts.join("\n\n")}\n\nThis is a proposal for the team. The factory hasn't changed or created any item.\n`;
+  const close = filing
+    ? "The factory files each child as a sub-issue of this item for the team to approve. No child enters the factory until someone adds the opt-in label to it."
+    : "This is a proposal for the team. The factory hasn't changed or created any item.";
+  return `${SPLIT_HEADING}\n\n${parts.join("\n\n")}\n\n${close}\n`;
 }
 
 /** SHA-256 of the item's own text, so the same text gets one proposal whatever else changed. */

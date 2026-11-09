@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import { fakeBacklog } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import { loadPolicy, type Policy } from "../policy/policy.ts";
+import type { SplitBoard } from "./file-split.ts";
 import { gate, type GateContext } from "./readiness.ts";
 
 async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
@@ -149,5 +150,23 @@ describe("gate: an oversized item (PBI 143)", () => {
     const all = await s.fake.comments(s.id);
     assert.equal(all.length, 1);
     assert.match(all[0], /a split couldn't be proposed because the coding model's reply couldn't be read/);
+  });
+
+  test("a filed split leaves the item not ready, with no readiness comment, and the proposal says it files the children (PBI 144)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let n = 0;
+    const board: SplitBoard = {
+      subIssues: async () => [], findIssues: async () => [], createIssue: async (_r, title) => ({ externalId: String(100 + n), title, url: `u${n++}` }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    const file = { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
+    const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
+    assert.equal(out.ready, false);
+    assert.equal(out.filed, true);
+    const all = await s.fake.comments(s.id);
+    assert.equal(all.filter((b) => b.startsWith("The factory can't start")).length, 0);
+    assert.match(all.find((b) => b.startsWith("The factory proposes splitting"))!, /files each child as a sub-issue/);
+    assert.equal(all.filter((b) => b.startsWith("The factory filed this item's split")).length, 1);
   });
 });
