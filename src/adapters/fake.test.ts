@@ -92,6 +92,20 @@ describe("fakeRepoHost", () => {
     ]);
   });
 
+  test("postReview opens a thread per line comment by the factory's bot, and returns them", async () => {
+    const host = fakeRepoHost();
+    const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });
+    const r = await host.postReview({ repo, prNumber: number, commitSha: "abc", body: "Two", comments: [
+      { path: "a.ts", line: 4, body: "Name it" }, { path: "b.ts", line: 9, body: "Test it" }] });
+    assert.deepEqual(r.threads.map((t) => [t.path, t.line, t.body]), [["a.ts", 4, "Name it"], ["b.ts", 9, "Test it"]]);
+    assert.notEqual(r.threads[0].threadId, r.threads[1].threadId);
+    const open = await host.openReviewComments(repo, number);
+    assert.deepEqual(open.map((c) => [c.threadId, c.author, c.body]), r.threads.map((t) => [t.threadId, "factory[bot]", t.body]));
+    await host.resolveThread(repo, r.threads[0].threadId);
+    assert.deepEqual((await host.openReviewComments(repo, number)).map((c) => c.body), ["Test it"]);
+    assert.deepEqual((await host.postReview({ repo, prNumber: number, commitSha: "def", body: "None", comments: [] })).threads, []);
+  });
+
   test("resolveThread drops the thread from the open comments, records it once, and is a no-op the second time", async () => {
     const host = fakeRepoHost();
     const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });

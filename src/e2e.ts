@@ -156,6 +156,7 @@ export async function startFactory(pool: pg.Pool) {
     if (a.mode === "judge" && a.prompt.includes('{"tier":')) text = JSON.stringify({ tier: "Low", reason: "the scripted classifier" });
     else if (a.mode === "judge" && a.prompt.includes('{"needsPerson":')) text = JSON.stringify({ needsPerson: false, reason: "the scripted classifier" });
     else if (a.agent === "factory-self-reviewer") text = judged.map((m) => JSON.stringify({ index: Number(m[1]), status: "passed", reason: "ok" })).join("\n") + "\nAPPROVED";
+    else if (a.agent === "factory-pr-reviewer") text = "APPROVED";
     else if (judged.length) text = judged.map((m) => JSON.stringify({ index: Number(m[1]), status: "passed", reason: "ok" })).join("\n");
     else if (cell.stage === "understand") text = Array.from({ length: criteria }, (_, i) => `@ac-${i + 1}: understood`).join("\n");
     else if (cell.stage === "specify") {
