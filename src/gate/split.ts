@@ -93,22 +93,30 @@ export function checkSplit(reply: string, criterionCount: number): SplitOutcome 
 }
 
 /**
- * Asks the SOP's coding model for a split and checks it. A failed or thrown run is no answer, never a split. Any other
- * outcome is kept in `deps.seen` by item text hash and returned from there for the same text, without a new run.
+ * Asks the SOP's coding model for a split and checks it. A failed or thrown run is no answer, never a split, and isn't
+ * kept: the poller leaves that item Eligible so the next poll asks again (see `splitUnanswered`). Any other outcome is
+ * kept in `deps.seen` by item text hash and returned from there for the same text, without a new run.
  */
 export async function proposeSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOutcome> {
   const key = itemTextHash(item);
   const known = deps.seen?.get(key);
   if (known) return known;
   const out = await askForSplit(item, deps);
-  if (deps.seen && !(!out.proposed && out.reason === NO_ANSWER)) {
+  if (deps.seen && !splitUnanswered(out)) {
     deps.seen.set(key, out);
     if (deps.seen.size > SPLIT_SEEN_MAX) deps.seen.delete(deps.seen.keys().next().value!);
   }
   return out;
 }
 
-const NO_ANSWER = "the coding model gave no answer";
+/** The reason a split carries when the coding model's run failed, threw or timed out. */
+export const SPLIT_NO_ANSWER = "the coding model gave no answer";
+const NO_ANSWER = SPLIT_NO_ANSWER;
+
+/** True when the coding model gave no answer, so the split is still due and the item must be gated again. */
+export function splitUnanswered(out: SplitOutcome | null | undefined): boolean {
+  return !!out && !out.proposed && out.reason === SPLIT_NO_ANSWER;
+}
 
 async function askForSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOutcome> {
   let r: AgentResult;

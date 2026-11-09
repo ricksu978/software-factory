@@ -1,7 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
-import { itemTextHash, proposeSplit, splitComment, type SplitDeps, type SplitOutcome } from "./split.ts";
+import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
   readinessSha: string;
@@ -75,7 +75,10 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
     const lines = failed.map((r) => (r.index > 0 ? `- ${r.criterion}\n  ${r.reason}` : `- ${r.reason}`));
     const noSplit = split && !split.proposed ? `\nThe judge found the item too big for one Sprint, but a split couldn't be proposed because ${split.reason}.\n` : "";
     const body = `The factory can't start this item yet. It failed these readiness checks:\n\n${lines.join("\n")}\n${noSplit}`;
-    await ctx.adapter.comment(item.externalId, body, `readiness:${item.updatedAt}:${ctx.readinessSha}`);
+    // A comment that says the coding model gave no answer gets its own key, so the re-gate that gets an answer posts
+    // a readiness comment without that line instead of being deduplicated against it.
+    const key = `readiness:${item.updatedAt}:${ctx.readinessSha}${splitUnanswered(split) ? ":split-unanswered" : ""}`;
+    await ctx.adapter.comment(item.externalId, body, key);
   }
   return { ready: failed.length === 0, results, oversized, split };
 }

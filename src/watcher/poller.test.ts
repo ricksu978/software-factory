@@ -80,6 +80,26 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(results, [{ file: "dor", source: "repo", criterion_index: 1, criterion: "Has a title", status: "passed", checked_sha: "c1" }]);
   });
 
+  test("an oversized item whose split got no answer stays Eligible, and the next poll asks again and posts it", async () => {
+    const big = async (item: FactoryItem, dor: Policy) =>
+      [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");
+    let answer = false;
+    const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
+    const agent = async () => (answer ? { ok: true, text: JSON.stringify({ children }) } : { ok: false, text: "usage limit" }) as never;
+    const split = { sop: { models: { coding: "c" } }, agent, seen: new Map() };
+    const ext = await seed({ acceptanceCriteria: ["one", "two"] });
+    const pollBig = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
+    await pollBig();
+    assert.equal((await row(ext)).state, "Eligible");
+    assert.match((await fake.comments(ext)).join("\n"), /the coding model gave no answer/);
+    answer = true;
+    await pollBig();
+    assert.equal((await row(ext)).state, "NotReady");
+    const all = await fake.comments(ext);
+    assert.equal(all.filter((b) => b.startsWith("The factory proposes splitting")).length, 1);
+    assert.ok(all.some((b) => b.startsWith("The factory can't start") && !b.includes("gave no answer")), "no corrected readiness comment");
+  });
+
   test("an item that fails the gate is NotReady with a reasons comment", async () => {
     verdict = "failed";
     const ext = await seed();
