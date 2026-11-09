@@ -690,9 +690,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     } catch {
       return "stopped";
     }
+    // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
+    // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
+    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
+    if (locked) console.error(`not pushing the work in progress: ${lockFinding()}`);
     // A push that fails leaves the branch at the last commit pushed, which is where the next cell carries on.
-    await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
-    await end("stopped");
+    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
+    // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
+    if (current) await end("stopped");
+    else await api.release();
     return "stopped";
   }
 

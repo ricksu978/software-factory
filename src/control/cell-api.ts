@@ -122,6 +122,15 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   return str(q?.body, "question.body");
 }
 
+/** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
+async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
+  const restart = await c.query(
+    "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
+    [now],
+  );
+  if (restart.rowCount) await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
+}
+
 const routes: Record<string, Route> = {
   "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
@@ -270,21 +279,20 @@ const routes: Record<string, Route> = {
     // A cell that stops while a restart is being prepared has pushed its work and is about to exit, so its claim ends
     // here. The item goes back to Queued at the stage it was in, and the restarted factory starts it again at once
     // instead of waiting out the lease. Under a pause or a stop_run the claim stays, so the scheduler's handling holds.
-    if (status === "stopped") {
-      const restart = await c.query(
-        "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
-        [now],
-      );
-      if (restart.rowCount) {
-        await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
-      }
-    }
+    if (status === "stopped") await releaseForRestart(c, run, now);
     const usage = body.usage as { utilization?: unknown; resetsAt?: unknown } | undefined;
     if (typeof usage?.utilization === "number") {
       const resetsAt = typeof usage.resetsAt === "string" ? new Date(usage.resetsAt) : new Date(now.getTime() + USAGE_PAUSE_MS);
       if (Number.isNaN(resetsAt.getTime())) throw new BadRequest("usage.resetsAt must be a time");
       await c.query("update wip_policy set usage_paused_until = $2 where usage_reserve_at <= $1", [usage.utilization, resetsAt]);
     }
+    return { ok: true };
+  },
+
+  // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would.
+  // Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
+  "POST release": async (_deps, { c, run, now }) => {
+    await releaseForRestart(c, run, now);
     return { ok: true };
   },
 

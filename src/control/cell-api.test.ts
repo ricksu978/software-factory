@@ -320,6 +320,20 @@ describe("cell API", dbTest, () => {
     assert.equal((await item(cell.itemId)).state, "InProgress");
   });
 
+  // A cell a restart stopped between a stage's passed report and its transition has no attempt to report stopped.
+  test("release ends the claim while a restart is being prepared, keeps the stage, and changes nothing under a pause", async () => {
+    const paused = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 200);
+    assert.equal((await item(paused.itemId)).state, "InProgress");
+    await db.pool.query("update override set cleared_at = now() where kind = 'pause'");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 200);
+    assert.equal((await item(paused.itemId)).state, "Queued");
+    assert.equal((await runRow(paused.runId)).next_stage, "green");
+    assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 409);
+  });
+
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'red', 1, 'passed'), ($1, 'green', 1, 'stopped')", [cell.runId]);

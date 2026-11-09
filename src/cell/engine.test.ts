@@ -106,6 +106,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       policyResults: async (b) => rec("/policy-results", b),
       pr: async (b) => rec("/pr", b),
       checks: async (sha) => (rec("/checks", { sha }), "success"),
+      release: async () => void rec("/release"),
       upload: async (b) => {
         rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt });
         if (o.failUpload) throw new Error(`upload ${b.kind} ${b.stageId}-${b.attempt}: 503`); // as the blob PUT failing does
@@ -763,6 +764,42 @@ describe("runCell", () => {
     assert.equal(await h.run(), "stopped");
     assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), h.lockSha);
     assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+  });
+
+  test("a stop whose agent edited a locked feature file pushes nothing, and still reports the attempt stopped", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let armed = false;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: armed }),
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482, edited\n");
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "stopped"); } finally { logged.mock.restore(); }
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), h.lockSha);
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status);
+    assert.deepEqual(green, ["started", "stopped"]);
+  });
+
+  // A stop the transition's guard finds after the stage passed leaves no attempt open, and the claim still ends.
+  test("a stop found after open-pr passed, before its transition, releases the claim", async () => {
+    let calls: Call[] = [];
+    const h = harness({
+      nextStage: "open-pr",
+      lease: async () => ({ stop: calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed") }),
+    });
+    calls = h.calls;
+    assert.equal(await h.run(), "stopped");
+    assert.ok(!h.transitions().length);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+    assert.equal(h.routes().at(-1), "/release");
   });
 
   test("a stage resumed after a stop tells the agent its work is on the branch, and numbers on from the stopped attempt", async () => {
