@@ -23,8 +23,8 @@ import type { ItemState } from "../../src/core/states.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { recordResponse } from "./pbi-19.steps.ts";
 
-type Item = { id: string; ext: string; title: string; sourceId: string; repoId: string | null };
-type Ctx = {
+export type Item = { id: string; ext: string; title: string; sourceId: string; repoId: string | null };
+export type Ctx = {
   server?: Server;
   close?: () => Promise<void>;
   origin?: string;
@@ -37,7 +37,7 @@ type Ctx = {
   last?: { scope: string; n: string; title: string };
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi131?: Ctx };
   w.pbi131 ??= { items: [], boards: new Map() };
   return w.pbi131;
@@ -405,7 +405,7 @@ function showsBefore(world: object, place: string, n: string, title: string): nu
   return hash;
 }
 
-function issueHref(world: object, place: string, n: string, title: string): string | null {
+export function issueHref(world: object, place: string, n: string, title: string): string | null {
   const r = render(scope(page(world), place));
   const hash = showsBefore(world, place, n, title);
   return hrefAt(r, hash, n);
@@ -485,8 +485,11 @@ Then("the link to the item's Run detail holds {string} and not {string}", functi
 });
 
 Then("{string} is not a link", function (n: string) {
-  const last = ctx(this).last;
-  assert.ok(last && last.n === n, `no place showed "${n}" yet`);
+  const c = ctx(this);
+  // Without a place read just before, as in PBI 137, the number is read before its item's title anywhere on the page.
+  const held = c.items.find((i) => `#${i.ext}` === n);
+  const last = c.last?.n === n ? c.last : held && { scope: "the page", n, title: held.title };
+  assert.ok(last, `no place showed "${n}" yet`);
   assert.equal(issueHref(this, last.scope, n, last.title), null, `"${n}" before "${last.title}" is a link`);
   const r = render(scope(page(this), "the page"));
   const linked = r.links.filter((l) => l.text.includes(n));
