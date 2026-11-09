@@ -5,6 +5,7 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
+import { readinessLogic } from "../agent/run.ts";
 import { gate } from "../gate/readiness.ts";
 import { splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
@@ -25,7 +26,7 @@ export type PollDeps = {
   slow?: Slow;
   /**
    * The factory's own readiness logic, the judge's prompt and the readiness version (PBI 149). The fingerprint covers
-   * it, so a restart with new logic re-checks every NotReady item. PBI 149 stub: not read yet.
+   * it, so a restart with new logic re-checks every NotReady item. Unset, the poller uses the code's own, readinessLogic().
    */
   logic?: ReadinessLogic;
 };
@@ -106,10 +107,12 @@ async function closeOpenPr(host: RepoHost, repo: string | null, row: Row, why: s
 }
 
 /** Reads every readiness input for one repo at its default branch head, once per poll. */
-async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null): Promise<Readiness> {
+async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic): Promise<Readiness> {
   const known = repo !== null && (await pool.query("select 1 from repo where url = $1", [`https://github.com/${repo}`])).rowCount === 1;
   if (!repo || !known) {
-    return { sha: "unknown repo", head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false };
+    // The logic still counts, so a change to it re-checks these items too (PBI 149).
+    const none = { dor: null, scenarios: null, "pr-review": null, risk: null, dod: null, config: null };
+    return { sha: `unknown repo:${readinessSha(none, logic)}`, head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false };
   }
   const head = await host.defaultBranchSha(repo);
   const raw = new Map<string, string | null>();
@@ -141,7 +144,7 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null): Pr
     configValid = false;
   }
   return {
-    sha: readinessSha(texts), head, dor: loaded.get("dor") ?? null, policyErrors,
+    sha: readinessSha(texts, logic), head, dor: loaded.get("dor") ?? null, policyErrors,
     dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true,
   };
 }
@@ -235,10 +238,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, open dependencies included, or when a
   //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: it has no withdrawn edge, and it must never reach Queued.
+  const logic = deps.logic ?? readinessLogic();
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
     const key = fi.repo ?? "";
-    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo));
+    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic));
     return byRepo.get(key)!;
   };
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.

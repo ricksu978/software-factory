@@ -135,10 +135,15 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
 
 /**
  * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md, and
- * READINESS_VERSION. PBI 149 stub: the prompt isn't filled in yet.
+ * READINESS_VERSION. The prompt is judgePrompt's own words, rendered around an empty item and an empty dor.md, so any
+ * edit to those words changes it while the items and policy files stay out of it.
  */
 export function readinessLogic(): ReadinessLogic {
-  return { judgePrompt: "", version: READINESS_VERSION };
+  const empty: FactoryItem = {
+    sourceId: "", externalId: "", title: "", body: "", acceptanceCriteria: [], labels: [], status: "", rank: 0,
+    repo: null, fields: {}, closed: false, updatedAt: "",
+  };
+  return { judgePrompt: judgePrompt(empty, { text: "", criteria: [] }), version: READINESS_VERSION };
 }
 
 const JUDGE_TIMEOUT_MS = 120_000;
