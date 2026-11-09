@@ -1002,6 +1002,25 @@ describe("the PR review stage", () => {
     assert.match(h.transitions()[0].question.body, /couldn't read the PR reviewer's answer/);
   });
 
+  test("a review GitHub turns down with a 422 blocks, naming the finding, and the item never reaches InReview", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => '{"finding":"Misses the VAT.","path":"app.txt","line":99}\nOPEN: 1']) });
+    h.deps.repoHost.postReview = async () => { throw Object.assign(new Error("Unprocessable Entity: Line could not be resolved"), { status: 422 }); };
+    assert.equal(await h.run(), "waiting");
+    const t = h.transitions();
+    assert.deepEqual(t.map((x) => x.event), ["blocked"]);
+    assert.match(t[0].question.body, /GitHub turned down the PR review/);
+    assert.match(t[0].question.body, /Line could not be resolved/);
+    assert.match(t[0].question.body, /app\.txt:99.*Misses the VAT\./);
+    assert.ok(h.calls.some((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "failed"));
+  });
+
+  test("any other postReview failure still fails the attempt and is thrown, as before", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1']) });
+    h.deps.repoHost.postReview = async () => { throw Object.assign(new Error("Bad gateway"), { status: 502 }); };
+    await assert.rejects(h.run(), /Bad gateway/);
+    assert.deepEqual(h.transitions(), []);
+  });
+
   test("CI failing on the addresser's fix goes back to green with the fix's sha, and posts no review at it", async () => {
     let fix = "";
     const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',

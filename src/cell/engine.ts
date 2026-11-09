@@ -711,7 +711,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await guard();
       const held = threads.filter((t) => review.verdicts.get(t.threadId)?.settled !== true).length;
       const posted = await host.postReview({ repo: ctx.repo, prNumber: pr.number, commitSha: head, comments: review.findings,
-        body: `The factory's PR review, round ${round}, at ${head}: ${review.findings.length} new finding${review.findings.length === 1 ? "" : "s"}, ${held} earlier thread${held === 1 ? "" : "s"} still open.` });
+        body: `The factory's PR review, round ${round}, at ${head}: ${review.findings.length} new finding${review.findings.length === 1 ? "" : "s"}, ${held} earlier thread${held === 1 ? "" : "s"} still open.` })
+        .catch((e: unknown) => {
+          // GitHub turns down the whole review with a 422 when a line comment names a line outside the PR's diff, and
+          // the same answer would fail every claim. So the item blocks, naming the findings, for a person to look at.
+          if ((e as { status?: number })?.status !== 422) throw e;
+          const list = review.findings.map((f) => `- \`${f.path}:${f.line}\`: ${f.body}`).join("\n");
+          throw new Blocked(`GitHub turned down the PR review on PR #${pr.number} at ${head}, most likely because a finding names a line outside the PR's diff: ${e instanceof Error ? e.message : String(e)}\n${list}`);
+        });
       for (const t of [...threads]) {
         const v = review.verdicts.get(t.threadId);
         if (v?.settled) {
