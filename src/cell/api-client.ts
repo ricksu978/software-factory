@@ -10,7 +10,7 @@ export class LeaseLost extends Error {
 
 export type CheckStatus = "pending" | "success" | "failure" | "none";
 export type StageReport = {
-  stageId: string; attempt: number; status: "started" | "passed" | "failed"; model: string;
+  stageId: string; attempt: number; status: "started" | "passed" | "failed" | "stopped"; model: string;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
   /** The text of the stage's own prompted agent call, for Floor. The cell API keeps the first 500 characters. */
   message?: string;
@@ -29,6 +29,8 @@ export type CellApi = {
   policyResults(b: PolicyResults): Promise<void>;
   pr(b: { prNumber: number; prUrl: string }): Promise<void>;
   checks(sha: string): Promise<CheckStatus>;
+  /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
+  release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
   upload(b: { kind: "transcript" | "report"; stageId: string; attempt: number; body: string }): Promise<void>;
 };
@@ -55,6 +57,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     transition: async (b) => void (await call("POST", "/transition", b)),
     policyResults: async (b) => void (await call("POST", "/policy-results", b)),
     pr: async (b) => void (await call("POST", "/pr", b)),
+    release: async () => void (await call("POST", "/release", {})),
     checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });

@@ -17,11 +17,11 @@ import { fakeLauncher } from "../../src/scheduler/launcher.ts";
 import { tick, TICK_MS } from "../../src/scheduler/scheduler.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
-const CELL_SECRET = "cell-secret";
+export const CELL_SECRET = "cell-secret";
 const WEBHOOK_SECRET = "webhook-secret";
 const APPHOST = "--apphost . --non-interactive --nologo";
 
-type Ctx = {
+export type Ctx = {
   env?: Record<string, string>;
   started?: SpawnSyncReturns<string>;
   server?: Server;
@@ -42,7 +42,7 @@ type Ctx = {
   runTick?: (once: () => Promise<unknown>) => Promise<void>;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi89?: Ctx };
   w.pbi89 ??= {};
   return w.pbi89;
@@ -54,7 +54,7 @@ export function usePool(p: import("pg").Pool | null): void {
   poolOverride = p;
 }
 const pool = () => poolOverride ?? need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
+export const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
 
 Before({ tags: "@pbi-89 and @db", ...long }, async function () {
   const d = await testDb();
@@ -79,7 +79,10 @@ Given(/^the control plane's environment sets (.+)$/, function (vars: string) {
   ctx(this).env = Object.fromEntries(vars.trim().split(/\s+/).map((v) => [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]));
 });
 
-When("the control plane starts", function () {
+When("the control plane starts", long, async function () {
+  // PBI 140's scenarios start the control plane in process, on their own database, through `controlStart`.
+  const own = (this as { controlStart?: () => Promise<void> }).controlStart;
+  if (own) return own();
   const c = ctx(this);
   // Only PATH and SystemRoot from this process, so nothing else on the runner's environment changes the outcome.
   c.started = spawnSync(process.execPath, ["src/main.ts"], {
@@ -120,7 +123,12 @@ Then("PBI 2's @local scenarios pass", long, function () {
 // ---- the control plane's handlers ----
 
 Given("the control plane is running with a fake board", long, async function () {
-  const c = ctx(this);
+  await startControlPlane(this);
+});
+
+/** Starts the control plane's handlers on a free port, with a fake board. PBI 140's steps reuse it. */
+export async function startControlPlane(world: object): Promise<void> {
+  const c = ctx(world);
   await testDb();
   c.fake = fakeBacklog();
   c.host = fakeRepoHost();
@@ -140,7 +148,7 @@ Given("the control plane is running with a fake board", long, async function () 
   });
   handlers.push(...control.handlers);
   c.close = control.close;
-});
+}
 
 async function person(c: Ctx, login: string, role: string, productOwner = false) {
   await pool().query(`insert into "user" (provider, subject, github_login, role, product_owner) values ('microsoft', $1, $1, $2, $3)`, [login, role, productOwner]);
@@ -326,7 +334,7 @@ Given("an item whose red report has {string} failing, whose green report has it 
   c.blobs!.set(`transcripts/${run}/red-1.jsonl`, '{"type":"assistant"}\n');
 });
 
-async function open(c: Ctx, path: string) {
+export async function open(c: Ctx, path: string) {
   const r = await fetch(`${c.origin}${path}`, { headers: headers(c.login!) });
   c.status = r.status;
   c.html = await r.text();

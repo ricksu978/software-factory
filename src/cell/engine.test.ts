@@ -44,7 +44,7 @@ type Script = (a: AgentArgs, stage: string) => Partial<AgentResult> | undefined 
 
 /** A signed-off run (or a fresh one) in a real repo, with every dependency recorded. */
 function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; ctx?: Partial<CellContext>; deps?: Partial<CellDeps>;
-  lease?: () => Promise<{ stop: boolean }>; failOn?: string; conflict?: boolean } = {}) {
+  lease?: () => Promise<{ stop: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "engine-"));
   roots.push(root);
   const origin = join(root, "origin.git");
@@ -106,7 +106,11 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       policyResults: async (b) => rec("/policy-results", b),
       pr: async (b) => rec("/pr", b),
       checks: async (sha) => (rec("/checks", { sha }), "success"),
-      upload: async (b) => rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }),
+      release: async () => void rec("/release"),
+      upload: async (b) => {
+        rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt });
+        if (o.failUpload) throw new Error(`upload ${b.kind} ${b.stageId}-${b.attempt}: 503`); // as the blob PUT failing does
+      },
     },
     ctx: {
       externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds"], nextStage: o.nextStage ?? "red",
@@ -723,6 +727,117 @@ describe("runCell", () => {
     assert.equal(git(h.dir, "status", "--porcelain"), "");
     assert.match(git(h.dir, "log", "-1", "--format=%s"), /stopped/);
     assert.ok(!h.transitions().length);
+  });
+
+  // PBI 140: a cell stopped for a restart pushes its work in progress and reports its open attempt stopped, so the
+  // restarted factory resumes the stage from that commit. One whose lease was lost pushes nothing.
+  const stopMidGreen = (leases: ("stop" | "lost")[], failUpload = false) => {
+    let n = 0;
+    let armed = false;
+    return harness({
+      nextStage: "green",
+      failUpload,
+      lease: async () => {
+        if (!armed) return { stop: false };
+        const answer = leases[Math.min(n++, leases.length - 1)];
+        if (answer === "lost") throw new LeaseLost("fenced");
+        return { stop: true };
+      },
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        writeFileSync(join(a.cwd, "app.txt"), "half done\n");
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+  };
+
+  test("a stop pushes the work-in-progress commit, then reports the open attempt stopped, not failed", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"]);
+    assert.equal(await h.run(), "stopped");
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), git(h.dir, "rev-parse", "HEAD"));
+    assert.equal(git(h.root, "--git-dir", h.origin, "show", `${BRANCH}:app.txt`), "half done");
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status);
+    assert.deepEqual(green, ["started", "stopped"]);
+    assert.ok(!h.transitions().length);
+  });
+
+  // A stopped report during a restart ends the claim, so the stopped attempt's uploads go first, while its token holds.
+  test("a stopped attempt uploads its transcript before it reports itself stopped", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"]);
+    assert.equal(await h.run(), "stopped");
+    const green = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "green")
+      .map((c) => (c.route === "/stage" ? `stage ${c.body.status}` : `upload ${c.body.kind}`));
+    assert.deepEqual(green, ["stage started", "upload transcript", "stage stopped"]);
+  });
+
+  test("a stopped attempt whose upload fails still reports itself stopped, so the item goes back to Queued", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop"], true);
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "stopped"); } finally { logged.mock.restore(); }
+    const green = h.calls.filter((c) => (c.route === "/stage" || c.route === "/upload-url") && c.body.stageId === "green")
+      .map((c) => (c.route === "/stage" ? `stage ${c.body.status}` : `upload ${c.body.kind}`));
+    assert.deepEqual(green, ["stage started", "upload transcript", "stage stopped"]);
+    assert.match(String(logged.mock.calls[0]?.arguments[0]), /transcript upload failed/);
+  });
+
+  test("a stop whose lease check before the push finds the lease lost pushes nothing and reports nothing", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = stopMidGreen(["stop", "lost"]);
+    assert.equal(await h.run(), "stopped");
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), h.lockSha);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+  });
+
+  test("a stop whose agent edited a locked feature file pushes nothing, and still reports the attempt stopped", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let armed = false;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: armed }),
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482, edited\n");
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "stopped"); } finally { logged.mock.restore(); }
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), h.lockSha);
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status);
+    assert.deepEqual(green, ["started", "stopped"]);
+  });
+
+  // A stop the transition's guard finds after the stage passed leaves no attempt open, and the claim still ends.
+  test("a stop found after open-pr passed, before its transition, releases the claim", async () => {
+    let calls: Call[] = [];
+    const h = harness({
+      nextStage: "open-pr",
+      lease: async () => ({ stop: calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed") }),
+    });
+    calls = h.calls;
+    assert.equal(await h.run(), "stopped");
+    assert.ok(!h.transitions().length);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+    assert.equal(h.routes().at(-1), "/release");
+  });
+
+  test("a stage resumed after a stop tells the agent its work is on the branch, and numbers on from the stopped attempt", async () => {
+    const h = harness({ nextStage: "green", ctx: { stageAttempts: { green: 1 }, resume: { stageId: "green", attempt: 1 } } });
+    assert.equal(await h.run(), "done");
+    const green = h.agentCalls.filter((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"));
+    assert.ok(green.length);
+    for (const a of green) assert.match(a.prompt, /already on the branch[\s\S]*carry on/i);
+    assert.doesNotMatch(h.agentCalls.find((a) => a.stage === "self-review")!.prompt, /already on the branch/);
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.attempt), [2]);
   });
 
   test("a 409 from the cell API stops the run at once, with no push and no further calls", async () => {

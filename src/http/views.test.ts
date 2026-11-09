@@ -40,6 +40,24 @@ describe("floorPage", () => {
 });
 
 describe("issueRef", () => {
+  // PBI 140: Prepare restart sits among the factory's Controls, and Floor counts down its wrap-up until no cell runs.
+  const floor = (restart: { minutesLeft: number; running: number } | null, canOperate = true) =>
+    floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate, restart }, null);
+
+  test("offers Prepare restart among the Controls to an operator", () => {
+    assert.match(floor(null), /<button name="kind" value="restart">Prepare restart<\/button>/);
+    assert.doesNotMatch(floor(null, false), /Prepare restart/);
+  });
+
+  test("counts down the wrap-up while a cell still runs, and says it's ready once none does", () => {
+    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells are wrapping up, with 9 minutes left/);
+    assert.match(floor({ minutesLeft: 1, running: 1 }), /1 cell is wrapping up, with 1 minute left/);
+    const ready = floor({ minutesLeft: 9, running: 0 });
+    assert.match(ready, /Ready to restart\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
+    assert.doesNotMatch(ready, /Preparing to restart/);
+    assert.doesNotMatch(floor(null), /restart\./);
+  });
+
   test("links #N to its issue on GitHub when the repo is known", () => {
     assert.equal(issueRef("131", "acme/widgets"), `<a href="https://github.com/acme/widgets/issues/131">#131</a>`);
   });
