@@ -80,6 +80,20 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(results, [{ file: "dor", source: "repo", criterion_index: 1, criterion: "Has a title", status: "passed", checked_sha: "c1" }]);
   });
 
+  test("each judge call's spend is stored for the item, a call that failed on a usage limit included (PBI 132)", async () => {
+    const spent = { model: "claude-haiku-4-5", tokensIn: 900, tokensOut: 0, costUsd: 0.0012 };
+    const limited = async (_item: FactoryItem, _dor: Policy, report?: (s: typeof spent) => void): Promise<string> => {
+      report?.(spent);
+      throw new Error("readiness judge failed: usage limit");
+    };
+    const ext = await seed();
+    await pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: limited, sourceId });
+    const r = await row(ext);
+    assert.equal(r.state, "Eligible");
+    const checks = (await db.pool.query("select model, tokens_in, tokens_out, cost_usd::float8 as cost from readiness_check where item_id = $1", [r.id])).rows;
+    assert.deepEqual(checks, [{ model: "claude-haiku-4-5", tokens_in: 900, tokens_out: 0, cost: 0.0012 }]);
+  });
+
   test("an oversized item whose split got no answer stays Eligible, and the next poll asks again and posts it", async () => {
     const big = async (item: FactoryItem, dor: Policy) =>
       [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");
@@ -102,6 +116,37 @@ describe("pollOnce", dbTest, () => {
     const all = await fake.comments(ext);
     assert.equal(all.filter((b) => b.startsWith("The factory proposes splitting")).length, 1);
     assert.ok(all.some((b) => b.startsWith("The factory can't start") && !b.includes("gave no answer")), "no corrected readiness comment");
+  });
+
+  test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
+    const a = await seed();
+    const b = await seed({ repo: "other/tools" });
+    const c = await seed({ repo: null });
+    await poll();
+    const repo = async (ext: string) => (await db.pool.query("select repo from item where source_id = $1 and external_id = $2", [sourceId, ext])).rows[0].repo;
+    assert.equal(await repo(a), REPO);
+    assert.equal(await repo(b), "other/tools");
+    assert.equal(await repo(c), null);
+  });
+
+  test("an item held with no repo gets its repo from the next poll that reads it, whatever its state", async () => {
+    const queued = await held("Queued");
+    const notReady = await held("NotReady");
+    const inProgress = await held("InProgress");
+    const gone = await held("Queued");
+    // The cursor is past every seeded item, so the poll only reads them back.
+    await db.pool.query("update backlog_source set cursor = '999' where id = $1", [sourceId]);
+    const { getItem } = fake.adapter;
+    fake.adapter.getItem = async (id) => {
+      if (id === gone.ext) throw new Error("unreachable");
+      return getItem(id);
+    };
+    await poll();
+    const repo = async (id: string) => (await db.pool.query("select repo from item where id = $1", [id])).rows[0].repo;
+    assert.equal(await repo(queued.id), REPO);
+    assert.equal(await repo(notReady.id), REPO);
+    assert.equal(await repo(inProgress.id), REPO);
+    assert.equal(await repo(gone.id), null);
   });
 
   test("an item that fails the gate is NotReady with a reasons comment", async () => {

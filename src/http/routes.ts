@@ -7,6 +7,7 @@ import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
+import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -228,7 +229,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
   return {
-    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, question, criteria, scope, pending, features,
+    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
   };
@@ -336,7 +337,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       return true;
     }
     if (req.method === "GET" && path === "/phase0") {
-      send(res, 200, phase0Page(await phase0(deps.pool), banner));
+      send(res, 200, phase0Page(await phase0(deps.pool), await readinessSpend(deps.pool), banner));
       return true;
     }
     const blob = BLOB_PATH.exec(path);

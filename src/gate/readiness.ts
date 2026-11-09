@@ -1,5 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
+import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
+import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { itemTextHash, proposeSplit, splitComment, splitUnanswered, type SplitDeps, type SplitOutcome } from "./split.ts";
 
@@ -11,12 +13,19 @@ export type GateContext = {
   configValid: boolean;
   repoKnown: boolean;
   openDeps: string[];
-  judge: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** `spent` hears what the call cost, whether it answers or throws (PBI 132). */
+  judge: (item: FactoryItem, dor: Policy, spent?: (s: JudgeSpend) => void) => Promise<string>;
+  /** Records each judge or split call's spend for the item, even when the call failed (PBI 132). */
+  recordCheck?: (item: FactoryItem, check: ReadinessCheck) => Promise<void>;
+  /** When a judge or split call runs. Defaults to the wall clock. */
+  now?: () => Date;
   adapter: BacklogAdapter;
   /** Each PolicyError the caller hit loading the five policy files, such as a run: line outside dod.md. */
   policyErrors?: string[];
   /** How to ask for a split of an oversized item (PBI 143). */
   split?: SplitDeps;
+  /** Where a readiness check that couldn't be recorded is reported. Defaults to console.error. */
+  log?: (line: string) => void;
 };
 
 /**
@@ -45,6 +54,47 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
 }
 
 /**
+ * Makes one AI call for the gate, then records what it spent as a readiness check of `kind`, whether it answered or
+ * threw (PBI 132). A call that reports no spend records nothing. A check that can't be recorded is logged, so the
+ * call's own reply or error is what comes out: a reply isn't thrown away and paid for again on the next poll, and a
+ * usage limit still reads as a usage limit.
+ */
+async function recorded<T>(item: FactoryItem, ctx: GateContext, kind: ReadinessCheckKind, call: (spent: (s: JudgeSpend) => void) => Promise<T>): Promise<T> {
+  const ranAt = (ctx.now ?? (() => new Date()))();
+  let spend: JudgeSpend | null = null;
+  try {
+    return await call((s) => { spend = s; });
+  } finally {
+    if (spend && ctx.recordCheck) {
+      try {
+        await ctx.recordCheck(item, { ...(spend as JudgeSpend), kind, ranAt });
+      } catch (e) {
+        (ctx.log ?? console.error)(`readiness: couldn't record the ${kind} call's cost for item ${item.externalId}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+}
+
+/** Asks for a split through `recorded`, so the coding model's call is a `split` readiness check. A cached split asks nothing. */
+function recordedSplit(item: FactoryItem, ctx: GateContext, deps: SplitDeps): Promise<SplitOutcome> {
+  return recorded(item, ctx, "split", (spent) => proposeSplit(item, {
+    ...deps,
+    agent: async (a: AgentArgs): Promise<AgentResult> => {
+      let r: AgentResult;
+      try {
+        r = await deps.agent(a);
+      } catch (e) {
+        // A run that throws never started, so it spent nothing, and says so.
+        spent({ model: a.model, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+        throw e;
+      }
+      spent({ model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
+      return r;
+    },
+  }));
+}
+
+/**
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
  * after any readiness input changes posts a fresh one. The gate never edits the item.
@@ -54,7 +104,7 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
   let oversized = false;
   if (results.length === 0 && ctx.dor) {
     const dor = ctx.dor;
-    const reply = await ctx.judge(item, dor);
+    const reply = await recorded(item, ctx, "judge", (spent) => ctx.judge(item, dor, spent));
     // Every flags line counts, so an early or echoed {"flags":[]} can't cancel a real flag later in the reply.
     const flagLines = jsonLines(reply).filter((o) => Array.isArray(o.flags));
     if (flagLines.length === 0) {
@@ -71,7 +121,7 @@ export async function gate(item: FactoryItem, ctx: GateContext): Promise<GateRes
     }
   }
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text.
-  const split = oversized && ctx.split ? await proposeSplit(item, ctx.split) : null;
+  const split = oversized && ctx.split ? await recordedSplit(item, ctx, ctx.split) : null;
   if (split?.proposed) await ctx.adapter.comment(item.externalId, splitComment(item, split.children), `split:${itemTextHash(item)}`);
   const failed = results.filter((r) => r.status !== "passed");
   if (failed.length > 0) {
