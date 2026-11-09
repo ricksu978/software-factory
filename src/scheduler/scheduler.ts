@@ -5,6 +5,7 @@
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
+import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import type { Actor } from "../store/events.ts";
@@ -35,6 +36,8 @@ export type TickDeps = {
   controlUrl: string;
   /** The version of the loaded SOP file, pinned on a run's first claim. */
   sopVersion: string;
+  /** Where a tick that runs long warns, and the clock that times it (PBI 134). */
+  slow?: Slow;
 };
 export type TickResult = { started: string[]; stopped: string[]; expired: string[] };
 
@@ -52,13 +55,21 @@ async function isolated(what: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** One tick. One that runs for 5 minutes warns, and again every 5 minutes, naming the step it is in (PBI 134). */
 export async function tick(d: TickDeps): Promise<TickResult> {
+  const w = watch(SLOW_TICK_MS, SLOW_TICK_MS, (ms, step) => `slow: the scheduler tick has run for ${minutes(ms)}, in step "${step}"`, d.slow);
+  return watched(w, () => tickSteps(d, w));
+}
+
+async function tickSteps(d: TickDeps, w: Watch): Promise<TickResult> {
   const result: TickResult = { started: [], stopped: [], expired: [] };
+  w.step("applying overrides");
   const overrides = await activeOverrides(d.pool, d.now);
   const factory = (kind: string) => overrides.some((o) => o.scope === "factory" && o.kind === kind);
 
   // The kill switch stops every cell with a live lease and starts nothing. Their leases then run out as usual.
   if (d.killFlag || factory("kill")) {
+    w.step("stopping every cell");
     const live = await d.pool.query<{ execution_name: string }>(
       `select r.execution_name from item i join run r on r.item_id = i.id and r.ended_at is null
        where i.state = 'InProgress' and i.lease_expires > $1 and r.execution_name is not null`,
@@ -74,10 +85,14 @@ export async function tick(d: TickDeps): Promise<TickResult> {
   }
 
   await applyItemOverrides(d, overrides, result);
+  w.step("expiring leases");
   result.expired = await withTx(d.pool, (c) => expireLeases(c, d.now));
+  w.step("chasing questions");
   await chaseQuestions(d);
+  w.step("polling merged CI");
   await pollMergedCi(d);
   if (factory("pause") || factory("drain")) return result;
+  w.step("starting the next item");
   await startNext(d, result);
   return result;
 }
@@ -189,7 +204,9 @@ async function requeue(d: TickDeps, itemId: string) {
         [itemId],
       );
     } else if (row.run_id && prClosed) {
-      await c.query("update run set next_stage = 'open-pr' where id = $1", [row.run_id]);
+      // The closed PR is dropped, so the poller, which reads an InProgress run's PR, doesn't withdraw the item again
+      // while open-pr opens a fresh one from the kept branch (PBI 142).
+      await c.query("update run set next_stage = 'open-pr', pr_number = null, pr_url = null where id = $1", [row.run_id]);
     }
   });
 }

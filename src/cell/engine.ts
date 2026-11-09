@@ -37,7 +37,7 @@ export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited";
 
 export type CellDeps = {
   api: CellApi; ctx: CellContext; agent: (a: AgentArgs) => Promise<AgentResult>; git: Git; dir: string;
-  repoHost: Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr">;
+  repoHost: Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState">;
   sop: Sop; config: RepoConfig; policies: Policies; now: () => Date;
   /** Waits between CI polls. Tests pass one that returns at once. */
   sleep?: (ms: number) => Promise<void>;
@@ -64,6 +64,8 @@ class Limited extends Error {
   }
 }
 class RenewalFailed extends Error {}
+/** The branch's PR merged already, so open-pr has nothing to open. The poller or the webhook moves the item (PBI 142). */
+class AlreadyMerged extends Error {}
 
 /**
  * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
@@ -510,6 +512,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Returns findings that send the item back to green, or null once the PR is open and CI passed.
   const openPr = async (): Promise<string[] | null> => {
     const attempt = await begin("open-pr");
+    // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
+    // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
+    if (ctx.prNumber !== null) {
+      const state = await d.repoHost.prState(ctx.repo, ctx.prNumber, []);
+      if (state.merged) {
+        throw new AlreadyMerged(`PR #${ctx.prNumber} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""}, so the factory opens no new PR for it.`);
+      }
+    }
     const summary = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`));
     if (!(await lockHolds(`open-pr(${tag}): summary`))) throw new Blocked(lockFinding());
     // After the summary's commit, so the checklist always names the head the PR is opened at.
@@ -665,6 +675,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await transition({ event: "retries_exhausted" });
       return "failed";
     }
+    // Any other error ends the open attempt failed with its message, so no attempt is left looking as if it still
+    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted.
+    if (current) current.message = e instanceof Error ? e.message : String(e);
+    if (e instanceof AlreadyMerged) {
+      await end("failed");
+      return "failed";
+    }
+    await end("failed").catch((again) => console.error("reporting the failed attempt failed:", again));
     throw e;
   }
 }
