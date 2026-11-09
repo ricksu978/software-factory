@@ -15,6 +15,7 @@ import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
 import { tick, TICK_MS } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
+import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
@@ -130,6 +131,8 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
     ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CELL_IMAGE", "CELL_CONTROL_URL"].map(need);
 
   const pool = createPool(dbUri);
+  // A prepared restart holds back the tick, which runs here, so a worker restarted on its own clears it too (PBI 140).
+  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");

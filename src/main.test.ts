@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
@@ -32,6 +33,15 @@ describe("main.ts at startup", () => {
     const r = start({});
     assert.equal(r.status, 1);
     assert.match(r.stderr, /Azure mode/);
+  });
+
+  // The scenarios start the control plane through serveControl, so this guards start() itself: the tick, the poller
+  // and the egress set-up are the worker's (PBI 156).
+  test("runs none of the worker's jobs", () => {
+    const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+    for (const job of ["./scheduler/scheduler.ts", "./watcher/poller.ts", "./scheduler/launcher.ts"]) {
+      assert.ok(!source.includes(`from "${job}"`), `src/main.ts imports ${job}`);
+    }
   });
 
   test("locally it logs this start's sign-in link, on the port the dashboard answers on", () => {
