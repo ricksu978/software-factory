@@ -18,8 +18,14 @@ export type SplitChild = { title: string; body: string; criteria: number[]; need
  */
 export type SplitOutcome = { proposed: true; children: SplitChild[] } | { proposed: false; reason: string };
 
-/** What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. */
-export type SplitDeps = { sop: { models: { coding: string } }; agent: (a: AgentArgs) => Promise<AgentResult> };
+/**
+ * What the gate needs to ask for a split: the SOP, for its coding model, and the agent runner. `seen` holds each
+ * answered outcome by item text hash, so a re-gate of text already split (say after a dor.md change) doesn't ask again.
+ */
+export type SplitDeps = { sop: { models: { coding: string } }; agent: (a: AgentArgs) => Promise<AgentResult>; seen?: Map<string, SplitOutcome> };
+
+/** The most outcomes `seen` keeps. The oldest goes first, so a long-lived poller's memory stays bounded. */
+export const SPLIT_SEEN_MAX = 1000;
 
 /** Every split proposal comment opens with this line, so it never reads as the readiness comment. */
 export const SPLIT_HEADING = "The factory proposes splitting this item into smaller items:";
@@ -60,7 +66,9 @@ export function checkSplit(reply: string, criterionCount: number): SplitOutcome 
     const n = i + 1;
     if (!r || typeof r !== "object" || Array.isArray(r)) return no(`child ${n} isn't an object`);
     const ch = r as Record<string, unknown>;
-    if (typeof ch.title !== "string" || ch.title.trim() === "") return no(`child ${n} has no title`);
+    // The title becomes a markdown heading, so its whitespace collapses to single spaces and it can't open new lines.
+    const title = typeof ch.title === "string" ? ch.title.replace(/\s+/g, " ").trim() : "";
+    if (title === "") return no(`child ${n} has no title`);
     if (typeof ch.body !== "string" || ch.body.trim() === "") return no(`child ${n} has no body`);
     if (!isIndexList(ch.criteria)) return no(`child ${n} doesn't say which criteria it takes`);
     if (ch.criteria.length === 0) return no(`child ${n} takes no criterion`);
@@ -70,7 +78,7 @@ export function checkSplit(reply: string, criterionCount: number): SplitOutcome 
       if (need < 1 || need > raw.length) return no(`child ${n} needs child ${need}, which doesn't exist`);
       if (need > n) return no(`child ${n} needs child ${need}, which comes after it`);
     }
-    children.push({ title: ch.title.trim(), body: ch.body.trim(), criteria: [...new Set(ch.criteria)], needs: [...new Set(ch.needs)] });
+    children.push({ title, body: ch.body.trim(), criteria: [...new Set(ch.criteria)], needs: [...new Set(ch.needs)] });
   }
   for (const ch of children) {
     const missing = ch.criteria.find((c) => c < 1 || c > criterionCount);
@@ -84,17 +92,34 @@ export function checkSplit(reply: string, criterionCount: number): SplitOutcome 
   return { proposed: true, children };
 }
 
-/** Asks the SOP's coding model for a split and checks it. A failed or thrown run is no answer, never a split. */
+/**
+ * Asks the SOP's coding model for a split and checks it. A failed or thrown run is no answer, never a split. Any other
+ * outcome is kept in `deps.seen` by item text hash and returned from there for the same text, without a new run.
+ */
 export async function proposeSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOutcome> {
+  const key = itemTextHash(item);
+  const known = deps.seen?.get(key);
+  if (known) return known;
+  const out = await askForSplit(item, deps);
+  if (deps.seen && !(!out.proposed && out.reason === NO_ANSWER)) {
+    deps.seen.set(key, out);
+    if (deps.seen.size > SPLIT_SEEN_MAX) deps.seen.delete(deps.seen.keys().next().value!);
+  }
+  return out;
+}
+
+const NO_ANSWER = "the coding model gave no answer";
+
+async function askForSplit(item: FactoryItem, deps: SplitDeps): Promise<SplitOutcome> {
   let r: AgentResult;
   try {
     // Judge mode: the parent's text is untrusted and this runs in the control plane, so the model gets no tool.
     r = await deps.agent({ prompt: splitPrompt(item), model: deps.sop.models.coding, cwd: tmpdir(), maxTurns: 1, mode: "judge",
       signal: AbortSignal.timeout(SPLIT_TIMEOUT_MS) });
   } catch {
-    return { proposed: false, reason: "the coding model gave no answer" };
+    return { proposed: false, reason: NO_ANSWER };
   }
-  if (!r.ok) return { proposed: false, reason: "the coding model gave no answer" };
+  if (!r.ok) return { proposed: false, reason: NO_ANSWER };
   return checkSplit(r.text, item.acceptanceCriteria.length);
 }
 

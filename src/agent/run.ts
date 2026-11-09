@@ -126,7 +126,7 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
     fenced(data, "json"),
     "",
     'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed","reason":"<why>"}, in index order.',
-    'Then a last line {"flags":[...],"oversized":true|false}. Add a short flag for each thing the item asks for that no cell may do: credentials or secrets, changes to CI or workflows, or access outside its own repo. Leave it {"flags":[]} when there is none.',
+    'Then a last line {"flags":[...],"oversized":true|false}. Add a short flag for each thing the item asks for that no cell may do: credentials or secrets, changes to CI or workflows, or access outside its own repo. Leave it {"flags":[],"oversized":false} when there is none and the item fits.',
     'Set "oversized" to true when the item is too big for one Sprint, or false when it fits. Size is never a flag.',
     "Write nothing else.",
   ].join("\n");

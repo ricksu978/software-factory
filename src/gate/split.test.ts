@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
+import type { SplitOutcome } from "./split.ts";
 import { checkSplit, itemTextHash, proposeSplit, SPLIT_HEADING, splitComment, splitPrompt } from "./split.ts";
 
 const item: FactoryItem = {
@@ -55,6 +56,30 @@ test("the split is asked of the SOP's coding model, with no tool, and a failed r
   assert.deepEqual(await proposeSplit(item, { sop, agent: run(false, "API error") }), { proposed: false, reason: "the coding model gave no answer" });
   const thrown = await proposeSplit(item, { sop, agent: async () => { throw new Error("boom"); } });
   assert.deepEqual(thrown, { proposed: false, reason: "the coding model gave no answer" });
+});
+
+test("a title's newlines collapse, so it can't break out of its heading", () => {
+  const out = checkSplit(reply([{ ...valid[0], title: "A\n\n@someone [x](https://e.x)\t end" }, valid[1]]), 3);
+  assert.ok(out.proposed);
+  assert.equal(out.children[0].title, "A @someone [x](https://e.x) end");
+  assert.match(splitComment(item, out.children), /### 1\. A @someone \[x\]\(https:\/\/e\.x\) end\n/);
+});
+
+test("the same item text is split once; no answer is asked again", async () => {
+  let calls = 0;
+  const seen = new Map<string, SplitOutcome>();
+  const sop = { models: { coding: "model-c" } };
+  const agent = (ok: boolean, text: string) => async (a: AgentArgs): Promise<AgentResult> => {
+    calls++;
+    return { ok, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+  };
+  assert.equal((await proposeSplit(item, { sop, agent: agent(false, ""), seen })).proposed, false);
+  assert.equal((await proposeSplit(item, { sop, agent: agent(true, reply(valid)), seen })).proposed, true);
+  assert.equal((await proposeSplit({ ...item, updatedAt: "later" }, { sop, agent: agent(true, reply(valid)), seen })).proposed, true);
+  assert.equal(calls, 2);
+  await proposeSplit({ ...item, body: "changed" }, { sop, agent: agent(true, "no JSON"), seen });
+  await proposeSplit({ ...item, body: "changed" }, { sop, agent: agent(true, "no JSON"), seen });
+  assert.equal(calls, 3);
 });
 
 test("the prompt fences the item and asks for 2 to 4 children with criteria indices and earlier needs", () => {
