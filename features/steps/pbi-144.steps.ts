@@ -8,20 +8,23 @@ import { fakeBacklog } from "../../src/adapters/fake.ts";
 import { acceptanceCriteria } from "../../src/adapters/github/backlog.ts";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
+import type { ItemState } from "../../src/core/states.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../src/gate/file-split.ts";
 import { gate } from "../../src/gate/readiness.ts";
-import { itemTextHash, SPLIT_HEADING, type SplitOutcome } from "../../src/gate/split.ts";
+import { SPLIT_HEADING, type SplitOutcome } from "../../src/gate/split.ts";
 import { loadPolicy, type Policy } from "../../src/policy/policy.ts";
+import { readinessItemHash } from "../../src/watcher/poller.ts";
 
 const HEADING = "Acceptance criteria";
-const DOR = "- [ ] Has a title\n";
+export const DOR = "- [ ] Has a title\n";
 
 type Fake = ReturnType<typeof fakeBacklog>;
-type State = { state: "Eligible" | "NotReady" | "Queued"; hash: string };
-type Issue = ChildIssue & { repo: string };
+/** The item's state in the state machine, and the readiness item hash (open dependencies included) it was gated at. */
+type State = { state: ItemState; hash: string };
+export type Issue = ChildIssue & { repo: string; labels: string[] };
 type Refusal = "file" | "sub-issue" | "board" | "block" | "comment";
 
-type Ctx = {
+export type Ctx = {
   fake: Fake;
   repo: string;
   label: string;
@@ -31,6 +34,13 @@ type Ctx = {
   criteria: string[];
   oversized: boolean;
   reply: string;
+  /** The coding model's split reply for a child, by the child's title (PBI 153). A child without one gets no split. */
+  childReplies: Map<string, string>;
+  /** Children the judge finds oversized, by title, and children it fails, by title, with the reason (PBI 153). */
+  oversizedChildren: Set<string>;
+  failedChildren: Map<string, string>;
+  /** Every item the judge was asked about, with the definition of ready it was given (PBI 153). */
+  judged: { id: string; dor: Policy }[];
   requests: AgentArgs[];
   /** The poller's item rows: what survives a restart. */
   states: Map<string, State>;
@@ -38,6 +48,11 @@ type Ctx = {
   seen: Map<string, SplitOutcome>;
   /** Every item the factory took up (gated ready and queued), by external id. */
   runs: Set<string>;
+  /** Every item the scheduler started a run for, by external id, and the stages each run has done (PBI 153). */
+  started: Set<string>;
+  stages: Map<string, string[]>;
+  /** The factory's WIP limit: how many items may be InProgress at once. The factory's default is 1. */
+  wip: number;
   /** The issues filed in the repo through the board, in order. */
   filed: Issue[];
   subIssues: Map<string, string[]>;
@@ -50,24 +65,25 @@ type Ctx = {
   polls: number;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi144?: Ctx };
   w.pbi144 ??= {
     fake: fakeBacklog(), repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
-    requests: [], states: new Map(), seen: new Map(), runs: new Set(), filed: [], subIssues: new Map(), board: new Map(),
-    blocks: new Map(), refusals: [], errors: [], polls: 0,
+    childReplies: new Map(), oversizedChildren: new Set(), failedChildren: new Map(), judged: [],
+    requests: [], states: new Map(), seen: new Map(), runs: new Set(), started: new Set(), stages: new Map(), wip: 1,
+    filed: [], subIssues: new Map(), board: new Map(), blocks: new Map(), refusals: [], errors: [], polls: 0,
   };
   return w.pbi144;
 }
 
 const indices = (cell: string) => cell.split(",").map((s) => s.trim()).filter(Boolean).map(Number);
 
-function splitReply(table: DataTable): string {
+export function splitReply(table: DataTable): string {
   const rows = table.hashes().sort((a, b) => Number(a.child) - Number(b.child));
   return JSON.stringify({ children: rows.map((r) => ({ title: r.title, body: r.body, criteria: indices(r.criteria), needs: indices(r.needs) })) });
 }
 
-const titleOf = (c: Ctx, id: string) => c.filed.find((i) => i.externalId === id)?.title ?? `#${id}`;
+export const titleOf = (c: Ctx, id: string) => c.filed.find((i) => i.externalId === id)?.title ?? `#${id}`;
 
 /** Throws once for the first matching refusal, then forgets it. */
 function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
@@ -77,7 +93,7 @@ function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
   throw new Error(`the repo refused a ${kind} write for "${title}"`);
 }
 
-async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
+export async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
   const fi = await c.fake.adapter.getItem(id);
   assert.ok(fi, `no item ${id}`);
   await c.fake.seed({ ...fi, ...change(fi), externalId: id });
@@ -101,13 +117,14 @@ function scriptedBoard(c: Ctx): SplitBoard {
       }
       return out;
     },
-    async createIssue(repo, title, body) {
+    // A label filed with the issue (PBI 153) is the issue's from the start, so the next listing sees it.
+    async createIssue(repo: string, title: string, body: string, labels: string[] = []) {
       refuse(c, "file", title);
       const externalId = await c.fake.seed({
-        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [], repo, status: "", fields: {},
+        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
-      c.filed.push({ externalId, title, url, repo });
+      c.filed.push({ externalId, title, url, repo, labels: [...labels] });
       return { externalId, title, url };
     },
     async addSubIssue(parentId, childId) {
@@ -139,35 +156,59 @@ function scriptedBoard(c: Ctx): SplitBoard {
   };
 }
 
-function agent(c: Ctx) {
+/** The coding model answers the parent's split with `reply`, and a child's with that child's own reply, if any. */
+function agent(c: Ctx, fi: FactoryItem) {
+  const text = fi.externalId === c.parentId ? c.reply : (c.childReplies.get(fi.title) ?? "");
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
-    return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+    return { ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
 }
 
-/** The judge passes every dor.md line and raises no flag; only the parent, once set so, is oversized. */
+/**
+ * The judge passes every dor.md line and raises no flag; only the parent, once set so, is oversized. A child set
+ * oversized is oversized too, and a child set to fail fails line 1 for its reason (PBI 153).
+ */
 function judge(c: Ctx) {
-  return async (item: FactoryItem, dor: Policy) => [
-    ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
-    JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
-  ].join("\n");
+  return async (item: FactoryItem, dor: Policy) => {
+    c.judged.push({ id: item.externalId, dor });
+    const fails = item.externalId === c.parentId ? undefined : c.failedChildren.get(item.title);
+    const oversized = item.externalId === c.parentId ? c.oversized : c.oversizedChildren.has(item.title);
+    return [
+      ...dor.criteria.map((cr) => JSON.stringify(
+        cr.index === 1 && fails !== undefined ? { index: cr.index, status: "failed", reason: fails } : { index: cr.index, status: "passed", reason: "ok" },
+      )),
+      JSON.stringify({ flags: [], oversized }),
+    ].join("\n");
+  };
+}
+
+/** The items `id` is blocked by that are still open, as the adapter's openDependencies reads them. */
+async function openDepsOf(c: Ctx, id: string): Promise<string[]> {
+  const open: string[] = [];
+  for (const b of c.blocks.get(id) ?? []) if (!(await c.fake.adapter.getItem(b))?.closed) open.push(b);
+  return open;
 }
 
 /**
  * One poll. As in the poller, an item that leaves the backlog is dropped (here every state counts, so putting the
- * label back always re-gates the item), a NotReady item whose text changed is gated again, and every Eligible item is
- * gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each` does.
+ * label back always re-gates the item), a NotReady item whose text or open dependencies changed is gated again, and
+ * every Eligible item is gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each`
+ * does.
  */
-async function poll(c: Ctx): Promise<void> {
+export async function poll(c: Ctx): Promise<void> {
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? DOR : null), "dor");
-  const listed = (await c.fake.adapter.listEligible(null)).items.filter((fi) => !fi.closed && fi.labels.includes(c.label));
+  // The board's issues are the parent and every filed child. They're read one by one rather than through the fake's
+  // listEligible, which knows only its own opt-in label, so a repo's own label (PBI 153) is the one that counts.
+  const board: FactoryItem[] = [];
+  for (const id of [c.parentId!, ...c.filed.map((i) => i.externalId)]) board.push(await item(c, id));
+  const listed = board.filter((fi) => !fi.closed && fi.labels.includes(c.label));
   const ids = new Set(listed.map((fi) => fi.externalId));
   for (const id of [...c.states.keys()]) if (!ids.has(id)) c.states.delete(id);
   for (const fi of listed) {
     const st = c.states.get(fi.externalId);
     if (!st) c.states.set(fi.externalId, { state: "Eligible", hash: "" });
-    else if (st.state === "NotReady" && st.hash !== itemTextHash(fi)) st.state = "Eligible";
+    else if (st.state === "NotReady" && st.hash !== readinessItemHash(fi, await openDepsOf(c, fi.externalId))) st.state = "Eligible";
   }
   const file: FileSplitDeps = { board: scriptedBoard(c), optInLabel: c.label, backlogStatus: c.backlogStatus, criteriaHeading: HEADING };
   const adapter = {
@@ -181,14 +222,13 @@ async function poll(c: Ctx): Promise<void> {
     const st = c.states.get(fi.externalId)!;
     if (st.state !== "Eligible") continue;
     try {
-      const openDeps: string[] = [];
-      for (const b of c.blocks.get(fi.externalId) ?? []) if (!(await c.fake.adapter.getItem(b))?.closed) openDeps.push(b);
+      const openDeps = await openDepsOf(c, fi.externalId);
       const out = await gate(fi, {
         readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true, openDeps,
-        judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, file },
+        judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c, fi), seen: c.seen, file },
       });
       st.state = out.ready ? "Queued" : "NotReady";
-      st.hash = itemTextHash(fi);
+      st.hash = readinessItemHash(fi, openDeps);
       if (out.ready) c.runs.add(fi.externalId);
     } catch (e) {
       c.errors.push(e);
@@ -197,11 +237,11 @@ async function poll(c: Ctx): Promise<void> {
   c.polls++;
 }
 
-function polled(c: Ctx): void {
+export function polled(c: Ctx): void {
   assert.ok(c.polls > 0, "the factory never polled");
 }
 
-function child(c: Ctx, title: string): Issue {
+export function child(c: Ctx, title: string): Issue {
   polled(c);
   const found = c.filed.filter((i) => i.title === title);
   assert.ok(found.length > 0, `no child "${title}" was filed`);
@@ -209,7 +249,7 @@ function child(c: Ctx, title: string): Issue {
   return found[0];
 }
 
-async function item(c: Ctx, id: string): Promise<FactoryItem> {
+export async function item(c: Ctx, id: string): Promise<FactoryItem> {
   const fi = await c.fake.adapter.getItem(id);
   assert.ok(fi, `no item ${id}`);
   return fi;
@@ -220,14 +260,20 @@ async function subIssueTitles(c: Ctx): Promise<string[]> {
   return (c.subIssues.get(c.parentId!) ?? []).map((id) => titleOf(c, id));
 }
 
-/** The parent's comments that link to any filed child, by its URL. */
-const links = (body: string, url: string) => new RegExp(`${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\d)`).test(body);
+/** An item's comments that link to any filed child, by its URL. The item is the parent unless one is named. */
+export const links = (body: string, url: string) => new RegExp(`${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?!\\d)`).test(body);
 
-async function linkComments(c: Ctx): Promise<string[]> {
+export async function linkComments(c: Ctx, id = c.parentId!): Promise<string[]> {
   polled(c);
-  const all = await c.fake.comments(c.parentId!);
+  const all = await c.fake.comments(id);
   return all.filter((b) => c.filed.some((i) => links(b, i.url)));
 }
+
+/**
+ * PBI 153: the parent's link comment says its children went into the factory. A scenario tagged @pbi-153 holds the
+ * comment it links each child from to that, since the feature's comment does both.
+ */
+export const SAYS_ENTERED = /\b(?:went|gone|go|goes|sent|put) (?:straight )?into the factory\b|\bentered the factory\b|\bare (?:now )?in the factory\b/i;
 
 async function blockerTitles(c: Ctx, title: string): Promise<string[]> {
   const ch = child(c, title);
@@ -419,7 +465,10 @@ Then("the factory takes up child {string}", function (title: string) {
 
 Then("the factory has started no run for child {string} or child {string}", function (a: string, b: string) {
   const c = ctx(this);
-  for (const title of [a, b]) assert.ok(!c.runs.has(child(c, title).externalId), `the factory took up child "${title}"`);
+  for (const title of [a, b]) {
+    const id = child(c, title).externalId;
+    assert.ok(!c.runs.has(id) && !c.started.has(id), `the factory took up child "${title}"`);
+  }
 });
 
 Then("the parent issue no longer carries the label {string}", async function (label: string) {
@@ -450,6 +499,7 @@ Then("that comment links to child {string}, child {string} and child {string}", 
   const found = await linkComments(c);
   assert.equal(found.length, 1, `comments linking to a child: ${found.length}`);
   for (const title of [a, b, d]) assert.ok(links(found[0], child(c, title).url), `the comment doesn't link to child "${title}":\n${found[0]}`);
+  if ((this as { pbi153?: boolean }).pbi153) assert.match(found[0], SAYS_ENTERED, `the comment linking the children doesn't say they went into the factory:\n${found[0]}`);
 });
 
 Then("the parent issue has one split proposal comment", async function () {
