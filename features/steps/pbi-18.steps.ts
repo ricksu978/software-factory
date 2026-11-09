@@ -36,6 +36,8 @@ export type Ctx = {
   checks?: (sha: string) => Promise<string>;
   /** Extra fields for the cell's context, as PBI 140's steps add to resume a stage a restart cut short. */
   context?: Record<string, unknown>;
+  /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
+  agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
 };
 
 function ctx(world: object): Ctx {
@@ -285,7 +287,7 @@ export async function runTheCell(world: object): Promise<void> {
         stageAttempts: {},
         ...c.context,
       },
-      agent: agent(c),
+      agent: c.agent ? (a: any) => c.agent!(a, agent(c)) : agent(c),
       git: shellGit(c.dir, BRANCH),
       dir: c.dir,
       repoHost: c.repoHost ?? {

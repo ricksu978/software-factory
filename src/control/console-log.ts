@@ -10,11 +10,11 @@ export function transitionLine(externalId: string, from: ItemState, to: ItemStat
   return `item ${externalId}: ${from} -> ${to} (${event})`;
 }
 
-/** Logs every committed transition from here on, and returns the call that stops it. */
+/** Logs every transition committed through deps.pool from here on, and returns the call that stops it. */
 export function logTransitions(deps: { pool: pg.Pool; log?: (line: string) => void }): () => void {
   const log = deps.log ?? ((line: string) => console.log(line));
   return onTransition(async (itemId, from, to, event) => {
     const ext = (await deps.pool.query<{ external_id: string }>("select external_id from item where id = $1", [itemId])).rows[0]?.external_id;
     log(transitionLine(ext ?? itemId, from, to, event));
-  });
+  }, deps.pool);
 }

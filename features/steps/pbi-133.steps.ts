@@ -18,7 +18,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify, format } from "node:util";
 import pg from "pg";
-import { attempt } from "../../src/main.ts";
+import { attempt } from "../../src/worker/main.ts";
 import { createPool, migrate, withTx } from "../../src/store/db.ts";
 import { appendEvent } from "../../src/store/events.ts";
 import { fakeLauncher } from "../../src/scheduler/launcher.ts";

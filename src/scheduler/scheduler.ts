@@ -26,7 +26,7 @@ export type TickDeps = {
   pool: pg.Pool;
   launcher: Launcher;
   now: Date;
-  /** FACTORY_KILL=1 at control plane start. It stops every cell, as a kill override does. */
+  /** FACTORY_KILL=1 at worker start. It stops every cell, as a kill override does. */
   killFlag: boolean;
   repoHost: RepoHost;
   backlogFor: (sourceId: string) => BacklogAdapter;
@@ -87,7 +87,8 @@ async function tickSteps(d: TickDeps, w: Watch): Promise<TickResult> {
   w.step("polling merged CI");
   await pollMergedCi(d);
   // Prepare restart (PBI 140): cells are told to stop at their next renewal and wrap up. Once the wrap-up runs out, the
-  // scheduler stops the ones still running. Nothing starts until the control plane restarts or an operator resumes.
+  // scheduler stops the ones still running. Nothing starts until the control plane or the worker restarts, or an
+  // operator resumes.
   const restart = overrides.find((o) => o.scope === "factory" && o.kind === "restart");
   if (restart && d.now.getTime() >= restart.createdAt.getTime() + restartWaitMs()) {
     w.step("stopping the cells left at the end of the wrap-up");
