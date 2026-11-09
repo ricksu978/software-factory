@@ -16,3 +16,16 @@ export async function matchesLock(repoDir: string, lockSha: string, files: strin
     throw e;
   }
 }
+
+/**
+ * Puts every locked file that differs between the lock commit and HEAD back as it was at the lock commit, a deleted one
+ * included, and stages it (PBI 152). Every other change stays. Returns the paths it restored, empty when the lock holds.
+ * The caller commits.
+ */
+export async function restoreLock(repoDir: string, lockSha: string, files: string[]): Promise<string[]> {
+  if (files.length === 0) throw new Error("restoreLock needs at least one locked file");
+  const { stdout } = await run("git", ["diff", "--name-only", "-z", "--no-renames", lockSha, "HEAD", "--", ...files], { cwd: repoDir });
+  const changed = [...new Set(stdout.split("\0").filter(Boolean))];
+  if (changed.length) await run("git", ["checkout", lockSha, "--", ...changed], { cwd: repoDir });
+  return changed;
+}

@@ -540,16 +540,38 @@ describe("runCell", () => {
     assert.ok(checked.length > 0 && checked.every((s) => s && s !== h.lockSha));
   });
 
-  test("a self-review fix that edits a locked feature file blocks at once, with no second round", async () => {
+  test("a self-review fix that edits a locked feature file has it restored and committed, and the review carries on", async () => {
     let reviews = 0;
-    const h = harness({ script: (a) => {
-      if (a.agent === "factory-self-reviewer") { reviews++; return { text: "app.txt:1: rename\nOPEN: 1" }; }
+    const h = harness({ nextStage: "self-review", script: (a) => {
+      if (a.agent === "factory-self-reviewer") {
+        reviews++;
+        if (reviews === 1) return { text: "1. app.txt:1: rename\nOPEN: 1" };
+      }
       if (a.prompt.startsWith("# Fix review findings")) appendFileSync(join(a.cwd, FEATURE), "# edited\n");
     } });
-    assert.equal(await h.run(), "waiting");
-    assert.equal(reviews, 1);
-    assert.match(h.transitions().at(-1).question.body, /locked feature file/);
-    assert.ok(!h.prs.length);
+    assert.equal(await h.run(), "done");
+    assert.equal(reviews, 2);
+    assert.ok(h.transitions().every((t) => !t.question), "the owner was asked a question");
+    assert.equal(git(h.dir, "show", `HEAD:${FEATURE}`), git(h.dir, "show", `${h.lockSha}:${FEATURE}`));
+    assert.match(git(h.dir, "log", "--format=%s"), /restore the locked feature files/);
+    const second = h.agentCalls.filter((a) => a.agent === "factory-self-reviewer")[1]!;
+    assert.match(second.prompt, /undid an edit to features\/pbi-482\.feature/);
+  });
+
+  test("every brief after sign-off names the locked feature files", async () => {
+    const h = harness({ nextStage: "red" });
+    assert.equal(await h.run(), "done");
+    const own = h.agentCalls.filter((a) => a.mode === "cell" && (a.agent || !/^\{"index":\d+,"criterion":/m.test(a.prompt)));
+    assert.deepEqual([...new Set(own.map((a) => a.stage))], ["red", "green", "self-review", "open-pr"]);
+    for (const a of own) assert.match(a.prompt, /## The locked feature files[\s\S]*features\/pbi-482\.feature/, `the ${a.stage} brief`);
+  });
+
+  test("a scenario note from the approving self-review round reaches the PR body for the person who merges", async () => {
+    const h = harness({ nextStage: "self-review", script: (a) => {
+      if (a.agent === "factory-self-reviewer") return { text: '{"index":1,"status":"passed","reason":"ok"}\nSCENARIO NOTE: "Criterion 1 holds" looks wrong.\nAPPROVED' };
+    } });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs.at(-1)!.body, /## Scenario notes for the person who merges\n[\s\S]*- "Criterion 1 holds" looks wrong\./);
   });
 
   test("an address reply to a trusted thread is posted, and one to any other thread isn't", async () => {
