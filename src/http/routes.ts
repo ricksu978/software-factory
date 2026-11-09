@@ -72,8 +72,10 @@ async function floor(pool: pg.Pool) {
      where i.state in ('SignOff', 'NeedsInput') group by i.id order by since`,
   )).rows;
   const reviews = (await pool.query(
-    `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since
-     from item i where i.state = 'InReview' order by since nulls last, i.title`,
+    `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since,
+       r.pr_number, r.pr_url
+     from item i left join lateral (select pr_number, pr_url from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
+     where i.state = 'InReview' order by since nulls last, i.title`,
   )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
   // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
@@ -88,7 +90,7 @@ async function floor(pool: pg.Pool) {
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
   const active = (await pool.query(
-    `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage,
+    `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
        (select message from stage_run s where s.run_id = r.id and message <> '' order by ended_at desc nulls last, started_at desc limit 1) as message
@@ -209,7 +211,8 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
   if (!item) return null;
   const run = (await pool.query(
-    `select id, sop_version, config_sha, scenarios_sha, features_lock_sha, risk_tier, tier_reasons, next_stage, locked_files
+    `select id, sop_version, config_sha, scenarios_sha, features_lock_sha, risk_tier, tier_reasons, next_stage, locked_files,
+       pr_number, pr_url, ended_at is null as open
      from run where item_id = $1 order by run_number desc, started_at desc limit 1`, [id],
   )).rows[0] ?? null;
   const policies = (await pool.query(
