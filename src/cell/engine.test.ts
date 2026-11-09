@@ -600,6 +600,14 @@ describe("runCell", () => {
     } });
     assert.equal(await h.run(), "done");
     assert.match(h.prs.at(-1)!.body, /## Scenario notes for the person who merges\n[\s\S]*- "Criterion 1 holds" looks wrong\./);
+    const passed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "self-review" && c.body.status === "passed");
+    assert.deepEqual(passed?.body.scenarioNotes, ['"Criterion 1 holds" looks wrong.']);
+  });
+
+  test("an open-pr in a later claim writes the scenario notes the run kept from self-review", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { scenarioNotes: ['"Criterion 1 holds" looks wrong.'] } });
+    assert.equal(await h.run(), "done");
+    assert.match(h.prs.at(-1)!.body, /## Scenario notes for the person who merges\n[\s\S]*- "Criterion 1 holds" looks wrong\./);
   });
 
   test("an address reply to a trusted thread is posted, and one to any other thread isn't", async () => {

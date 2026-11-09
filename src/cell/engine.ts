@@ -24,6 +24,8 @@ export type CellContext = {
   decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
   configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null;
+  /** The last passed self-review's scenario notes, for a PR body written in a later claim (PBI 152). */
+  scenarioNotes?: string[];
   trustedComments: ReviewComment[];
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
@@ -220,15 +222,16 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
   const meter = stageMeter(d.agent);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
-  let current: { stageId: Recorded; attempt: number; report: string | null; message?: string } | null = null;
+  let current: { stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[] } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
   // attempt rows and blobs, never over an earlier one's.
   const lastAttempt = new Map(Object.entries(ctx.stageAttempts));
   let reviewRounds = 0;
-  // The approving self-review round's `SCENARIO NOTE:` lines, for the PR body (PBI 152).
-  let scenarioNotes: string[] = [];
+  // The approving self-review round's `SCENARIO NOTE:` lines, for the PR body (PBI 152). The run keeps them, so an
+  // open-pr in a later claim, after a usage limit, a stop, a block or a requeue, still writes them.
+  let scenarioNotes: string[] = ctx.scenarioNotes ?? [];
   // The item's scenarios with their verdicts, for the PR body.
   const redResults = new Map<string, string>();
   const greenResults = new Map<string, string>();
@@ -287,6 +290,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
       costUsd: m.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
+      ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
@@ -539,6 +543,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       // `OPEN: 0` says the same as APPROVED: no finding is open. A reviewer wrote it for five clean rounds on PBI 105.
       if ((last === "APPROVED" || /^OPEN:\s*0$/.test(last)) && verdicts.every((v) => v.status === "passed")) {
         scenarioNotes = [...r.text.matchAll(/^\s*SCENARIO NOTE:\s*(.+)$/gm)].map((m) => m[1]!.trim());
+        if (current) current.scenarioNotes = scenarioNotes;
         await keepLock("self-review", `self-review(${tag}): fixes`);
         await push();
         await end("passed");
