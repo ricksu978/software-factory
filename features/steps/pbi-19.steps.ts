@@ -305,7 +305,8 @@ Given("a NotReady item that failed the dor.md line {string}", long, async functi
 
 When("{string} opens Floor", long, async function (login: string) {
   const c = ctx(this);
-  if (!c.server) return;
+  // PBI 175's scenarios open Floor with no PBI 19 Given before it, so the dashboard starts here when it hasn't.
+  if (!(await dashboard(c))) return;
   await user(login);
   await request(c, "GET", "/", azureHeaders(login));
 });
