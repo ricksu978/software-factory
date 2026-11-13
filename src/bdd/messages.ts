@@ -83,7 +83,10 @@ function tagged(results: Results, tag: string): ScenarioResult[] {
 // "every step asserts" check and the person signing off, who sees the tag, are what catch it.
 export const REGRESSION_TAG = "@regression";
 
-export function redGate(results: Results, pbiTag: string, expected: string[]): GateResult {
+// `expected` names the item's scenarios bdd.run selects, and `listed` counts the ones bdd.parse lists, filter or no
+// filter (PBI 185). A scenario bdd.run leaves out isn't expected to run, but an item none of whose scenarios it selects
+// fails, since nothing then proves the item red.
+export function redGate(results: Results, pbiTag: string, expected: string[], listed = expected.length): GateResult {
   const mine = tagged(results, pbiTag);
   const findings: string[] = [];
   for (const r of mine) {
@@ -104,7 +107,9 @@ export function redGate(results: Results, pbiTag: string, expected: string[]): G
   // Only when every expected scenario ran: if some didn't, the ones that did don't show the item is all @regression.
   if (notRun.length === 0 && mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
   for (const name of notRun) findings.push(`not run in the cell: ${name}`);
-  if (mine.length === 0 && expected.length === 0) findings.push(`no scenario carries ${pbiTag}`);
+  if (mine.length === 0 && expected.length === 0) {
+    findings.push(listed === 0 ? `no scenario carries ${pbiTag}` : `no scenario carrying ${pbiTag} runs in the cell: bdd.run's tag filter leaves out all ${listed}`);
+  }
   return { ok: findings.length === 0, findings };
 }
 
@@ -121,4 +126,37 @@ export function traceability(results: Results, criteriaCount: number, pbiTag: st
   const missing: string[] = [];
   for (let n = 1; n <= criteriaCount; n++) if (!mine.some((r) => r.tags.includes(`@ac-${n}`))) missing.push(`@ac-${n}`);
   return missing;
+}
+
+// A dry run executes no step, so cucumber-js reports each one SKIPPED, or UNDEFINED or AMBIGUOUS when it has no single
+// step definition (PBI 185).
+const NOT_EXECUTED = new Set(["SKIPPED", "UNDEFINED", "AMBIGUOUS"]);
+
+// Why a report that should come from `--dry-run` doesn't, or null when it does: a step that finished PASSED, FAILED or
+// PENDING ran, and a test case that never started was cut short. The flag misses cucumber-js when the command hands it
+// to something else, as `npm run <script>` without `--` does, or a trailing `|| true` or pipe, and the command then
+// runs the suite for real.
+export function notDryRun(ndjson: string): string | null {
+  const cases = new Set<string>();
+  const started = new Set<string>();
+  const ran = new Map<string, number>();
+  for (const line of ndjson.split("\n")) {
+    if (!line.trim()) continue;
+    let m: Record<string, any>;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (m.testCase) cases.add(m.testCase.id);
+    else if (m.testCaseStarted) started.add(m.testCaseStarted.testCaseId);
+    else if (m.testStepFinished) {
+      const status = String(m.testStepFinished.testStepResult?.status);
+      if (!NOT_EXECUTED.has(status)) ran.set(status, (ran.get(status) ?? 0) + 1);
+    }
+  }
+  if (ran.size) return `steps ran: ${[...ran].map(([s, n]) => `${n} ${s}`).join(", ")}`;
+  const unstarted = [...cases].filter((c) => !started.has(c)).length;
+  if (unstarted) return `${unstarted} test case${unstarted === 1 ? "" : "s"} never started`;
+  return null;
 }
