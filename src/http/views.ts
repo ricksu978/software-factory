@@ -257,7 +257,8 @@ export type ActivityRow = { at: Date; external_id: string | null; repo: string |
   actor?: string | null; setting?: string | null };
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
-const MOVES = new Set(["transition", "override"]);
+// An SOP move (PBI 173) shows its old and new versions where a transition shows its states.
+const MOVES = new Set(["transition", "override", "sop_moved"]);
 
 /** The factory's newest events, newest first, with the time in UTC (PBI 105). */
 export function activityPage(rows: ActivityRow[], banner: string | null): string {

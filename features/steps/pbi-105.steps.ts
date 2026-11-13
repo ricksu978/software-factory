@@ -21,6 +21,7 @@ import { appendEvent, type Actor } from "../../src/store/events.ts";
 import { overrideItem, transitionItem } from "../../src/store/items.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { recordResponse } from "./pbi-19.steps.ts";
+import { isPbi173, openActivityLog } from "./pbi-173.steps.ts";
 
 const STATES: ItemState[] = ["Eligible", "NotReady", "Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "Accepted", "Done", "Failed", "Abandoned"];
 const DAY = "2026-11-07";
@@ -185,6 +186,7 @@ Given("the owner approved item {string}'s sign-off at {word}, recorded as a {str
 });
 
 When("a viewer opens the activity log", long, async function () {
+  if (isPbi173(this)) return openActivityLog(this);
   await openLog(this, "viewer");
 });
 

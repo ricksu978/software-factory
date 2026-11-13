@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setUp, type Ctx as CellCtx } from "./pbi-18.steps.ts";
+import { isPbi173, ownerAskedNoQuestion } from "./pbi-173.steps.ts";
 
 const BRANCH = "factory/pbi-482-r1";
 const ORDERS = "features/pbi-482-orders.feature";
@@ -558,7 +559,8 @@ function questions(c: CellCtx): string[] {
   return c.calls.filter((x) => x.route === "/transition" && x.body.question).map((x) => String(x.body.question.body ?? ""));
 }
 
-Then("the owner is asked no question", function () {
+Then("the owner is asked no question", async function () {
+  if (isPbi173(this)) return ownerAskedNoQuestion(this);
   const c = cell(this);
   ranClean(c);
   assert.deepEqual(questions(c), [], "the owner was asked a question");

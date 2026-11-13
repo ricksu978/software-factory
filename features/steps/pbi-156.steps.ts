@@ -32,15 +32,17 @@ const RUN_FOR_MS = 1_000;
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
 type Call = { method: string; id: unknown; args: unknown[] };
-type Board = { name: string; id: string; fake: Fake; adapter: BacklogAdapter; calls: Call[]; failAll: boolean; refuseStatus: boolean };
-type Running = { stop(): Promise<void>; runs: Map<string, number> };
+export type Board = { name: string; id: string; fake: Fake; adapter: BacklogAdapter; calls: Call[]; failAll: boolean; refuseStatus: boolean };
+export type Running = { stop(): Promise<void>; runs: Map<string, number>; done?: Promise<void> };
 type WorkerModule = {
   startWorker(d: object): Promise<Running>;
   main(env: Record<string, string>, egress?: (cfg: object) => Promise<void>): Promise<Running>;
 };
 type MainModule = { serveControl?: (d: object, port: number) => Promise<{ stop(): Promise<void> }> };
 
-type Ctx = {
+export type Ctx = {
+  /** Deps another feature's steps add to, or put in place of, the worker's, as PBI 157's steps give it a pool of its own. */
+  deps?: Record<string, unknown>;
   boards: Board[];
   /** "egress" when the proxy was set up and "cell:<item id>" when a cell started, in order. */
   events: string[];
@@ -63,7 +65,7 @@ type Ctx = {
   missing?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi156?: Ctx };
   w.pbi156 ??= {
     boards: [], events: [], egressCalls: [], egressFails: false, launcherFailures: 0, launched: [],
@@ -122,7 +124,7 @@ function recording(b: Omit<Board, "adapter">): BacklogAdapter {
 }
 
 /** The named board, made on first use. The scenario's one board is PBI 17's fake, so items PBI 17 adds sit on it. */
-async function board(world: object, name = "the board"): Promise<Board> {
+export async function board(world: object, name = "the board"): Promise<Board> {
   const c = ctx(world);
   const found = c.boards.find((b) => b.name === name);
   if (found) return found;
@@ -143,13 +145,13 @@ async function board(world: object, name = "the board"): Promise<Board> {
 }
 
 /** PBI 17 gives each item a backlog source of its own. Here they all sit on the scenario's one board. */
-async function rehome(world: object): Promise<void> {
+export async function rehome(world: object): Promise<void> {
   const b = await board(world);
   await pool().query("update item set source_id = $1 where source_id in (select id from backlog_source where url like 'test:%')", [b.id]);
 }
 
 /** Maps each board item the factory now holds to its id, so PBI 17's state steps can name it. */
-async function learnItems(world: object): Promise<void> {
+export async function learnItems(world: object): Promise<void> {
   const c = ctx(world);
   const rows = (await pool().query<{ id: string; external_id: string }>(
     "select id, external_id from item where source_id = any($1)", [c.boards.map((b) => b.id)])).rows;
@@ -167,7 +169,7 @@ function judge(c: Ctx) {
 }
 
 /** Everything a process could be handed: the worker's fakes, and the control plane's settings beside them. */
-async function fakes(world: object) {
+export async function fakes(world: object) {
   const c = ctx(world);
   const s = p17(world);
   if (!c.boards.length) await board(world);
@@ -218,7 +220,7 @@ async function fakes(world: object) {
 const ticks = (w: Running) => w.runs.get("scheduler tick") ?? 0;
 
 /** Starts the worker and waits for `n` ticks and one poll of each board. A worker that fails to start is recorded. */
-async function startWorker(world: object, n: number): Promise<void> {
+export async function startWorker(world: object, n: number): Promise<void> {
   const c = ctx(world);
   await rehome(world);
   const mod = await load<WorkerModule>("src/worker/main.ts");
@@ -229,7 +231,7 @@ async function startWorker(world: object, n: number): Promise<void> {
   // PBI 17's state steps check that a scheduler ran. Here it's the worker's, once it has been started.
   p17(world).ticked = true;
   try {
-    c.worker = await mod.startWorker({ pool: pool(), ...(await fakes(world)) });
+    c.worker = await mod.startWorker({ pool: pool(), ...(await fakes(world)), ...c.deps });
   } catch (e) {
     c.workerError = e;
     // A worker that went ahead anyway would tick by now.

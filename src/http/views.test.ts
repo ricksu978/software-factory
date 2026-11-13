@@ -24,6 +24,13 @@ describe("activityPage", () => {
     assert.doesNotMatch(comment, /Queued|Failed|>x</);
   });
 
+  test("shows an SOP move's old and new versions", () => {
+    const html = activityPage([{ at, external_id: "482", repo: null, title: "t", kind: "sop_moved", from: "0.1.0", to: "0.2.0", event: null }], null);
+    const row = /<tbody>([\s\S]*)<\/tbody>/.exec(html)![1];
+    assert.match(row, /sop_moved/);
+    assert.match(row, /0\.1\.0 → 0\.2\.0/);
+  });
+
   test("escapes titles and says so when nothing has happened", () => {
     const html = activityPage([{ at, external_id: "<i>", repo: null, title: "<script>alert(1)</script>", kind: "transition", from: "Queued", to: "InProgress", event: "claimed" }], null);
     assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
