@@ -8,7 +8,8 @@ export type ItemEvent =
   | "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked"
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
-  | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn";
+  | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
+  | "returned";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -40,6 +41,12 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap(
     (s): [ItemState, ItemEvent, ItemState][] => [[s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]],
   ),
+  // An item that leaves the backlog before it's Queued is withdrawn too, and one withdrawn from either state that gets
+  // its label back returns to Eligible, so it meets the readiness gate again (PBI 168). The poller only fires
+  // `returned` for such an item: one withdrawn from Queued or later stays gone.
+  ["Eligible", "withdrawn", "Abandoned"],
+  ["NotReady", "withdrawn", "Abandoned"],
+  ["Abandoned", "returned", "Eligible"],
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));
