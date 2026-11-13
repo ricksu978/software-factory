@@ -516,24 +516,30 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("update wip_policy set wip_min = 1, wip_max = 3, current_wip = 1, review_capacity = 3, daily_budget = null");
     await person("octo", "operator");
     await person("vera", "viewer");
-    const taken = await post("/configuration", "octo", "setting=review_capacity&value=5");
+    const taken = await post("/configuration", "octo", "setting=review_capacity&value=5&reason=More+reviewers.");
     assert.equal(taken.status, 303);
     assert.equal(taken.headers.get("location"), "/configuration?changed=review_capacity");
     assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
     assert.match((await get("/configuration?changed=review_capacity", "octo")).html, /review capacity changed/);
-    assert.match((await get("/activity", "octo")).html, /octo changed review capacity from 3 to 5/);
+    assert.match((await get("/activity", "octo")).html, /octo changed review capacity from 3 to 5 because More reviewers\./);
     const octoId = (await db.pool.query(`select id from "user" where github_login = 'octo'`)).rows[0].id;
-    assert.equal((await db.pool.query(`select actor_id from event where kind = 'setting' order by id desc limit 1`)).rows[0].actor_id, octoId);
+    assert.deepEqual((await db.pool.query(`select actor_id, payload from event where kind = 'setting' order by id desc limit 1`)).rows[0],
+      { actor_id: octoId, payload: { setting: "review capacity", from: "3", to: "5", reason: "More reviewers." } });
 
-    const raised = await post("/configuration", "octo", "setting=wip_min&value=2");
+    const unexplained = await post("/configuration", "octo", "setting=review_capacity&value=6&reason=+++");
+    assert.equal(unexplained.status, 400);
+    assert.match(await unexplained.text(), /Give a reason for the change\./);
+    assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
+
+    const raised = await post("/configuration", "octo", "setting=wip_min&value=2&reason=Busy+week.");
     assert.equal(raised.status, 303);
     assert.deepEqual((await db.pool.query("select wip_min, current_wip from wip_policy")).rows[0], { wip_min: 2, current_wip: 2 });
 
-    const broken = await post("/configuration", "octo", "setting=review_capacity&value=0");
+    const broken = await post("/configuration", "octo", "setting=review_capacity&value=0&reason=Pause.");
     assert.equal(broken.status, 400);
     assert.match(await broken.text(), /Review capacity must be a whole number of at least 1\./);
 
-    const refused = await post("/configuration", "vera", "setting=review_capacity&value=9");
+    const refused = await post("/configuration", "vera", "setting=review_capacity&value=9&reason=Let+me+in.");
     assert.equal(refused.status, 403);
     assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
     assert.doesNotMatch((await get("/configuration", "vera")).html, /<form/);

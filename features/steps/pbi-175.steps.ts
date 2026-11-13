@@ -42,7 +42,7 @@ type Ctx = {
   stepType?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi175?: Ctx };
   w.pbi175 ??= { env: {} };
   return w.pbi175;
@@ -70,17 +70,18 @@ function runtime(name: string) {
 const keyOf = (name: string) => RUNTIME[name.trim().toLowerCase()]?.key ?? name.trim();
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
-const decode = (html: string) => html.replace(/&#39;/g, "'").replace(/&#x27;/gi, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+export const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
+export const decode = (html: string) => html.replace(/&#39;/g, "'").replace(/&#x27;/gi, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-BeforeStep({ tags: "@pbi-175" }, function ({ pickleStep }) {
+BeforeStep({ tags: "@pbi-175 or @pbi-176" }, function ({ pickleStep }) {
   ctx(this).stepType = pickleStep.type;
 });
 
-Before({ tags: "@pbi-175 and @db", ...long }, async function () {
+// PBI 176 builds on this page, so its scenarios share these hooks and steps.
+Before({ tags: "(@pbi-175 or @pbi-176) and @db", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
@@ -90,7 +91,7 @@ Before({ tags: "@pbi-175 and @db", ...long }, async function () {
   );
 });
 
-After({ tags: "@pbi-175", ...long }, async function () {
+After({ tags: "@pbi-175 or @pbi-176", ...long }, async function () {
   const c = ctx(this);
   await c.close?.();
   if (c.server) {
@@ -106,7 +107,7 @@ After({ tags: "@pbi-175", ...long }, async function () {
 });
 
 /** The dashboard, started on first use with the env the scenario says the factory started with. */
-async function dashboard(c: Ctx): Promise<void> {
+export async function dashboard(c: Ctx): Promise<void> {
   if (c.server) return;
   c.sourceId ??= (await pool().query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-175:' || gen_random_uuid()) returning id")).rows[0].id;
   let handler: ReturnType<typeof dashboardRoutes> | undefined;
@@ -118,7 +119,7 @@ async function dashboard(c: Ctx): Promise<void> {
   c.close = handler.close;
 }
 
-async function user(login: string, role: string): Promise<void> {
+export async function user(login: string, role: string): Promise<void> {
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2)
      on conflict (provider, subject) do update set role = excluded.role`,
@@ -126,7 +127,7 @@ async function user(login: string, role: string): Promise<void> {
   );
 }
 
-async function get(world: object, path: string, login: string): Promise<void> {
+export async function get(world: object, path: string, login: string): Promise<void> {
   const c = ctx(world);
   await dashboard(c);
   const r = await fetch(`${c.origin}${path}`, { headers: headers(login), redirect: "manual" });
@@ -135,14 +136,17 @@ async function get(world: object, path: string, login: string): Promise<void> {
   recordResponse(world, c.status, c.page);
 }
 
-/** Sends a change to the page as `login`, from the dashboard's own origin, and follows a redirect back to the page. */
-async function change(world: object, login: string, setting: string, value: string): Promise<void> {
+/**
+ * Sends a change to the page as `login`, from the dashboard's own origin, and follows a redirect back to the page.
+ * `extra` adds form fields, such as PBI 176's `reason`.
+ */
+export async function change(world: object, login: string, setting: string, value: string, extra: Record<string, string> = {}): Promise<void> {
   const c = ctx(world);
   await dashboard(c);
   const r = await fetch(`${c.origin}/configuration`, {
     method: "POST",
     headers: { ...headers(login), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ setting: keyOf(setting), value }).toString(),
+    body: new URLSearchParams({ setting: keyOf(setting), value, ...extra }).toString(),
     redirect: "manual",
   });
   c.posted = r.status;
@@ -218,8 +222,12 @@ Given("the factory runs locally for {string}", function (login: string) {
   c.env.FACTORY_DEV_LOGIN = login;
 });
 
+// Signing in adds a viewer, but never lowers the role of someone a scenario has already made an operator or owner.
 Given("{string} is signed in to the dashboard", long, async function (login: string) {
-  await user(login, "viewer");
+  await pool().query(
+    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
+    [login],
+  );
 });
 
 Given("{string} is an operator", long, async function (login: string) {
@@ -383,8 +391,9 @@ When(/^"([^"]*)" changes (.+) to "([^"]*)" on the Configuration page$/, long, as
   await change(this, login, name, value);
 });
 
-When(/^"([^"]*)" clears (.+) on the Configuration page$/, long, async function (login: string, name: string) {
-  await change(this, login, name, "");
+// PBI 176 says every change needs a reason, clearing one too.
+When(/^"([^"]*)" clears (.+) on the Configuration page, giving the reason "(.*)"$/, long, async function (login: string, name: string, reason: string) {
+  await change(this, login, name, "", { reason });
 });
 
 When(/^"([^"]*)" sends a change of (.+) to "([^"]*)" to the Configuration page$/, long, async function (login: string, name: string, value: string) {
@@ -445,7 +454,7 @@ Then("the queued item is in progress", long, async function () {
 
 // ---- the activity log ----
 
-async function activityRows(world: object, login: string): Promise<string[]> {
+export async function activityRows(world: object, login: string): Promise<string[]> {
   const c = ctx(world);
   await dashboard(c);
   const r = await fetch(`${c.origin}/activity`, { headers: headers(login), redirect: "manual" });
