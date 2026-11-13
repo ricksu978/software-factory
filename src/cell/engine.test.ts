@@ -631,6 +631,21 @@ describe("runCell", () => {
     assert.match(address[0].body.message ?? "", /the CI check "ci" that Definition of Done line 1 names was missing on [0-9a-f]{40}/);
   });
 
+  test("a missing CI check's note survives the 500-character cut behind a long address reply (PBI 229)", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] },
+      script: (a, stage) => {
+        if (stage !== "address" || a.mode === "judge" || a.agent === "factory-self-reviewer") return undefined;
+        writeFileSync(join(a.cwd, "app.txt"), "fix\n");
+        return { text: "x".repeat(800) };
+      } });
+    h.deps.api.ciChecks = async () => [{ name: "lint", conclusion: "success", url: "https://ci/2" }];
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: true` `ci: ci`\n");
+    assert.equal(await h.run(), "done");
+    const address = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address" && c.body.status !== "started");
+    const kept = Array.from(String(address[0].body.message)).slice(0, 500).join("");
+    assert.match(kept, /the CI check "ci" that Definition of Done line 1 names was missing on [0-9a-f]{40}/);
+  });
+
   test("green with no PR never asks CI about a check, and runs the line's command (PBI 229)", async () => {
     const asked: string[] = [];
     const h = harness({ nextStage: "green", ctx: { prNumber: null } });

@@ -351,6 +351,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
     /** PBI 190: each restate the PR reviewer was asked for in this attempt, by round, with why its answer couldn't be read. */
     restates?: { round: number; reason: string }[];
+    /** Notes the factory adds, such as a missing CI check (PBI 229). They go before the message, since the cell API
+     *  keeps only its first 500 characters, and a later `say` doesn't replace them. */
+    notes?: string[];
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
@@ -418,7 +421,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     };
     if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
-      costUsd: m.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
+      costUsd: m.costUsd, ...(c.message === undefined && !c.notes?.length ? {} : { message: [...(c.notes ?? []), c.message].filter(Boolean).join("\n\n") }),
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       ...(c.restates?.length ? { restates: c.restates } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
@@ -527,8 +530,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     });
     dodVerdicts = verdicts;
     dodSha = checkedSha;
-    // A missing check fails nothing, since its line fell back to its command, but the attempt's message says so.
-    if (missing.length && current) current.message = [current.message, ...missing].filter(Boolean).join("\n\n");
+    // A missing check fails nothing, since its line fell back to its command, but the attempt's message says so, first,
+    // so the cell API's 500-character cut never drops it behind a long agent reply.
+    if (missing.length && current) current.notes = [...(current.notes ?? []), ...missing];
     return verdicts;
   };
   // Fresh DoD (Run contract 11): checked again unless the verdicts at this very commit all held.
