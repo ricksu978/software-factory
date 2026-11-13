@@ -14,6 +14,7 @@ import { startServer } from "../../src/http/server.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, polled, REPO, setup, stateOf, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { scope } from "./pbi-131.steps.ts";
+import { scriptedJudge } from "./pbi-132.steps.ts";
 
 type Move = { from: string; to: string };
 /** The move a "after it" step follows. */
@@ -45,7 +46,7 @@ async function itemId(c: PollCtx, ext: string): Promise<string> {
 async function hold(world: object, state: string, ext?: string): Promise<PollCtx> {
   const c = pollCtx(world);
   assert.ok(await setup(c), "the poller's fakes or database aren't available");
-  c.spend = true;
+  c.metered = scriptedJudge({ costUsd: 0.001 });
   const id = await c.fake!.seed({ ...(ext ? { externalId: ext } : {}), labels: [LABEL], repo: REPO });
   await c.fake!.seed({ externalId: id, title: title(id), labels: [LABEL], repo: REPO });
   c.extIds = [id];
@@ -81,7 +82,6 @@ async function notReadyList(sourceId: string): Promise<string> {
       await handler.close();
     }
   } finally {
-    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
