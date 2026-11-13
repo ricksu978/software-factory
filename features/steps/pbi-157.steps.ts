@@ -334,8 +334,14 @@ async function runFor(world: object, ms: number): Promise<void> {
   await learnItems(world);
 }
 
+/** Fails when the worker module is missing, or when any worker threw at start, so a crashed worker never passes for an idle standby. */
 function started(c: Ctx): void {
   if (c.missing) assert.fail(c.missing);
+  const crashed = c.workers.find((w) => w.startError !== undefined);
+  if (crashed) {
+    const e = crashed.startError;
+    assert.fail(`the ${crashed.name} worker failed to start: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+  }
 }
 
 // ---- Hooks ----
