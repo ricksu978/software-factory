@@ -15,7 +15,7 @@ const READINESS_HEADING = "The factory can't start this item yet.";
 const NO_SPLIT = "split couldn't be proposed";
 
 type Fake = ReturnType<typeof fakeBacklog>;
-type Ctx = {
+export type Ctx = {
   fake: Fake;
   itemId?: string;
   title?: string;
@@ -33,7 +33,7 @@ type Ctx = {
   prompt?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi143?: Ctx };
   w.pbi143 ??= {
     fake: fakeBacklog(), criteria: [], reply: splitReply(validSplit()), requests: [],
@@ -43,7 +43,7 @@ function ctx(world: object): Ctx {
 }
 
 // PBI 13's Background step writes ".factory/dor.md" into its own world slot.
-function files(world: object): Map<string, string> {
+export function files(world: object): Map<string, string> {
   const w = world as { pbi13?: { files: Map<string, string> } };
   w.pbi13 ??= { files: new Map() };
   return w.pbi13.files;
@@ -102,7 +102,7 @@ async function seedParent(c: Ctx, updatedAt?: string): Promise<void> {
   });
 }
 
-async function runGate(world: object): Promise<void> {
+export async function runGate(world: object): Promise<void> {
   const c = ctx(world);
   c.outcome = undefined;
   c.error = undefined;
@@ -270,6 +270,9 @@ Given("the repo's dor.md has since changed", function () {
   const f = files(this);
   f.set(".factory/dor.md", `${f.get(".factory/dor.md") ?? ""}\nThe team reviewed this list.\n`);
   c.readinessSha = "policy-2";
+  // PBI 202 runs PBI 144's poll harness after this step, so its repo's dor.md changes too when that harness is in use.
+  const w = this as { pbi144?: { dor: string } };
+  if (w.pbi144) w.pbi144.dor = `${w.pbi144.dor}\nThe team reviewed this list.\n`;
 });
 
 Given("the parent item's body has since changed", async function () {
