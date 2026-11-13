@@ -14,7 +14,7 @@ import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
-import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
+import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import type { Git } from "./git.ts";
 
@@ -253,6 +253,37 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
   };
 }
 
+/** A named check CI reported on a commit, with the URL of its run (PBI 229). */
+export type CiCheck = { name: string; conclusion: "success" | "failure"; url: string };
+
+/** The findings a stage gets from Definition of Done verdicts: one per failed line. */
+export const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
+
+/**
+ * Checks the Definition of Done at `head` (Run contract 11): each `run:` line's command runs in the checkout, the
+ * other lines go to `judge`, and the verdicts are stored with the commit they checked. `ciChecks` reads the checks CI
+ * reported on a commit, or is null when there's no PR, and gives null when CI hasn't reported on that commit. The
+ * findings are the stage's findings from this check.
+ */
+export async function checkDefinitionOfDone(d: {
+  dir: string; head: string; dod: Policy;
+  ciChecks: ((sha: string) => Promise<CiCheck[] | null>) | null;
+  judge: (judged: Criterion[]) => Promise<Verdict[]>;
+  store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
+}): Promise<{ verdicts: Verdict[]; findings: string[]; checkedSha: string }> {
+  const { dir, head, dod } = d;
+  const verdicts: Verdict[] = [];
+  for (const c of dod.criteria.filter((x) => x.run)) {
+    const r = await sh(c.run!, dir);
+    verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason: r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}` });
+  }
+  const judged = dod.criteria.filter((x) => !x.run);
+  if (judged.length) verdicts.push(...await d.judge(judged));
+  verdicts.sort((a, b) => a.index - b.index);
+  await d.store(head, verdicts);
+  return { verdicts, findings: dodFindings(verdicts), checkedSha: head };
+}
+
 export async function runCell(d: CellDeps): Promise<Outcome> {
   const { api, ctx, git, dir, sop, config, policies } = d;
   const tag = `@pbi-${ctx.externalId}`;
@@ -446,32 +477,28 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Run contract 11: run: lines in the checkout, the rest judged by an agent, all stored with the commit they checked.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
-    const head = await git.head();
     const dod = policies.dod;
-    const verdicts: Verdict[] = [];
-    for (const c of dod.criteria.filter((x) => x.run)) {
-      const r = await sh(c.run!, dir);
-      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason: r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}` });
-    }
-    const judged = dod.criteria.filter((x) => !x.run);
-    if (judged.length) {
-      const r = await ask(stageId, brief(
-        "# Definition of Done",
-        "Judge whether this branch meets each line of the team's Definition of Done, which follows whole.",
-        fenced(dod.text, "markdown"),
-        "The lines to judge, one JSON line each:",
-        judged.map((c) => JSON.stringify({ index: c.index, criterion: c.text })).join("\n"),
-        'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed"|"person","reason":"<why>"}. Use "person" for a line only a person can check, or one that can only hold after merge, such as a deploy. Write nothing else, and change no file.',
-      ));
-      verdicts.push(...parseJudgement(r.text, { ...dod, criteria: judged }));
-    }
-    verdicts.sort((a, b) => a.index - b.index);
-    await api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha: head, verdicts });
+    const { verdicts, checkedSha } = await checkDefinitionOfDone({
+      dir, head: await git.head(), dod,
+      // ponytail: PBI 229 wires in the checks CI reported on the PR's commits.
+      ciChecks: null,
+      judge: async (judged) => {
+        const r = await ask(stageId, brief(
+          "# Definition of Done",
+          "Judge whether this branch meets each line of the team's Definition of Done, which follows whole.",
+          fenced(dod.text, "markdown"),
+          "The lines to judge, one JSON line each:",
+          judged.map((c) => JSON.stringify({ index: c.index, criterion: c.text })).join("\n"),
+          'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed"|"person","reason":"<why>"}. Use "person" for a line only a person can check, or one that can only hold after merge, such as a deploy. Write nothing else, and change no file.',
+        ));
+        return parseJudgement(r.text, { ...dod, criteria: judged });
+      },
+      store: (checkedSha, verdicts) => api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha, verdicts }),
+    });
     dodVerdicts = verdicts;
-    dodSha = head;
+    dodSha = checkedSha;
     return verdicts;
   };
-  const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
   // Fresh DoD (Run contract 11): checked again unless the verdicts at this very commit all held.
   const freshDod = async (stageId: StageId, attempt: number) =>
     (await git.head()) === dodSha && dodFindings(dodVerdicts).length === 0 ? [] : dodFindings(await checkDod(stageId, attempt));

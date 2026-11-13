@@ -5,7 +5,11 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type PolicyName = "dor" | "scenarios" | "pr-review" | "risk" | "dod";
-export type Criterion = { index: number; text: string; run: string | null };
+export type Criterion = {
+  index: number; text: string; run: string | null;
+  /** The CI check a dod.md line names with `ci: <name>`, which stands in for its command when it reported (PBI 229). */
+  ci?: string | null;
+};
 export type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string };
 export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] };
 
