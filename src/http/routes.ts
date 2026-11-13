@@ -25,6 +25,8 @@ export type DashboardDeps = {
   env?: Record<string, string | undefined>;
   /** Reads a stored transcript or report by its blob path, or null when it's missing. Without it, Run detail shows paths. */
   readBlob?: (path: string) => Promise<string | null>;
+  /** The dashboard's clock, for how long a running stage attempt has taken so far (PBI 189). Defaults to the real time. */
+  now?: () => Date;
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
