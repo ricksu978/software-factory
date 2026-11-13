@@ -43,6 +43,11 @@ export type WorkerDeps = {
   secret: string;
   sopVersion: string;
   tickMs?: number;
+  /**
+   * The clock each scheduler tick reads its time from, once, as the tick starts. That time is the tick's `now`, and the
+   * worker's heartbeat records it (PBI 158). `new Date()` by default.
+   */
+  now?: () => Date;
   pollMs?: number;
   /** How often a standby tries for the worker lock again. LOCK_RETRY_MS by default. */
   lockRetryMs?: number;
@@ -241,8 +246,9 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   let ticked = false;
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
+    const now = (d.now ?? (() => new Date()))();
     await tick({
-      pool: d.pool, launcher: d.launcher, now: new Date(), killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
+      pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
       secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
     });
     if (!ticked) log.log("The worker ran its first scheduler tick.");
