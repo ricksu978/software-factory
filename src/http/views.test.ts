@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { activityPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
+import { activityPage, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -38,12 +38,55 @@ describe("activityPage", () => {
     assert.doesNotMatch(html, /<script>alert|<i>/);
     assert.match(activityPage([], null), /No event yet/);
   });
+
+  test("shows a setting change with who made it, the setting and its old and new values", () => {
+    const html = activityPage([{ at, external_id: null, repo: null, title: null, kind: "setting", from: "25", to: null, event: null, actor: "octo", setting: "daily budget" }], null);
+    assert.match(html, /octo changed daily budget from 25 to not set/);
+  });
+});
+
+describe("configurationPage", () => {
+  const runtime = [
+    { key: "mode", label: "WIP mode", value: "fixed", editable: false },
+    { key: "review_capacity", label: "review capacity", value: "3", editable: true },
+    { key: "daily_budget", label: "daily budget", value: null, editable: true, note: "Stored, but not enforced yet." },
+  ];
+  const env = [{ key: "FACTORY_POLICY_DIR", label: "FACTORY_POLICY_DIR", value: "<b>x</b>" }, { key: "FACTORY_KILL", label: "FACTORY_KILL", value: null }];
+
+  test("gives an operator a form for each setting they can change, and none for the ones the factory sets", () => {
+    const html = configurationPage({ runtime, env, canOperate: true }, null);
+    assert.match(html, /<h1>Configuration<\/h1>/);
+    assert.match(html, /name="setting" value="review_capacity"/);
+    assert.match(html, /name="setting" value="daily_budget"/);
+    assert.doesNotMatch(html, /value="mode"/);
+    const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
+    assert.doesNotMatch(envPart, /<form|<input|<button/);
+  });
+
+  test("shows a setting's note to an operator and a viewer alike", () => {
+    for (const canOperate of [true, false]) assert.match(configurationPage({ runtime, env, canOperate }, null), /Stored, but not enforced yet\./);
+  });
+
+  test("gives a viewer no form at all", () => {
+    assert.doesNotMatch(configurationPage({ runtime, env, canOperate: false }, null), /<form|<input|<button|<select|<textarea/);
+  });
+
+  test("marks each env-backed setting as needing a restart, shows a missing value as not set and escapes values", () => {
+    const html = configurationPage({ runtime, env, canOperate: false, error: "<i>no</i>" }, null);
+    const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
+    assert.equal(envPart.match(/Needs a restart/g)?.length, 2);
+    assert.doesNotMatch(html.slice(0, html.indexOf("<h2>Env-backed settings</h2>")), /Needs a restart/);
+    assert.match(envPart, /not set/);
+    assert.ok(html.includes("&lt;b&gt;x&lt;/b&gt;"));
+    assert.doesNotMatch(html, /<b>x|<i>no/);
+  });
 });
 
 describe("floorPage", () => {
   test("links to the activity log", () => {
     const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false }, null);
     assert.match(html, /<a href="\/activity">/);
+    assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
 });
 
