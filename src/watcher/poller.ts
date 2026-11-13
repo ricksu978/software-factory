@@ -324,7 +324,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
  * the factory's when step 2 or the webhook later sees the PR merged. Then the item row stays locked across the merge,
  * so a Hold or a claim that lands meanwhile waits, and the re-read under the lock sees the one that came first. A merge
  * moves the item through `merged`, as a person's would, and logs `factory_merged`. A refusal logs
- * `factory_merge_refused` with GitHub's message, and the next poll tries again.
+ * `factory_merge_refused` with GitHub's message, and the next poll tries again. An item held or moved between the
+ * two writes isn't merged, and `factory_merge_refused` closes its attempt.
  */
 async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
   // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
@@ -343,7 +344,12 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
   });
   if (!attempted) return;
   await withTx(pool, async (c) => {
-    if (!(await mayMerge(c))) return;
+    // A Hold or another move that landed since the attempt was logged stops the merge. The attempt is closed, so a
+    // person's later merge of the PR isn't logged as the factory's.
+    if (!(await mayMerge(c))) {
+      await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: "the item was held or moved before the merge" } });
+      return;
+    }
     const res = await host.mergePr(repo, prNumber, { method: "squash", headSha: view.headSha });
     if (!res.merged) {
       await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });

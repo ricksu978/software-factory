@@ -720,6 +720,28 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual(await events("factory_merged"), []);
     });
 
+    test("a hold that lands after the attempt is logged stops the merge and closes the attempt, so a person's merge isn't the factory's", async () => {
+      await allow("octo");
+      const { ext, id, pr, p } = await ready();
+      // The dashboard's Hold, landing as the attempt commits, before the merge's locked re-read.
+      await db.pool.query(`create function hold_on_attempt() returns trigger language plpgsql as $$
+        begin if new.kind = 'factory_merge_attempt' then update item set held = true where id = new.item_id; end if; return new; end $$`);
+      await db.pool.query("create trigger hold_on_attempt after insert on event for each row execute function hold_on_attempt()");
+      try {
+        await poll();
+      } finally {
+        await db.pool.query("drop trigger hold_on_attempt on event; drop function hold_on_attempt()");
+      }
+      assert.deepEqual(host.mergeCalls, []);
+      assert.equal((await row(ext)).state, "InReview");
+      assert.deepEqual(await events("factory_merge_refused"), [{ repo: REPO, prNumber: pr, reason: "the item was held or moved before the merge" }]);
+      Object.assign(p, { open: false, merged: true, mergeSha: "m1" });
+      await db.pool.query("update item set held = false where id = $1", [id]);
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
     test("an approval from someone outside the allowlist doesn't merge, and only allowlisted approvers are logged", async () => {
       await allow("kim");
       const a = await ready();
