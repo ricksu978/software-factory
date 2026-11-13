@@ -1,5 +1,6 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
+import { formatDuration, type ItemDurations } from "../core/durations.ts";
 
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -126,7 +127,7 @@ export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waiti
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
     : "";
   return page("Floor", `<h1>Floor</h1>${status}
-<p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a></p>
+<p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a> <a href="/configuration">Configuration</a></p>
 <h2>Waiting on you</h2>
 ${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
@@ -175,7 +176,22 @@ export type RunDetail = {
   linkBlobs: boolean;
   /** An operator's override buttons for this item, or null for anyone else. */
   controls: { held: boolean; stoppable: boolean; requeueable: boolean } | null;
+  /** Where the item's time went (PBI 187). Without it, the Time section is left out. */
+  durations?: ItemDurations;
 };
+
+/** Run detail's Time section: the total, the time Queued, each wait on a person and their total, and each stage's time. */
+function timeSection(t: ItemDurations): string {
+  const figure = (label: string, ms: number | null) => `<dt>${label}</dt><dd>${ms === null ? "not known yet" : formatDuration(ms)}</dd>`;
+  const w = t.waiting;
+  const stages = t.stages.length
+    ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Time</th><th scope="col">Attempts</th></tr></thead><tbody>${t.stages
+        .map((s) => `<tr><td>${escapeHtml(s.stageId)}</td><td>${formatDuration(s.ms)}</td><td>${s.attempts}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">No stage has run yet.</p>`;
+  return `<h2>Time</h2><dl>${figure("Total", t.totalMs)}${figure("Queued", t.queuedMs)}</dl>
+<h3>Waiting on a person</h3><dl>${figure("Sign-off", w.signOffMs)}${figure("Needs input", w.needsInputMs)}${figure("In review", w.inReviewMs)}${figure("Waiting on a person", w.totalMs)}</dl>
+<h3>Time in each stage</h3>${stages}`;
+}
 
 export function runDetailPage(d: RunDetail, banner: string | null): string {
   const r = d.run;
@@ -227,7 +243,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${scope}${criteria}${pending}${form}${controls}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
+${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }`, banner);
 }
@@ -254,7 +270,9 @@ export function phase0Page(rows: Phase0Row[], readinessSpend: number, banner: st
 }
 
 /** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload. */
-export type ActivityRow = { at: Date; external_id: string | null; repo: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null };
+export type ActivityRow = { at: Date; external_id: string | null; repo: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null;
+  /** Who made a `setting` change, and the setting's name (PBI 175). */
+  actor?: string | null; setting?: string | null };
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
 // An SOP move (PBI 173) shows its old and new versions where a transition shows its states.
@@ -263,6 +281,9 @@ const MOVES = new Set(["transition", "override", "sop_moved"]);
 /** The factory's newest events, newest first, with the time in UTC (PBI 105). */
 export function activityPage(rows: ActivityRow[], banner: string | null): string {
   const cell = (r: ActivityRow) => {
+    if (r.kind === "setting") {
+      return `<td>${escapeHtml(r.actor ?? "")} changed ${escapeHtml(r.setting ?? "")} from ${escapeHtml(r.from ?? "not set")} to ${escapeHtml(r.to ?? "not set")}</td>`;
+    }
     if (!MOVES.has(r.kind)) return "<td></td>";
     const event = r.kind === "transition" && r.event ? ` <span class="muted">(${escapeHtml(r.event)})</span>` : "";
     return `<td>${escapeHtml(r.from ?? "")} → ${escapeHtml(r.to ?? "")}${event}</td>`;
@@ -273,4 +294,33 @@ export function activityPage(rows: ActivityRow[], banner: string | null): string
         .join("")}</tbody></table>`
     : `<p class="muted">No event yet.</p>`;
   return page("Activity", `<h1>Activity</h1><p class="muted">The 100 newest events, newest first.</p>${table}`, banner);
+}
+
+/** One setting as the Configuration page lists it: its key, its name, and its value, or null when it has none. */
+export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean; note?: string };
+
+/**
+ * The Configuration page (PBI 175). Runtime settings come first. An operator gets a form beside each one they can
+ * change, and a viewer gets none. Env-backed settings are read-only, and each says it needs a restart.
+ */
+export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null }, banner: string | null): string {
+  const value = (v: string | null) => (v === null ? `<span class="muted">not set</span>` : escapeHtml(v));
+  const note = (s: ConfigSetting) => (s.note ? `<span class="muted">${escapeHtml(s.note)}</span>` : "");
+  const change = (s: ConfigSetting) => {
+    if (!s.editable) return `<td class="muted">Set by the factory</td>`;
+    if (!c.canOperate) return `<td>${note(s)}</td>`;
+    const id = `setting-${escapeHtml(s.key)}`;
+    return `<td><form method="post" action="/configuration"><input type="hidden" name="setting" value="${escapeHtml(s.key)}">
+<label for="${id}">New ${escapeHtml(s.label)}</label><input id="${id}" name="value" value="${escapeHtml(s.value ?? "")}"> <button>Change</button></form>${note(s)}</td>`;
+  };
+  const head = (third: string) => `<thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">${third}</th></tr></thead>`;
+  const runtime = `<table>${head(c.canOperate ? "Change" : "Notes")}<tbody>${c.runtime
+    .map((s) => `<tr><th scope="row">${escapeHtml(s.label)}</th><td>${value(s.value)}</td>${change(s)}</tr>`).join("")}</tbody></table>`;
+  const env = `<table>${head("Takes effect")}<tbody>${c.env
+    .map((s) => `<tr><th scope="row"><code>${escapeHtml(s.label)}</code></th><td>${value(s.value)}</td><td>Needs a restart</td></tr>`).join("")}</tbody></table>`;
+  const notice = c.notice ? `<p class="banner" role="status">${escapeHtml(c.notice)}</p>` : "";
+  const error = c.error ? `<p class="banner" role="alert">${escapeHtml(c.error)}</p>` : "";
+  return page("Configuration", `<h1>Configuration</h1>${notice}${error}
+<h2>Runtime settings</h2><p class="muted">The factory's WIP policy, as it is now. A change takes effect on the scheduler's next turn, with no restart, unless its note says it does less.</p>${runtime}
+<h2>Env-backed settings</h2><p class="muted">What the control plane read from its environment at start. A change takes effect only when the factory restarts. Secrets never show here.</p>${env}`, banner);
 }

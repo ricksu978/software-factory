@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { activityPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
+import { activityPage, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -37,12 +37,55 @@ describe("activityPage", () => {
     assert.doesNotMatch(html, /<script>alert|<i>/);
     assert.match(activityPage([], null), /No event yet/);
   });
+
+  test("shows a setting change with who made it, the setting and its old and new values", () => {
+    const html = activityPage([{ at, external_id: null, repo: null, title: null, kind: "setting", from: "25", to: null, event: null, actor: "octo", setting: "daily budget" }], null);
+    assert.match(html, /octo changed daily budget from 25 to not set/);
+  });
+});
+
+describe("configurationPage", () => {
+  const runtime = [
+    { key: "mode", label: "WIP mode", value: "fixed", editable: false },
+    { key: "review_capacity", label: "review capacity", value: "3", editable: true },
+    { key: "daily_budget", label: "daily budget", value: null, editable: true, note: "Stored, but not enforced yet." },
+  ];
+  const env = [{ key: "FACTORY_POLICY_DIR", label: "FACTORY_POLICY_DIR", value: "<b>x</b>" }, { key: "FACTORY_KILL", label: "FACTORY_KILL", value: null }];
+
+  test("gives an operator a form for each setting they can change, and none for the ones the factory sets", () => {
+    const html = configurationPage({ runtime, env, canOperate: true }, null);
+    assert.match(html, /<h1>Configuration<\/h1>/);
+    assert.match(html, /name="setting" value="review_capacity"/);
+    assert.match(html, /name="setting" value="daily_budget"/);
+    assert.doesNotMatch(html, /value="mode"/);
+    const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
+    assert.doesNotMatch(envPart, /<form|<input|<button/);
+  });
+
+  test("shows a setting's note to an operator and a viewer alike", () => {
+    for (const canOperate of [true, false]) assert.match(configurationPage({ runtime, env, canOperate }, null), /Stored, but not enforced yet\./);
+  });
+
+  test("gives a viewer no form at all", () => {
+    assert.doesNotMatch(configurationPage({ runtime, env, canOperate: false }, null), /<form|<input|<button|<select|<textarea/);
+  });
+
+  test("marks each env-backed setting as needing a restart, shows a missing value as not set and escapes values", () => {
+    const html = configurationPage({ runtime, env, canOperate: false, error: "<i>no</i>" }, null);
+    const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
+    assert.equal(envPart.match(/Needs a restart/g)?.length, 2);
+    assert.doesNotMatch(html.slice(0, html.indexOf("<h2>Env-backed settings</h2>")), /Needs a restart/);
+    assert.match(envPart, /not set/);
+    assert.ok(html.includes("&lt;b&gt;x&lt;/b&gt;"));
+    assert.doesNotMatch(html, /<b>x|<i>no/);
+  });
 });
 
 describe("floorPage", () => {
   test("links to the activity log", () => {
     const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false }, null);
     assert.match(html, /<a href="\/activity">/);
+    assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
 });
 
@@ -218,5 +261,38 @@ describe("readiness spend (PBI 132)", () => {
   test("the Phase 0 report shows readiness spend beside stage spend, to four places", () => {
     const html = phase0Page([{ item_id: "i1", title: "Pay by card", external_id: "1", repo: null, pr_url: null, merged_at: null, cost: 2, risk_tier: null, tier_reasons: null }], 0.0092, null);
     assert.match(html, /<dl><dt>Stage spend<\/dt><dd>\$2\.00<\/dd><dt>Readiness spend<\/dt><dd>\$0\.0092<\/dd><\/dl>/);
+  });
+});
+
+describe("Run detail's Time section (PBI 187)", () => {
+  const detail = (durations?: RunDetail["durations"]): RunDetail => ({
+    item: { id: "i1", title: "Export a month", state: "InProgress", external_id: "187", repo: "acme/widgets" }, run: null, policies: [], stages: [],
+    readiness: [], question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null, durations,
+  });
+  const M = 60_000;
+  const section = (html: string) => /<h2>Time<\/h2>([\s\S]*?)<h2>/.exec(html)?.[1] ?? "";
+
+  test("shows the total, Queued and each wait with their total, as hours and minutes", () => {
+    const html = section(runDetailPage(detail({
+      totalMs: 25 * 60 * M, queuedMs: 140 * M,
+      waiting: { signOffMs: 150 * M, needsInputMs: 45 * M, inReviewMs: 180 * M, totalMs: 375 * M }, stages: [],
+    }), null));
+    for (const [dt, dd] of [["Total", "1d 1h 0m"], ["Queued", "2h 20m"], ["Sign-off", "2h 30m"], ["Needs input", "0h 45m"], ["In review", "3h 0m"], ["Waiting on a person", "6h 15m"]]) {
+      assert.match(html, new RegExp(`<dt>${dt}</dt><dd>${dd}</dd>`), dt);
+    }
+    assert.match(html, /No stage has run yet/);
+  });
+
+  test("shows each stage's time and attempts, and an unknown total when the issue's creation isn't known", () => {
+    const html = section(runDetailPage(detail({
+      totalMs: null, queuedMs: 0, waiting: { signOffMs: 0, needsInputMs: 0, inReviewMs: 0, totalMs: 0 },
+      stages: [{ stageId: "red", ms: 25 * M, attempts: 2 }, { stageId: "green", ms: 95 * M, attempts: 1 }],
+    }), null));
+    assert.match(html, /<dt>Total<\/dt><dd>not known yet<\/dd>/);
+    assert.match(html, /<tr><td>red<\/td><td>0h 25m<\/td><td>2<\/td><\/tr><tr><td>green<\/td><td>1h 35m<\/td><td>1<\/td><\/tr>/);
+  });
+
+  test("leaves the section out without durations", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Time<\/h2>/);
   });
 });

@@ -512,4 +512,30 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!html.includes("secret-"), "a payload field other than from, to and event reached the page");
     assert.equal((await fetch(`${origin}/activity`)).status, 401);
   });
+  test("/configuration lets an operator change a runtime setting, logs who did, and refuses a viewer", async () => {
+    await db.pool.query("update wip_policy set wip_min = 1, wip_max = 3, current_wip = 1, review_capacity = 3, daily_budget = null");
+    await person("octo", "operator");
+    await person("vera", "viewer");
+    const taken = await post("/configuration", "octo", "setting=review_capacity&value=5");
+    assert.equal(taken.status, 303);
+    assert.equal(taken.headers.get("location"), "/configuration?changed=review_capacity");
+    assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
+    assert.match((await get("/configuration?changed=review_capacity", "octo")).html, /review capacity changed/);
+    assert.match((await get("/activity", "octo")).html, /octo changed review capacity from 3 to 5/);
+    const octoId = (await db.pool.query(`select id from "user" where github_login = 'octo'`)).rows[0].id;
+    assert.equal((await db.pool.query(`select actor_id from event where kind = 'setting' order by id desc limit 1`)).rows[0].actor_id, octoId);
+
+    const raised = await post("/configuration", "octo", "setting=wip_min&value=2");
+    assert.equal(raised.status, 303);
+    assert.deepEqual((await db.pool.query("select wip_min, current_wip from wip_policy")).rows[0], { wip_min: 2, current_wip: 2 });
+
+    const broken = await post("/configuration", "octo", "setting=review_capacity&value=0");
+    assert.equal(broken.status, 400);
+    assert.match(await broken.text(), /Review capacity must be a whole number of at least 1\./);
+
+    const refused = await post("/configuration", "vera", "setting=review_capacity&value=9");
+    assert.equal(refused.status, 403);
+    assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
+    assert.doesNotMatch((await get("/configuration", "vera")).html, /<form/);
+  });
 });

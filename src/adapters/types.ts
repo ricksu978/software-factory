@@ -4,6 +4,8 @@ export type FactoryItem = {
   sourceId: string; externalId: string; title: string; body: string;
   acceptanceCriteria: string[]; labels: string[]; status: string; rank: number;
   repo: string | null; fields: Record<string, string>; closed: boolean; updatedAt: string;
+  /** When the item's issue was created, as an ISO time, where the backlog knows it (PBI 187). */
+  createdAt?: string;
 };
 // fields holds the values of FieldMap.readinessFields, such as { Size: "8" }
 
