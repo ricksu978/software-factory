@@ -1037,6 +1037,37 @@ describe("the PR review stage", () => {
     assert.match(t[0].question.body, /app\.txt:1.*Rename it\./);
   });
 
+  test("after address, the PR review runs on the head address pushed, and only then does the item return to InReview", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment], prNumber: 7 }, script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") { writeFileSync(join(a.cwd, "app.txt"), "renamed\n"); return; }
+      return reviewer([])(a, stage);
+    } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["address", "pr-review"]);
+    const review = h.agentCalls.find((a) => a.agent === "factory-pr-reviewer")!;
+    const head = git(h.dir, "rev-parse", "HEAD");
+    assert.ok(review.prompt.includes(head) && review.prompt.includes("#7"));
+    assert.ok(!review.prompt.includes("rename foo"), "the person's thread isn't one of the PR reviewer's own");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/postReview").map((c) => c.body.commitSha), [head]);
+    const order = h.calls.map((c) => c.route === "/stage" ? `${c.body.stageId}:${c.body.status}` : c.route).filter((r) => r.includes(":") || r === "/transition");
+    assert.deepEqual(order.slice(-3), ["pr-review:started", "pr-review:passed", "/transition"]);
+    assert.deepEqual(h.transitions(), [{ event: "pr_opened", prNumber: 7 }]);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"), "the PR already has its reviewers");
+  });
+
+  test("after address, a PR review finding still held blocks, and the item never returns to InReview", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment], prNumber: 7 }, script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") return;
+      if (a.agent === "factory-pr-reviewer") return { text: '{"finding":"Rename it.","path":"app.txt","line":1}\nOPEN: 1' };
+      return undefined;
+    } });
+    // A copy, so the one-round limit doesn't leak into the tests that share SOP.
+    h.deps.sop = structuredClone(SOP);
+    h.deps.sop.stages.find((x) => x.id === "pr-review")!.max_rounds = 1;
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.transitions().map((t) => t.event), ["blocked"]);
+  });
+
   test("a repo host that can't post a review gets no PR review, and open-pr hands the PR to people", async () => {
     const h = harness({ nextStage: "open-pr" });
     delete h.deps.repoHost.postReview;

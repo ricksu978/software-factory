@@ -144,8 +144,9 @@ describe("parseGitHubWebhook", () => {
   });
 
   test("a pull_request_review submitted maps to review with the state lowercased and the author's login", () => {
-    const body = { action: "submitted", repository, pull_request: { number: 5 }, review: { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "dev", type: "User" } } };
-    assert.deepEqual(parseGitHubWebhook(h("pull_request_review"), body), { kind: "review", prNumber: 5, repo: "o/r", state: "changes_requested", submittedAt: "2026-11-06T01:00:00Z", author: "dev" });
+    const body = { action: "submitted", repository, pull_request: { number: 5 }, review: { state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T01:00:00Z", user: { login: "dev", type: "User" } } };
+    assert.deepEqual(parseGitHubWebhook(h("pull_request_review"), body), { kind: "review", prNumber: 5, repo: "o/r", state: "changes_requested", submittedAt: "2026-11-06T01:00:00Z", author: "dev", body: "Split it" });
+    assert.equal((parseGitHubWebhook(h("pull_request_review"), { ...body, review: { ...body.review, body: null } }) as { body: string }).body, "", "GitHub sends null for no summary");
   });
 
   test("issues, merged and closed PRs and completed check suites map to their events", () => {

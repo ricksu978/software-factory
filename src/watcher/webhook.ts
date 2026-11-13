@@ -77,8 +77,8 @@ const github = { actor: "system", actorId: "github" } as const;
 /**
  * Plan Task 17: what a merge, a close or a review does to the item whose open run holds the PR. A merge moves InReview,
  * or InProgress during address, to Accepted and records `merge_sha`; the scheduler's CI poll then decides Done or
- * Failed. A close without a merge withdraws the item. A changes-requested review from an allowlisted login, newer
- * than `run.reviews_seen_at`, sends an InReview item back to address (Run contract 10). An item another path moved
+ * Failed. A close without a merge withdraws the item. A changes-requested review with a summary from an allowlisted
+ * login, newer than `run.reviews_seen_at`, sends an InReview item back to address (Run contract 10). An item another path moved
  * first is left alone.
  */
 async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void> {
@@ -103,6 +103,9 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
       await withTx(pool, (c) => transitionItem(c, row.item_id, "withdrawn", github));
     } else {
       if (row.state !== "InReview") return;
+      // The payload carries no line comments, so a review with no summary may hold nothing but a reply inside the
+      // factory's own thread. The poller tells which, as it does for a review that only comments (PBI 130).
+      if (!e.body.trim()) return;
       if (row.reviews_seen_at && new Date(e.submittedAt).getTime() <= row.reviews_seen_at.getTime()) return;
       const trusted = await pool.query(`select 1 from "user" where lower(github_login) = lower($1)`, [e.author]);
       if (!trusted.rowCount) return;

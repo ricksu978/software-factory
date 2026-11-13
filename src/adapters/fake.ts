@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -118,7 +118,9 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * `repo@sha`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
  * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
- * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS.
+ * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS. A review that
+ * requests changes counts when it has a body, or when a comment outside the factory's threads carries its author and
+ * `submittedAt`, which is how the fake ties a comment to its review.
  * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
  * `factory[bot]` in `reviewComments`, which postReview returns.
@@ -181,13 +183,15 @@ export function fakeRepoHost(): RepoHost & {
       pr(repo, n).reviewers = [...fallback];
       return [...fallback];
     },
-    async prState(repo, n, trustedLogins) {
+    async prState(repo, n, trustedLogins, trustedBot) {
       const p = pr(repo, n);
       const settled = Date.now() - THREAD_SETTLE_MS;
       const trusted = new Set(trustedLogins.map(loginKey));
-      const open = (p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [])
-        .filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
-      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author))).map((r) => r.submittedAt), ...open].sort();
+      const own = withoutFactoryThreads(p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [], trustedBot);
+      const open = own.filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
+      // A comment belongs to the review its author submitted at its submittedAt.
+      const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
+      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r)).map((r) => r.submittedAt), ...open].sort();
       return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
     },
     async closePr(repo, n, comment) {

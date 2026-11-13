@@ -13,7 +13,7 @@ export type FactoryWebhookEvent =
   | { kind: "pr_closed"; prNumber: number; repo: string; by: string } // `by`: the login that closed it
   | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; repo: string; login: string; body: string; commentId: string }
-  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }
+  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body: string }
   | { kind: "ignored" };
 
 export interface BacklogAdapter {
@@ -54,6 +54,22 @@ export function botKey(login: string): string {
   return key.endsWith("[bot]") ? key : `${key}[bot]`;
 }
 
+/**
+ * Whether a thread is one the factory's own review opened: its first comment is by the repo's trusted bot. Such a
+ * thread belongs to the PR review stage, so neither a reply inside it nor its finding sends an item to address
+ * (PBI 130). With no trusted bot, no thread is the factory's.
+ */
+export function factoryThread(firstAuthor: string | undefined, trustedBot: string | null | undefined): boolean {
+  return Boolean(trustedBot && firstAuthor !== undefined && loginKey(firstAuthor) === botKey(trustedBot));
+}
+
+/** The comments outside the factory's own threads, each thread known by its first comment in `comments`' order. */
+export function withoutFactoryThreads<T extends { threadId: string; author: string }>(comments: T[], trustedBot: string | null | undefined): T[] {
+  const first = new Map<string, string>();
+  for (const c of comments) if (!first.has(c.threadId)) first.set(c.threadId, c.author);
+  return comments.filter((c) => !factoryThread(first.get(c.threadId), trustedBot));
+}
+
 export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
 
 /**
@@ -85,8 +101,13 @@ export interface RepoHost {
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
-  /** `lastChangesRequestedAt` is the newest trusted review that requests changes or comments in a still-open thread, once that comment has stood two minutes (Run contract 10). */
-  prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{
+  /**
+   * `lastChangesRequestedAt` is the newest trusted review that requests changes or comments in a still-open thread, once
+   * that comment has stood two minutes (Run contract 10). A thread `trustedBot` opened, the factory's own review's, never
+   * counts, whoever replies inside it, and neither does a review requesting changes whose only text sits in such a
+   * thread (PBI 130).
+   */
+  prState(repo: string, prNumber: number, trustedLogins: string[], trustedBot?: string | null): Promise<{
     merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null;
   }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;

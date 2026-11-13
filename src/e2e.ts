@@ -264,7 +264,7 @@ export async function startFactory(pool: pg.Pool) {
       const pr = host.prs.find((p) => p.number === run.pr_number)!;
       const submittedAt = new Date().toISOString();
       pr.reviews.push({ state: "changes_requested", submittedAt, author: OWNER_LOGIN, body: "Rename the export column." });
-      return deliver({ kind: "review", prNumber: pr.number, repo: REPO, state: "changes_requested", submittedAt, author: OWNER_LOGIN }, "pull_request_review");
+      return deliver({ kind: "review", prNumber: pr.number, repo: REPO, state: "changes_requested", submittedAt, author: OWNER_LOGIN, body: "Rename the export column." }, "pull_request_review");
     },
     /** A person merges the item's PR into main on the origin, and GitHub delivers pr_merged. */
     async merge(ext: string) {

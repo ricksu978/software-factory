@@ -443,7 +443,7 @@ describe("pollOnce", dbTest, () => {
     await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
     // The claim that started the address run set reviews_seen_at to its own time.
     const { ext, pr, run } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
-    host.prs.find((p) => p.number === pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:30:00Z", author: "octo" });
+    host.prs.find((p) => p.number === pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:30:00Z", author: "octo", body: "Fix it." });
     await poll();
     assert.equal((await row(ext)).state, "Queued");
     assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
@@ -464,6 +464,26 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
   });
 
+  test("a trusted reply inside a thread the factory's own review opened leaves the item in InReview (PBI 130)", async () => {
+    await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
+    // Stored without "[bot]", as issue #79 allows; GitHub names the App's comments with it.
+    await db.pool.query("update repo set trusted_bot = 'factory' where url = $1", [`https://github.com/${REPO}`]);
+    const { ext, pr } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    const p = host.prs.find((x) => x.number === pr)!;
+    const at = "2026-11-06T10:30:00Z";
+    host.reviewComments.set(`${p.repo}#${pr}`, [
+      { threadId: "ft1", path: "a.ts", line: 1, author: "factory[bot]", body: "Misses the VAT.", submittedAt: at },
+      { threadId: "ft1", path: "a.ts", line: 1, author: "octo", body: "I'd rather keep it.", submittedAt: at },
+    ]);
+    // octo submitted the reply as a review that requests changes with no summary.
+    p.reviews.push({ state: "changes_requested", submittedAt: at, author: "octo" });
+    await poll();
+    assert.equal((await row(ext)).state, "InReview");
+    host.reviewComments.get(`${p.repo}#${pr}`)!.push({ threadId: "pt1", path: "a.ts", line: 2, author: "octo", body: "Use the tax table.", submittedAt: at });
+    await poll();
+    assert.equal((await row(ext)).state, "Queued", "a person's own thread still sends it to address");
+  });
+
   test("a merge conflict sends an InReview item to address", async () => {
     const { ext, pr, run } = await held("InReview", { pr: true });
     host.prs.find((p) => p.number === pr)!.mergeable = false;
@@ -475,7 +495,7 @@ describe("pollOnce", dbTest, () => {
   test("a review older than the address run's claim leaves the item in InReview", async () => {
     await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
     const { ext, pr } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
-    host.prs.find((p) => p.number === pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T09:00:00Z", author: "octo" });
+    host.prs.find((p) => p.number === pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T09:00:00Z", author: "octo", body: "Fix it." });
     await poll();
     assert.equal((await row(ext)).state, "InReview");
   });
