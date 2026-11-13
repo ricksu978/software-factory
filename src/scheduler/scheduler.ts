@@ -1,6 +1,6 @@
 // The scheduler (plan Task 13). Every TICK_MS it applies operator overrides, sends back expired leases, times out
-// and reminds questions nobody answered, polls CI on merged items, and starts at most one cell while a slot under the
-// WIP limit is free. Everything it decides comes from the database, so a restarted process picks up where the old
+// and reminds questions nobody answered, polls CI on merged items, and starts a cell for each free slot under the WIP
+// limit. Everything it decides comes from the database, so a restarted process picks up where the old
 // one stopped and never starts a second cell for an item with a live lease (Review Focus 5).
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
@@ -298,8 +298,11 @@ async function pollMergedCi(d: TickDeps) {
 }
 
 /**
- * Starts one cell when the WIP limit has room. Nothing starts while usage is paused or any run waits for its usage
- * reset, as spec §7 requires. While the waiting count is at review_capacity, only work already in flight starts.
+ * Starts a cell for each free slot under the WIP limit, so a live raise of current WIP fills the new slots in one tick
+ * (PBI 177). With the running count at or over the limit, a lowered one, it starts nothing and stops nothing (spec §7,
+ * Damping). Nothing starts while usage is paused or any run waits for its usage reset, as spec §7 requires. While the
+ * waiting count is at review_capacity, only work already in flight starts. A pin failure or a failed start ends the
+ * tick's starts, so an item sent back to Queued is never claimed twice in one tick.
  */
 async function startNext(d: TickDeps, result: TickResult) {
   const policy = (await d.pool.query<{ current_wip: number; review_capacity: number; usage_paused_until: Date | null }>(
@@ -315,11 +318,19 @@ async function startNext(d: TickDeps, result: TickResult) {
        exists (select from run where ended_at is null and resume_at > $1) as resuming`,
     [d.now],
   )).rows[0];
-  if (counts.resuming || counts.running >= policy.current_wip) return;
+  if (counts.resuming) return;
 
+  const resumeOnly = counts.waiting >= policy.review_capacity;
+  for (let free = policy.current_wip - counts.running; free > 0; free--) {
+    if (!(await startOne(d, resumeOnly, result))) return;
+  }
+}
+
+/** Claims and starts one cell. False when nothing more should start this tick. */
+async function startOne(d: TickDeps, resumeOnly: boolean, result: TickResult): Promise<boolean> {
   let started: string | null;
   try {
-    started = await claimAndStart(d, counts.waiting >= policy.review_capacity);
+    started = await claimAndStart(d, resumeOnly);
   } catch (e) {
     if (!(e instanceof PinError)) throw e;
     // The claim rolled back. Held, the item can't come first in line again, so it never blocks the items behind it.
@@ -327,9 +338,11 @@ async function startNext(d: TickDeps, result: TickResult) {
     // A held item reaches this once per hold, and the time keeps a second hold after a re-queue from reusing the key.
     const body = `The factory can't start this item: ${e.message}. Fix it, then re-queue the item.`;
     await isolated(`commenting the hold on item ${e.itemId}`, () => d.backlogFor(e.sourceId).comment(e.externalId, body, `pin:${d.now.toISOString()}`));
-    return;
+    return false;
   }
-  if (started) result.started.push(started);
+  if (!started) return false;
+  result.started.push(started);
+  return true;
 }
 
 /** Thrown when a run can't be pinned for a reason that a retry won't fix. */
