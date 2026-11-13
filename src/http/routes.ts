@@ -4,6 +4,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
+import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
+import type { ItemState } from "../core/states.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
@@ -234,11 +236,33 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const scope = signing && fi?.body.trim() ? fi.body : null;
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
+  const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
+    durations,
   };
+}
+
+/** Where the item's time went (PBI 187): its moves, every run's stage attempts and its questions, read up to `now`. */
+async function itemTime(pool: pg.Pool, id: string, state: ItemState, now: Date) {
+  // An item held from before issue_created_at was stored counts from its first logged event until a poll fills it in.
+  const createdAt = (await pool.query<{ at: Date | null }>(
+    "select coalesce(issue_created_at, (select min(at) from event where item_id = $1)) as at from item where id = $1", [id],
+  )).rows[0].at;
+  const moves = (await pool.query<Move>(
+    `select payload->>'from' as from, payload->>'to' as to, at from event
+     where item_id = $1 and kind in ('transition', 'override') and payload ? 'to' order by at, id`, [id],
+  )).rows;
+  const stages = (await pool.query<StageSpan>(
+    `select s.stage_id as "stageId", s.started_at as "startedAt", s.ended_at as "endedAt"
+     from stage_run s join run r on r.id = s.run_id where r.item_id = $1 order by s.started_at`, [id],
+  )).rows;
+  const questions = (await pool.query<QuestionSpan>(
+    `select kind, asked_at as "askedAt", answered_at as "answeredAt", closed_at as "closedAt" from question where item_id = $1`, [id],
+  )).rows;
+  return itemDurations({ createdAt, state, now, moves, stages, questions });
 }
 
 /**

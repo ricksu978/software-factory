@@ -213,3 +213,36 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(html, /<dl><dt>Stage spend<\/dt><dd>\$2\.00<\/dd><dt>Readiness spend<\/dt><dd>\$0\.0092<\/dd><\/dl>/);
   });
 });
+
+describe("Run detail's Time section (PBI 187)", () => {
+  const detail = (durations?: RunDetail["durations"]): RunDetail => ({
+    item: { id: "i1", title: "Export a month", state: "InProgress", external_id: "187", repo: "acme/widgets" }, run: null, policies: [], stages: [],
+    readiness: [], question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null, durations,
+  });
+  const M = 60_000;
+  const section = (html: string) => /<h2>Time<\/h2>([\s\S]*?)<h2>/.exec(html)?.[1] ?? "";
+
+  test("shows the total, Queued and each wait with their total, as hours and minutes", () => {
+    const html = section(runDetailPage(detail({
+      totalMs: 25 * 60 * M, queuedMs: 140 * M,
+      waiting: { signOffMs: 150 * M, needsInputMs: 45 * M, inReviewMs: 180 * M, totalMs: 375 * M }, stages: [],
+    }), null));
+    for (const [dt, dd] of [["Total", "1d 1h 0m"], ["Queued", "2h 20m"], ["Sign-off", "2h 30m"], ["Needs input", "0h 45m"], ["In review", "3h 0m"], ["Waiting on a person", "6h 15m"]]) {
+      assert.match(html, new RegExp(`<dt>${dt}</dt><dd>${dd}</dd>`), dt);
+    }
+    assert.match(html, /No stage has run yet/);
+  });
+
+  test("shows each stage's time and attempts, and an unknown total when the issue's creation isn't known", () => {
+    const html = section(runDetailPage(detail({
+      totalMs: null, queuedMs: 0, waiting: { signOffMs: 0, needsInputMs: 0, inReviewMs: 0, totalMs: 0 },
+      stages: [{ stageId: "red", ms: 25 * M, attempts: 2 }, { stageId: "green", ms: 95 * M, attempts: 1 }],
+    }), null));
+    assert.match(html, /<dt>Total<\/dt><dd>not known yet<\/dd>/);
+    assert.match(html, /<tr><td>red<\/td><td>0h 25m<\/td><td>2<\/td><\/tr><tr><td>green<\/td><td>1h 35m<\/td><td>1<\/td><\/tr>/);
+  });
+
+  test("leaves the section out without durations", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Time<\/h2>/);
+  });
+});

@@ -346,7 +346,7 @@ Then("Run detail shows these stage times:", function (table: { hashes(): { stage
 Then(/^Run detail shows the ([a-z-]+) stage took "([^"]*)" over (\d+) attempts?$/, function (stageId: string, time: string, attempts: string) {
   const row = stageRow(this, stageId);
   assert.ok(row, `Run detail shows no stage time for ${stageId}: ${JSON.stringify(stageRows(this))}`);
-  assert.deepEqual(row.slice(0, 3), [stageId, time, attempts], `Run detail's time for the ${stageId} stage`);
+  assert.deepEqual(row.slice(0, 3), [stageId, time, String(attempts)], `Run detail's time for the ${stageId} stage`);
 });
 
 Then(/^Run detail shows no stage time for ([a-z-]+)$/, function (stageId: string) {

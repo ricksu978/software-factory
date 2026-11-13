@@ -1,5 +1,6 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
+import { formatDuration, type ItemDurations } from "../core/durations.ts";
 
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -173,7 +174,22 @@ export type RunDetail = {
   linkBlobs: boolean;
   /** An operator's override buttons for this item, or null for anyone else. */
   controls: { held: boolean; stoppable: boolean; requeueable: boolean } | null;
+  /** Where the item's time went (PBI 187). Without it, the Time section is left out. */
+  durations?: ItemDurations;
 };
+
+/** Run detail's Time section: the total, the time Queued, each wait on a person and their total, and each stage's time. */
+function timeSection(t: ItemDurations): string {
+  const figure = (label: string, ms: number | null) => `<dt>${label}</dt><dd>${ms === null ? "not known yet" : formatDuration(ms)}</dd>`;
+  const w = t.waiting;
+  const stages = t.stages.length
+    ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Time</th><th scope="col">Attempts</th></tr></thead><tbody>${t.stages
+        .map((s) => `<tr><td>${escapeHtml(s.stageId)}</td><td>${formatDuration(s.ms)}</td><td>${s.attempts}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">No stage has run yet.</p>`;
+  return `<h2>Time</h2><dl>${figure("Total", t.totalMs)}${figure("Queued", t.queuedMs)}</dl>
+<h3>Waiting on a person</h3><dl>${figure("Sign-off", w.signOffMs)}${figure("Needs input", w.needsInputMs)}${figure("In review", w.inReviewMs)}${figure("Waiting on a person", w.totalMs)}</dl>
+<h3>Time in each stage</h3>${stages}`;
+}
 
 export function runDetailPage(d: RunDetail, banner: string | null): string {
   const r = d.run;
@@ -225,7 +241,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${scope}${criteria}${pending}${form}${controls}${verdicts}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
+${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }`, banner);
 }
