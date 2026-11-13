@@ -517,3 +517,6 @@ Then("the cell run fails with an error that says an AI call was made while no st
 Then("the model is never asked for that call", function () {
   assert.ok(!ctx(this).cell!.asked.includes(OUTSIDE), "the model was asked for the call made while no stage was open");
 });
+
+// PBI 168 asks this judge alongside PBI 12's fake one, so its polls record readiness checks.
+export { judge as scriptedJudge };
