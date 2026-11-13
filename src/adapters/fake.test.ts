@@ -79,6 +79,18 @@ describe("fakeRepoHost", () => {
     assert.equal((await host.prState(repo, number, [])).lastChangesRequestedAt, null);
   });
 
+  test("prState skips a thread the trusted bot opened, whoever replies in it (PBI 130)", async () => {
+    const host = fakeRepoHost();
+    const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });
+    const at = "2026-11-06T10:00:00Z";
+    host.reviewComments.set(`${repo}#${number}`, [
+      { threadId: "ft", path: "a.ts", line: 1, author: "factory[bot]", body: "Misses the VAT.", submittedAt: at },
+      { threadId: "ft", path: "a.ts", line: 1, author: "owner", body: "Keep it.", submittedAt: at },
+    ]);
+    assert.equal((await host.prState(repo, number, ["owner"], "factory")).lastChangesRequestedAt, null);
+    assert.equal((await host.prState(repo, number, ["owner"])).lastChangesRequestedAt, at, "with no trusted bot, no thread is the factory's");
+  });
+
   test("postReview records each review in order, always as COMMENT", async () => {
     const host = fakeRepoHost();
     assert.deepEqual(host.postedReviews, []);

@@ -102,6 +102,18 @@ describe("githubRepoHost", () => {
     assert.equal((await host.prState("o/r", 3, ["owner"])).lastChangesRequestedAt, "2026-11-06T02:00:00Z", "a reply seconds old may be resolved next");
   });
 
+  test("prState skips a thread the trusted bot opened, a trusted reply inside it included (PBI 130)", async () => {
+    const comment = (__typename: string, login: string) => ({ author: { __typename, login }, body: "x", pullRequestReview: { submittedAt: "2026-11-06T02:00:00Z" } });
+    const threads = [{ id: "t", isResolved: false, path: "a.ts", line: 1, comments: { nodes: [comment("Bot", "factory"), comment("User", "owner")] } }];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: null, state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
+    }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, null);
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory")).lastChangesRequestedAt, null, "stored without [bot]");
+    assert.equal((await host.prState("o/r", 3, ["owner"], "other[bot]")).lastChangesRequestedAt, "2026-11-06T02:00:00Z");
+  });
+
   test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: true, merge_commit_sha: "m1", state: "closed", mergeable: null }),

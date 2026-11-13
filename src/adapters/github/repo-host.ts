@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -80,7 +80,7 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
     },
 
     // A cell asks it too, with no trusted logins, to learn whether its branch's PR already merged (PBI 142).
-    async prState(repo, prNumber, trustedLogins) {
+    async prState(repo, prNumber, trustedLogins, trustedBot) {
       const gh = await client();
       const r = split(repo);
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
@@ -95,7 +95,7 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const settled = Date.now() - THREAD_SETTLE_MS;
       const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
-        .filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
+        .filter((t) => !t.isResolved && !factoryThread(t.comments.nodes[0] && authorLogin(t.comments.nodes[0].author), trustedBot)).flatMap((t) => t.comments.nodes)
         .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
         .map((c) => c.pullRequestReview!.submittedAt!);
       const times = [...requested, ...open].sort();

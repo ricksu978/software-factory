@@ -210,7 +210,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   await each(await items(pool, sourceId, ["InReview", "InProgress"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const repo = (await itemOf(row.external_id))?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
-    const pr = await repoHost.prState(repo, row.pr_number, trusted);
+    // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).
+    const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
+    const pr = await repoHost.prState(repo, row.pr_number, trusted, bot);
     if (pr.merged) {
       await move(pool, row.id, "merged", (c) => c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]));
     } else if (!pr.open) {

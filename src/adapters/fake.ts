@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, standingSummaries, THREAD_SETTLE_MS, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -181,11 +181,11 @@ export function fakeRepoHost(): RepoHost & {
       pr(repo, n).reviewers = [...fallback];
       return [...fallback];
     },
-    async prState(repo, n, trustedLogins) {
+    async prState(repo, n, trustedLogins, trustedBot) {
       const p = pr(repo, n);
       const settled = Date.now() - THREAD_SETTLE_MS;
       const trusted = new Set(trustedLogins.map(loginKey));
-      const open = (p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [])
+      const open = withoutFactoryThreads(p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [], trustedBot)
         .filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
       const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author))).map((r) => r.submittedAt), ...open].sort();
       return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
