@@ -250,6 +250,30 @@ describe("scheduler", dbTest, () => {
     assert.equal(started.length, 1);
   });
 
+  test("one tick fills every free slot under the WIP limit, and no more (PBI 177)", async () => {
+    await db.pool.query("update wip_policy set current_wip = 3");
+    const running = await item("0", "InProgress", `lease_expires = '${new Date(NOW.getTime() + 300_000).toISOString()}'`);
+    const queued = [await item("1", "Queued", "backlog_rank = 1"), await item("2", "Queued", "backlog_rank = 2"), await item("3", "Queued", "backlog_rank = 3")];
+    await run();
+    assert.deepEqual(started.map((e) => e.ITEM_ID), queued.slice(0, 2));
+    assert.equal((await state(running)).state, "InProgress");
+    assert.equal((await state(queued[2])).state, "Queued");
+    await run();
+    assert.equal(started.length, 2);
+  });
+
+  test("a start that fails ends the tick's starts, so the item it sent back isn't claimed again the same tick", async () => {
+    await db.pool.query("update wip_policy set current_wip = 3");
+    await item("1", "Queued");
+    let calls = 0;
+    launcher.start = async () => {
+      calls++;
+      throw new Error("docker is down");
+    };
+    await run();
+    assert.equal(calls, 1);
+  });
+
   test("a start that fails moves the item out of InProgress, so the generation it handed out is never valid again", async () => {
     const id = await item("1", "Queued");
     launcher.start = async () => {

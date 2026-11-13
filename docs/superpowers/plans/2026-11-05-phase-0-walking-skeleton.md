@@ -828,6 +828,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
 
 - [ ] **Step 1: Write failing tests** with `fakeLauncher` and the test DB:
   - **Fixed WIP.** With one InProgress item that holds a live lease and one Queued item, `tick` starts nothing. Once the lease expires, `tick` moves the old item to Queued and starts one cell.
+  - **Live WIP (PBI 177).** `tick` reads `current_wip` each time and starts a cell for each free slot, so with one item running, `current_wip` raised to 3 and three items Queued, one `tick` starts two and leaves the third Queued. With the running count at or over a lowered `current_wip`, `tick` starts nothing and stops no cell. A pin failure or a start that throws ends that tick's starts, so an item sent back to Queued isn't claimed again in the same tick.
   - **Review Focus 5.** A second `tick` from a new process, with the same DB and a live lease, starts nothing.
   - **Kill switch.** A `kill` override, or `killFlag: true`, makes `tick` call `stop` for every execution with a live lease and start nothing.
   - **Drain and pause.** Neither starts anything. Under drain the running cell's `/lease` reply has `stop: false`, and under pause it has `stop: true`.
