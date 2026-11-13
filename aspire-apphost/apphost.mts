@@ -15,8 +15,9 @@ const floatPorts = process.env.FACTORY_FLOAT_PORTS === '1';
 // forever in WaitReadBuffers -> AsyncReadBuffers -> pgaio_io_acquire_nb, ignores cancel, and every later page read in
 // any session joins it. 17 has no AIO read path, and the test suites already run on it (src/store/test-db.ts).
 // The tag goes before withDataVolume(), which picks 17's data path from it. 17 can't open the 18 volume, so it gets
-// its own, named per checkout like Aspire's default so worktrees still don't share one.
-const pgVolume = `pg17-${createHash('sha256').update(import.meta.dirname).digest('hex').slice(0, 10)}-data`;
+// its own, named per checkout like Aspire's default so worktrees still don't share one. The path is lowercased first:
+// Windows paths ignore case, but import.meta.dirname keeps whatever casing the AppHost was launched with.
+const pgVolume = `pg17-${createHash('sha256').update(import.meta.dirname.toLowerCase()).digest('hex').slice(0, 10)}-data`;
 const postgres = await builder.addPostgres('pg').withImageTag('17').withDataVolume({ name: pgVolume });
 const db = await postgres.addDatabase('factory-db', { databaseName: 'factory' });
 const dbUri = await db.uriExpression();
