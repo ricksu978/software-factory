@@ -2,7 +2,8 @@
 // through, runs the scheduler's tick, and polls each board with the readiness judge. Today's control plane,
 // src/main.ts, runs none of them, so each job runs in one process. Until the outbox lands (step 3), the worker mirrors
 // its own transitions onto the board, as the control plane mirrors its own. `aspire run` starts it as the worker
-// resource. Keeping a second worker idle with an advisory lock is a later step.
+// resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
+// on a connection of its own (PBI 157). One that can't take it stands by, and one whose lock connection closes exits.
 import { App } from "@octokit/app";
 import type pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
@@ -43,11 +44,15 @@ export type WorkerDeps = {
   sopVersion: string;
   tickMs?: number;
   pollMs?: number;
+  /** Where the worker's log lines go. The console by default. */
+  log?: Pick<Console, "log" | "warn" | "error">;
 };
 
 export type Worker = {
   /** How many times each job has run, failed runs included, keyed by its name in the log. */
   runs: Map<string, number>;
+  /** Settles once the worker has stopped: it resolves after stop(), and rejects when the worker lost the worker lock. */
+  done: Promise<void>;
   stop(): Promise<void>;
 };
 
@@ -113,6 +118,8 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
   }
   return {
     runs,
+    // PBI 157 stub: the worker takes no lock yet, so it never loses one.
+    done: new Promise<void>(() => {}),
     async stop() {
       await Promise.all(loops.map((stop) => stop()));
       for (const off of hooks) off();
@@ -148,9 +155,12 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
   });
 }
 
-if (import.meta.main) {
-  main(process.env).catch((e) => {
+/** Runs the worker as this process: a worker that fails to start, or that stops with an error, exits it with code 1. */
+export function runProcess(start: () => Promise<Worker>): void {
+  start().catch((e) => {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   });
 }
+
+if (import.meta.main) runProcess(() => main(process.env));
