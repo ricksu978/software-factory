@@ -403,6 +403,17 @@ describe("cell API", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from stage_run")).rows[0].n, 0);
   });
 
+  test("/pr starts the review clock, and neither a retried /pr nor the first pr_opened moves it (PBI 191)", async () => {
+    const cell = await claimed();
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9 })).status, 200);
+    assert.deepEqual((await runRow(cell.runId)).reviews_seen_at, at);
+    clock = new Date(at.getTime() + 5 * 60_000);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9 })).status, 200);
+    clock = new Date(at.getTime() + 20 * 60_000);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened" })).status, 200);
+    assert.deepEqual((await runRow(cell.runId)).reviews_seen_at, at);
+  });
+
   test("a PR URL that isn't the run's repo PR gets 400, so the board never links it", async () => {
     const cell = await claimed();
     assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
