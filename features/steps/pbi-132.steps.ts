@@ -419,8 +419,9 @@ Then("the {string} section lists {int} checks, oldest first", function (name: st
 Then("each listed check shows when it ran, its model, its tokens in and out, and its cost", function () {
   const got = rows(section(this, "Readiness checks"));
   const want = [
-    { at: /2026-11-08[T ]09:00/, tokensIn: "1100 in", tokensOut: "70 out", cost: "$0.0025" },
-    { at: /2026-11-09[T ]10:15/, tokensIn: "1200 in", tokensOut: "80 out", cost: "$0.0031" },
+    // Run detail shows tokens in thousands and cost to the cent, a cost under half a cent as "<$0.01" (PBI 189).
+    { at: /2026-11-08[T ]09:00/, tokensIn: "1.1k in", tokensOut: "70 out", cost: "<$0.01" },
+    { at: /2026-11-09[T ]10:15/, tokensIn: "1.2k in", tokensOut: "80 out", cost: "<$0.01" },
   ];
   assert.equal(got.length, want.length, `the section lists ${got.length} checks`);
   for (const [i, w] of want.entries()) {
@@ -437,7 +438,9 @@ Then("the {string} section still lists the {string} stage at a cost of ${float}"
 Then("the {string} section lists {int} check with a cost of ${float}", function (name: string, n: number, cost: number) {
   const got = rows(section(this, name));
   assert.equal(got.length, n, `the section lists ${got.length} checks:\n${got.join("\n")}`);
-  for (const r of got) assert.ok(r.includes(`$${cost.toFixed(4)}`), `the check doesn't show $${cost.toFixed(4)}: ${r}`);
+  // Run detail shows a check's cost to the cent, and one above zero under half a cent as "<$0.01" (PBI 189).
+  const shown = cost > 0 && cost < 0.005 ? "<$0.01" : `$${cost.toFixed(2)}`;
+  for (const r of got) assert.ok(r.includes(shown), `the check doesn't show ${shown}: ${r}`);
 });
 
 Then("the {string} section says {string}", function (name: string, words: string) {

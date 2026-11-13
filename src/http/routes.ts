@@ -10,6 +10,7 @@ import { nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
+import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
 import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
@@ -394,7 +395,8 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     if (itemPath && req.method === "GET" && !itemPath[2]) {
       const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"));
       if (!detail) send(res, 404, "No such item.");
-      else send(res, 200, runDetailPage(detail, banner));
+      // Times show in the zone the viewer's browser sent, and a running attempt's time so far runs to now (PBI 189).
+      else send(res, 200, runDetailPage({ ...detail, zone: zoneFrom(req.headers.cookie), now: deps.now?.() ?? new Date() }, banner));
       return true;
     }
     if (itemPath && req.method === "POST" && itemPath[2]) {

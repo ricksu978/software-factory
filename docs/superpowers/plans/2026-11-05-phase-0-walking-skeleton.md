@@ -1018,8 +1018,9 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - each policy file used, marked repo or default, with every criterion's result and reason from `policy_result`;
     - the signed-off feature files at `features_lock_sha`;
     - each scenario's red and green verdicts, read by running `classify` on the reports at `stage_run.report_ref`;
-    - per stage: attempts, model, tokens, cost and a transcript link;
-    - a "Readiness checks" section right after the stages, with one row per readiness check, oldest first, each with when it ran in UTC, its call ("Judge" or "Split proposal"), its model, its tokens in and out and its cost to four places, or "No readiness check has run yet." (PBI 132);
+    - per stage: attempts, model, when each attempt started, how long it took, tokens, cost and a transcript link;
+    - a "Readiness checks" section right after the stages, with one row per readiness check, oldest first, each with when it ran, its call ("Judge" or "Split proposal"), its model, its tokens in and out and its cost, or "No readiness check has run yet." (PBI 132);
+    - **Readable numbers and local times (PBI 189).** Both tables show tokens as is under 1,000, else in thousands or millions to 1 decimal place, such as `12.8k` or `2.1m`. They show cost to the cent, rounding half up on the stored decimal digits, and a cost above zero under half a cent as `<$0.01`, so a cheap call never reads as free. The Stages table's "Time spent" runs from `started_at` to `ended_at` as `4m 7s` under an hour and `1h 12m` from an hour on. An attempt still running shows the time so far against the dashboard's `now` clock, followed by "so far". `src/http/format.ts` holds these formatters. Every time on Run detail shows to the minute in the viewer's time zone, and no column heading says UTC. The page's script sets a `tz` cookie to the browser's IANA zone and reloads once when the page came in another zone. The server reads that cookie through `zoneFrom`, and a missing cookie or a name that isn't a zone shows UTC. The page says which zone its times show in.
     - the shadow risk tier with its reasons.
   - **Token expiry.** A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
   - **Comment decisions.**

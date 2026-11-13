@@ -190,7 +190,7 @@ describe("readiness spend (PBI 132)", () => {
     assert.ok(section, "no Readiness checks section right after Stages");
     const row = /<tbody>([\s\S]*)<\/tbody>/.exec(section)![1];
     assert.match(row, /<time datetime="2026-11-09T10:15:00.000Z">2026-11-09 10:15<\/time>/);
-    for (const v of ["claude-haiku-4-5", "1200 in, 80 out", "$0.0031"]) assert.ok(row.includes(v), v);
+    for (const v of ["claude-haiku-4-5", "1.2k in, 80 out", "&lt;$0.01"]) assert.ok(row.includes(v), v);
   });
 
   test("Run detail names each check's call, the judge or the split proposal", () => {
@@ -201,7 +201,7 @@ describe("readiness spend (PBI 132)", () => {
     ]), null);
     const rows = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(html.split("<h2>Readiness checks</h2>")[1])![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
     assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5<\/td>/);
-    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*\$0\.2100/);
+    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*<td>\$0\.21<\/td>/);
   });
 
   test("Run detail says so when no readiness check has run", () => {
@@ -211,5 +211,38 @@ describe("readiness spend (PBI 132)", () => {
   test("the Phase 0 report shows readiness spend beside stage spend, to four places", () => {
     const html = phase0Page([{ item_id: "i1", title: "Pay by card", external_id: "1", repo: null, pr_url: null, merged_at: null, cost: 2, risk_tier: null, tier_reasons: null }], 0.0092, null);
     assert.match(html, /<dl><dt>Stage spend<\/dt><dd>\$2\.00<\/dd><dt>Readiness spend<\/dt><dd>\$0\.0092<\/dd><\/dl>/);
+  });
+});
+
+describe("Run detail's readable numbers and local times (PBI 189)", () => {
+  const stage = { stage_id: "build", attempt: 1, model: "claude-opus-5-5", tokens_in: 2149999, tokens_out: 48210, cost_usd: "0.5291", status: "passed", transcript_ref: null,
+    started_at: new Date("2026-11-09T15:30:00Z"), ended_at: new Date("2026-11-09T16:42:20Z") };
+  const detail = (over: Partial<RunDetail>): RunDetail => ({
+    item: { id: "i1", title: "Export a month", state: "InProgress", external_id: "189", repo: null }, run: null, policies: [], stages: [stage],
+    readiness: [{ model: "claude-haiku-4-5", tokensIn: 1240, tokensOut: 80, costUsd: 0.055, ranAt: new Date("2026-11-09T23:30:00Z") }],
+    question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+  const rowOf = (html: string, section: string) => /<tbody><tr>([\s\S]*?)<\/tr>/.exec(html.split(`<h2>${section}</h2>`)[1])![1];
+
+  test("the Stages table shows readable tokens and cost, when the attempt started in the viewer's zone, and how long it took", () => {
+    const row = rowOf(runDetailPage(detail({ zone: "America/New_York" }), null), "Stages");
+    assert.match(row, /<td><time datetime="2026-11-09T15:30:00.000Z">2026-11-09 10:30<\/time><\/td><td>1h 12m<\/td><td>2.1m in, 48.2k out<\/td><td>\$0.53<\/td>/);
+  });
+
+  test("an attempt still running shows the time so far", () => {
+    const html = runDetailPage(detail({ stages: [{ ...stage, ended_at: null, status: "started" }], now: new Date("2026-11-09T15:36:30Z") }), null);
+    assert.match(rowOf(html, "Stages"), /<td>6m 30s so far<\/td>/);
+  });
+
+  test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
+    const row = rowOf(runDetailPage(detail({ zone: "Asia/Tokyo" }), null), "Readiness checks");
+    assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5<\/td><td>1.2k in, 80 out<\/td><td>\$0.06<\/td>/);
+  });
+
+  test("no column heading says UTC, and the page says which zone its times show in", () => {
+    const html = runDetailPage(detail({}), null);
+    assert.doesNotMatch(html, /<th[^>]*>[^<]*UTC/);
+    assert.match(html, /Times show in UTC\./);
+    assert.match(html, /document\.cookie = sent/);
   });
 });
