@@ -1,10 +1,9 @@
 name: ci
 
-# A PR's pushes run once, under pull_request. Main runs on push, for the factory's post-merge check of the merge commit.
+# Push only, so a PR's push runs once. pull_request would run a second time, and GitHub skips it on a PR with a merge
+# conflict, which leaves a factory cell waiting on CI that never comes. Every PR here comes from a branch in this repo.
 on:
   push:
-    branches: [main]
-  pull_request:
 
 jobs:
   ci:
