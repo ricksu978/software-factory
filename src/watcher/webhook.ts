@@ -6,6 +6,7 @@ import { botKey, loginKey, type FactoryWebhookEvent } from "../adapters/types.ts
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
+import { logAttemptedMerge } from "./merge.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
 export function verifySignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
@@ -95,6 +96,8 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
       await withTx(pool, async (c) => {
         await transitionItem(c, row.item_id, "merged", github);
         await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, e.mergeSha]);
+        // A merge the factory asked for whose answer it never got is still logged as the factory's (PBI 181).
+        await logAttemptedMerge(c, row.item_id, e.prNumber, e.mergeSha, github);
       });
     } else if (e.kind === "pr_closed") {
       // The factory's own close comes from moving the item already, so only someone else's withdraws it.

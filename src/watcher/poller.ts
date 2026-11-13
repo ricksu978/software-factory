@@ -12,7 +12,7 @@ import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { mergeBlocker } from "./merge.ts";
+import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -221,7 +221,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
     const pr = await repoHost.prState(repo, row.pr_number, trusted, bot);
     if (pr.merged) {
-      await move(pool, row.id, "merged", (c) => c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]));
+      // A merge the factory asked for whose answer it never got is still logged as the factory's (PBI 181).
+      await move(pool, row.id, "merged", async (c) => {
+        await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]);
+        await logAttemptedMerge(c, row.id, row.pr_number!, pr.mergeSha, system);
+      });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
@@ -315,9 +319,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 /**
  * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that an allowlisted
  * user approved and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at
- * the head the view was read at. The item row stays locked across the merge, so a Hold or a claim that lands meanwhile waits and the
- * re-read under the lock sees the one that came first. A merge moves the item through `merged`, as a person's would,
- * and logs `factory_merged`. A refusal logs `factory_merge_refused` with GitHub's message, and the next poll tries again.
+ * the head the view was read at. First the attempt, with the PR, the head and the approvers, is logged as
+ * `factory_merge_attempt` in its own committed write, so a merge GitHub made while the call failed is still logged as
+ * the factory's when step 2 or the webhook later sees the PR merged. Then the item row stays locked across the merge,
+ * so a Hold or a claim that lands meanwhile waits, and the re-read under the lock sees the one that came first. A merge
+ * moves the item through `merged`, as a person's would, and logs `factory_merged`. A refusal logs
+ * `factory_merge_refused` with GitHub's message, and the next poll tries again.
  */
 async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
   // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
@@ -325,9 +332,18 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
   const read = await host.mergeView(repo, prNumber);
   const view = { ...read, approvedBy: read.approvedBy.filter((a) => keys.has(loginKey(a))) };
   if (mergeBlocker(view) !== null) return;
-  await withTx(pool, async (c) => {
+  const mayMerge = async (c: pg.PoolClient) => {
     const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
-    if (!cur || cur.state !== "InReview" || cur.held) return;
+    return !!cur && cur.state === "InReview" && !cur.held;
+  };
+  const attempted = await withTx(pool, async (c) => {
+    if (!(await mayMerge(c))) return false;
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy } });
+    return true;
+  });
+  if (!attempted) return;
+  await withTx(pool, async (c) => {
+    if (!(await mayMerge(c))) return;
     const res = await host.mergePr(repo, prNumber, { method: "squash", headSha: view.headSha });
     if (!res.merged) {
       await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });

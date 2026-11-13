@@ -689,6 +689,37 @@ describe("pollOnce", dbTest, () => {
       assert.equal((await events("factory_merged")).length, 1);
     });
 
+    test("a merge that went through while the call failed is still logged as the factory's when the next poll sees it", async () => {
+      await allow("octo");
+      const { ext, pr, run, p } = await ready();
+      const mergePr = host.mergePr.bind(host);
+      host.mergePr = async (...args) => {
+        await mergePr(...args);
+        throw new Error("502 Bad Gateway");
+      };
+      await poll();
+      assert.equal(p.merged, true);
+      assert.equal((await row(ext)).state, "InReview");
+      assert.deepEqual(await events("factory_merged"), []);
+      assert.deepEqual(await events("factory_merge_attempt"), [{ repo: REPO, prNumber: pr, headSha: "h1", approvers: ["octo"] }]);
+      host.mergePr = mergePr;
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m9");
+      assert.deepEqual(await events("factory_merged"), [{ repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"] }]);
+    });
+
+    test("a person's merge after a refused attempt isn't logged as the factory's", async () => {
+      await allow("octo");
+      const { ext, p } = await ready();
+      p.refusals = ["Base branch was modified."];
+      await poll();
+      Object.assign(p, { open: false, merged: true, mergeSha: "m1" });
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
     test("an approval from someone outside the allowlist doesn't merge, and only allowlisted approvers are logged", async () => {
       await allow("kim");
       const a = await ready();
