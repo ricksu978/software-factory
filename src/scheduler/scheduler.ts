@@ -207,7 +207,8 @@ async function stopRun(d: TickDeps, itemId: string, o: { id: string; reason: str
  * Sends a Failed or Abandoned item back and clears its hold (Run contract 1 and 7). One withdrawn from Eligible or
  * NotReady goes back to Eligible, through the readiness gate again (PBI 168). An Abandoned item whose question
  * is still open goes back to waiting on it, with the clock and reminders reset. A run whose PR merged gives way to a
- * new run on a new branch. A run whose PR a person closed unmerged resumes at open-pr, from the kept branch.
+ * new run on a new branch. A run whose PR a person closed unmerged resumes at open-pr, from the kept branch, even
+ * when a question was open, which then closes (PBI 194).
  */
 async function requeue(d: TickDeps, itemId: string) {
   const row = await itemRow(d.pool, itemId);
@@ -224,7 +225,12 @@ async function requeue(d: TickDeps, itemId: string) {
       "select id, kind from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1",
       [itemId],
     );
-    if (row.state === "Abandoned" && open.rowCount) {
+    // A person closed the PR, by hand or by the poller or webhook's withdrawal, so the item resumes at open-pr as it
+    // does from InReview. A question it waited on when the PR closed closes too: reopening it would send the item
+    // back to NeedsInput holding the closed PR, and the next poll would withdraw it again (PBI 194).
+    if (prClosed && open.rowCount) {
+      await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [itemId]);
+    } else if (row.state === "Abandoned" && open.rowCount) {
       const event: ItemEvent = open.rows[0].kind === "sign_off" ? "reopened_signoff" : "reopened_question";
       await transitionItem(c, itemId, event, system);
       await c.query("update question set asked_at = $2, reminders_sent = 0 where id = $1", [open.rows[0].id, d.now]);
