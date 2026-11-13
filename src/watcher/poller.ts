@@ -11,7 +11,7 @@ import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts"
 import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
-import { IllegalTransition, transitionItem, upsertItem } from "../store/items.ts";
+import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
@@ -314,12 +314,7 @@ async function returnWithdrawn(pool: pg.Pool, itemId: string): Promise<void> {
   await withTx(pool, async (c) => {
     const held = await c.query("select 1 from item where id = $1 and state = 'Abandoned' for update", [itemId]);
     if (held.rowCount === 0) return;
-    const last = (await c.query<{ from: string; event: string | null }>(
-      `select payload->>'from' as from, payload->>'event' as event from event
-       where item_id = $1 and kind in ('transition', 'override') and payload->>'to' = 'Abandoned' order by at desc limit 1`,
-      [itemId],
-    )).rows[0];
-    if (last?.event !== "withdrawn" || !GATING.includes(last.from as ItemState)) return;
+    if (!(await withdrawnBeforeQueue(c, itemId))) return;
     await transitionItem(c, itemId, "returned", system);
   });
 }
