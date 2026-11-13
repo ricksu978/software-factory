@@ -67,13 +67,14 @@ export async function startFactory(pool: pg.Pool) {
 
   // The target repo: a config whose bdd commands copy the scripted agent's report, a DoD with one run: line, and
   // no other policy file, so the factory's defaults run.
+  // bdd.run is wrapped in `sh -c` (PBI 185), so the `--dry-run` Red adds lands in $0 and its dry run copies the run's report.
   const cp = (name: string) => `mkdir -p reports && cp "${fwd(join(fixtures, name))}" reports/bdd.ndjson`;
   git(root, "init", "-q", "--bare", "-b", "main", origin);
   git(root, "init", "-q", "-b", "main", seed);
   git(seed, "config", "user.email", "person@example.com");
   git(seed, "config", "user.name", "person");
   mkdirSync(join(seed, ".factory"));
-  const config = `bdd:\n  parse: ${JSON.stringify(cp("parse.ndjson"))}\n  run: ${JSON.stringify(cp("run.ndjson"))}\n  report: reports/bdd.ndjson\ncommands:\n  test: "true"\n  lint: "true"\n`;
+  const config = `bdd:\n  parse: ${JSON.stringify(cp("parse.ndjson"))}\n  run: ${JSON.stringify(`sh -c '${cp("run.ndjson")}'`)}\n  report: reports/bdd.ndjson\ncommands:\n  test: "true"\n  lint: "true"\n`;
   const dod = "- [ ] Tests pass. `run: true`\n";
   writeFileSync(join(seed, ".factory", "config.yml"), config);
   writeFileSync(join(seed, ".factory", "dod.md"), dod);

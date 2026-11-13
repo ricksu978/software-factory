@@ -89,6 +89,13 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   git(dir, "config", "user.email", "c@example.com");
   git(dir, "config", "user.name", "c");
   writeFileSync(join(fixtures, "parse.ndjson"), report(names, "red"));
+  // The fake bdd.run copies run.ndjson. With `--dry-run` added, as Red adds it to list what bdd.run selects (PBI 185),
+  // it copies dry.ndjson if a test wrote one, or else parse.ndjson, as a bdd.run with no tag filter would list.
+  const fx = (f: string) => `"${fwd(join(fixtures, f))}"`;
+  writeFileSync(join(fixtures, "run.sh"), [
+    "mkdir -p reports",
+    `if [ "$1" = --dry-run ]; then if [ -f ${fx("dry.ndjson")} ]; then cp ${fx("dry.ndjson")} reports/bdd.ndjson; else cp ${fx("parse.ndjson")} reports/bdd.ndjson; fi`,
+    `else cp ${fx("run.ndjson")} reports/bdd.ndjson; fi`, ""].join("\n"));
 
   const calls: Call[] = [];
   const agentCalls: (AgentArgs & { stage: string })[] = [];
@@ -151,7 +158,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
       bdd: { parse: `mkdir -p reports && cp "${fwd(join(fixtures, "parse.ndjson"))}" reports/bdd.ndjson`,
-        run: `mkdir -p reports && cp "${fwd(join(fixtures, "run.ndjson"))}" reports/bdd.ndjson`, report: "reports/bdd.ndjson" },
+        run: `sh "${fwd(join(fixtures, "run.sh"))}"`, report: "reports/bdd.ndjson" },
       commands: { test: "true", lint: "true" } },
     policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
       risk: policy("risk", "Low.\n"), dod: policy("dod", "- [ ] Typecheck passes. `run: true`\n") },
@@ -749,15 +756,15 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
   });
 
-  // PBI 185. The fake bdd.run copies a report, so its `--tags` rides on an echo: Red reads the filter from the command.
+  // PBI 185. bdd.parse lists Criterion 2 as @local, and the dry run of bdd.run, like its real run, leaves it out.
   const localRun = (h: ReturnType<typeof harness>) => {
     const lines = report(["Criterion 1 holds", "Criterion 2 holds"], "red").split("\n");
     const parse = lines.map((l) => l.includes('"p1"') && l.includes("pickle") ? l.replace('{"name":"@ac-2"}', '{"name":"@ac-2"},{"name":"@local"}') : l);
     writeFileSync(join(h.root, "fx", "parse.ndjson"), parse.join("\n"));
-    h.deps.config.bdd.run = `${h.deps.config.bdd.run} && echo --tags "not @local"`;
+    writeFileSync(join(h.root, "fx", "dry.ndjson"), report(["Criterion 1 holds"], "red"));
   };
 
-  test("Red expects only the scenarios bdd.run's tag filter selects, so a @local one left out of the run passes", async () => {
+  test("Red expects only the scenarios a dry run of bdd.run lists, so a @local one left out of the run passes", async () => {
     const h = harness({ script: (_a, stage) => {
       if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
     } });
@@ -766,11 +773,30 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
   });
 
-  test("Red fails, naming the expression, when bdd.run's tag filter doesn't parse", async () => {
-    const h = harness();
-    h.deps.config.bdd.run = `${h.deps.config.bdd.run} && echo --tags "not ("`;
+  test("Red takes bdd.run's filter from the dry run, so a filter kept in an npm script or a profile counts too", async () => {
+    // bdd.run names no --tags at all, as `npm run bdd:cell` doesn't, yet its dry run leaves the @local scenario out.
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    localRun(h);
+    assert.doesNotMatch(h.deps.config.bdd.run, /--tags|-t /);
+    assert.equal(await h.run(), "done");
+  });
+
+  test("Red still fails with \"not run in the cell\" for a scenario the dry run lists but the run leaves out", async () => {
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
     assert.equal(await h.run(), "waiting");
-    assert.match(h.transitions().at(-1).question.body, /bdd\.run's tag expression "not \(" doesn't parse/);
+    assert.match(h.transitions().at(-1).question.body, /not run in the cell: Criterion 2 holds/);
+  });
+
+  test("Red fails, naming the exit, when bdd.run's dry run writes no report", async () => {
+    const h = harness();
+    // `sh -c '<script>' --dry-run` gives the script --dry-run as $0.
+    h.deps.config.bdd.run = `sh -c 'if [ "$0" = --dry-run ]; then echo bad flag >&2; exit 2; fi; ${h.deps.config.bdd.run}'`;
+    assert.equal(await h.run(), "waiting");
+    assert.match(h.transitions().at(-1).question.body, /bdd\.run with --dry-run added wrote no report to reports\/bdd\.ndjson \(exit 2\): bad flag/);
   });
 
   test("a cell resumed at open-pr still lists each scenario in the PR body", async () => {
