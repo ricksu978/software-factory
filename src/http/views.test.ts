@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { runInNewContext } from "node:vm";
 import { activityPage, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
@@ -233,7 +234,7 @@ describe("readiness spend (PBI 132)", () => {
     assert.ok(section, "no Readiness checks section right after Stages");
     const row = /<tbody>([\s\S]*)<\/tbody>/.exec(section)![1];
     assert.match(row, /<time datetime="2026-11-09T10:15:00.000Z">2026-11-09 10:15<\/time>/);
-    for (const v of ["claude-haiku-4-5", "1200 in, 80 out", "$0.0031"]) assert.ok(row.includes(v), v);
+    for (const v of ["claude-haiku-4-5", "1.2k in, 80 out", "&lt;$0.01"]) assert.ok(row.includes(v), v);
   });
 
   test("Run detail names each check's call, the judge or the split proposal", () => {
@@ -244,7 +245,7 @@ describe("readiness spend (PBI 132)", () => {
     ]), null);
     const rows = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(html.split("<h2>Readiness checks</h2>")[1])![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
     assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5<\/td>/);
-    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*\$0\.2100/);
+    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*<td title="\$0\.21">\$0\.21<\/td>/);
   });
 
   test("Run detail's stage row says when the PR reviewer needed a second ask, and why (PBI 190)", () => {
@@ -261,6 +262,85 @@ describe("readiness spend (PBI 132)", () => {
   test("the Phase 0 report shows readiness spend beside stage spend, to four places", () => {
     const html = phase0Page([{ item_id: "i1", title: "Pay by card", external_id: "1", repo: null, pr_url: null, merged_at: null, cost: 2, risk_tier: null, tier_reasons: null }], 0.0092, null);
     assert.match(html, /<dl><dt>Stage spend<\/dt><dd>\$2\.00<\/dd><dt>Readiness spend<\/dt><dd>\$0\.0092<\/dd><\/dl>/);
+  });
+});
+
+describe("Run detail's readable numbers and local times (PBI 189)", () => {
+  const stage = { stage_id: "build", attempt: 1, model: "claude-opus-5-5", tokens_in: 2149999, tokens_out: 48210, cost_usd: "0.5291", status: "passed", transcript_ref: null,
+    started_at: new Date("2026-11-09T15:30:00Z"), ended_at: new Date("2026-11-09T16:42:20Z") };
+  const detail = (over: Partial<RunDetail>): RunDetail => ({
+    item: { id: "i1", title: "Export a month", state: "InProgress", external_id: "189", repo: null }, run: null, policies: [], stages: [stage],
+    readiness: [{ model: "claude-haiku-4-5", tokensIn: 1240, tokensOut: 80, costUsd: 0.055, ranAt: new Date("2026-11-09T23:30:00Z") }],
+    question: null, criteria: null, scope: null, pending: [], features: [], verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+  const openRun: RunDetail["run"] = { sop_version: null, config_sha: null, scenarios_sha: null, features_lock_sha: null, risk_tier: null, tier_reasons: null, next_stage: "build", open: true };
+  const rowOf = (html: string, section: string) => /<tbody><tr>([\s\S]*?)<\/tr>/.exec(html.split(`<h2>${section}</h2>`)[1])![1];
+
+  test("the Stages table shows readable tokens and cost, when the attempt started in the viewer's zone, and how long it took", () => {
+    const row = rowOf(runDetailPage(detail({ zone: "America/New_York" }), null), "Stages");
+    assert.match(row, /<td><time datetime="2026-11-09T15:30:00.000Z">2026-11-09 10:30<\/time><\/td><td>1h 12m<\/td><td title="2149999 in, 48210 out">2.1m in, 48.2k out<\/td><td title="\$0.5291">\$0.53<\/td>/);
+  });
+
+  test("an attempt still running shows the time so far", () => {
+    const html = runDetailPage(detail({ stages: [{ ...stage, ended_at: null, status: "started" }], run: openRun, now: new Date("2026-11-09T15:36:30Z") }), null);
+    assert.match(rowOf(html, "Stages"), /<td>6m 30s so far<\/td>/);
+  });
+
+  test("an attempt left without an end once its item or run moved on doesn't count on against now", () => {
+    const dead = { stages: [{ ...stage, ended_at: null, status: "started" }], now: new Date("2026-11-10T17:35:00Z") };
+    for (const over of [{ run: { ...openRun, open: false } }, { run: openRun, item: { ...detail({}).item, state: "Queued" } }, {}]) {
+      const row = rowOf(runDetailPage(detail({ ...dead, ...over }), null), "Stages");
+      assert.match(row, /<td>didn&#39;t finish<\/td>|<td>didn't finish<\/td>/);
+      assert.doesNotMatch(row, /so far/);
+    }
+  });
+
+  test("a dead cell's attempt left open on a run a new cell claimed doesn't count on against now", () => {
+    const deadRow = { ...stage, ended_at: null, status: "started", started_at: new Date("2026-11-09T15:30:00Z") };
+    const liveRow = { ...stage, attempt: 2, ended_at: null, status: "started", started_at: new Date("2026-11-10T17:30:00Z") };
+    const html = runDetailPage(detail({ stages: [deadRow, liveRow], run: openRun, now: new Date("2026-11-10T17:35:00Z") }), null);
+    const rows = html.split("<h2>Stages</h2>")[1].split("</tbody>")[0].split("<tr>").slice(2);
+    assert.match(rows[0], /<td>didn&#39;t finish<\/td>|<td>didn't finish<\/td>/);
+    assert.doesNotMatch(rows[0], /so far/);
+    assert.match(rows[1], /<td>5m 0s so far<\/td>/);
+  });
+
+  test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
+    const row = rowOf(runDetailPage(detail({ zone: "Asia/Tokyo" }), null), "Readiness checks");
+    assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5<\/td><td title="1240 in, 80 out">1.2k in, 80 out<\/td><td title="\$0.055">\$0.06<\/td>/);
+  });
+
+  test("no column heading says UTC, and the page says which zone its times show in", () => {
+    const html = runDetailPage(detail({}), null);
+    assert.doesNotMatch(html, /<th[^>]*>[^<]*UTC/);
+    assert.match(html, /Times show in UTC\./);
+    assert.match(html, /document\.cookie = sent/);
+  });
+
+  /** Runs the page's zone script in a browser in `tz` whose cookie jar keeps writes or not, and counts reloads. */
+  const runZoneScript = (html: string, tz: string, keepsCookies: boolean, jar = "") => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1];
+    let reloads = 0;
+    const document = {
+      get cookie() { return jar; },
+      set cookie(v: string) { if (keepsCookies) jar = v.split(";")[0]; },
+    };
+    runInNewContext(script, { document, location: { reload: () => reloads++ }, Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: tz }) }) } });
+    return reloads;
+  };
+
+  test("a browser in another zone sets the cookie and reloads once", () => {
+    const html = runDetailPage(detail({}), null);
+    assert.equal(runZoneScript(html, "Europe/Paris", true), 1);
+    assert.equal(runZoneScript(html, "Europe/Paris", true, "tz=Europe%2FParis"), 0);
+  });
+
+  test("a browser that blocks cookies never reloads, so the page can't loop", () => {
+    assert.equal(runZoneScript(runDetailPage(detail({}), null), "Europe/Paris", false), 0);
+  });
+
+  test("a browser already in the page's zone doesn't reload", () => {
+    assert.equal(runZoneScript(runDetailPage(detail({ zone: "Europe/Paris" }), null), "Europe/Paris", true), 0);
   });
 });
 
