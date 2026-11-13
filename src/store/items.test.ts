@@ -165,6 +165,33 @@ describe("store", dbTest, () => {
     await db.pool.query(`delete from "user" where subject like 's-%'`);
   });
 
+  test("seed-owner adds or promotes an owner by issuer, and refuses an issuer that isn't a URL", async () => {
+    const seed = (...words: string[]) =>
+      spawnSync(process.execPath, ["src/store/migrate-cli.ts", "seed-owner", ...words], { env: { ...process.env, FACTORY_DB_URI: db.url }, encoding: "utf8" });
+    const none = seed("subject=i-0");
+    assert.equal(none.status, 1);
+    assert.match(none.stderr, /provider=/);
+    assert.match(none.stderr, /issuer=/);
+    for (const issuer of ["issuer=keycloak", "issuer=", "issuer=ftp://id.example.com"]) {
+      const r = seed(issuer, "subject=i-0");
+      assert.equal(r.status, 1, issuer);
+      assert.match(r.stderr, /issuer.*must be a URL/i, issuer);
+    }
+    assert.equal(seed("issuer=https://id.example.com", "provider=google", "subject=i-0").status, 1, "both a provider and an issuer");
+    assert.match(seed("issuer=https://id.example.com").stderr, /subject=/);
+    const ok = seed("issuer=https://id.example.com", "subject=i-1", "email=me@example.com", "product-owner");
+    assert.equal(ok.status, 0, ok.stderr);
+    await db.pool.query(`update "user" set role = 'viewer' where subject = 'i-1'`);
+    assert.equal(seed("issuer=https://id.example.com", "subject=i-1").status, 0);
+    assert.equal(seed("issuer=http://localhost:7430/realms/factory", "subject=i-1").status, 0);
+    const rows = (await db.pool.query(`select issuer, provider, email, role, product_owner from "user" where subject like 'i-%' order by issuer`)).rows;
+    assert.deepEqual(rows, [
+      { issuer: "http://localhost:7430/realms/factory", provider: null, email: null, role: "owner", product_owner: false },
+      { issuer: "https://id.example.com", provider: null, email: "me@example.com", role: "owner", product_owner: true },
+    ]);
+    await db.pool.query(`delete from "user" where subject like 'i-%'`);
+  });
+
   test("migrate-cli seeds sources and the local dev owner, idempotently", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sources-"));
     try {
