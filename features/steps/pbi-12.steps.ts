@@ -15,7 +15,8 @@ export { baseFiles };
 
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
-type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }) => Promise<string>;
+type Spend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }, spent?: (s: Spend) => void) => Promise<string>;
 export type Logic = { judgePrompt: string; version: number; splitPrompt: string };
 type Poller = {
   pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic; split?: SplitDeps }) => Promise<unknown>;
@@ -39,6 +40,8 @@ export type Ctx = {
   split?: SplitDeps;
   /** PBI 149: each item's updatedAt and each of their repos' head and readiness files, as the setup left them. */
   baseline?: Baseline;
+  /** PBI 168: the judge reports what each call spent, so the gate records a readiness check. Unset, it reports none. */
+  spend?: boolean;
   polls: number;
   error?: unknown;
 };
@@ -49,8 +52,9 @@ export function ctx(world: object): Ctx {
   return w.pbi12;
 }
 
-const judge = (c: Ctx): Judge => async (item, dor) => {
+const judge = (c: Ctx): Judge => async (item, dor, spent) => {
   c.asked.set(item.externalId, (c.asked.get(item.externalId) ?? 0) + 1);
+  if (c.spend) spent?.({ model: "fake-judge", tokensIn: 10, tokensOut: 5, costUsd: 0.001 });
   if (c.judge === "throw") throw new Error("usage limit reached");
   const line = (index: number) => {
     const failed = c.judge === "fail" && (!c.failLine || c.failLine.index === index);
