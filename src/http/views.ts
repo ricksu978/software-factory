@@ -156,7 +156,9 @@ export type RunDetail = {
     /** The run's PR, and whether the run is still open: only an open run's PR shows (PBI 145). */
     pr_number?: number | null; pr_url?: string | null; open?: boolean } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
-  stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null }[];
+  stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null;
+    /** PBI 190: the PR reviewer's restates in the attempt. */
+    restates?: { round: number; reason: string }[] }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
   readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
@@ -183,8 +185,8 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .join("")}</tbody></table>`
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
-    ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${escapeHtml(s.tokens_in ?? 0)} in, ${escapeHtml(s.tokens_out ?? 0)} out</td><td>$${escapeHtml(s.cost_usd ?? "0")}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td></tr>`)
+    ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${escapeHtml(s.tokens_in ?? 0)} in, ${escapeHtml(s.tokens_out ?? 0)} out</td><td>$${escapeHtml(s.cost_usd ?? "0")}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((r) => `Needed a second ask of the PR reviewer in round ${escapeHtml(r.round)}: ${escapeHtml(r.reason)}`).join("<br>")}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
