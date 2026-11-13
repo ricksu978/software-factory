@@ -21,6 +21,11 @@ export type AgentArgs = {
   maxTurns?: number; mode: "cell" | "judge"; webTools?: ("WebSearch" | "WebFetch")[]; signal: AbortSignal;
   /** A session to carry on, by the sessionId an earlier call returned, as when the PR reviewer restates (PBI 190). */
   resume?: string;
+  /**
+   * PBI 209: told of each message as the call writes it, as the line the message takes in the call's transcript,
+   * without its newline, so a stage's transcript so far can be uploaded while the call runs.
+   */
+  onMessage?: (line: string) => void;
 };
 
 const WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
@@ -77,7 +82,9 @@ export function agentOptions(a: AgentArgs): Options {
     disallowedTools: WEB_TOOLS.filter((t) => !a.webTools?.includes(t)), ...(agents ? { agents } : {}) };
 }
 
-export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">> {
+/** Folds a call's messages into its result. `onMessage` hears each one's transcript line as it arrives (PBI 209). */
+export async function foldMessages(msgs: AsyncIterable<SDKMessage>, _onMessage?: (line: string) => void): Promise<Omit<AgentResult, "model">> {
+  // ponytail: PBI 209 red stub. onMessage isn't told of any message yet.
   const r: Omit<AgentResult, "model"> = { ok: false, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0, limit: null, usage: null, transcript: "" };
   const lines: string[] = [];
   try {
@@ -112,7 +119,7 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omi
 }
 
 export async function runAgent(a: AgentArgs): Promise<AgentResult> {
-  return { ...(await foldMessages(query({ prompt: a.prompt, options: agentOptions(a) }))), model: a.model };
+  return { ...(await foldMessages(query({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
 }
 
 // Typed by the fields the judge reads, so Task 9's Sop and Policy fit without importing them.

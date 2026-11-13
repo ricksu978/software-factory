@@ -220,14 +220,28 @@ export type MeteredStage = {
   usage: AgentResult["usage"];
 };
 
+/** PBI 209: the most often a running stage's transcript so far is uploaded. */
+export const TRANSCRIPT_UPLOAD_MS = 15_000;
+
+/** PBI 209: where a running stage's transcript so far goes, the attempt's usual path, as CellApi.upload puts it. */
+export type TranscriptUploads = {
+  upload(b: { kind: "transcript"; stageId: string; attempt: number; body: string }): Promise<void>;
+};
+
 /**
  * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
  * is an error, and the model is never asked, so no call can go unrecorded.
+ *
+ * PBI 209: with `uploads`, while an attempt is open its transcript so far, every message its agent calls have written,
+ * is uploaded on a setInterval of TRANSCRIPT_UPLOAD_MS, when messages have arrived since the last upload that worked.
+ * A failed upload is logged and skipped, and never fails the call. close() stops the uploads, and settled() resolves
+ * once none is in flight, so the complete transcript the caller uploads after it lands last.
  */
-export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
+export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>, _uploads?: TranscriptUploads): {
   open(stageId: string, attempt: number): void;
   close(): MeteredStage | null;
   ask(a: AgentArgs): Promise<AgentResult>;
+  settled(): Promise<void>;
 } {
   let open: MeteredStage | null = null;
   return {
@@ -250,6 +264,8 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
       if (r.usage) stage.usage = r.usage;
       return r;
     },
+    // ponytail: PBI 209 red stub. Nothing is uploaded while a stage runs yet, so nothing is ever in flight.
+    async settled() {},
   };
 }
 
