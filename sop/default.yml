@@ -1,7 +1,7 @@
 # The Phase 0 SOP (spec §6 "SOP", plan Task 14 Step 1). Model IDs live here and nowhere else.
 # Phase 0 records the budget but enforces only wall_clock, which counts time with a lease.
 sop: default
-version: 0.1.0
+version: 0.2.0
 budget:              # per PBI, across all stages
   usd: 40
   wall_clock: 8h     # runs only while the item holds a WIP slot
@@ -57,6 +57,15 @@ stages:
     model: coding
     prompt: sop/prompts/open-pr.md
     on_fail: needs_input
+  - id: pr-review          # PBI 128: the factory reviews its own PR before people do
+    agent: factory-pr-reviewer
+    addresser: factory-pr-addresser
+    model: coding
+    prompt: sop/prompts/pr-review.md
+    loop_until: "APPROVED"
+    max_replies: 2         # a finding still held after the addresser replied to it twice goes to needs_input
+    max_rounds: 5
+    on_fail: needs_input   # CI failing on the addresser's fix goes back to green instead
   - id: address
     agent: factory-pr-addresser
     model: coding

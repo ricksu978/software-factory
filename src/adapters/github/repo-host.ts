@@ -15,7 +15,7 @@ export type AppLike = {
   getInstallationOctokit(installationId: number): Promise<unknown>;
 };
 
-// A cell token can push code, open a PR and comment. With nothing on statuses or checks it can't mark its own PR
+// A cell token can push code, open a PR, comment, and post and resolve the PR review stage's own review threads. With nothing on statuses or checks it can't mark its own PR
 // green, which only the control plane's risk-approval check may do (spec §9). Without an explicit set, GitHub gives
 // the token every permission the App holds.
 export const CELL_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write" } as const;
@@ -26,7 +26,8 @@ const split = (repo: string) => {
 };
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
-type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState">;
+type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState"
+  | "openReviewComments" | "postReview" | "resolveThread">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -39,6 +40,43 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
 
     async commentOnPr(repo, prNumber, body) {
       await (await client()).request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", { ...split(repo), issue_number: prNumber, body });
+    },
+
+    async openReviewComments(repo, prNumber) {
+      const r = split(repo);
+      const res = await (await client()).graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber });
+      const threads = res.repository.pullRequest.reviewThreads.nodes as { id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { author: Author; body: string }[] } }[];
+      const comments = threads.filter((t) => !t.isResolved).flatMap((t) =>
+        t.comments.nodes.map((c): ReviewComment => ({ threadId: t.id, path: t.path, line: t.line, author: authorLogin(c.author), body: c.body })),
+      );
+      // ponytail: one page of 100 reviews, oldest first, as in prState; a PR with more would miss the newest summaries.
+      const reviews = (res.repository.pullRequest.reviews.nodes as { id: string; state: string; body: string; author: Author }[])
+        .filter((v) => v.state !== "PENDING")
+        .map((v): Review => ({ id: v.id, author: authorLogin(v.author), state: v.state.toLowerCase() as Review["state"], body: v.body }));
+      return [...comments, ...standingSummaries(reviews)];
+    },
+
+    async postReview({ repo, prNumber, commitSha, body, comments }) {
+      const gh = await client();
+      const r = split(repo);
+      // Built field by field, so an event a caller slips in never reaches GitHub. Only COMMENT is ever sent.
+      const review = (await gh.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
+        ...r, pull_number: prNumber, commit_id: commitSha, body, event: "COMMENT",
+        comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })),
+      })).data as { id: number };
+      if (!comments.length) return { threads: [] };
+      // REST answers with the review, not its threads, so the threads whose first comment belongs to it are looked up.
+      // ponytail: the PR's first 100 threads; on a PR with more, a new thread past them goes untracked.
+      const res = await gh.graphql<any>(OWN_THREADS, { owner: r.owner, repo: r.repo, number: prNumber });
+      const nodes = res.repository.pullRequest.reviewThreads.nodes as { id: string; path: string; line: number | null; comments: { nodes: { body: string; pullRequestReview: { databaseId: number | null } | null }[] } }[];
+      return { threads: nodes.filter((t) => t.comments.nodes[0]?.pullRequestReview?.databaseId === review.id)
+        .map((t) => ({ threadId: t.id, path: t.path, line: t.line ?? 0, body: t.comments.nodes[0].body })) };
+    },
+
+    async resolveThread(_repo, threadId) {
+      // GitHub answers resolveReviewThread on a resolved thread with the thread as it stands, so a second call is a no-op.
+      // Checked live on 2026-11-09: isResolved and resolvedBy came back unchanged, with no error.
+      await (await client()).graphql(RESOLVE, { thread: threadId });
     },
 
     // A cell asks it too, with no trusted logins, to learn whether its branch's PR already merged (PBI 142).
@@ -170,6 +208,10 @@ function authorLogin(a: Author): string {
   return a.__typename === "Bot" ? `${a.login}[bot]` : a.login;
 }
 
+const OWN_THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
+    id path line comments(first: 1) { nodes { body pullRequestReview { databaseId } } } } } } } }`;
+
 const RESOLVE = `mutation($thread: ID!) {
   resolveReviewThread(input: { threadId: $thread }) { thread { id isResolved } } }`;
 
@@ -227,33 +269,6 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return (await gh.request("GET /repos/{owner}/{repo}/branches/{branch}", { ...r, branch })).data.commit.sha;
     },
 
-    async openReviewComments(repo, prNumber) {
-      const r = split(repo);
-      const res = await (await client()).graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber });
-      const threads = res.repository.pullRequest.reviewThreads.nodes as { id: string; isResolved: boolean; path: string; line: number | null; comments: { nodes: { author: Author; body: string }[] } }[];
-      const comments = threads.filter((t) => !t.isResolved).flatMap((t) =>
-        t.comments.nodes.map((c): ReviewComment => ({ threadId: t.id, path: t.path, line: t.line, author: authorLogin(c.author), body: c.body })),
-      );
-      // ponytail: one page of 100 reviews, oldest first, as in prState; a PR with more would miss the newest summaries.
-      const reviews = (res.repository.pullRequest.reviews.nodes as { id: string; state: string; body: string; author: Author }[])
-        .filter((v) => v.state !== "PENDING")
-        .map((v): Review => ({ id: v.id, author: authorLogin(v.author), state: v.state.toLowerCase() as Review["state"], body: v.body }));
-      return [...comments, ...standingSummaries(reviews)];
-    },
-
-    async postReview({ repo, prNumber, commitSha, body, comments }) {
-      // Built field by field, so an event a caller slips in never reaches GitHub. Only COMMENT is ever sent.
-      await (await client()).request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
-        ...split(repo), pull_number: prNumber, commit_id: commitSha, body, event: "COMMENT",
-        comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })),
-      });
-    },
-
-    async resolveThread(_repo, threadId) {
-      // GitHub answers resolveReviewThread on a resolved thread with the thread as it stands, so a second call is a no-op.
-      // Checked live on 2026-11-09: isResolved and resolvedBy came back unchanged, with no error.
-      await (await client()).graphql(RESOLVE, { thread: threadId });
-    },
   };
 }
 

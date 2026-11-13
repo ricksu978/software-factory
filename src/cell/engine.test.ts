@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, commandEnv, loadInputs, runCell, stageMeter, type CellContext, type CellDeps } from "./engine.ts";
+import { changedFiles, commandEnv, loadInputs, readReview, runCell, stageMeter, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -120,7 +120,8 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
     agent: async (a) => {
       agentCalls.push({ ...a, stage });
       const judged = [...a.prompt.matchAll(/^\{"index":(\d+),"criterion":".*"\}$/gm)].map((m) => JSON.stringify({ index: Number(m[1]), status: "passed", reason: "ok" }));
-      let text = a.agent === "factory-self-reviewer" ? `${judged.join("\n")}\nAPPROVED` : judged.length ? judged.join("\n") : "@ac-1\n@ac-2";
+      let text = a.agent === "factory-self-reviewer" ? `${judged.join("\n")}\nAPPROVED` : a.agent === "factory-pr-reviewer" ? "APPROVED"
+        : judged.length ? judged.join("\n") : "@ac-1\n@ac-2";
       // The shadow risk classifier's two passes at open-pr (Task 16).
       if (a.mode === "judge" && a.prompt.includes('{"tier":')) text = JSON.stringify({ tier: "Low", reason: "a fake Low" });
       if (a.mode === "judge" && a.prompt.includes('{"needsPerson":')) text = JSON.stringify({ needsPerson: false, reason: "a fake no" });
@@ -141,6 +142,11 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       replyToThread: async (_r, threadId, body) => rec("/repo/replyToThread", { threadId, body }),
       commentOnPr: async (_r, prNumber, body) => rec("/repo/commentOnPr", { prNumber, body }),
       prState: async () => (rec("/repo/prState"), { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: null }),
+      postReview: async (p) => {
+        rec("/repo/postReview", p);
+        return { threads: p.comments.map((c, i) => ({ threadId: `rt-${calls.length}-${i}`, ...c })) };
+      },
+      resolveThread: async (_r, threadId) => rec("/repo/resolveThread", { threadId }),
     },
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
@@ -278,7 +284,7 @@ describe("runCell", () => {
     const h = harness();
     await h.run();
     assert.ok(!h.agentCalls.some((a) => a.stage === "understand" || a.stage === "specify"));
-    assert.deepEqual(h.started().filter((s, i, all) => all.indexOf(s) === i), ["red", "green", "self-review", "open-pr"]);
+    assert.deepEqual(h.started().filter((s, i, all) => all.indexOf(s) === i), ["red", "green", "self-review", "open-pr", "pr-review"]);
   });
 
   test("a base conflict the agent can't clear blocks with its paths, records the merge pass's cost, and no stage runs", async () => {
@@ -403,12 +409,36 @@ describe("runCell", () => {
     const h = harness({ nextStage: "open-pr", ctx: { prNumber: null } });
     await h.run();
     assert.ok(!h.routes().includes("/repo/prState"));
-    assert.equal(h.prs.length, 1);
+    // Opened once, then written again with the PR review's rounds.
+    assert.equal(h.prs.length, 2);
+  });
+
+  test("reviewers are asked only once the PR review passes, after every review the factory posts", async () => {
+    const h = harness();
+    assert.equal(await h.run(), "done");
+    const r = h.routes();
+    const asked = r.indexOf("/repo/requestReviewers");
+    const passed = h.calls.findIndex((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "passed");
+    assert.ok(asked > r.lastIndexOf("/repo/postReview"), "no reviewer is asked while the factory's rounds run");
+    assert.ok(asked < passed, "asked inside the pr-review attempt");
+    assert.equal(r.filter((x) => x === "/repo/requestReviewers").length, 1);
+  });
+
+  test("an error while asking for reviewers ends the pr-review attempt failed with its message, and moves no item", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); };
+    await assert.rejects(h.run(), /GitHub answered 502/);
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "pr-review").at(-1)!.body;
+    assert.deepEqual([last.status, last.message], ["failed", "GitHub answered 502"]);
+    assert.deepEqual(h.transitions(), []);
   });
 
   for (const [step, fail] of [
     ["opening the PR", (h: ReturnType<typeof harness>) => { h.deps.repoHost.openOrUpdatePr = async () => { throw new Error("GitHub answered 502"); }; }],
-    ["asking for reviewers", (h: ReturnType<typeof harness>) => { h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); }; }],
+    ["asking for reviewers on a host with no review methods", (h: ReturnType<typeof harness>) => {
+      delete (h.deps.repoHost as { postReview?: unknown }).postReview;
+      h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); };
+    }],
     ["reading CI", (h: ReturnType<typeof harness>) => { h.deps.api.checks = async () => { throw new Error("GitHub answered 502"); }; }],
   ] as const) {
     test(`an error while ${step} ends the open-pr attempt failed with its message, and still throws`, async () => {
@@ -424,21 +454,22 @@ describe("runCell", () => {
   test("each passed stage sends its own prompted call's text as message, never a judge's or the classifier's", async () => {
     const h = harness({
       // Every stage's own prompt answers with its stage. The DoD judge, the reviewer and the classifier keep their answers.
-      script: (a, stage) => a.mode === "cell" && !a.prompt.startsWith("# Definition of Done") && a.agent !== "factory-self-reviewer"
+      script: (a, stage) => a.mode === "cell" && !a.prompt.startsWith("# Definition of Done") && !a.agent?.endsWith("-reviewer")
         ? { text: `said at ${stage}` } : undefined,
     });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are updated.\n- [ ] Typecheck passes. `run: true`\n");
     assert.equal(await h.run(), "done");
     const passed = h.calls.filter((c) => c.route === "/stage" && c.body.status === "passed").map((c) => [c.body.stageId, c.body.message]);
-    assert.deepEqual(passed.map(([s]) => s), ["red", "green", "self-review", "open-pr"]);
-    assert.deepEqual(passed.filter(([s]) => s !== "self-review"), [["red", "said at red"], ["green", "said at green"], ["open-pr", "said at open-pr"]]);
+    assert.deepEqual(passed.map(([s]) => s), ["red", "green", "self-review", "open-pr", "pr-review"]);
+    assert.deepEqual(passed.filter(([s]) => !s.endsWith("review")), [["red", "said at red"], ["green", "said at green"], ["open-pr", "said at open-pr"]]);
     assert.match(passed[2][1], /APPROVED$/);
+    assert.equal(passed[4][1], "APPROVED");
   });
 
   test("each stage ends with /stage passed, then its uploads, then the transition", async () => {
     const h = harness();
     assert.equal(await h.run(), "done");
-    const tail = h.calls.slice(h.calls.findIndex((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed"));
+    const tail = h.calls.slice(h.calls.findIndex((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "passed"));
     assert.deepEqual(tail.map((c) => c.route), ["/stage", "/upload-url", "/lease", "/transition"]);
     const s = harness({ nextStage: "specify", signedOff: false });
     assert.equal(await s.run(), "waiting");
@@ -494,7 +525,7 @@ describe("runCell", () => {
     // run back to green, which is PBI 105's failure.
     h.deps.policies.dod = policy("dod", `- [ ] Dependencies are installed. \`run: test -f "${marker}"\`\n`);
     assert.equal(await h.run(), "done");
-    assert.deepEqual(h.started(), ["open-pr"], "the dod.md check passed at open-pr, so green never ran again");
+    assert.deepEqual(h.started(), ["open-pr", "pr-review"], "the dod.md check passed at open-pr, so green never ran again");
     assert.ok(existsSync(join(h.root, "setup-ran")), "setup ran");
     assert.equal(fwd(readFileSync(join(h.root, "setup-ran"), "utf8").trim()).endsWith("/work"), true, "in the checkout");
   });
@@ -590,7 +621,7 @@ describe("runCell", () => {
     const h = harness({ nextStage: "red" });
     assert.equal(await h.run(), "done");
     const own = h.agentCalls.filter((a) => a.mode === "cell" && (a.agent || !/^\{"index":\d+,"criterion":/m.test(a.prompt)));
-    assert.deepEqual([...new Set(own.map((a) => a.stage))], ["red", "green", "self-review", "open-pr"]);
+    assert.deepEqual([...new Set(own.map((a) => a.stage))], ["red", "green", "self-review", "open-pr", "pr-review"]);
     for (const a of own) assert.match(a.prompt, /## The locked feature files[\s\S]*features\/pbi-482\.feature/, `the ${a.stage} brief`);
   });
 
@@ -847,11 +878,11 @@ describe("runCell", () => {
   });
 
   // A stop the transition's guard finds after the stage passed leaves no attempt open, and the claim still ends.
-  test("a stop found after open-pr passed, before its transition, releases the claim", async () => {
+  test("a stop found after pr-review passed, before its transition, releases the claim", async () => {
     let calls: Call[] = [];
     const h = harness({
       nextStage: "open-pr",
-      lease: async () => ({ stop: calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed") }),
+      lease: async () => ({ stop: calls.some((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "passed") }),
     });
     calls = h.calls;
     assert.equal(await h.run(), "stopped");
@@ -898,5 +929,172 @@ describe("loadInputs", () => {
     assert.ok(!("blocked" in r));
     assert.equal(r.policies.prReview.source, "default");
     assert.equal(r.policies.dod.criteria.length, 1);
+  });
+});
+
+describe("readReview", () => {
+  const open = (threadId: string): ReviewThread => ({ threadId, path: "a.ts", line: 1, body: "Name it", replies: 0, reason: null, conversation: [] });
+
+  test("reads new findings and a verdict for each of the factory's open threads, and ignores any other thread", () => {
+    const r = readReview([
+      '{"thread":"T1","settled":true,"reason":"fixed"}',
+      '{"thread":"T2","settled":false,"reason":"still skips zero"}',
+      '{"thread":"PT-9","settled":true,"reason":"a person\'s"}',
+      '{"finding":"Misses the VAT.","path":"src/t.ts","line":12}',
+      "OPEN: 2",
+    ].join("\n"), [open("T1"), open("T2")]);
+    assert.ok(!("unreadable" in r));
+    assert.deepEqual(r.findings, [{ path: "src/t.ts", line: 12, body: "Misses the VAT." }]);
+    assert.deepEqual([...r.verdicts.keys()], ["T1", "T2"]);
+    assert.equal(r.verdicts.get("T2")!.reason, "still skips zero");
+  });
+
+  test("an answer that ends with neither APPROVED nor OPEN is unreadable", () => {
+    assert.ok("unreadable" in readReview("Looks fine to me.", []));
+  });
+
+  test("a finding with no path or line is unreadable, since it can't be a line comment", () => {
+    assert.ok("unreadable" in readReview('{"finding":"Misses the VAT."}\nOPEN: 1', []));
+    assert.ok("unreadable" in readReview('{"finding":"Misses the VAT.","path":"a.ts","line":0}\nOPEN: 1', []));
+  });
+
+  test("OPEN with nothing open behind it is unreadable, and OPEN: 0 with nothing open reads as clean", () => {
+    assert.ok("unreadable" in readReview('{"thread":"T1","settled":true,"reason":"ok"}\nOPEN: 1', [open("T1")]));
+    const clean = readReview('{"thread":"T1","settled":true,"reason":"ok"}\nOPEN: 0', [open("T1")]);
+    assert.ok(!("unreadable" in clean) && clean.findings.length === 0);
+  });
+
+  test("a thread the reviewer didn't judge counts as held, so OPEN with only that is readable", () => {
+    assert.ok(!("unreadable" in readReview("OPEN: 1", [open("T1")])));
+  });
+});
+
+describe("the PR review stage", () => {
+  // A reviewer that answers from a list, one answer per round, and APPROVED once the list runs out. An APPROVED that
+  // leaves an open thread unjudged keeps that thread open, so a later answer judges each thread its brief holds.
+  const reviewer = (answers: ((prompt: string) => string)[]): Script => (a) => {
+    if (a.agent !== "factory-pr-reviewer") return;
+    const next = answers.shift();
+    return { text: next ? next(a.prompt) : "APPROVED" };
+  };
+  const threadIn = (prompt: string) => /"threadId": "([^"]+)"/.exec(prompt)?.[1];
+
+  test("a finding is posted, fixed by the addresser in the same cell, resolved, and the PR body states 2 rounds", async () => {
+    const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"fixed"}\nAPPROVED`];
+    const h = harness({ nextStage: "open-pr", script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") { writeFileSync(join(a.cwd, "app.txt"), "fixed\n"); return; }
+      return reviewer(answers)(a, stage);
+    } });
+    assert.equal(await h.run(), "done");
+    const posts = h.calls.filter((c) => c.route === "/repo/postReview").map((c) => c.body);
+    assert.deepEqual(posts.map((p) => p.comments.length), [1, 0]);
+    assert.notEqual(posts[0].commitSha, posts[1].commitSha, "the second review is at the addresser's fix");
+    assert.equal(posts[1].commitSha, git(h.dir, "rev-parse", "HEAD"));
+    assert.equal(h.calls.filter((c) => c.route === "/repo/resolveThread").length, 1);
+    assert.match(h.prs.at(-1)!.body, /PR review took 2 rounds\./);
+    const order = h.calls.map((c) => c.route === "/stage" ? `${c.body.stageId}:${c.body.status}` : c.route).filter((r) => r.startsWith("pr-review") || r === "/transition");
+    assert.deepEqual(order, ["pr-review:started", "pr-review:passed", "/transition"]);
+    assert.equal(h.transitions()[0].event, "pr_opened");
+    assert.equal(h.transitions()[0].tier, "Low");
+  });
+
+  test("a held thread gets the reviewer's reason as a reply, and a reply from the addresser goes on its thread", async () => {
+    const answers = [() => '{"finding":"Rename it.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":false,"reason":"The name still hides the VAT."}\nOPEN: 1`,
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"The reply holds."}\nAPPROVED`];
+    const h = harness({ nextStage: "open-pr", script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") {
+        const file = /reply file is `([^`]+)`/.exec(a.prompt)![1];
+        appendFileSync(file, JSON.stringify({ threadId: threadIn(a.prompt), body: "It matches the invoice." }) + "\n");
+        return;
+      }
+      return reviewer(answers)(a, stage);
+    } });
+    assert.equal(await h.run(), "done");
+    const replies = h.calls.filter((c) => c.route === "/repo/replyToThread").map((c) => c.body.body);
+    assert.deepEqual(replies.map((r) => r.replace(/[0-9a-f]{40}/, "<sha>")), ["It matches the invoice.", "Still open at <sha>: The name still hides the VAT.", "It matches the invoice."]);
+    const third = h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer")[2].prompt;
+    assert.match(third, /It matches the invoice\./);
+    assert.match(third, /The name still hides the VAT\./);
+  });
+
+  test("a finding still held after the addresser replied twice blocks, naming it, and the item never reaches InReview", async () => {
+    const h = harness({ nextStage: "open-pr", script: async (a) => {
+      if (a.agent === "factory-pr-addresser") {
+        appendFileSync(/reply file is `([^`]+)`/.exec(a.prompt)![1], JSON.stringify({ threadId: threadIn(a.prompt), body: "No." }) + "\n");
+        return;
+      }
+      if (a.agent !== "factory-pr-reviewer") return;
+      const t = threadIn(a.prompt);
+      return { text: t ? `{"thread":"${t}","settled":false,"reason":"still"}\nOPEN: 1` : '{"finding":"Rename it.","path":"app.txt","line":1}\nOPEN: 1' };
+    } });
+    assert.equal(await h.run(), "waiting");
+    assert.equal(h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer").length, 3);
+    const t = h.transitions();
+    assert.deepEqual(t.map((x) => x.event), ["blocked"]);
+    assert.match(t[0].question.body, /after the addresser replied 2 times/);
+    assert.match(t[0].question.body, /app\.txt:1.*Rename it\./);
+  });
+
+  test("a repo host that can't post a review gets no PR review, and open-pr hands the PR to people", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    delete h.deps.repoHost.postReview;
+    delete h.deps.repoHost.resolveThread;
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["open-pr"]);
+    assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-reviewer"));
+    assert.deepEqual(h.transitions().map((t) => t.event), ["pr_opened"]);
+    assert.doesNotMatch(h.prs.at(-1)!.body, /PR review took/);
+  });
+
+  test("an unreadable review blocks, and nothing is posted", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => "I think it's fine."]) });
+    assert.equal(await h.run(), "waiting");
+    assert.ok(!h.routes().includes("/repo/postReview"));
+    assert.match(h.transitions()[0].question.body, /couldn't read the PR reviewer's answer/);
+  });
+
+  test("a review GitHub turns down with a 422 blocks, naming the finding, and the item never reaches InReview", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => '{"finding":"Misses the VAT.","path":"app.txt","line":99}\nOPEN: 1']) });
+    h.deps.repoHost.postReview = async () => { throw Object.assign(new Error("Unprocessable Entity: Line could not be resolved"), { status: 422 }); };
+    assert.equal(await h.run(), "waiting");
+    const t = h.transitions();
+    assert.deepEqual(t.map((x) => x.event), ["blocked"]);
+    assert.match(t[0].question.body, /GitHub turned down the PR review/);
+    assert.match(t[0].question.body, /Line could not be resolved/);
+    assert.match(t[0].question.body, /app\.txt:99.*Misses the VAT\./);
+    assert.ok(h.calls.some((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status === "failed"));
+  });
+
+  test("any other postReview failure still fails the attempt and is thrown, as before", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1']) });
+    h.deps.repoHost.postReview = async () => { throw Object.assign(new Error("Bad gateway"), { status: 502 }); };
+    await assert.rejects(h.run(), /Bad gateway/);
+    assert.deepEqual(h.transitions(), []);
+  });
+
+  test("CI failing on the addresser's fix goes back to green with the fix's sha, and posts no review at it", async () => {
+    let fix = "";
+    const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"Green fixed it."}\nAPPROVED`];
+    const h = harness({ nextStage: "open-pr", script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") {
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        execFileSync("git", ["commit", "-qam", "fix"], { cwd: a.cwd });
+        fix = git(a.cwd, "rev-parse", "HEAD");
+        return;
+      }
+      if (stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done")) writeFileSync(join(a.cwd, "app.txt"), "green again\n");
+      return reviewer(answers)(a, stage);
+    } });
+    h.deps.api.checks = async (sha) => (sha === fix ? "failure" : "success");
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s, i, all) => s !== all[i - 1]), ["open-pr", "pr-review", "green", "self-review", "open-pr", "pr-review"]);
+    const greenBrief = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!.prompt;
+    assert.ok(greenBrief.includes(`CI failed on ${fix}`));
+    assert.ok(!h.calls.some((c) => c.route === "/repo/postReview" && c.body.commitSha === fix));
+    // The second pass checks the thread the first one left, and resolves it.
+    assert.equal(h.calls.filter((c) => c.route === "/repo/resolveThread").length, 1);
   });
 });

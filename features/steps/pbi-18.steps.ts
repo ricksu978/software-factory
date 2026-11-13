@@ -36,6 +36,8 @@ export type Ctx = {
   checks?: (sha: string) => Promise<string>;
   /** Extra fields for the cell's context, as PBI 140's steps add to resume a stage a restart cut short. */
   context?: Record<string, unknown>;
+  /** Wraps the scripted agent, as PBI 128's steps do to script the PR reviewer and the PR addresser. */
+  wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
   /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
 };
@@ -287,7 +289,7 @@ export async function runTheCell(world: object): Promise<void> {
         stageAttempts: {},
         ...c.context,
       },
-      agent: c.agent ? (a: any) => c.agent!(a, agent(c)) : agent(c),
+      agent: ((base) => c.agent ? (a: any) => c.agent!(a, base) : base)(c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c)),
       git: shellGit(c.dir, BRANCH),
       dir: c.dir,
       repoHost: c.repoHost ?? {
@@ -320,8 +322,9 @@ function lastTransition(c: Ctx): Record<string, any> {
   return t.body;
 }
 
+// A stage's retries collapse into one row, so a stage the run comes back to, as after "back to green", shows again.
 Then("the cell ran these stages, in order:", function (table: DataTable) {
-  const stages = ran(ctx(this)).filter((s, i, all) => all.indexOf(s) === i);
+  const stages = ran(ctx(this)).filter((s, i, all) => s !== all[i - 1]);
   assert.deepEqual(stages, table.hashes().map((r) => r.stage));
 });
 
