@@ -640,6 +640,7 @@ describe("pollOnce", dbTest, () => {
   });
   describe("the factory's merge (PBI 181)", () => {
     const dod = "## Definition of Done\n\n- [x] Tests pass\n";
+    const allow = (login: string) => db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', $1, 'owner', $1)`, [login]);
     async function ready(state = "InReview") {
       const h = await held(state, { pr: true });
       const p = host.prs.find((x) => x.number === h.pr)!;
@@ -649,6 +650,7 @@ describe("pollOnce", dbTest, () => {
     const events = async (kind: string) => (await db.pool.query<{ payload: any }>("select payload from event where kind = $1 and actor = 'system'", [kind])).rows.map((r) => r.payload);
 
     test("a clean, approved InReview PR is squash-merged at its head, the item moves to Accepted and the merge is logged", async () => {
+      await allow("Octo");
       const { ext, pr, run } = await ready();
       await poll();
       assert.deepEqual(host.mergeCalls, [{ repo: REPO, prNumber: pr, method: "squash", headSha: "h1", merged: true }]);
@@ -658,6 +660,7 @@ describe("pollOnce", dbTest, () => {
     });
 
     test("an unticked DoD line, no approval, a state other than clean, a hold or an InProgress item leave the PR alone", async () => {
+      await allow("octo");
       const a = await ready();
       a.p.body = `${dod}- [ ] No secret *(for the person who merges to check)*\n`;
       const b = await ready();
@@ -674,6 +677,7 @@ describe("pollOnce", dbTest, () => {
     });
 
     test("a merge GitHub refuses leaves the item in InReview, logs GitHub's message, and the next poll merges", async () => {
+      await allow("octo");
       const { ext, pr, p } = await ready();
       p.refusals = ["Base branch was modified."];
       await poll();
@@ -683,6 +687,19 @@ describe("pollOnce", dbTest, () => {
       await poll();
       assert.equal((await row(ext)).state, "Accepted");
       assert.equal((await events("factory_merged")).length, 1);
+    });
+
+    test("an approval from someone outside the allowlist doesn't merge, and only allowlisted approvers are logged", async () => {
+      await allow("kim");
+      const a = await ready();
+      a.p.reviews = [{ state: "approved", submittedAt: new Date(0).toISOString(), author: "stranger" }];
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      assert.equal((await row(a.ext)).state, "InReview");
+      a.p.reviews.push({ state: "approved", submittedAt: new Date(1).toISOString(), author: "kim" });
+      await poll();
+      assert.equal((await row(a.ext)).state, "Accepted");
+      assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
     });
   });
 });

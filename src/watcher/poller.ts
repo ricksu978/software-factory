@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
+import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
@@ -227,7 +227,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
       await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
     } else if (row.state === "InReview" && !row.held) {
-      await mergeIfReady(pool, repoHost, repo, row.pr_number, row);
+      await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
   });
 
@@ -313,14 +313,17 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 }
 
 /**
- * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that someone approved
- * and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at the head the
- * view was read at. The item row stays locked across the merge, so a Hold or a claim that lands meanwhile waits and the
+ * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that an allowlisted
+ * user approved and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at
+ * the head the view was read at. The item row stays locked across the merge, so a Hold or a claim that lands meanwhile waits and the
  * re-read under the lock sees the one that came first. A merge moves the item through `merged`, as a person's would,
  * and logs `factory_merged`. A refusal logs `factory_merge_refused` with GitHub's message, and the next poll tries again.
  */
-async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row): Promise<void> {
-  const view = await host.mergeView(repo, prNumber);
+async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
+  // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
+  const keys = new Set(trusted.map(loginKey));
+  const read = await host.mergeView(repo, prNumber);
+  const view = { ...read, approvedBy: read.approvedBy.filter((a) => keys.has(loginKey(a))) };
   if (mergeBlocker(view) !== null) return;
   await withTx(pool, async (c) => {
     const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
