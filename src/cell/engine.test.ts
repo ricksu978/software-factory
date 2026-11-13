@@ -589,6 +589,33 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
   });
 
+  // PBI 215: the base commit, origin/main, lacks the branch's features/ folder, so a command can tell the two apart.
+  test("a Definition of Done line that fails the same tests on the base commit blocks green once, with the base's question", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n");
+    const base = git(h.dir, "rev-parse", "origin/main");
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /base fails in the cell/);
+    assert.ok(t.question.body.includes(base.slice(0, 7)));
+    assert.deepEqual(t.question.baseFailure, { sha: base, tests: ["parses the config"] });
+    const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
+    assert.match(dod.body.verdicts[0].reason, /fails the same tests/);
+    assert.equal(git(h.dir, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH);
+  });
+
+  test("a Definition of Done line that fails only on the item's branch is retried, runs on the base once, and exhausts green", async () => {
+    const h = harness({ nextStage: "green" });
+    const log = join(h.root, "runs.txt");
+    h.deps.policies.dod = policy("dod", `- [ ] Unit tests pass. \`run: git rev-parse HEAD >> "${fwd(log)}"; [ -d features ] && echo 'not ok 1 - parses the config' && exit 1; exit 0\`\n`);
+    const base = git(h.dir, "rev-parse", "origin/main");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.equal(readFileSync(log, "utf8").split("\n").filter((l) => l === base).length, 1);
+  });
+
   test("a Definition of Done judge that commits fails the green attempt before its push", async () => {
     const h = harness({ nextStage: "green", script: committingJudge() });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are clear.\n");

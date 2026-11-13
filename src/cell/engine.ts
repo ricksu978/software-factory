@@ -16,6 +16,7 @@ import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
+import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
 import type { Git } from "./git.ts";
 
 /** The body of GET /context (Run contract 5). */
@@ -67,6 +68,14 @@ const run = promisify(execFile);
 // How a run leaves runCell early. Each maps to one exit in `finish`.
 class Stop extends Error {}
 class Blocked extends Error {}
+/** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
+class BaseFails extends Blocked {
+  readonly baseFailure: { sha: string; tests: string[] };
+  constructor(message: string, baseFailure: { sha: string; tests: string[] }) {
+    super(message);
+    this.baseFailure = baseFailure;
+  }
+}
 class Exhausted extends Error {}
 class Limited extends Error {
   readonly resetsAt: number;
@@ -93,11 +102,13 @@ export function commandEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
   return out;
 }
 
-export function sh(command: string, cwd: string): Promise<{ code: number; out: string }> {
+/** Runs a command as Run contract 11 says. `out` is the output's last 2000 characters, `all` the whole of it. */
+export function sh(command: string, cwd: string): Promise<{ code: number; out: string; all: string }> {
   return new Promise((resolve) => {
     execFile("sh", ["-c", command], { cwd, timeout: COMMAND_TIMEOUT_MS, env: commandEnv(), maxBuffer: 64 * 1024 * 1024 }, (e, stdout, stderr) => {
       const code = e ? (typeof e.code === "number" ? e.code : 1) : 0;
-      resolve({ code, out: `${stdout}${stderr}`.slice(-2000) });
+      const all = `${stdout}${stderr}`;
+      resolve({ code, out: all.slice(-2000), all });
     });
   });
 }
@@ -444,14 +455,40 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return findings;
   };
 
+  // PBI 215: each command's run on the base commit, kept for the cell, since `origin/<base>` stays where the claim's
+  // merge fetched it. A command runs there only after it failed on the item's branch, and at most once.
+  const baseRuns = new Map<string, Promise<{ sha: string; tests: string[] }>>();
+  const onBase = (command: string) => {
+    let r = baseRuns.get(command);
+    if (!r) {
+      r = runOnBase(dir, ctx.base, command, config.commands.setup).then((b) => ({ sha: b.sha, tests: b.code === 0 ? [] : failingTests(b.out) }));
+      baseRuns.set(command, r);
+    }
+    return r;
+  };
+
   // Run contract 11: run: lines in the checkout, the rest judged by an agent, all stored with the commit they checked.
+  // A run: line that fails is run again on the base commit (PBI 215). When every test it failed fails there too, the
+  // check stops with BaseFails once its verdicts are stored, so the stage asks about the base instead of retrying.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
     const head = await git.head();
     const dod = policies.dod;
     const verdicts: Verdict[] = [];
+    const shared: { criterion: string; tests: string[] }[] = [];
+    let baseSha = "";
     for (const c of dod.criteria.filter((x) => x.run)) {
       const r = await sh(c.run!, dir);
-      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason: r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}` });
+      let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
+      if (r.code !== 0) {
+        const tests = failingTests(r.all);
+        const b = await onBase(c.run!);
+        if (sharedWithBase(tests, b.tests)) {
+          shared.push({ criterion: c.text, tests });
+          baseSha = b.sha;
+          reason = `the base commit ${b.sha.slice(0, 7)} fails the same tests: ${reason}`;
+        }
+      }
+      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
     }
     const judged = dod.criteria.filter((x) => !x.run);
     if (judged.length) {
@@ -469,6 +506,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha: head, verdicts });
     dodVerdicts = verdicts;
     dodSha = head;
+    if (shared.length) {
+      throw new BaseFails(baseQuestion(ctx.base, baseSha, shared), { sha: baseSha, tests: [...new Set(shared.flatMap((l) => l.tests))] });
+    }
     return verdicts;
   };
   const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
@@ -1039,7 +1079,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
     if (e instanceof Blocked) {
       await end("failed");
-      await transition({ event: "blocked", question: { kind: "needs_input", body: e.message } });
+      await transition({ event: "blocked", question: { kind: "needs_input", body: e.message, ...(e instanceof BaseFails ? { baseFailure: e.baseFailure } : {}) } });
       return "waiting";
     }
     if (e instanceof Exhausted) {
