@@ -30,7 +30,7 @@ type Project = { id: string; fields: Field[] };
 type RawItem = {
   id: string; updatedAt: string;
   fieldValues: { nodes: { text?: string; number?: number; name?: string; field?: { name: string } }[] };
-  content: { number?: number; title?: string; body?: string; state?: string; updatedAt?: string; repository?: { nameWithOwner: string }; labels?: { nodes: { name: string }[] } } | null;
+  content: { number?: number; title?: string; body?: string; state?: string; createdAt?: string; updatedAt?: string; repository?: { nameWithOwner: string }; labels?: { nodes: { name: string }[] } } | null;
 };
 type Located = { item: FactoryItem; itemId: string };
 
@@ -46,7 +46,7 @@ const ITEMS = `query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV
       ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }
       ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
       ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } } }
-    content { ... on Issue { number title body state updatedAt repository { nameWithOwner } labels(first: 50) { nodes { name } } } } } } } } }`;
+    content { ... on Issue { number title body state createdAt updatedAt repository { nameWithOwner } labels(first: 50) { nodes { name } } } } } } } } }`;
 
 const SET_STATUS = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } } }`;
@@ -161,6 +161,7 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       repo: c.repository.nameWithOwner,
       fields: Object.fromEntries(cfg.fieldMap.readinessFields.filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
       closed: c.state !== "OPEN", updatedAt: [raw.updatedAt, c.updatedAt ?? ""].sort().at(-1)!,
+      ...(c.createdAt ? { createdAt: c.createdAt } : {}),
     };
   };
 

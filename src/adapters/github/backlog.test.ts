@@ -32,7 +32,7 @@ describe("githubBacklog", () => {
         }
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
           id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
-          content: { number: 7, title: "t", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
+          content: { number: 7, title: "t", body: "", state: "OPEN", createdAt: "2026-11-05T08:00:00Z", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
         }] } } };
       },
     };
@@ -53,6 +53,11 @@ describe("githubBacklog", () => {
     const { adapter } = orgBoard([], true);
     await assert.rejects(adapter.getItem("7"), /rate limited/);
     assert.equal((await adapter.getItem("7"))?.externalId, "7");
+  });
+
+  test("an item carries its issue's creation time (PBI 187)", async () => {
+    const { adapter } = orgBoard([]);
+    assert.equal((await adapter.getItem("7"))?.createdAt, "2026-11-05T08:00:00Z");
   });
 
   test("acceptance criteria are the list under the heading, up to the next heading", () => {
