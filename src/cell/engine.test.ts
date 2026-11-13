@@ -749,6 +749,30 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
   });
 
+  // PBI 185. The fake bdd.run copies a report, so its `--tags` rides on an echo: Red reads the filter from the command.
+  const localRun = (h: ReturnType<typeof harness>) => {
+    const lines = report(["Criterion 1 holds", "Criterion 2 holds"], "red").split("\n");
+    const parse = lines.map((l) => l.includes('"p1"') && l.includes("pickle") ? l.replace('{"name":"@ac-2"}', '{"name":"@ac-2"},{"name":"@local"}') : l);
+    writeFileSync(join(h.root, "fx", "parse.ndjson"), parse.join("\n"));
+    h.deps.config.bdd.run = `${h.deps.config.bdd.run} && echo --tags "not @local"`;
+  };
+
+  test("Red expects only the scenarios bdd.run's tag filter selects, so a @local one left out of the run passes", async () => {
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    localRun(h);
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
+  });
+
+  test("Red fails, naming the expression, when bdd.run's tag filter doesn't parse", async () => {
+    const h = harness();
+    h.deps.config.bdd.run = `${h.deps.config.bdd.run} && echo --tags "not ("`;
+    assert.equal(await h.run(), "waiting");
+    assert.match(h.transitions().at(-1).question.body, /bdd\.run's tag expression "not \(" doesn't parse/);
+  });
+
   test("a cell resumed at open-pr still lists each scenario in the PR body", async () => {
     const h = harness({ nextStage: "open-pr" });
     assert.equal(await h.run(), "done");

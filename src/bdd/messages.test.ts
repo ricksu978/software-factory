@@ -69,6 +69,16 @@ test("red fails when the item has no scenarios at all", () => {
   assert.deepEqual(redGate(new Map(), "@pbi-482", []).findings, ["no scenario carries @pbi-482"]);
 });
 
+test("red fails when bdd.run's filter leaves out every scenario of the item", () => {
+  // bdd.parse lists two scenarios, both @local, and bdd.run selects neither, so nothing proves the item red.
+  assert.deepEqual(redGate(new Map(), "@pbi-482", [], 2).findings, ["no scenario carrying @pbi-482 runs in the cell: bdd.run's tag filter leaves out all 2"]);
+});
+
+test("red judges only the scenarios bdd.run selects, so a left-out one isn't missing", () => {
+  const r = results([["Totals add up", ["@pbi-482"], "red"]]);
+  assert.deepEqual(redGate(r, "@pbi-482", ["Totals add up"], 2), { ok: true, findings: [] });
+});
+
 test("red passes a green @regression scenario beside a red one", () => {
   const r = results([["still passes", ["@pbi-482", "@regression"], "green"], ["new", ["@pbi-482"], "red"]]);
   assert.deepEqual(redGate(r, "@pbi-482", ["still passes", "new"]), { ok: true, findings: [] });

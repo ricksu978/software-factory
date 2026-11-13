@@ -21,6 +21,7 @@
     "@azure/arm-appcontainers": "4.0.0",
     "@azure/identity": "4.14.1",
     "@azure/storage-blob": "12.34.0",
+    "@cucumber/tag-expressions": "11.0.1",
     "@octokit/app": "16.1.4",
     "@octokit/core": "7.0.8",
     "pg": "8.23.1",

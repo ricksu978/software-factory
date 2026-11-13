@@ -83,7 +83,10 @@ function tagged(results: Results, tag: string): ScenarioResult[] {
 // "every step asserts" check and the person signing off, who sees the tag, are what catch it.
 export const REGRESSION_TAG = "@regression";
 
-export function redGate(results: Results, pbiTag: string, expected: string[]): GateResult {
+// `expected` names the item's scenarios bdd.run selects, and `listed` counts the ones bdd.parse lists, filter or no
+// filter (PBI 185). A scenario bdd.run leaves out isn't expected to run, but an item none of whose scenarios it selects
+// fails, since nothing then proves the item red.
+export function redGate(results: Results, pbiTag: string, expected: string[], listed = expected.length): GateResult {
   const mine = tagged(results, pbiTag);
   const findings: string[] = [];
   for (const r of mine) {
@@ -104,7 +107,9 @@ export function redGate(results: Results, pbiTag: string, expected: string[]): G
   // Only when every expected scenario ran: if some didn't, the ones that did don't show the item is all @regression.
   if (notRun.length === 0 && mine.length > 0 && mine.every((r) => r.tags.includes(REGRESSION_TAG))) findings.push(`every scenario carrying ${pbiTag} is ${REGRESSION_TAG}, so Red proves nothing`);
   for (const name of notRun) findings.push(`not run in the cell: ${name}`);
-  if (mine.length === 0 && expected.length === 0) findings.push(`no scenario carries ${pbiTag}`);
+  if (mine.length === 0 && expected.length === 0) {
+    findings.push(listed === 0 ? `no scenario carries ${pbiTag}` : `no scenario carrying ${pbiTag} runs in the cell: bdd.run's tag filter leaves out all ${listed}`);
+  }
   return { ok: findings.length === 0, findings };
 }
 

@@ -10,6 +10,7 @@ import type { LineComment, ReviewComment, RepoHost } from "../adapters/types.ts"
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, redGate, traceability } from "../bdd/messages.ts";
+import { selects } from "../bdd/select.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
@@ -523,11 +524,19 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (undone.length) return undone;
       const parse = await bdd("parse");
       if (parse.code !== 0) return [`bdd.parse exited ${parse.code}: ${parse.out.trim()}`];
-      const expected = [...classify(parse.report).values()].filter((r) => r.tags.includes(tag)).map((r) => r.name);
+      // Red expects only the scenarios bdd.run's own tag filter selects, so a @local one isn't missing (PBI 185).
+      const listed = [...classify(parse.report).values()].filter((r) => r.tags.includes(tag));
+      let selected: (tags: string[]) => boolean;
+      try {
+        selected = selects(config.bdd.run);
+      } catch (e) {
+        return [e instanceof Error ? e.message : String(e)];
+      }
+      const expected = listed.filter((r) => selected(r.tags)).map((r) => r.name);
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(redResults, run.report);
-      return redGate(classify(run.report), tag, expected).findings;
+      return redGate(classify(run.report), tag, expected, listed.length).findings;
     });
     if (findings.length) throw new Blocked(`Red failed:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
