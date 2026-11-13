@@ -138,6 +138,8 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
         mkdirSync(join(a.cwd, "features"), { recursive: true });
         writeFileSync(join(a.cwd, FEATURE), "@pbi-482\nFeature: Item 482\n");
       }
+      // Open-pr's summary starts with "## Problem", as the PR body must (PBI 216).
+      if (stage === "open-pr" && a.mode === "cell" && !a.agent && !judged.length) text = "## Problem\n\nItem 482 asked for it.";
       if (stage === "red") writeFileSync(join(fixtures, "run.ndjson"), report(names, "red"));
       if (stage === "green") writeFileSync(join(fixtures, "run.ndjson"), report(names, "green"));
       const extra = (await o.script?.(a, stage)) ?? {};
@@ -464,13 +466,13 @@ describe("runCell", () => {
     const h = harness({
       // Every stage's own prompt answers with its stage. The DoD judge, the reviewer and the classifier keep their answers.
       script: (a, stage) => a.mode === "cell" && !a.prompt.startsWith("# Definition of Done") && !a.agent?.endsWith("-reviewer")
-        ? { text: `said at ${stage}` } : undefined,
+        ? { text: stage === "open-pr" ? "## Problem\n\nsaid at open-pr" : `said at ${stage}` } : undefined,
     });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are updated.\n- [ ] Typecheck passes. `run: true`\n");
     assert.equal(await h.run(), "done");
     const passed = h.calls.filter((c) => c.route === "/stage" && c.body.status === "passed").map((c) => [c.body.stageId, c.body.message]);
     assert.deepEqual(passed.map(([s]) => s), ["red", "green", "self-review", "open-pr", "pr-review"]);
-    assert.deepEqual(passed.filter(([s]) => !s.endsWith("review")), [["red", "said at red"], ["green", "said at green"], ["open-pr", "said at open-pr"]]);
+    assert.deepEqual(passed.filter(([s]) => !s.endsWith("review")), [["red", "said at red"], ["green", "said at green"], ["open-pr", "## Problem\n\nsaid at open-pr"]]);
     assert.match(passed[2][1], /APPROVED$/);
     assert.equal(passed[4][1], "APPROVED");
   });
