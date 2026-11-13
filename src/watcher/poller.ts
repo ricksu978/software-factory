@@ -299,6 +299,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
           [row.id, r.dor?.source ?? "repo", r.head || null, v.index, v.criterion, v.status, v.reason],
         );
       }
+      // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
+      // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
+      if (out.filed) await transitionItem(c, row.id, "split_filed", system);
     });
   });
 

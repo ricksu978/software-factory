@@ -118,6 +118,43 @@ describe("pollOnce", dbTest, () => {
     assert.ok(all.some((b) => b.startsWith("The factory can't start") && !b.includes("gave no answer")), "no corrected readiness comment");
   });
 
+  test("a parent whose split is filed moves NotReady to Split, and stays there with its label back and a new policy (PBI 225)", async () => {
+    const big = async (item: FactoryItem, dor: Policy) => {
+      judged.push(item.externalId);
+      return [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");
+    };
+    const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
+    const agent = async () => ({ ok: true, text: JSON.stringify({ children }) }) as never;
+    const subs: string[] = [];
+    let n = 100;
+    const board = {
+      subIssues: async () => subs.map((id) => ({ externalId: id, title: id, url: `u/${id}` })),
+      findIssues: async () => [],
+      createIssue: async (_repo: string, title: string) => ({ externalId: String(++n), title, url: `u/${n}` }),
+      addSubIssue: async (_p: string, c: string) => void subs.push(c),
+      boardStatus: async () => "Backlog",
+      addToBoard: async () => {},
+      blockedBy: async () => [],
+      addBlockedBy: async () => {},
+      removeLabel: async (id: string) => void (await fake.seed({ externalId: id, labels: [], repo: REPO, acceptanceCriteria: ["one", "two"] })),
+    };
+    const split = { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "AC" } };
+    const ext = await seed({ acceptanceCriteria: ["one", "two"] });
+    const pollSplit = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
+    await pollSplit();
+    assert.equal(subs.length, 2);
+    assert.equal((await row(ext)).state, "Split");
+    await pollSplit();
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, acceptanceCriteria: ["one", "two"] });
+    commit("c2", { ...files, ".factory/dor.md": "- [ ] Has a title\n- [ ] Has an owner\n" });
+    judged = [];
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    assert.deepEqual(judged, []);
+    const moves = (await db.pool.query("select payload->>'from' as from, payload->>'event' as event, payload->>'to' as to from event where item_id = $1 and kind = 'transition' order by at, id", [(await row(ext)).id])).rows;
+    assert.deepEqual(moves, [{ from: "Eligible", event: "readiness_failed", to: "NotReady" }, { from: "NotReady", event: "split_filed", to: "Split" }]);
+  });
+
   test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
     const a = await seed();
     const b = await seed({ repo: "other/tools" });
