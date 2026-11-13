@@ -1,6 +1,5 @@
 // Every Aspire integration pin in aspire.config.json must exist on NuGet, or `aspire run` fails its package restore.
-// It reads nuget.org, so it skips offline, except on GitHub Actions. A factory cell sets CI=true but has no route to
-// nuget.org, so CI alone can't mean the network is there.
+// It reads nuget.org, so it skips offline, except under CI.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -13,7 +12,7 @@ for (const [id, version] of Object.entries(packages)) {
     try {
       r = await fetch(`https://api.nuget.org/v3-flatcontainer/${id.toLowerCase()}/index.json`, { signal: AbortSignal.timeout(30_000) });
     } catch (e) {
-      if (process.env.GITHUB_ACTIONS) throw e;
+      if (process.env.CI) throw e;
       return t.skip(`nuget.org unreachable: ${(e as Error).message}`);
     }
     assert.equal(r.status, 200);
