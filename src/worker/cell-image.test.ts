@@ -114,6 +114,20 @@ describe("keeping the cell image current with main", dbTest, () => {
     assert.deepEqual(await readCellImage(db.pool), { started: newest, built: newest, restart: null });
   });
 
+  test("moving worker code into cell/ holds the rebuild until a restart", async () => {
+    const start = git(seed, "rev-parse", "HEAD");
+    await startCellImage(deps());
+    mkdirSync(join(seed, "cell"), { recursive: true });
+    git(seed, "mv", "src/worker/main.ts", "cell/main.ts");
+    git(seed, "commit", "-q", "-m", "move");
+    git(seed, "push", "-q", "origin", "main");
+    const moved = git(seed, "rev-parse", "HEAD");
+    assert.equal(git(seed, "diff", "--name-only", start, moved), "cell/main.ts", "git follows the rename by default");
+    await pollCellImage(deps());
+    assert.equal(built.length, 1, "nothing is rebuilt");
+    assert.deepEqual(await readCellImage(db.pool), { started: start, built: start, restart: moved });
+  });
+
   test("a failed build keeps the built commit, logs the error and is tried again", async () => {
     await db.pool.query("delete from event where kind = $1", [BUILD_FAILED_EVENT]);
     const start = git(seed, "rev-parse", "HEAD");

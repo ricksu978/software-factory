@@ -132,7 +132,8 @@ export async function pollCellImage(d: CellImageDeps): Promise<void> {
   if (!s) return startCellImage(d);
   // Measured from the commit the control plane and the worker started at, so a cell-side commit after one that changes
   // their code still waits for the restart, and the restart picks up main's newest commit.
-  const changed = head === s.started ? [] : (await git(d.checkout, ["diff", "--name-only", s.started, head])).split("\n").filter(Boolean);
+  // --no-renames lists both paths of a rename, so moving worker code into cell/ still counts as a change to worker code.
+  const changed = head === s.started ? [] : (await git(d.checkout, ["diff", "--name-only", "--no-renames", s.started, head])).split("\n").filter(Boolean);
   const held = changed.filter((p) => !needsNoRestart(p));
   if (held.length) {
     if (s.restart !== head) {

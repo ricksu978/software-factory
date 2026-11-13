@@ -480,10 +480,9 @@ const imageLines = (lines: string[]) => lines.filter((l) => /cell image/i.test(l
 const short = (s: string) => s.slice(0, 7);
 
 // Both a Given and a Then. Before the factory polls, Floor shows what the Background's start-up build recorded, so the
-// Given only names the commit, and the Thens check Floor.
+// Given checks Floor against that build's commit, and the Thens check it against the rebuild's.
 Then("Floor shows the cell image was built from commit {string}", long, async function (name: string) {
   const c = ctx(this);
-  if (!c.polled) return void sha(c, name);
   const want = short(sha(c, name));
   const lines = imageLines(await floorLines(this));
   assert.ok(lines.some((l) => /built from/i.test(l) && l.includes(want)), `Floor doesn't show the cell image was built from ${name} (${want}): ${JSON.stringify(lines)}`);
