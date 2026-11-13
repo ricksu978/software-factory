@@ -4,6 +4,7 @@
 // its own transitions onto the board, as the control plane mirrors its own. `aspire run` starts it as the worker
 // resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
 // on a connection of its own (PBI 157). One that can't take it stands by, and one whose lock connection closes exits.
+// Each scheduler tick records the worker's heartbeat, the time it started, in worker_heartbeat (PBI 158).
 import { App } from "@octokit/app";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
@@ -16,6 +17,7 @@ import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
 import { tick, TICK_MS } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
+import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 
@@ -43,6 +45,11 @@ export type WorkerDeps = {
   secret: string;
   sopVersion: string;
   tickMs?: number;
+  /**
+   * The clock each scheduler tick reads its time from, once, as the tick starts. That time is the tick's `now`, and the
+   * worker's heartbeat records it (PBI 158). `new Date()` by default.
+   */
+  now?: () => Date;
   pollMs?: number;
   /** How often a standby tries for the worker lock again. LOCK_RETRY_MS by default. */
   lockRetryMs?: number;
@@ -241,10 +248,22 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   let ticked = false;
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
-    await tick({
-      pool: d.pool, launcher: d.launcher, now: new Date(), killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-      secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
-    });
+    const now = (d.now ?? (() => new Date()))();
+    try {
+      await tick({
+        pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
+      });
+    } finally {
+      // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,
+      // because each shows the worker is alive (PBI 158). A heartbeat that can't be written is logged, not thrown, so
+      // the tick's own outcome is what the log reports for it.
+      try {
+        await recordHeartbeat(d.pool, now);
+      } catch (e) {
+        log.error("The worker heartbeat couldn't be written:", e);
+      }
+    }
     if (!ticked) log.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs, log)];

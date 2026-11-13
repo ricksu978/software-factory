@@ -2,6 +2,7 @@
 // and today's control plane from src/main.ts in this process, on PBI 4's shared test database, with fakes. PBI 17's
 // steps own the items, the launcher's record and the item states, so the worker's launcher records into PBI 17's
 // context. The worker module loads lazily, so while it doesn't exist every scenario fails on a Then.
+// PBI 158's steps run this file's worker too, so its hooks run for @pbi-158.
 // Each process mirrors only the transitions it commits, so the control plane gets a pool of its own on the same
 // database, as it has in its own process.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
@@ -77,7 +78,7 @@ export function ctx(world: object): Ctx {
 const pool = () => need().pool;
 const host = (world: object) => p17(world).repoHost as unknown as Host;
 
-Before({ tags: "@pbi-156" }, function () {
+Before({ tags: "@pbi-156 or @pbi-158" }, function () {
   const c = ctx(this);
   const originals = { log: console.log, warn: console.warn, error: console.error };
   for (const k of ["log", "warn", "error"] as const) {
@@ -89,7 +90,7 @@ Before({ tags: "@pbi-156" }, function () {
   c.restore.push(() => Object.assign(console, originals));
 });
 
-After({ tags: "@pbi-156", ...long }, async function () {
+After({ tags: "@pbi-156 or @pbi-158", ...long }, async function () {
   const c = ctx(this);
   await c.worker?.stop();
   await c.control?.stop();
