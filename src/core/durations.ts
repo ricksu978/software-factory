@@ -3,7 +3,8 @@ import type { ItemState } from "./states.ts";
 
 /** One move between states, from a transition or override event. */
 export type Move = { from: ItemState; to: ItemState; at: Date };
-export type StageSpan = { stageId: string; startedAt: Date; endedAt: Date | null };
+/** `runEndedAt` is when the attempt's run ended, if it has: an attempt left open by a run that ended stops there. */
+export type StageSpan = { stageId: string; startedAt: Date; endedAt: Date | null; runEndedAt?: Date | null };
 export type QuestionSpan = { kind: "sign_off" | "needs_input"; askedAt: Date; answeredAt: Date | null; closedAt: Date | null };
 
 export type ItemDurations = {
@@ -40,7 +41,9 @@ export function itemDurations(d: { createdAt: Date | null; state: ItemState; now
 
   const stages = new Map<string, { stageId: string; ms: number; attempts: number; first: number }>();
   for (const s of d.stages) {
-    const ms = Math.max(0, (s.endedAt?.getTime() ?? now) - s.startedAt.getTime());
+    // A closed attempt counts as logged. One left open, as a stopped run or an expired lease leaves it, stops at its
+    // run's end if that run ended, otherwise at the item's end, and runs up to now only while the item is open.
+    const ms = s.endedAt ? Math.max(0, s.endedAt.getTime() - s.startedAt.getTime()) : span(s.startedAt, s.runEndedAt?.getTime() ?? now);
     const row = stages.get(s.stageId) ?? { stageId: s.stageId, ms: 0, attempts: 0, first: s.startedAt.getTime() };
     row.ms += ms;
     row.attempts += 1;

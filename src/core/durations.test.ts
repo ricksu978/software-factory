@@ -105,3 +105,24 @@ test("a closed spell counts as logged, and only an ended item's end cuts an open
   const done = itemDurations({ ...base, state: "Abandoned", now: t("15:00"), moves: [move("NeedsInput", "Abandoned", "11:30")], questions: [open] });
   assert.equal(done.waiting.needsInputMs, 90 * M);
 });
+
+test("an attempt left open on a Failed item stops at the item's end, not now", () => {
+  const d = itemDurations({
+    ...base, state: "Failed", now: t("08:00", 12),
+    moves: [move("Queued", "InProgress", "10:00"), move("InProgress", "Failed", "11:30")],
+    stages: [{ stageId: "green", startedAt: t("10:30"), endedAt: null, runEndedAt: null }],
+  });
+  assert.deepEqual(d.stages, [{ stageId: "green", ms: 60 * M, attempts: 1 }]);
+});
+
+test("an attempt left open by an earlier run that ended stops at that run's end", () => {
+  const d = itemDurations({
+    ...base, state: "InProgress", now: t("15:00"),
+    moves: [move("InProgress", "Failed", "11:30"), move("Failed", "Queued", "12:00"), move("Queued", "InProgress", "12:00")],
+    stages: [
+      { stageId: "green", startedAt: t("10:30"), endedAt: null, runEndedAt: t("12:00") },
+      { stageId: "green", startedAt: t("14:00"), endedAt: null, runEndedAt: null },
+    ],
+  });
+  assert.deepEqual(d.stages, [{ stageId: "green", ms: (90 + 60) * M, attempts: 2 }]);
+});

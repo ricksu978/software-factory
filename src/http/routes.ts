@@ -256,7 +256,7 @@ async function itemTime(pool: pg.Pool, id: string, state: ItemState, now: Date) 
      where item_id = $1 and kind in ('transition', 'override') and payload ? 'to' order by at, id`, [id],
   )).rows;
   const stages = (await pool.query<StageSpan>(
-    `select s.stage_id as "stageId", s.started_at as "startedAt", s.ended_at as "endedAt"
+    `select s.stage_id as "stageId", s.started_at as "startedAt", s.ended_at as "endedAt", r.ended_at as "runEndedAt"
      from stage_run s join run r on r.id = s.run_id where r.item_id = $1 order by s.started_at`, [id],
   )).rows;
   const questions = (await pool.query<QuestionSpan>(
