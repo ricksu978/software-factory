@@ -60,6 +60,8 @@ type Attempt = {
   /** The complete transcript the meter handed back when the attempt ended. */
   complete?: string;
   status?: string;
+  /** The scenario's clock when the attempt started, which the meter's 15-second ticks count from. */
+  openedAt: number;
 };
 type Cell = {
   generation: number; api: HttpCellApi; meter: ReturnType<typeof stageMeter>;
@@ -86,7 +88,7 @@ type Ctx = {
   puts: Put[];
   blobs: Map<string, string>;
   /** Every upload the cell tried while its stage ran, and whether it worked. */
-  tries: { at: number; ok: boolean }[];
+  tries: { at: number; ok: boolean; messages: number }[];
   inflight: Set<Promise<unknown>>;
   refuse: boolean;
   apiDown: boolean;
@@ -234,8 +236,9 @@ function makeCell(world: object, generation: number): Cell {
       // A dead cell sends nothing more.
       if (cell.dead) return new Promise<void>(() => {});
       const running = c.open !== undefined;
+      const messages = c.open?.messages.length ?? 0;
       const p = (c.apiDown ? down : api).upload(b);
-      const tracked = p.then(() => running && c.tries.push({ at: c.at, ok: true }), () => running && c.tries.push({ at: c.at, ok: false }))
+      const tracked = p.then(() => running && c.tries.push({ at: c.at, ok: true, messages }), () => running && c.tries.push({ at: c.at, ok: false, messages }))
         .finally(() => c.inflight.delete(tracked));
       c.inflight.add(tracked);
       return p;
@@ -308,7 +311,7 @@ async function pass(world: object, seconds: number, each?: (s: number) => Promis
 
 async function startAttempt(world: object, stage: string, attempt: number): Promise<Attempt> {
   const c = ctx(world);
-  const a: Attempt = { stage, attempt, calls: [], messages: [] };
+  const a: Attempt = { stage, attempt, calls: [], messages: [], openedAt: c.at };
   c.attempts.push(a);
   c.open = a;
   c.used = { tokensIn: 0, tokensOut: 0, costUsd: 0 };
@@ -354,6 +357,17 @@ async function endAttempt(world: object, status: "passed" | "failed" | "stopped"
 async function uploadSoFar(world: object, messages: number): Promise<void> {
   await write(world, messages);
   await pass(world, 15);
+  uploadedSoFar(world);
+}
+
+/** Asserts that an upload made while the stage ran holds every message so far, made `ago` seconds back. */
+function uploadedSoFar(world: object, ago = 0): void {
+  const c = ctx(world);
+  const a = c.open;
+  assert.ok(a, "no stage attempt is running");
+  const put = latestTo(c, `transcripts/${c.runId}/${a.stage}-${a.attempt}.jsonl`, true);
+  holds(c, put?.body, a.messages, "the transcript so far");
+  assert.equal(put!.at, c.at - ago * 1000, `the transcript so far wasn't uploaded ${ago} seconds ago. Uploads:\n${show(c)}`);
 }
 
 // ---- reading what was stored ----
@@ -504,7 +518,10 @@ Given("its agent has written {int} more message since", long, async function (n:
 });
 
 Given("its agent has written no message since", function () {
-  // Nothing to write.
+  const c = ctx(this);
+  const last = c.tries.at(-1);
+  assert.ok(last, "the cell hasn't tried to upload the transcript so far");
+  assert.equal(c.open?.messages.length, last.messages, "the agent has written messages since the cell's last try");
 });
 
 Given("its first agent call finished after writing {int} messages", long, async function (n: number) {
@@ -549,9 +566,12 @@ Given("the cell uploaded it again after its agent had written {int} more", long,
 });
 
 Given("the cell uploaded the transcript so far {int} seconds ago", long, async function (ago: number) {
+  const c = ctx(this);
   await write(this, 1);
-  await pass(this, 15 - ago);
+  // The meter ticks every 15 seconds from when the attempt started: wait for the next tick, then `ago` more.
+  await pass(this, 15 - ((c.at - c.open!.openedAt) / 1000) % 15);
   await pass(this, ago);
+  uploadedSoFar(this, ago);
 });
 
 Given("the item's {string} stage attempt {int} failed, and its transcript is stored at {string}", long, async function (stage: string, n: number, path: string) {
@@ -625,6 +645,7 @@ Given("the cell's first try at uploading the transcript so far failed", long, as
   c.refuse = true;
   await pass(this, 15);
   c.refuse = false;
+  assert.ok(c.tries.at(-1)?.ok === false, `the cell's first try didn't fail. Tries: ${JSON.stringify(c.tries)}`);
 });
 
 Given("blob storage refuses every upload while the stage runs", function () {

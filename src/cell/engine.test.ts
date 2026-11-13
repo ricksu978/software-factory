@@ -568,6 +568,35 @@ describe("runCell", () => {
     assert.equal(passed[4][1], "APPROVED");
   });
 
+  test("a transcript-so-far upload still going when a stage ends lands before the complete transcript (PBI 209)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let ticked = false;
+    const h = harness({
+      script: (a, stage) => {
+        if (stage !== "red" || a.mode !== "cell" || ticked) return;
+        ticked = true;
+        a.onMessage?.("line");
+        // The meter's tick starts an upload of the transcript so far, which is held open past the stage's end.
+        mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+        return { transcript: "line\nmore\n" };
+      },
+    });
+    const sent = h.deps.api.upload;
+    const landed: string[] = [];
+    h.deps.api.upload = async (b) => {
+      const red = b.kind === "transcript" && b.stageId === "red" && b.attempt === 1;
+      // A real timer, which no await in the stage's end can be waiting on, releases the held upload.
+      if (red && b.body === "line\n") await new Promise((r) => setTimeout(r, 50));
+      await sent(b);
+      if (red) landed.push(b.body);
+    };
+    assert.equal(await h.run(), "done");
+    assert.ok(ticked, "the red stage made no cell call");
+    assert.equal(landed[0], "line\n", "the transcript so far wasn't uploaded while red ran");
+    assert.equal(landed.length, 2);
+    assert.match(landed[1], /^line\nmore\n/, "the complete transcript didn't land last");
+  });
+
   test("each stage ends with /stage passed, then its uploads, then the transition", async () => {
     const h = harness();
     assert.equal(await h.run(), "done");
