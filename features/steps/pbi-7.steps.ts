@@ -9,7 +9,7 @@ const featureFile = join(repo, "features/pbi-7-state-machine.feature");
 
 // The states and events plan Task 3 names. The edges come from the feature file's Examples table, never from the code under test.
 const states = ["Eligible", "NotReady", "Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "Accepted", "Done", "Failed", "Abandoned"];
-const events = ["readiness_failed", "item_edited", "ready", "claimed", "scenarios_written", "blocked", "pr_opened", "changes_requested", "merged", "approvals_met", "dod_verified", "dod_failed", "retries_exhausted", "timed_out", "lease_expired", "usage_limited", "policy_changed", "requeued", "reopened_signoff", "reopened_question", "criteria_changed", "withdrawn"];
+const events = ["readiness_failed", "item_edited", "ready", "claimed", "scenarios_written", "blocked", "pr_opened", "changes_requested", "merged", "approvals_met", "dod_verified", "dod_failed", "retries_exhausted", "timed_out", "lease_expired", "usage_limited", "policy_changed", "requeued", "reopened_signoff", "reopened_question", "criteria_changed", "withdrawn", "returned"];
 
 type Machine = { next: (from: string, event: string) => string | null; overrideTo: (from: string, to: string) => string };
 type Ctx = { machine?: Machine | null; from?: string; result?: string | null; failures?: string[]; tried?: number };

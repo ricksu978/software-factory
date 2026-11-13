@@ -224,6 +224,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(body.scenarioNotes, notes);
   });
 
+  test("a PR review attempt's restates are stored on its stage row (PBI 190)", async () => {
+    const cell = await claimed("pr-review");
+    const restates = [{ round: 1, reason: "its last line is neither APPROVED nor OPEN: <n>: Looks fine." }];
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 1, status: "started" });
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 1, status: "passed", restates })).status, 200);
+    const row = (await db.pool.query("select restates from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.deepEqual(row.restates, restates);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 2, status: "passed", restates: [{ round: "x" }] })).status, 400);
+  });
+
   test("context after an approved sign-off hands red the lock", async () => {
     const cell = await claimed("red");
     await db.pool.query("update run set features_lock_sha = '5c3a1f0', locked_files = '{features/a.feature}', config_sha = 'cfg1' where id = $1", [cell.runId]);
@@ -260,6 +270,19 @@ describe("cell API", dbTest, () => {
     ]);
     const { body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
+  });
+
+  test("an address run's context holds none of a thread the factory's own review opened, a person's reply included (PBI 130)", async () => {
+    const cell = await claimed("address");
+    await db.pool.query("update run set pr_number = 9 where id = $1", [cell.runId]);
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', 'owner', 'ricksu978', 'owner')`);
+    host.reviewComments.set(`${repo}#9`, [
+      { threadId: "ft", path: "src/a.ts", line: 3, author: "factory[bot]", body: "Misses the VAT." },
+      { threadId: "ft", path: "src/a.ts", line: 3, author: "ricksu978", body: "Keep it." },
+      { threadId: "pt", path: "src/a.ts", line: 5, author: "ricksu978", body: "Use the tax table." },
+    ]);
+    const { body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.deepEqual(body.trustedComments.map((c: { body: string }) => c.body), ["Use the tax table."]);
   });
 
   test("lease renews and says stop while a factory pause is on", async () => {
@@ -342,6 +365,28 @@ describe("cell API", dbTest, () => {
     assert.equal((await item(paused.itemId)).state, "Queued");
     assert.equal((await runRow(paused.runId)).next_stage, "green");
     assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 409);
+  });
+
+  test("sop-move records the image's SOP on the run and logs one system event on the item, once", async () => {
+    const cell = await claimed("green");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);
+    const run = await runRow(cell.runId);
+    assert.equal(run.sop_version, "default@2");
+    assert.equal(run.config_sha, "cfg1");
+    assert.equal(run.next_stage, "green");
+    // A second cell of the same claim that moves again changes nothing and logs nothing more.
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);
+    const events = (await db.pool.query("select actor, kind, payload from event where item_id = $1 and kind = 'sop_moved'", [cell.itemId])).rows;
+    assert.deepEqual(events, [{ actor: "system", kind: "sop_moved", payload: { from: "default@1", to: "default@2", runId: cell.runId } }]);
+  });
+
+  test("sop-move refuses a move from a version the run isn't pinned to, and a stale token", async () => {
+    const cell = await claimed("green");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "other", to: "default@2" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1" })).status, 400);
+    assert.equal((await runRow(cell.runId)).sop_version, "default@1");
+    assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 409);
+    assert.equal((await db.pool.query("select 1 from event where kind = 'sop_moved'")).rowCount, 0);
   });
 
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {

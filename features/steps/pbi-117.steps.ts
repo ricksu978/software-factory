@@ -5,7 +5,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import pg from "pg";
-import { load, long, testDb } from "./pbi-8.steps.ts";
+import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // PBI 117. Each scenario gets its own database inside the shared test server, so a scenario can start from today's
 // schema or from nothing and migrate it itself. Roles are cluster-wide, so principal scenarios reset the memberships
@@ -208,7 +208,9 @@ Then("both users are added", function () {
 });
 
 Then("the user {string} loads with the issuer {string} and no provider", async function (subject: string, issuer: string) {
-  const r = await pool(ctx(this)).query(`select * from "user" where subject = $1`, [subject]);
+  // PBI 170's scenarios use it too, on the shared test database, as they have no database of their own.
+  const own = ctx(this).pool;
+  const r = await (own ?? need().pool).query(`select * from "user" where subject = $1`, [subject]);
   assert.equal(r.rowCount, 1, `${r.rowCount} users "${subject}" exist`);
   assert.equal(r.rows[0].issuer, issuer);
   assert.equal(r.rows[0].provider, null);

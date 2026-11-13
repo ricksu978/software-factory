@@ -184,6 +184,17 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(q, { asked_at: NOW, reminders_sent: 0 });
   });
 
+  test("re-queueing an item withdrawn from NotReady sends it back to Eligible, not Queued (PBI 168)", async () => {
+    const id = await item("1", "Abandoned");
+    await db.pool.query(
+      `insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'poller', $1, 'transition', '{"from":"NotReady","to":"Abandoned","event":"withdrawn"}')`,
+      [id],
+    );
+    await override("requeue", id);
+    await run();
+    assert.deepEqual(await state(id), { state: "Eligible", held: false });
+  });
+
   test("re-queueing a Failed item whose PR merged starts a new run, numbered one higher, on a new branch", async () => {
     const id = await item("1", "Failed");
     await openRun(id, `merge_sha = 'abc1234', run_number = 1, branch = 'factory/pbi-1-r1', repo_id = '${repoId}', config_sha = 'x'`);

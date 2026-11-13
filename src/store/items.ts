@@ -170,16 +170,32 @@ export async function releaseLease(c: pg.PoolClient, itemId: string, generation:
 }
 
 /** `repo` is the `owner/name` of the repo the item's issue is in, or null for a board item in no repo (PBI 137). */
-export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number; repo?: string | null };
+export type NewItem = { sourceId: string; externalId: string; title: string; rank?: number; repo?: string | null; issueCreatedAt?: string | Date | null };
 
-/** Inserts an item as Eligible, or refreshes its title, backlog rank and repo, keyed on (source_id, external_id). */
+/**
+ * Inserts an item as Eligible, or refreshes its title, backlog rank and repo, keyed on (source_id, external_id). It
+ * keeps the issue's creation time once known, so an item held from before the column gets it on its next poll (PBI 187).
+ */
 export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Promise<string> {
   const r = await c.query<{ id: string }>(
-    `insert into item (source_id, external_id, title, state, backlog_rank, repo) values ($1, $2, $3, 'Eligible', $4, $5)
+    `insert into item (source_id, external_id, title, state, backlog_rank, repo, issue_created_at) values ($1, $2, $3, 'Eligible', $4, $5, $6)
      on conflict (source_id, external_id) do update set title = excluded.title, backlog_rank = coalesce(excluded.backlog_rank, item.backlog_rank),
-       repo = excluded.repo
+       repo = excluded.repo, issue_created_at = coalesce(excluded.issue_created_at, item.issue_created_at)
      returning id`,
-    [item.sourceId, item.externalId, item.title, item.rank ?? null, item.repo ?? null],
+    [item.sourceId, item.externalId, item.title, item.rank ?? null, item.repo ?? null, item.issueCreatedAt ?? null],
   );
   return r.rows[0].id;
+}
+
+/**
+ * True when an Abandoned item's last move to Abandoned was a withdrawal from Eligible or NotReady, so it never passed
+ * the readiness gate. Such an item comes back only through `returned`, to Eligible, never to Queued (PBI 168).
+ */
+export async function withdrawnBeforeQueue(c: pg.PoolClient, itemId: string): Promise<boolean> {
+  const last = (await c.query<{ from: string; event: string | null }>(
+    `select payload->>'from' as from, payload->>'event' as event from event
+     where item_id = $1 and kind in ('transition', 'override') and payload->>'to' = 'Abandoned' order by at desc limit 1`,
+    [itemId],
+  )).rows[0];
+  return last?.event === "withdrawn" && (last.from === "Eligible" || last.from === "NotReady");
 }

@@ -32,7 +32,7 @@ describe("githubBacklog", () => {
         }
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
           id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
-          content: { number: 7, title: "t", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
+          content: { number: 7, title: "t", body: "", state: "OPEN", createdAt: "2026-11-05T08:00:00Z", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
         }] } } };
       },
     };
@@ -53,6 +53,11 @@ describe("githubBacklog", () => {
     const { adapter } = orgBoard([], true);
     await assert.rejects(adapter.getItem("7"), /rate limited/);
     assert.equal((await adapter.getItem("7"))?.externalId, "7");
+  });
+
+  test("an item carries its issue's creation time (PBI 187)", async () => {
+    const { adapter } = orgBoard([]);
+    assert.equal((await adapter.getItem("7"))?.createdAt, "2026-11-05T08:00:00Z");
   });
 
   test("acceptance criteria are the list under the heading, up to the next heading", () => {
@@ -144,8 +149,9 @@ describe("parseGitHubWebhook", () => {
   });
 
   test("a pull_request_review submitted maps to review with the state lowercased and the author's login", () => {
-    const body = { action: "submitted", repository, pull_request: { number: 5 }, review: { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "dev", type: "User" } } };
-    assert.deepEqual(parseGitHubWebhook(h("pull_request_review"), body), { kind: "review", prNumber: 5, repo: "o/r", state: "changes_requested", submittedAt: "2026-11-06T01:00:00Z", author: "dev" });
+    const body = { action: "submitted", repository, pull_request: { number: 5 }, review: { state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T01:00:00Z", user: { login: "dev", type: "User" } } };
+    assert.deepEqual(parseGitHubWebhook(h("pull_request_review"), body), { kind: "review", prNumber: 5, repo: "o/r", state: "changes_requested", submittedAt: "2026-11-06T01:00:00Z", author: "dev", body: "Split it" });
+    assert.equal((parseGitHubWebhook(h("pull_request_review"), { ...body, review: { ...body.review, body: null } }) as { body: string }).body, "", "GitHub sends null for no summary");
   });
 
   test("issues, merged and closed PRs and completed check suites map to their events", () => {

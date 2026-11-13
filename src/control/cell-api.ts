@@ -4,10 +4,12 @@
 import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import { botKey, loginKey, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
+import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
+import { SOP_MOVED } from "../cell/sop-move.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
+import { appendEvent } from "../store/events.ts";
 import { renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
@@ -178,12 +180,14 @@ const routes: Record<string, Route> = {
     );
     const resume = last.rows[0]?.status === "stopped" ? { stageId: run.next_stage, attempt: last.rows[0].attempt } : null;
     let trustedComments: ReviewComment[] = [];
-    // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief.
+    // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief. A thread the
+    // factory's own review opened belongs to the PR review stage, so none of it does, a person's reply included (PBI 130).
     if (run.next_stage === "address" && run.pr_number !== null) {
       const users = await c.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`);
       const trusted = new Set(users.rows.map((u) => loginKey(u.github_login)));
       if (run.trusted_bot) trusted.add(botKey(run.trusted_bot));
-      trustedComments = (await deps.repoHost.openReviewComments(repo, run.pr_number)).filter((x) => trusted.has(loginKey(x.author)));
+      trustedComments = withoutFactoryThreads(await deps.repoHost.openReviewComments(repo, run.pr_number), run.trusted_bot)
+        .filter((x) => trusted.has(loginKey(x.author)));
     }
     return {
       externalId: run.external_id, title: item?.title ?? run.title, acceptanceCriteria: item?.acceptanceCriteria ?? [],
@@ -258,19 +262,24 @@ const routes: Record<string, Route> = {
     const status = oneOf(body.status, "status", ["started", "passed", "failed", "stopped"] as const);
     const num = (v: unknown) => (typeof v === "number" ? v : null);
     const text = (v: unknown) => (typeof v === "string" ? v : null);
+    // PBI 190: the PR reviewer's restates in this attempt, each a round and why its answer couldn't be read.
+    const restates = body.restates === undefined ? null : Array.isArray(body.restates)
+      && body.restates.every((r) => Number.isInteger(r?.round) && typeof r?.reason === "string")
+      ? JSON.stringify(body.restates.map((r: { round: number; reason: string }) => ({ round: r.round, reason: cut(r.reason) })))
+      : (() => { throw new BadRequest("restates must be a list of { round, reason }"); })();
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message))];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
-         message = coalesce($12, message)
+         message = coalesce($12, message), restates = coalesce($13::jsonb, restates)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'))`,
         values,
       );
     }
@@ -300,6 +309,18 @@ const routes: Record<string, Route> = {
   // Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
   "POST release": async (_deps, { c, run, now }) => {
     await releaseForRestart(c, run, now);
+    return { ok: true };
+  },
+
+  // PBI 173: a run pinned to an older SOP moves to the SOP in the cell image, keeping its config commit and stage. The
+  // move is a system event on the item. A move the run has already made is a no-op, so a retried call logs it once.
+  "POST sop-move": async (_deps, { c, run, body }) => {
+    const from = str(body.from, "from");
+    const to = str(body.to, "to");
+    if (run.sop_version === to) return { ok: true };
+    if (run.sop_version !== from) throw new BadRequest(`the run is pinned to SOP ${run.sop_version ?? "none"}, not ${from}`);
+    await c.query("update run set sop_version = $2 where id = $1", [run.run_id, to]);
+    await appendEvent(c, { actor: "system", actorId: "cell-api", itemId: run.item_id, kind: SOP_MOVED, payload: { from, to, runId: run.run_id } });
     return { ok: true };
   },
 

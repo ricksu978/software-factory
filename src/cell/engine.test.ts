@@ -89,6 +89,15 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   git(dir, "config", "user.email", "c@example.com");
   git(dir, "config", "user.name", "c");
   writeFileSync(join(fixtures, "parse.ndjson"), report(names, "red"));
+  // The fake bdd.run copies run.ndjson. With `--dry-run` added, as Red adds it to list what bdd.run selects (PBI 185),
+  // it copies dry.ndjson if a test wrote one, or else parse.ndjson, as a bdd.run with no tag filter would list, with
+  // every step SKIPPED, as cucumber-js reports a dry run.
+  const fx = (f: string) => `"${fwd(join(fixtures, f))}"`;
+  const skip = `sed -E 's/"status":"[A-Z]+"/"status":"SKIPPED"/g'`;
+  writeFileSync(join(fixtures, "run.sh"), [
+    "mkdir -p reports",
+    `if [ "$1" = --dry-run ]; then if [ -f ${fx("dry.ndjson")} ]; then ${skip} ${fx("dry.ndjson")} > reports/bdd.ndjson; else ${skip} ${fx("parse.ndjson")} > reports/bdd.ndjson; fi`,
+    `else cp ${fx("run.ndjson")} reports/bdd.ndjson; fi`, ""].join("\n"));
 
   const calls: Call[] = [];
   const agentCalls: (AgentArgs & { stage: string })[] = [];
@@ -151,7 +160,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
       bdd: { parse: `mkdir -p reports && cp "${fwd(join(fixtures, "parse.ndjson"))}" reports/bdd.ndjson`,
-        run: `mkdir -p reports && cp "${fwd(join(fixtures, "run.ndjson"))}" reports/bdd.ndjson`, report: "reports/bdd.ndjson" },
+        run: `sh "${fwd(join(fixtures, "run.sh"))}"`, report: "reports/bdd.ndjson" },
       commands: { test: "true", lint: "true" } },
     policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
       risk: policy("risk", "Low.\n"), dod: policy("dod", "- [ ] Typecheck passes. `run: true`\n") },
@@ -749,6 +758,63 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
   });
 
+  // PBI 185. bdd.parse lists Criterion 2 as @local, and the dry run of bdd.run, like its real run, leaves it out.
+  const localRun = (h: ReturnType<typeof harness>) => {
+    const lines = report(["Criterion 1 holds", "Criterion 2 holds"], "red").split("\n");
+    const parse = lines.map((l) => l.includes('"p1"') && l.includes("pickle") ? l.replace('{"name":"@ac-2"}', '{"name":"@ac-2"},{"name":"@local"}') : l);
+    writeFileSync(join(h.root, "fx", "parse.ndjson"), parse.join("\n"));
+    writeFileSync(join(h.root, "fx", "dry.ndjson"), report(["Criterion 1 holds"], "red"));
+  };
+
+  test("Red expects only the scenarios a dry run of bdd.run lists, so a @local one left out of the run passes", async () => {
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    localRun(h);
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
+  });
+
+  test("Red takes bdd.run's filter from the dry run, so a filter kept in a profile counts too", async () => {
+    // bdd.run names no --tags at all, as `cucumber-js --profile cell` doesn't, yet its dry run leaves the @local scenario out.
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    localRun(h);
+    assert.doesNotMatch(h.deps.config.bdd.run, /--tags|-t /);
+    assert.equal(await h.run(), "done");
+  });
+
+  test("Red still fails with \"not run in the cell\" for a scenario the dry run lists but the run leaves out", async () => {
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    assert.equal(await h.run(), "waiting");
+    assert.match(h.transitions().at(-1).question.body, /not run in the cell: Criterion 2 holds/);
+  });
+
+  test("Red fails, naming the exit, when bdd.run's dry run writes no report", async () => {
+    const h = harness();
+    // `sh -c '<script>' --dry-run` gives the script --dry-run as $0.
+    h.deps.config.bdd.run = `sh -c 'if [ "$0" = --dry-run ]; then echo bad flag >&2; exit 2; fi; ${h.deps.config.bdd.run}'`;
+    assert.equal(await h.run(), "waiting");
+    assert.match(h.transitions().at(-1).question.body, /bdd\.run with --dry-run added wrote no report to reports\/bdd\.ndjson \(exit 2\): bad flag/);
+  });
+
+  test("Red fails when the --dry-run it adds doesn't reach cucumber-js, as with `npm run <script>`, so a real run isn't read as the dry run", async () => {
+    // npm keeps a trailing --dry-run for itself, so the script runs for real. Here the real run leaves Criterion 2 out,
+    // which a real run read as the dry run would hide instead of reporting it "not run in the cell".
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    // `sh -c '<script>' --dry-run` puts the flag in $0, which the script never reads, as an npm script never sees it.
+    h.deps.config.bdd.run = `sh -c 'cp "${fwd(join(h.root, "fx", "run.ndjson"))}" reports/bdd.ndjson'`;
+    assert.equal(await h.run(), "waiting");
+    const body = h.transitions().at(-1).question.body;
+    assert.match(body, /bdd\.run with --dry-run added didn't do a dry run \(steps ran: 1 FAILED\)/);
+    assert.doesNotMatch(body, /not run in the cell/);
+  });
+
   test("a cell resumed at open-pr still lists each scenario in the PR body", async () => {
     const h = harness({ nextStage: "open-pr" });
     assert.equal(await h.run(), "done");
@@ -1037,6 +1103,37 @@ describe("the PR review stage", () => {
     assert.match(t[0].question.body, /app\.txt:1.*Rename it\./);
   });
 
+  test("after address, the PR review runs on the head address pushed, and only then does the item return to InReview", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment], prNumber: 7 }, script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") { writeFileSync(join(a.cwd, "app.txt"), "renamed\n"); return; }
+      return reviewer([])(a, stage);
+    } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["address", "pr-review"]);
+    const review = h.agentCalls.find((a) => a.agent === "factory-pr-reviewer")!;
+    const head = git(h.dir, "rev-parse", "HEAD");
+    assert.ok(review.prompt.includes(head) && review.prompt.includes("#7"));
+    assert.ok(!review.prompt.includes("rename foo"), "the person's thread isn't one of the PR reviewer's own");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/postReview").map((c) => c.body.commitSha), [head]);
+    const order = h.calls.map((c) => c.route === "/stage" ? `${c.body.stageId}:${c.body.status}` : c.route).filter((r) => r.includes(":") || r === "/transition");
+    assert.deepEqual(order.slice(-3), ["pr-review:started", "pr-review:passed", "/transition"]);
+    assert.deepEqual(h.transitions(), [{ event: "pr_opened", prNumber: 7 }]);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"), "the PR already has its reviewers");
+  });
+
+  test("after address, a PR review finding still held blocks, and the item never returns to InReview", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment], prNumber: 7 }, script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") return;
+      if (a.agent === "factory-pr-reviewer") return { text: '{"finding":"Rename it.","path":"app.txt","line":1}\nOPEN: 1' };
+      return undefined;
+    } });
+    // A copy, so the one-round limit doesn't leak into the tests that share SOP.
+    h.deps.sop = structuredClone(SOP);
+    h.deps.sop.stages.find((x) => x.id === "pr-review")!.max_rounds = 1;
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.transitions().map((t) => t.event), ["blocked"]);
+  });
+
   test("a repo host that can't post a review gets no PR review, and open-pr hands the PR to people", async () => {
     const h = harness({ nextStage: "open-pr" });
     delete h.deps.repoHost.postReview;
@@ -1048,11 +1145,56 @@ describe("the PR review stage", () => {
     assert.doesNotMatch(h.prs.at(-1)!.body, /PR review took/);
   });
 
-  test("an unreadable review blocks, and nothing is posted", async () => {
-    const h = harness({ nextStage: "open-pr", script: reviewer([() => "I think it's fine."]) });
+  test("an unreadable review whose restate is unreadable too blocks, and nothing is posted", async () => {
+    const h = harness({ nextStage: "open-pr", script: (a) => a.agent === "factory-pr-reviewer" ? { text: "I think it's fine.", sessionId: "rs-1" } : undefined });
     assert.equal(await h.run(), "waiting");
     assert.ok(!h.routes().includes("/repo/postReview"));
     assert.match(h.transitions()[0].question.body, /couldn't read the PR reviewer's answer/);
+  });
+
+  // PBI 190: one restate, in the reviewer's own session, before the item asks a person.
+  const restating = (first: string, restated: string) => {
+    const h = harness({ nextStage: "open-pr", script: (a) => {
+      if (a.agent !== "factory-pr-reviewer") return;
+      return a.resume ? { text: restated, sessionId: a.resume } : { text: first, sessionId: "rs-1" };
+    } });
+    const reviewerCalls = () => h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer");
+    const report = () => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status !== "started");
+    return { h, reviewerCalls, report };
+  };
+
+  test("an unreadable answer is restated once in the same session, without the brief, and a restated APPROVED passes", async () => {
+    const { h, reviewerCalls, report } = restating("Looks fine to me overall.", "APPROVED");
+    assert.equal(await h.run(), "done");
+    const [review, restate, ...more] = reviewerCalls();
+    assert.deepEqual(more, []);
+    assert.equal(review.resume, undefined);
+    assert.equal(restate.resume, "rs-1");
+    assert.match(restate.prompt, /last line is neither APPROVED nor OPEN: <n>: Looks fine to me overall\./);
+    assert.ok(!restate.prompt.includes(review.prompt.slice(0, 200)), "the restate holds the review brief again");
+    assert.equal(h.calls.filter((c) => c.route === "/repo/postReview").length, 1);
+    assert.deepEqual(h.started().filter((s) => s === "pr-review"), ["pr-review"]);
+    assert.deepEqual(report().map((c) => c.body.status), ["passed"]);
+    assert.deepEqual(report()[0].body.restates, [{ round: 1, reason: "its last line is neither APPROVED nor OPEN: <n>: Looks fine to me overall." }]);
+    assert.match(h.prs.at(-1)!.body, /PR review took 1 round\./);
+  });
+
+  test("a restate that is still unreadable blocks with the restated answer's reason, and the second ask is logged", async () => {
+    const { h, reviewerCalls, report } = restating("Looks fine to me overall.", "Sorry, it looks fine.");
+    assert.equal(await h.run(), "waiting");
+    assert.equal(reviewerCalls().length, 2);
+    const q = h.transitions()[0].question.body;
+    assert.match(q, /couldn't read the PR reviewer's answer.*Sorry, it looks fine\./);
+    assert.doesNotMatch(q, /Looks fine to me overall/);
+    assert.ok(!h.routes().includes("/repo/postReview"));
+    assert.deepEqual(report().map((c) => c.body.status), ["failed"]);
+    assert.equal(report()[0].body.restates.length, 1);
+  });
+
+  test("an answer from a run with no session to resume blocks as before, with no restate", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => "I think it's fine."]) });
+    assert.equal(await h.run(), "waiting");
+    assert.equal(h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer").length, 1);
   });
 
   test("a review GitHub turns down with a 422 blocks, naming the finding, and the item never reaches InReview", async () => {

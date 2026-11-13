@@ -135,9 +135,17 @@ Then("the {string} and {string} containers are running, each with a data volume"
     const volumes = ([] as { source?: string; mountType?: string }[]).concat((res?.volumes ?? []) as never);
     const named = volumes.find((v) => v.mountType === "volume" && v.source?.endsWith("-data"));
     assert.ok(named?.source, `"${resource}" has no named data volume in ${JSON.stringify(res.volumes)}`);
-    const state = sh(`docker inspect --format "{{.State.Running}} {{range .Mounts}}{{.Name}} {{end}}" ${id}`).out;
-    assert.match(state, /^true /, `the "${resource}" container isn't running`);
-    assert.ok(state.split(/\s+/).includes(named.source), `the "${resource}" container doesn't mount ${named.source}`);
+    const state = sh(`docker inspect --format "{{.State.Running}} {{.Config.Image}} {{range .Mounts}}{{.Name}}={{.Destination}} {{end}}" ${id}`).out;
+    const [running, image = "", ...mounts] = state.trim().split(/\s+/);
+    assert.equal(running, "true", `the "${resource}" container isn't running`);
+    const mount = mounts.find((m) => m.startsWith(`${named.source}=`));
+    assert.ok(mount, `the "${resource}" container doesn't mount ${named.source}`);
+    // The AppHost pins pg to Postgres 17, whose image keeps its data in an anonymous VOLUME at /var/lib/postgresql/data.
+    // A named volume mounted anywhere else, as when withImageTag() comes after withDataVolume(), loses the data on restart.
+    if (resource === "pg") {
+      assert.match(image, /(^|\/)postgres:17(\.|$)/, `"pg" runs ${image}, not Postgres 17`);
+      assert.equal(mount, `${named.source}=/var/lib/postgresql/data`, `"pg" mounts its data volume at the wrong path`);
+    }
   }
 });
 
