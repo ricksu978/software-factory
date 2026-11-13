@@ -70,8 +70,25 @@ describe("checkChange", () => {
     assert.equal(message("daily_budget", "-10"), "Daily budget must be more than 0, or left empty for none.");
   });
 
+  test("clears an active usage pause, with a reason (PBI 178)", () => {
+    const paused = { ...policy, usage_pause: "2026-11-14T09:00:00Z" };
+    assert.deepEqual(checkChange(paused, "usage_pause", " ", ` ${why} `), { ok: true, reason: why, updates: [{ key: "usage_pause", column: "usage_paused_until", value: null }] });
+    const noReason = checkChange(paused, "usage_pause", "");
+    assert.ok(!noReason.ok && noReason.message === "Give a reason for the change.");
+  });
+
+  test("turns down a clear with no usage pause, and any value but empty for the usage pause", () => {
+    const none = checkChange(policy, "usage_pause", "", why);
+    assert.ok(!none.ok && none.status === 400 && none.message === "There's no usage pause to clear.");
+    const paused = { ...policy, usage_pause: "2026-11-14T09:00:00Z" };
+    for (const p of [paused, policy]) {
+      const set = checkChange(p, "usage_pause", "2026-12-01T00:00:00Z", why);
+      assert.ok(!set.ok && set.status === 400 && set.message === "The usage pause can only be cleared.");
+    }
+  });
+
   test("refuses a setting the factory sets itself, an env-backed one and an unknown one", () => {
-    for (const key of ["mode", "usage_pause", "GITHUB_APP_ID", "nope"]) {
+    for (const key of ["mode", "GITHUB_APP_ID", "nope"]) {
       const c = checkChange(policy, key, "1", why);
       assert.ok(!c.ok && c.message === "That setting can't be changed from the page.", key);
     }

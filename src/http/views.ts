@@ -339,16 +339,21 @@ export function activityPage(rows: ActivityRow[], banner: string | null): string
 }
 
 /** One setting as the Configuration page lists it: its key, its name, and its value, or null when it has none. */
-export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean; note?: string };
+export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean; clearable?: boolean; note?: string };
 
 /**
  * The Configuration page (PBI 175). Runtime settings come first. An operator gets a form beside each one they can
- * change, which asks for the change's reason too (PBI 176), and a viewer gets none. Env-backed settings are read-only, and each says it needs a restart.
+ * change, which asks for the change's reason too (PBI 176), and a viewer gets none. An operator also gets a button to clear an active usage pause (PBI 178). Env-backed settings are read-only, and each says it needs a restart.
  */
 export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null }, banner: string | null): string {
   const value = (v: string | null) => (v === null ? `<span class="muted">not set</span>` : escapeHtml(v));
   const note = (s: ConfigSetting) => (s.note ? `<span class="muted">${escapeHtml(s.note)}</span>` : "");
   const change = (s: ConfigSetting) => {
+    if (s.clearable && c.canOperate && s.value !== null) {
+      // PBI 178: an operator can clear an active usage pause, with a reason, but never set one.
+      return `<td><form method="post" action="/configuration"><input type="hidden" name="setting" value="${escapeHtml(s.key)}"><input type="hidden" name="value" value="">
+<label for="reason-${escapeHtml(s.key)}">Reason</label><input id="reason-${escapeHtml(s.key)}" name="reason" required> <button>Clear</button></form>${note(s)}</td>`;
+    }
     if (!s.editable) return `<td class="muted">Set by the factory</td>`;
     if (!c.canOperate) return `<td>${note(s)}</td>`;
     const id = `setting-${escapeHtml(s.key)}`;

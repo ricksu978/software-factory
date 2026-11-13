@@ -382,12 +382,12 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       const canOperate = requireRole(user, "operator");
       const view = async (status: number, extra: { notice?: string | null; error?: string | null }) => {
         const now = await runtimeValues(deps.pool);
-        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable, note: s.note }));
+        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable, clearable: s.clearable, note: s.note }));
         send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, ...extra }, banner));
       };
       if (req.method === "GET") {
         const changed = RUNTIME_SETTINGS.find((s) => s.key === url.searchParams.get("changed"));
-        await view(200, { notice: changed ? `Setting saved: ${changed.label} changed.` : null });
+        await view(200, { notice: changed ? `Setting saved: ${changed.label} ${changed.clearable ? "cleared" : "changed"}.` : null });
         return true;
       }
       if (!canOperate) {

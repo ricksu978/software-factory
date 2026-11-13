@@ -70,6 +70,17 @@ describe("configurationPage", () => {
     assert.doesNotMatch(envPart, /<form|<input|<button/);
   });
 
+  test("gives an operator a button to clear an active usage pause, and none once it's cleared or to a viewer (PBI 178)", () => {
+    const pause = (value: string | null) => [{ key: "usage_pause", label: "usage pause", value, editable: false, clearable: true }];
+    const row = (html: string) => /<tr><th scope="row">usage pause<\/th>([\s\S]*?)<\/tr>/.exec(html)![1];
+    const active = row(configurationPage({ runtime: pause("2026-11-14T09:00:00Z"), env, canOperate: true }, null));
+    assert.match(active, /<form method="post" action="\/configuration"><input type="hidden" name="setting" value="usage_pause"><input type="hidden" name="value" value="">/);
+    assert.match(active, /<input id="reason-usage_pause" name="reason" required>/);
+    assert.match(active, /<button>Clear<\/button>/);
+    assert.doesNotMatch(row(configurationPage({ runtime: pause(null), env, canOperate: true }, null)), /<form|<input|<button/);
+    assert.doesNotMatch(configurationPage({ runtime: pause("2026-11-14T09:00:00Z"), env, canOperate: false }, null), /<form|<input|<button/);
+  });
+
   test("shows a setting's note to an operator and a viewer alike", () => {
     for (const canOperate of [true, false]) assert.match(configurationPage({ runtime, env, canOperate }, null), /Stored, but not enforced yet\./);
   });
