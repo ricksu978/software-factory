@@ -11,7 +11,8 @@ import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
+import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
+import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -32,7 +33,7 @@ const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
 const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
-type User = { id: string; role: Role; product_owner: boolean };
+type User = { id: string; role: Role; product_owner: boolean; github_login: string | null };
 
 function send(res: ServerResponse, status: number, html: string, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", ...headers });
@@ -161,7 +162,8 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
  */
 async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
   const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
-    `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event
+    `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event,
+       e.actor_id as actor, e.payload->>'setting' as setting
      from event e left join item i on i.id = e.item_id order by e.at desc, e.id desc limit 100`,
   )).rows;
   const repos = await issueRepos(pool, [...new Set(rows.flatMap((r) => (r.item_id ? [r.item_id] : [])))]);
@@ -296,7 +298,8 @@ function eventStreams(pool: pg.Pool) {
  * refused, so no request can pass as a webhook to a proxy and land on a dashboard route here (Review Focus 4).
  */
 export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promise<void> } {
-  const env = deps.env ?? process.env;
+  // A copy taken now, so the Configuration page shows the env the control plane started with.
+  const env = { ...(deps.env ?? process.env) };
   const streams = eventStreams(deps.pool);
   const handler: Handler = async (req, res) => {
     const raw = (req.url ?? "/").split("?")[0];
@@ -320,7 +323,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       send(res, 401, signInPage());
       return true;
     }
-    const user = (await deps.pool.query<User>(`select id, role, product_owner from "user" where provider = $1 and subject = $2`, [identity.provider, identity.subject])).rows[0];
+    const user = (await deps.pool.query<User>(`select id, role, product_owner, github_login from "user" where provider = $1 and subject = $2`, [identity.provider, identity.subject])).rows[0];
     if (!user) {
       send(res, 403, noAccessPage());
       return true;
@@ -342,6 +345,28 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     }
     if (req.method === "GET" && path === "/phase0") {
       send(res, 200, phase0Page(await phase0(deps.pool), await readinessSpend(deps.pool), banner));
+      return true;
+    }
+    if (path === "/configuration" && (req.method === "GET" || req.method === "POST")) {
+      const canOperate = requireRole(user, "operator");
+      const view = async (status: number, extra: { notice?: string | null; error?: string | null }) => {
+        const now = await runtimeValues(deps.pool);
+        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable }));
+        send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, ...extra }, banner));
+      };
+      if (req.method === "GET") {
+        const changed = RUNTIME_SETTINGS.find((s) => s.key === url.searchParams.get("changed"));
+        await view(200, { notice: changed ? `Setting saved: ${changed.label} changed.` : null });
+        return true;
+      }
+      if (!canOperate) {
+        send(res, 403, "Only an operator can change the factory's settings.");
+        return true;
+      }
+      const b = await form(req);
+      const outcome = await changeSetting(deps.pool, user.github_login ?? identity.subject, b.setting ?? "", b.value ?? "");
+      if (!outcome.ok) await view(outcome.status, { error: outcome.message });
+      else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
       return true;
     }
     const blob = BLOB_PATH.exec(path);
