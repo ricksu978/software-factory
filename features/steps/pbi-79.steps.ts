@@ -19,7 +19,11 @@ Given("{string} commented {string} in an open thread on PR {int}", function (aut
   const host = ctx(this).host as unknown as { reviewComments?: Map<string, Thread[]> } | undefined;
   if (!host?.reviewComments) return;
   const key = `ricksu978/software-factory#${pr}`;
-  host.reviewComments.set(key, [...(host.reviewComments.get(key) ?? []), { threadId: "t1", path: "src/a.ts", line: 3, author, body }]);
+  const list = host.reviewComments.get(key) ?? [];
+  // The factory's own comment here is a reply, as its address stage posts one, so it goes into a thread a person
+  // opened. A thread the bot opens is its own review's, which never reaches an address run (PBI 130).
+  if (!list.length && author.endsWith("[bot]")) list.push({ threadId: "t1", path: "src/a.ts", line: 3, author: "a-reviewer", body: "Rename this?" });
+  host.reviewComments.set(key, [...list, { threadId: "t1", path: "src/a.ts", line: 3, author, body }]);
 });
 
 // Other suites share this repo row and expect the seeded value.

@@ -4,7 +4,7 @@
 import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import { botKey, loginKey, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
+import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
 import { SOP_MOVED } from "../cell/sop-move.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
@@ -180,12 +180,14 @@ const routes: Record<string, Route> = {
     );
     const resume = last.rows[0]?.status === "stopped" ? { stageId: run.next_stage, attempt: last.rows[0].attempt } : null;
     let trustedComments: ReviewComment[] = [];
-    // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief.
+    // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief. A thread the
+    // factory's own review opened belongs to the PR review stage, so none of it does, a person's reply included (PBI 130).
     if (run.next_stage === "address" && run.pr_number !== null) {
       const users = await c.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`);
       const trusted = new Set(users.rows.map((u) => loginKey(u.github_login)));
       if (run.trusted_bot) trusted.add(botKey(run.trusted_bot));
-      trustedComments = (await deps.repoHost.openReviewComments(repo, run.pr_number)).filter((x) => trusted.has(loginKey(x.author)));
+      trustedComments = withoutFactoryThreads(await deps.repoHost.openReviewComments(repo, run.pr_number), run.trusted_bot)
+        .filter((x) => trusted.has(loginKey(x.author)));
     }
     return {
       externalId: run.external_id, title: item?.title ?? run.title, acceptanceCriteria: item?.acceptanceCriteria ?? [],

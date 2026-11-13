@@ -4,6 +4,7 @@ import type pg from "pg";
 import type { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../../src/adapters/types.ts";
 import type { SplitDeps } from "../../src/gate/split.ts";
+import type { Judge as GateJudge } from "./pbi-13.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // Shares PBI 4's database. Each scenario starts with empty item, source, repo and user tables, a fake board, a fake
@@ -15,7 +16,7 @@ export { baseFiles };
 
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
-type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }) => Promise<string>;
+type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }, spent?: Parameters<GateJudge>[2]) => Promise<string>;
 export type Logic = { judgePrompt: string; version: number; splitPrompt: string };
 type Poller = {
   pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic; split?: SplitDeps }) => Promise<unknown>;
@@ -39,6 +40,11 @@ export type Ctx = {
   split?: SplitDeps;
   /** PBI 149: each item's updatedAt and each of their repos' head and readiness files, as the setup left them. */
   baseline?: Baseline;
+  /**
+   * PBI 168: a judge asked alongside this fake one, which reports what each call spent, so the gate records a readiness
+   * check. Its reply is ignored. Unset, the fake judge reports no spend.
+   */
+  metered?: GateJudge;
   polls: number;
   error?: unknown;
 };
@@ -49,8 +55,9 @@ export function ctx(world: object): Ctx {
   return w.pbi12;
 }
 
-const judge = (c: Ctx): Judge => async (item, dor) => {
+const judge = (c: Ctx): Judge => async (item, dor, spent) => {
   c.asked.set(item.externalId, (c.asked.get(item.externalId) ?? 0) + 1);
+  if (c.metered) await c.metered(item, dor as never, spent);
   if (c.judge === "throw") throw new Error("usage limit reached");
   const line = (index: number) => {
     const failed = c.judge === "fail" && (!c.failLine || c.failLine.index === index);
@@ -231,14 +238,14 @@ When("a person merges the item's PR", function () {
 
 When("{string}, who maps to no allowlisted user, requests changes on the item's PR", function (login: string) {
   const c = ctx(this);
-  if (c.host && c.pr) pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login });
+  if (c.host && c.pr) pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login, body: "Please change this." });
 });
 
 When("{string}, an allowlisted user, requests changes on the item's PR", long, async function (login: string) {
   const c = ctx(this);
   if (!c.host || !c.pr) return;
   await need().pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', $1, 'owner', $1)`, [login]);
-  pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login });
+  pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login, body: "Please change this." });
 });
 
 Then("the factory holds the item in state {string}", long, async function (state: string) {

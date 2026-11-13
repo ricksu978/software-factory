@@ -9,7 +9,7 @@ import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "..
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import type { Actor } from "../store/events.ts";
-import { claimNext, expireLeases, overrideItem, transitionItem } from "../store/items.ts";
+import { claimNext, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { activeOverrides, clearItemOverrides, restartWaitMs } from "../store/overrides.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
@@ -204,7 +204,8 @@ async function stopRun(d: TickDeps, itemId: string, o: { id: string; reason: str
 }
 
 /**
- * Sends a Failed or Abandoned item back and clears its hold (Run contract 1 and 7). An Abandoned item whose question
+ * Sends a Failed or Abandoned item back and clears its hold (Run contract 1 and 7). One withdrawn from Eligible or
+ * NotReady goes back to Eligible, through the readiness gate again (PBI 168). An Abandoned item whose question
  * is still open goes back to waiting on it, with the clock and reminders reset. A run whose PR merged gives way to a
  * new run on a new branch. A run whose PR a person closed unmerged resumes at open-pr, from the kept branch.
  */
@@ -227,6 +228,12 @@ async function requeue(d: TickDeps, itemId: string) {
       const event: ItemEvent = open.rows[0].kind === "sign_off" ? "reopened_signoff" : "reopened_question";
       await transitionItem(c, itemId, event, system);
       await c.query("update question set asked_at = $2, reminders_sent = 0 where id = $1", [open.rows[0].id, d.now]);
+      return;
+    }
+    // An item withdrawn before it was Queued never passed the readiness gate, so it goes back to Eligible to meet it
+    // again rather than straight to Queued (PBI 168).
+    if (row.state === "Abandoned" && (await withdrawnBeforeQueue(c, itemId))) {
+      await transitionItem(c, itemId, "returned", system);
       return;
     }
     await transitionItem(c, itemId, "requeued", system);

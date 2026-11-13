@@ -262,6 +262,19 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
   });
 
+  test("an address run's context holds none of a thread the factory's own review opened, a person's reply included (PBI 130)", async () => {
+    const cell = await claimed("address");
+    await db.pool.query("update run set pr_number = 9 where id = $1", [cell.runId]);
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', 'owner', 'ricksu978', 'owner')`);
+    host.reviewComments.set(`${repo}#9`, [
+      { threadId: "ft", path: "src/a.ts", line: 3, author: "factory[bot]", body: "Misses the VAT." },
+      { threadId: "ft", path: "src/a.ts", line: 3, author: "ricksu978", body: "Keep it." },
+      { threadId: "pt", path: "src/a.ts", line: 5, author: "ricksu978", body: "Use the tax table." },
+    ]);
+    const { body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.deepEqual(body.trustedComments.map((c: { body: string }) => c.body), ["Use the tax table."]);
+  });
+
   test("lease renews and says stop while a factory pause is on", async () => {
     const cell = await claimed();
     clock = new Date(at.getTime() + 60_000);
