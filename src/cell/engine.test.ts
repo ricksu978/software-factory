@@ -616,6 +616,29 @@ describe("runCell", () => {
     assert.equal(readFileSync(log, "utf8").split("\n").filter((l) => l === base).length, 1);
   });
 
+  test("a line the base shares alongside a line that fails only on the item's branch is retried, not blamed on the base", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.policies.dod = policy("dod", [
+      "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`",
+      "- [ ] Types check. `run: [ -d features ] && echo 'error TS2322' && exit 1; exit 0`",
+      "",
+    ].join("\n"));
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(h.transitions().every((t) => !t.question?.baseFailure));
+    assert.ok(h.started().filter((s) => s === "green").length > 1);
+  });
+
+  test("a line the base shares alongside a judged line that failed is retried, not blamed on the base", async () => {
+    const h = harness({ nextStage: "green", script: (a) => {
+      if (a.prompt.startsWith("# Definition of Done")) return { text: '{"index":2,"status":"failed","reason":"unclear"}' };
+    } });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n- [ ] Docs are clear.\n");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(h.transitions().every((t) => !t.question?.baseFailure));
+  });
+
   test("a base run that can't run leaves a failed Definition of Done line the item's, retried as before", async () => {
     const h = harness({ nextStage: "green" });
     // The line drops origin/main after the claim's merge, so the base run's rev-parse throws.

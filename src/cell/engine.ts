@@ -476,13 +476,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   // Run contract 11: run: lines in the checkout, the rest judged by an agent, all stored with the commit they checked.
-  // A run: line that fails is run again on the base commit (PBI 215). When every test it failed fails there too, the
-  // check stops with BaseFails once its verdicts are stored, so the stage asks about the base instead of retrying.
+  // A run: line that fails is run again on the base commit (PBI 215). When every failed line's tests all fail there too,
+  // the check stops with BaseFails once its verdicts are stored, so the stage asks about the base instead of retrying.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
     const head = await git.head();
     const dod = policies.dod;
     const verdicts: Verdict[] = [];
     const shared: { criterion: string; tests: string[] }[] = [];
+    const sharedIdx = new Set<number>();
     let baseSha = "";
     for (const c of dod.criteria.filter((x) => x.run)) {
       const r = await sh(c.run!, dir);
@@ -492,6 +493,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         const b = await onBase(c.run!);
         if (sharedWithBase(tests, b.tests)) {
           shared.push({ criterion: c.text, tests });
+          sharedIdx.add(c.index);
           baseSha = b.sha;
           reason = `the base commit ${b.sha.slice(0, 7)} fails the same tests: ${reason}`;
         }
@@ -514,7 +516,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha: head, verdicts });
     dodVerdicts = verdicts;
     dodSha = head;
-    if (shared.length) {
+    // The base is blamed only when every failed line is one whose failing tests the base shares. A line that fails only
+    // on the branch, names no test, or was judged failed stays the item's, so the stage retries as before.
+    const failed = verdicts.filter((v) => v.status === "failed");
+    if (shared.length && failed.every((v) => sharedIdx.has(v.index))) {
       throw new BaseFails(baseQuestion(ctx.base, baseSha, shared), { sha: baseSha, tests: [...new Set(shared.flatMap((l) => l.tests))] });
     }
     return verdicts;
