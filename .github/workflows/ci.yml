@@ -1,7 +1,8 @@
 name: ci
 
-# Push only, so a PR's push runs once. pull_request would run a second time, and GitHub skips it on a PR with a merge
-# conflict, which leaves a factory cell waiting on CI that never comes. Every PR here comes from a branch in this repo.
+# Push only, on every branch, so a PR's push runs once. Every PR here comes from a branch in this repo. Don't swap it
+# for pull_request: GitHub runs no pull_request workflow on a PR with a merge conflict, and a factory cell would wait
+# on CI that never runs.
 on:
   push:
 
