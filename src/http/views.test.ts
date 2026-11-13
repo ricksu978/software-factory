@@ -248,6 +248,13 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*<td title="\$0\.21">\$0\.21<\/td>/);
   });
 
+  test("Run detail's stage row says when the PR reviewer needed a second ask, and why (PBI 190)", () => {
+    const d = detail([]);
+    d.stages = [{ ...d.stages[0], stage_id: "pr-review", restates: [{ round: 2, reason: "its last line is neither APPROVED nor OPEN: <n>: <b>fine</b>" }] }];
+    const row = /<tbody>([\s\S]*?)<\/tbody>/.exec(runDetailPage(d, null).split("<h2>Stages</h2>")[1])![1];
+    assert.match(row, /Needed a second ask of the PR reviewer in round 2: its last line is neither APPROVED nor OPEN: &lt;n&gt;: &lt;b&gt;fine&lt;\/b&gt;/);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });
