@@ -266,19 +266,24 @@ const routes: Record<string, Route> = {
     const status = oneOf(body.status, "status", ["started", "passed", "failed", "stopped"] as const);
     const num = (v: unknown) => (typeof v === "number" ? v : null);
     const text = (v: unknown) => (typeof v === "string" ? v : null);
+    // PBI 190: the PR reviewer's restates in this attempt, each a round and why its answer couldn't be read.
+    const restates = body.restates === undefined ? null : Array.isArray(body.restates)
+      && body.restates.every((r) => Number.isInteger(r?.round) && typeof r?.reason === "string")
+      ? JSON.stringify(body.restates.map((r: { round: number; reason: string }) => ({ round: r.round, reason: cut(r.reason) })))
+      : (() => { throw new BadRequest("restates must be a list of { round, reason }"); })();
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message))];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
-         message = coalesce($12, message)
+         message = coalesce($12, message), restates = coalesce($13::jsonb, restates)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'))`,
         values,
       );
     }

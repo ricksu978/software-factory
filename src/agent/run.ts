@@ -12,11 +12,15 @@ export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string;
+  /** The session the call ran in, which a later call can resume (PBI 190). */
+  sessionId?: string;
 };
 
 export type AgentArgs = {
   prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: ("WebSearch" | "WebFetch")[]; signal: AbortSignal;
+  /** A session to carry on, by the sessionId an earlier call returned, as when the PR reviewer restates (PBI 190). */
+  resume?: string;
 };
 
 const WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
@@ -59,7 +63,7 @@ export function agentOptions(a: AgentArgs): Options {
   if (a.signal.aborted) abortController.abort(a.signal.reason);
   else a.signal.addEventListener("abort", () => abortController.abort(a.signal.reason), { once: true });
 
-  const common: Options = { model: a.model, cwd: a.cwd, abortController, maxTurns: a.maxTurns, agent: a.agent };
+  const common: Options = { model: a.model, cwd: a.cwd, abortController, maxTurns: a.maxTurns, agent: a.agent, ...(a.resume ? { resume: a.resume } : {}) };
   if (a.mode === "judge") {
     // The judge reads untrusted item text in the control plane, which holds the App key and the database.
     // Nothing on disk loads, no built-in tool exists, no MCP server from any config starts, and every tool is denied.
@@ -84,6 +88,8 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omi
         if (i.status === "rejected") r.limit = { resetsAt: i.resetsAt ?? Math.floor(Date.now() / 1000) + FALLBACK_WAIT_S };
         if (i.utilization !== undefined) r.usage = { utilization: i.utilization, resetsAt: i.resetsAt ?? null };
       } else if (m.type === "result") {
+        // The session a later call resumes, as the PR review does to ask for a restate (PBI 190).
+        r.sessionId = m.session_id;
         // A success with is_error carries an API error, such as the one that follows a rejected usage limit.
         r.ok = m.subtype === "success" && !m.is_error;
         r.text = m.subtype === "success" ? m.result : m.errors.join("\n");

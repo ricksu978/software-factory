@@ -224,6 +224,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(body.scenarioNotes, notes);
   });
 
+  test("a PR review attempt's restates are stored on its stage row (PBI 190)", async () => {
+    const cell = await claimed("pr-review");
+    const restates = [{ round: 1, reason: "its last line is neither APPROVED nor OPEN: <n>: Looks fine." }];
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 1, status: "started" });
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 1, status: "passed", restates })).status, 200);
+    const row = (await db.pool.query("select restates from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.deepEqual(row.restates, restates);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "pr-review", attempt: 2, status: "passed", restates: [{ round: "x" }] })).status, 400);
+  });
+
   test("context after an approved sign-off hands red the lock", async () => {
     const cell = await claimed("red");
     await db.pool.query("update run set features_lock_sha = '5c3a1f0', locked_files = '{features/a.feature}', config_sha = 'cfg1' where id = $1", [cell.runId]);
