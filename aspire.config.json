@@ -18,6 +18,7 @@
   "packages": {
     "Aspire.Hosting.JavaScript": "13.6.4",
     "Aspire.Hosting.Azure.Storage": "13.6.4",
+    "Aspire.Hosting.Keycloak": "13.6.4",
     "Aspire.Hosting.PostgreSQL": "13.6.4"
   }
 }
