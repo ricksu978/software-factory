@@ -201,7 +201,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    An item withdrawn before it was Queued that's listed again, its label back, returns to Eligible (PBI 168).
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
-    const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo });
+    const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
     await returnWithdrawn(pool, id);
   });
 
