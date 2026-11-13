@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { parse } from "yaml";
 import type { FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
-import { splitPrompt } from "../gate/split.ts";
+import { splitPrompt, TEMPLATE_DOR } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
 
 export type AgentResult = {
@@ -144,8 +144,9 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
  * The factory's current readiness logic (PBI 149): the judge's prompt, independent of any one item or dor.md,
  * READINESS_VERSION, and since PBI 159 the split prompt. The judge's prompt is judgePrompt's own words, rendered around
  * an empty item and a dor.md with no text and one empty criterion. The split prompt is splitPrompt's, around an empty
- * item with one empty criterion. So every line of each template, the per-criterion line included, is in the logic, and
- * any edit to those words changes it while the items and policy files stay out of it.
+ * item with one empty criterion and, since PBI 202, that same stand-in dor.md (TEMPLATE_DOR). So every line of each
+ * template, the per-criterion lines included, is in the logic, and any edit to those words changes it while the items
+ * and policy files stay out of it.
  */
 export function readinessLogic(): ReadinessLogic {
   const empty: FactoryItem = {
@@ -155,7 +156,7 @@ export function readinessLogic(): ReadinessLogic {
   return {
     judgePrompt: judgePrompt(empty, { text: "", criteria: [{ index: 0, text: "" }] }),
     version: READINESS_VERSION,
-    splitPrompt: splitPrompt({ ...empty, acceptanceCriteria: [""] }),
+    splitPrompt: splitPrompt({ ...empty, acceptanceCriteria: [""] }, TEMPLATE_DOR),
   };
 }
 

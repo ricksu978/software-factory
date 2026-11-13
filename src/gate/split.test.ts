@@ -119,3 +119,39 @@ test("a given prompt is what the coding model gets, and the split key and cache 
   assert.equal(splitKey(item, {}), splitKey({ ...item, updatedAt: "later" }, {}));
   assert.notEqual(splitKey(item, {}), splitKey({ ...item, body: "changed" }, {}));
 });
+
+const dor = {
+  text: "# Definition of Ready\n\nA ticket names its owner team.\n\n- [ ] Names the screen it changes\n",
+  criteria: [{ index: 1, text: "Names the screen it changes" }],
+};
+
+test("the split prompt carries the dor.md the judge reads and asks for child bodies that meet it (PBI 202)", () => {
+  const p = splitPrompt(item, dor);
+  assert.ok(p.includes("A ticket names its owner team."), p);
+  assert.ok(p.includes(JSON.stringify({ index: 1, criterion: "Names the screen it changes" })), p);
+  assert.ok(p.split("\n").some((l) => /\bbody\b/.test(l) && /\bmeets every\b/.test(l) && /dor\.md/.test(l)), p);
+  assert.ok(!splitPrompt(item).includes("Definition of Ready"), "no dor.md given, none in the prompt");
+});
+
+test("the split prompt asks each child to cite its own spec sections and plan tasks, not only the parent's (PBI 202)", () => {
+  for (const p of [splitPrompt(item), splitPrompt(item, dor)]) {
+    const line = p.split("\n").find((l) => /implements or changes/.test(l));
+    assert.ok(line, p);
+    assert.match(line, /cites every spec section or plan task/);
+    assert.match(line, /even when the parent's body doesn't cite/);
+    assert.doesNotMatch(p, /the spec section or plan task the parent's body cites/);
+  }
+});
+
+test("the coding model gets the dor.md given to proposeSplit, but the split key and cache ignore it (PBI 202)", async () => {
+  const asked: string[] = [];
+  const agent = async (a: AgentArgs): Promise<AgentResult> => {
+    asked.push(a.prompt);
+    return { ok: true, text: reply(valid), costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+  };
+  const sop = { models: { coding: "model-c" } };
+  const seen = new Map<string, SplitOutcome>();
+  await proposeSplit(item, { sop, agent, seen }, dor);
+  await proposeSplit(item, { sop, agent, seen }, { ...dor, text: "changed", criteria: [{ index: 1, text: "Links the mock-up" }] });
+  assert.deepEqual(asked, [splitPrompt(item, dor)]);
+});
