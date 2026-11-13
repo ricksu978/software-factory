@@ -303,6 +303,9 @@ const routes: Record<string, Route> = {
     return { ok: true };
   },
 
+  // PBI 173: a run pinned to an older SOP moves to the SOP in the cell image. Red stub: it records nothing yet.
+  "POST sop-move": async () => ({ ok: true }),
+
   "POST transition": async (_deps, { c, run, body, now }) => {
     const event = body.event as ItemEvent;
     if (!cellEvents.has(event)) throw new BadRequest(`a cell may not send ${String(body.event)}`);

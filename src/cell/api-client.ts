@@ -37,7 +37,11 @@ export type CellApi = {
   upload(b: { kind: "transcript" | "report"; stageId: string; attempt: number; body: string }): Promise<void>;
 };
 
-export type HttpCellApi = CellApi & { context(): Promise<CellContext>; githubToken(): Promise<string> };
+export type HttpCellApi = CellApi & {
+  context(): Promise<CellContext>; githubToken(): Promise<string>;
+  /** Moves the run to SOP `to` from SOP `from` (PBI 173). */
+  moveSop(b: { from: string; to: string }): Promise<void>;
+};
 
 export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: string; generation: number }): HttpCellApi {
   const base = `${cfg.controlUrl.replace(/\/$/, "")}/internal/cells/${encodeURIComponent(cfg.runId)}`;
@@ -60,6 +64,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     policyResults: async (b) => void (await call("POST", "/policy-results", b)),
     pr: async (b) => void (await call("POST", "/pr", b)),
     release: async () => void (await call("POST", "/release", {})),
+    moveSop: async (b) => void (await call("POST", "/sop-move", b)),
     checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
