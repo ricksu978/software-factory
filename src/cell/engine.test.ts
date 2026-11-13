@@ -616,6 +616,16 @@ describe("runCell", () => {
     assert.equal(readFileSync(log, "utf8").split("\n").filter((l) => l === base).length, 1);
   });
 
+  test("a base run that can't run leaves a failed Definition of Done line the item's, retried as before", async () => {
+    const h = harness({ nextStage: "green" });
+    // The line drops origin/main after the claim's merge, so the base run's rev-parse throws.
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: git update-ref -d refs/remotes/origin/main; echo 'not ok 1 - parses the config'; exit 1`\n");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
+    assert.doesNotMatch(dod.body.verdicts[0].reason, /fails the same tests/);
+  });
+
   test("a Definition of Done judge that commits fails the green attempt before its push", async () => {
     const h = harness({ nextStage: "green", script: committingJudge() });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are clear.\n");

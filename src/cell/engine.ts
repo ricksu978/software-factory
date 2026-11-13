@@ -456,12 +456,20 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   // PBI 215: each command's run on the base commit, kept for the cell, since `origin/<base>` stays where the claim's
-  // merge fetched it. A command runs there only after it failed on the item's branch, and at most once.
+  // merge fetched it. A command runs there only after it failed on the item's branch, and at most once. A base run that
+  // throws counts as one that shares no failing test.
   const baseRuns = new Map<string, Promise<{ sha: string; tests: string[] }>>();
   const onBase = (command: string) => {
     let r = baseRuns.get(command);
     if (!r) {
-      r = runOnBase(dir, ctx.base, command, config.commands.setup).then((b) => ({ sha: b.sha, tests: b.code === 0 ? [] : failingTests(b.out) }));
+      // A base run that can't run at all (no origin/<base>, no temp folder, a locked worktree) proves nothing against the
+      // base, so the failure stays the item's and is retried as before, instead of ending the cell.
+      r = runOnBase(dir, ctx.base, command, config.commands.setup)
+        .then((b) => ({ sha: b.sha, tests: b.code === 0 ? [] : failingTests(b.out) }))
+        .catch((e) => {
+          console.error(`running a Definition of Done command on origin/${ctx.base} failed, so its failure stays the item's:`, e);
+          return { sha: "", tests: [] as string[] };
+        });
       baseRuns.set(command, r);
     }
     return r;
