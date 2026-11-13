@@ -15,16 +15,23 @@ Given(
   long,
   async function (min: number, max: number, current: number, capacity: number) {
     await freshDb(this, current);
-    await need().pool.query("update wip_policy set wip_min = $1, wip_max = $2, current_wip = $3, review_capacity = $4", [min, max, current, capacity]);
+    const set = await need().pool.query(
+      "update wip_policy set wip_min = $1, wip_max = $2, current_wip = $3, review_capacity = $4",
+      [min, max, current, capacity],
+    );
+    assert.equal(set.rowCount, 1, `the WIP policy update changed ${set.rowCount} row(s), not one`);
   },
 );
 
 Given("current WIP is {int}", long, async function (wip: number) {
-  await need().pool.query("update wip_policy set current_wip = $1", [wip]);
+  const set = await need().pool.query("update wip_policy set current_wip = $1", [wip]);
+  assert.equal(set.rowCount, 1, `setting current WIP changed ${set.rowCount} row(s), not one`);
 });
 
 Given("item {string} is queued behind them", long, async function (name: string) {
-  await newItem(ctx(this), name, "Queued", { rank: 10_000 });
+  const id = await newItem(ctx(this), name, "Queued", { rank: 10_000 });
+  const r = await need().pool.query<{ state: string }>("select state from item where id = $1", [id]);
+  assert.equal(r.rows[0]?.state, "Queued", `item ${name} is ${r.rows[0]?.state}, not Queued`);
 });
 
 // Nothing in review and no open question, so the review brake can't hold work back.
