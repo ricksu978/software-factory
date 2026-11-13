@@ -4,6 +4,7 @@
 // its own transitions onto the board, as the control plane mirrors its own. `aspire run` starts it as the worker
 // resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
 // on a connection of its own (PBI 157). One that can't take it stands by, and one whose lock connection closes exits.
+// Each scheduler tick records the worker's heartbeat, the time it started, in worker_heartbeat (PBI 158).
 import { App } from "@octokit/app";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
@@ -16,6 +17,7 @@ import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
 import { tick, TICK_MS } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
+import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 
@@ -247,10 +249,21 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   let ticked = false;
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
     const now = (d.now ?? (() => new Date()))();
-    await tick({
-      pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-      secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
-    });
+    try {
+      await tick({
+        pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
+      });
+    } finally {
+      // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,
+      // because each shows the worker is alive (PBI 158). A heartbeat that can't be written is logged, not thrown, so
+      // the tick's own outcome is what the log reports for it.
+      try {
+        await recordHeartbeat(d.pool, now);
+      } catch (e) {
+        log.error("The worker heartbeat couldn't be written:", e);
+      }
+    }
     if (!ticked) log.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs, log)];
