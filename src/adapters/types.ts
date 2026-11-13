@@ -93,12 +93,28 @@ export type LineComment = { path: string; line: number; body: string };
 /** The review thread one of a posted review's line comments opened, by the id resolveThread and replyToThread take. */
 export type OpenedThread = { threadId: string; path: string; line: number; body: string };
 
+/** A check that failed on a commit, as the cell API hands it to a cell waiting on CI (PBI 232). */
+export type FailedCheck = { name: string; url: string; log: string | null };
+
+/** How many lines from the end of a failed check's log the cell API returns. */
+export const FAILED_LOG_LINES = 100;
+
+/** The last FAILED_LOG_LINES lines of `log`, joined by "\n", with a trailing newline and CRLFs dropped. */
+export function logTail(log: string): string {
+  return log.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").slice(-FAILED_LOG_LINES).join("\n");
+}
+
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  /**
+   * The checks that failed on `sha`, each with its URL and the last 100 lines of its log, or a null log when the host
+   * can't give it (PBI 232). A check that passed, was skipped or ended neutral isn't one of them.
+   */
+  failedChecksOnSha(repo: string, sha: string): Promise<FailedCheck[]>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */

@@ -114,7 +114,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
       transition: async (b) => rec("/transition", b),
       policyResults: async (b) => rec("/policy-results", b),
       pr: async (b) => rec("/pr", b),
-      checks: async (sha) => (rec("/checks", { sha }), "success"),
+      checks: async (sha) => (rec("/checks", { sha }), { status: "success", failedChecks: [] }),
       release: async () => void rec("/release"),
       upload: async (b) => {
         rec("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt });
@@ -751,12 +751,25 @@ describe("runCell", () => {
   test("a second pass after back to green writes new self-review and open-pr attempts", async () => {
     let checks = 0;
     const h = harness();
-    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ++checks === 1 ? "failure" : "success");
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ({ status: ++checks === 1 ? "failure" : "success", failedChecks: [] }));
     assert.equal(await h.run(), "done");
     const of = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started").map((c) => c.body.attempt);
     assert.deepEqual(of("self-review"), [1, 2]);
     assert.deepEqual(of("open-pr"), [1, 2]);
     assert.deepEqual(of("green"), [1, 2]);
+  });
+
+  test("CI failing at open-pr hands green each failed check's name, URL and log (PBI 232)", async () => {
+    let checks = 0;
+    const h = harness();
+    const unit = { name: "unit", url: "https://ci/unit", log: "line 1\nAssertionError: expected 3 to equal 4" };
+    const lint = { name: "lint", url: "https://ci/lint", log: null };
+    h.deps.api.checks = async () => (++checks === 1 ? { status: "failure", failedChecks: [unit, lint] } : { status: "success", failedChecks: [] });
+    assert.equal(await h.run(), "done");
+    const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
+    const finding = retry.slice(retry.indexOf("## Your last attempt failed"));
+    assert.match(finding, /CI failed on [0-9a-f]{40}/);
+    for (const text of ['"unit"', "https://ci/unit", "line 1\nAssertionError: expected 3 to equal 4", '"lint"', "https://ci/lint", "its log couldn't be read"]) assert.ok(finding.includes(text), `the finding lacks ${text}:\n${finding}`);
   });
 
   test("a later claim numbers each stage on from the run's highest attempt, so it writes over no earlier row or blob", async () => {
@@ -1255,7 +1268,7 @@ describe("the PR review stage", () => {
       if (stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done")) writeFileSync(join(a.cwd, "app.txt"), "green again\n");
       return reviewer(answers)(a, stage);
     } });
-    h.deps.api.checks = async (sha) => (sha === fix ? "failure" : "success");
+    h.deps.api.checks = async (sha) => ({ status: sha === fix ? "failure" : "success", failedChecks: [] });
     assert.equal(await h.run(), "done");
     assert.deepEqual(h.started().filter((s, i, all) => s !== all[i - 1]), ["open-pr", "pr-review", "green", "self-review", "open-pr", "pr-review"]);
     const greenBrief = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!.prompt;

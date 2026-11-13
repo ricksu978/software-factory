@@ -255,8 +255,9 @@ const routes: Record<string, Route> = {
     );
     const status = await deps.repoHost.checksOnSha(repo, sha);
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
-    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending" };
-    return { status };
+    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending", failedChecks: [] };
+    // PBI 232: why CI failed, read here on the control plane's token, so the cell needs no GitHub access to learn it.
+    return { status, failedChecks: status === "failure" ? await deps.repoHost.failedChecksOnSha(repo, sha) : [] };
   },
 
   "POST stage": async (deps, { c, run, body, now }) => {

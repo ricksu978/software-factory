@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, logTail, standingSummaries, THREAD_SETTLE_MS, type FailedCheck, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -188,10 +188,34 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
   }
 }
 
+type CheckRun = { id: number; name: string; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null };
+
+const failedRun = (c: CheckRun) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? "");
+
+/**
+ * A failed check run's log, by its id, which for GitHub Actions is its job's id. A check from another CI, or a log
+ * GitHub no longer keeps, has none to give, and so does a log GitHub fails to give: the check is still named.
+ */
+async function jobLog(gh: GitHubClient, r: { owner: string; repo: string }, id: number): Promise<string | null> {
+  try {
+    const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: id })).data;
+    const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : null;
+    return text === null ? null : logTail(text);
+  } catch {
+    return null;
+  }
+}
+
+async function failedOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<FailedCheck[]> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as CheckRun[];
+  return Promise.all(runs.filter(failedRun).map(async (c) => ({ name: c.name, url: c.html_url || c.details_url || "", log: await jobLog(gh, r, c.id) })));
+}
+
 async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
-  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { status: string; conclusion: string | null }[];
-  if (runs.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""))) return "failure";
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as CheckRun[];
+  if (runs.some(failedRun)) return "failure";
   if (runs.length === 0) {
     // "none" only when no commit status has reported either, so a repo whose CI reports statuses still reads pending.
     const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
@@ -236,6 +260,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async checksOnSha(repo, sha) {
       return checksOn(await client(), split(repo), sha);
+    },
+
+    async failedChecksOnSha(repo, sha) {
+      return failedOn(await client(), split(repo), sha);
     },
 
     async checksOnHead(repo, prNumber) {
