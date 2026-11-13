@@ -145,38 +145,10 @@ export async function board(world: object, name = "the board"): Promise<Board> {
   return made;
 }
 
-/**
- * Moves the board's copies of items PBI 17's step put under a source of their own off the board, to a parked source no
- * worker polls, as Abandoned so no scheduler takes them up. A copy's readiness checks and events stay with it.
- */
-async function parkBoardCopies(boardId: string): Promise<void> {
-  await pool().query(
-    `with parked as (insert into backlog_source (adapter, url) values ('fake', 'parked:' || gen_random_uuid()) returning id)
-     update item b set source_id = (select id from parked), state = 'Abandoned', lease_owner = null, lease_expires = null
-       from item t join backlog_source s on s.id = t.source_id
-      where b.source_id = $1 and s.url like 'test:%' and b.external_id = t.external_id`,
-    [boardId],
-  );
-}
-
-/**
- * PBI 17 gives each item a backlog source of its own. Here they all sit on the scenario's one board.
- *
- * PBI 17's step seeds the board with the item too, so a worker that polls the board between that step and this one adds
- * the item again, on the board. The step's own item is the one the scenario means, so the board's copy is parked. A poll
- * can land between the parking and the move, so a clash on the board's unique key tries again.
- */
+/** PBI 17 gives each item a backlog source of its own. Here they all sit on the scenario's one board. */
 export async function rehome(world: object): Promise<void> {
   const b = await board(world);
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await parkBoardCopies(b.id);
-      await pool().query("update item set source_id = $1 where source_id in (select id from backlog_source where url like 'test:%')", [b.id]);
-      return;
-    } catch (e) {
-      if ((e as { code?: string }).code !== "23505" || attempt >= 5) throw e;
-    }
-  }
+  await pool().query("update item set source_id = $1 where source_id in (select id from backlog_source where url like 'test:%')", [b.id]);
 }
 
 /** Maps each board item the factory now holds to its id, so PBI 17's state steps can name it. */

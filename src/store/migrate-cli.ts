@@ -108,7 +108,8 @@ export async function main(args: string[], env: NodeJS.ProcessEnv): Promise<numb
     }
     return 0;
   } catch (e) {
-    console.error((e as Error).message);
+    // The stack too: this catches every step of migrate, not just the Keycloak lookup.
+    console.error((e as Error).stack ?? String(e));
     return 1;
   } finally {
     await pool.end();
