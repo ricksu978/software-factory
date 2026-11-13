@@ -1079,11 +1079,56 @@ describe("the PR review stage", () => {
     assert.doesNotMatch(h.prs.at(-1)!.body, /PR review took/);
   });
 
-  test("an unreadable review blocks, and nothing is posted", async () => {
-    const h = harness({ nextStage: "open-pr", script: reviewer([() => "I think it's fine."]) });
+  test("an unreadable review whose restate is unreadable too blocks, and nothing is posted", async () => {
+    const h = harness({ nextStage: "open-pr", script: (a) => a.agent === "factory-pr-reviewer" ? { text: "I think it's fine.", sessionId: "rs-1" } : undefined });
     assert.equal(await h.run(), "waiting");
     assert.ok(!h.routes().includes("/repo/postReview"));
     assert.match(h.transitions()[0].question.body, /couldn't read the PR reviewer's answer/);
+  });
+
+  // PBI 190: one restate, in the reviewer's own session, before the item asks a person.
+  const restating = (first: string, restated: string) => {
+    const h = harness({ nextStage: "open-pr", script: (a) => {
+      if (a.agent !== "factory-pr-reviewer") return;
+      return a.resume ? { text: restated, sessionId: a.resume } : { text: first, sessionId: "rs-1" };
+    } });
+    const reviewerCalls = () => h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer");
+    const report = () => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "pr-review" && c.body.status !== "started");
+    return { h, reviewerCalls, report };
+  };
+
+  test("an unreadable answer is restated once in the same session, without the brief, and a restated APPROVED passes", async () => {
+    const { h, reviewerCalls, report } = restating("Looks fine to me overall.", "APPROVED");
+    assert.equal(await h.run(), "done");
+    const [review, restate, ...more] = reviewerCalls();
+    assert.deepEqual(more, []);
+    assert.equal(review.resume, undefined);
+    assert.equal(restate.resume, "rs-1");
+    assert.match(restate.prompt, /last line is neither APPROVED nor OPEN: <n>: Looks fine to me overall\./);
+    assert.ok(!restate.prompt.includes(review.prompt.slice(0, 200)), "the restate holds the review brief again");
+    assert.equal(h.calls.filter((c) => c.route === "/repo/postReview").length, 1);
+    assert.deepEqual(h.started().filter((s) => s === "pr-review"), ["pr-review"]);
+    assert.deepEqual(report().map((c) => c.body.status), ["passed"]);
+    assert.deepEqual(report()[0].body.restates, [{ round: 1, reason: "its last line is neither APPROVED nor OPEN: <n>: Looks fine to me overall." }]);
+    assert.match(h.prs.at(-1)!.body, /PR review took 1 round\./);
+  });
+
+  test("a restate that is still unreadable blocks with the restated answer's reason, and the second ask is logged", async () => {
+    const { h, reviewerCalls, report } = restating("Looks fine to me overall.", "Sorry, it looks fine.");
+    assert.equal(await h.run(), "waiting");
+    assert.equal(reviewerCalls().length, 2);
+    const q = h.transitions()[0].question.body;
+    assert.match(q, /couldn't read the PR reviewer's answer.*Sorry, it looks fine\./);
+    assert.doesNotMatch(q, /Looks fine to me overall/);
+    assert.ok(!h.routes().includes("/repo/postReview"));
+    assert.deepEqual(report().map((c) => c.body.status), ["failed"]);
+    assert.equal(report()[0].body.restates.length, 1);
+  });
+
+  test("an answer from a run with no session to resume blocks as before, with no restate", async () => {
+    const h = harness({ nextStage: "open-pr", script: reviewer([() => "I think it's fine."]) });
+    assert.equal(await h.run(), "waiting");
+    assert.equal(h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer").length, 1);
   });
 
   test("a review GitHub turns down with a 422 blocks, naming the finding, and the item never reaches InReview", async () => {

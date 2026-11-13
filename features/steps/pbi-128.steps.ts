@@ -10,6 +10,9 @@
 //     {"finding":"This misses the VAT.","path":"src/totals.ts","line":12}
 //     {"thread":"FT-1","settled":false,"reason":"VAT is still left out for exports."}
 //     OPEN: 1            (or APPROVED, when it has no new finding and settles every thread)
+//   Each review runs in a session of its own, `pr-reviewer-session-<n>`, whose id comes back as the answer's sessionId.
+//   A call that resumes one of those sessions is a restate (PBI 190), answered by the `onRestate` hook when a step set
+//   one, and never counted as a review.
 // - A scripted PR addresser, the agent call that names "factory-pr-addresser". For each of the factory's open threads
 //   whose id its brief holds, it fixes the code, committing once per pass, or writes a reply line
 //   {"threadId":"FT-1","body":"..."} to the reply file its brief names (`The reply file is \`<path>\`.`), as the
@@ -30,7 +33,7 @@ const REPO = "acme/app";
 const BRANCH = "factory/pbi-482-r1";
 const PR = 57;
 const BOT = "factory[bot]";
-const REVIEWER = "factory-pr-reviewer";
+export const REVIEWER = "factory-pr-reviewer";
 const ADDRESSER = "factory-pr-addresser";
 const MAX_REVIEWS = 15; // a safety stop, so an engine that never ends the stage can't loop forever
 
@@ -41,9 +44,11 @@ type Action = { kind: "fix" } | { kind: "reply"; body: string };
 type AddressSpec = { actions: Map<string, Action> };
 type Host = ReturnType<typeof fakeRepoHost>;
 type ThreadState = { threadId: string; resolved: boolean; bodies: string[] };
-type AgentRecord = {
+export type AgentRecord = {
   stage: string; agent?: string; prompt: string; mode: string; index: number;
   head: string; originHead: string;
+  /** The session the call resumed, if any. */
+  resume?: string;
 };
 
 export type Ctx = {
@@ -78,6 +83,14 @@ export type Ctx = {
   snapshots: Map<number, Map<string, ThreadState>>;
   /** The posted review "that review" means. */
   that: number | null;
+  /** The session id each review ran in, by review n - 1. */
+  reviewerSessions: string[];
+  /** The answer the scripted reviewer worked out for each review, by review n - 1, before any `reword`. */
+  answers: string[];
+  /** PBI 190: replaces review n's answer, given the one the scripted reviewer worked out. */
+  reword?: (n: number, answer: string) => string;
+  /** PBI 190: answers a PR reviewer call that resumes a review's session. */
+  onRestate?: (a: { prompt: string; resume: string }, rec: AgentRecord) => string;
 };
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -139,7 +152,7 @@ function threadsNow(c: Ctx): Map<string, ThreadState> {
 }
 
 /** The factory's open threads whose id the brief holds. */
-function threadsInBrief(c: Ctx, prompt: string) {
+export function threadsInBrief(c: Ctx, prompt: string) {
   const now = threadsNow(c);
   return c.threads.filter((t) => !now.get(t.threadId)!.resolved && prompt.includes(t.threadId));
 }
@@ -161,6 +174,7 @@ function install(world: object): Ctx {
     addresses: [], replyEachTime: new Map(), last: null, raisedAt: new Map(),
     ci: { firstHeadFails: false, greensFailing: 0, addresserFirstFails: false, addresserAllFail: false },
     firstChecked: null, failedShas: [], agentCalls: [], reviewerCalls: [], addresserCalls: [], addresserShas: [], snapshots: new Map(), that: null,
+    reviewerSessions: [], answers: [],
   };
   let seq = 0;
   run.repoHost = new Proxy(host, {
@@ -202,10 +216,19 @@ function install(world: object): Ctx {
     const rec: AgentRecord = {
       stage: run.stage, agent: a.agent, prompt: a.prompt, mode: a.mode, index: run.calls.length,
       head: git(a.cwd, "rev-parse", "HEAD"), originHead: git(run.root, "--git-dir", run.origin, "rev-parse", BRANCH),
+      ...(a.resume ? { resume: a.resume } : {}),
     };
     c.agentCalls.push(rec);
-    const answer = (text: string) => ({ ok: true, text, costUsd: 0.5, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" });
-    if (a.agent === REVIEWER) return answer(reviewer(c, run, rec));
+    const answer = (text: string, sessionId = `session-${c.agentCalls.length}`) =>
+      ({ ok: true, text, costUsd: 0.5, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n", sessionId });
+    if (a.agent === REVIEWER && a.resume && c.onRestate) return answer(c.onRestate({ prompt: a.prompt, resume: a.resume }, rec), a.resume);
+    if (a.agent === REVIEWER) {
+      const text = reviewer(c, run, rec);
+      const n = c.reviewerCalls.length;
+      c.answers[n - 1] = text;
+      c.reviewerSessions[n - 1] = `pr-reviewer-session-${n}`;
+      return answer(c.reword ? c.reword(n, text) : text, c.reviewerSessions[n - 1]);
+    }
     if (a.agent === ADDRESSER) return answer(addresser(c, rec, a.cwd));
     const r = await base(a);
     // Each Green attempt leaves a commit of its own, so a fix after failed CI has a new head.
@@ -462,7 +485,7 @@ export function stageReports(run: CellCtx, stageId: string) {
   return run.calls.map((x, i) => ({ ...x, i })).filter((x) => x.route === "/stage" && x.body.stageId === stageId);
 }
 
-function question(run: CellCtx): string {
+export function question(run: CellCtx): string {
   const t = run.calls.filter((x) => x.route === "/transition").at(-1);
   assert.ok(t, "the cell sent no transition");
   assert.equal(t.body.event, "blocked", `the last transition is ${t.body.event}, not a move to NeedsInput`);
