@@ -11,6 +11,8 @@ import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts"
 import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
+import { appendEvent } from "../store/events.ts";
+import { mergeBlocker } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -36,7 +38,7 @@ export type PollDeps = {
 };
 
 type Row = {
-  id: string; external_id: string; state: ItemState; criteria_hash: string | null;
+  id: string; external_id: string; state: ItemState; held: boolean; criteria_hash: string | null;
   readiness_policy_sha: string | null; readiness_item_hash: string | null;
   run_id: string | null; branch: string | null; pr_number: number | null; reviews_seen_at: Date | null; run_repo_url: string | null;
 };
@@ -76,7 +78,7 @@ async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: 
 
 async function items(pool: pg.Pool, sourceId: string, states: ItemState[]): Promise<Row[]> {
   const r = await pool.query<Row>(
-    `select i.id, i.external_id, i.state, i.criteria_hash, i.readiness_policy_sha, i.readiness_item_hash,
+    `select i.id, i.external_id, i.state, i.held, i.criteria_hash, i.readiness_policy_sha, i.readiness_item_hash,
             r.id as run_id, r.branch, r.pr_number, r.reviews_seen_at, rp.url as run_repo_url
      from item i
      left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
@@ -224,6 +226,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await move(pool, row.id, "withdrawn");
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
       await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+    } else if (row.state === "InReview" && !row.held) {
+      await mergeIfReady(pool, repoHost, repo, row.pr_number, row);
     }
   });
 
@@ -306,6 +310,30 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   if (unlisted > 0) return { seen: listed.items.length, cursor: src.cursor ?? "" };
   await pool.query("update backlog_source set cursor = $2 where id = $1", [sourceId, listed.cursor]);
   return { seen: listed.items.length, cursor: listed.cursor };
+}
+
+/**
+ * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that someone approved
+ * and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at the head the
+ * view was read at. The item row stays locked across the merge, so a Hold or a claim that lands meanwhile waits and the
+ * re-read under the lock sees the one that came first. A merge moves the item through `merged`, as a person's would,
+ * and logs `factory_merged`. A refusal logs `factory_merge_refused` with GitHub's message, and the next poll tries again.
+ */
+async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row): Promise<void> {
+  const view = await host.mergeView(repo, prNumber);
+  if (mergeBlocker(view) !== null) return;
+  await withTx(pool, async (c) => {
+    const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
+    if (!cur || cur.state !== "InReview" || cur.held) return;
+    const res = await host.mergePr(repo, prNumber, { method: "squash", headSha: view.headSha });
+    if (!res.merged) {
+      await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });
+      return;
+    }
+    await transitionItem(c, row.id, "merged", system);
+    await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, res.sha]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy } });
+  });
 }
 
 /**
