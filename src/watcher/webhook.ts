@@ -76,7 +76,7 @@ const github = { actor: "system", actorId: "github" } as const;
 
 /**
  * Plan Task 17: what a merge, a close or a review does to the item whose open run holds the PR. A merge moves InReview,
- * or InProgress during address, to Accepted and records `merge_sha`; the scheduler's CI poll then decides Done or
+ * InProgress during address, or NeedsInput (PBI 194) to Accepted and records `merge_sha`; the scheduler's CI poll then decides Done or
  * Failed. A close without a merge withdraws the item. A changes-requested review with a summary from an allowlisted
  * login, newer than `run.reviews_seen_at`, sends an InReview item back to address (Run contract 10). An item another path moved
  * first is left alone.
@@ -91,7 +91,7 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
   if (!row) return;
   try {
     if (e.kind === "pr_merged") {
-      if (row.state !== "InReview" && row.state !== "InProgress") return;
+      if (row.state !== "InReview" && row.state !== "InProgress" && row.state !== "NeedsInput") return;
       await withTx(pool, async (c) => {
         await transitionItem(c, row.item_id, "merged", github);
         await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, e.mergeSha]);

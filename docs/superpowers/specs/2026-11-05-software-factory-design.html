@@ -288,6 +288,7 @@ stateDiagram-v2
   InReview --> Queued: changes requested, or a conflict
   InReview --> Accepted: approvals met, or merged by a person
   InProgress --> Accepted: merged during address
+  NeedsInput --> Accepted: merged while waiting
   Accepted --> Done: DoD verified after merge
   InProgress --> Failed: retry budget spent
   NeedsInput --> Abandoned: no answer in 5 days

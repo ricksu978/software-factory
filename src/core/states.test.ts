@@ -9,7 +9,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["SignOff", "claimed", "InProgress"], ["NeedsInput", "claimed", "InProgress"],
   ["InProgress", "scenarios_written", "SignOff"], ["InProgress", "blocked", "NeedsInput"],
   ["InProgress", "pr_opened", "InReview"], ["InReview", "changes_requested", "Queued"],
-  ["InReview", "merged", "Accepted"], ["InProgress", "merged", "Accepted"],
+  ["InReview", "merged", "Accepted"], ["InProgress", "merged", "Accepted"], ["NeedsInput", "merged", "Accepted"],
   ["InReview", "approvals_met", "Accepted"], ["Accepted", "dod_verified", "Done"],
   ["Accepted", "dod_failed", "Failed"], ["InProgress", "retries_exhausted", "Failed"],
   ["NeedsInput", "timed_out", "Abandoned"], ["SignOff", "timed_out", "Abandoned"],

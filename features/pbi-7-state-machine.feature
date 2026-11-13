@@ -24,6 +24,7 @@ Feature: PBI state machine
       | InReview   | changes_requested | Queued     |
       | InReview   | merged            | Accepted   |
       | InProgress | merged            | Accepted   |
+      | NeedsInput | merged            | Accepted   |
       | InReview   | approvals_met     | Accepted   |
       | Accepted   | dod_verified      | Done       |
       | Accepted   | dod_failed        | Failed     |

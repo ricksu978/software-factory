@@ -419,6 +419,34 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, null);
   });
 
+  test("a NeedsInput item whose PR merged moves to Accepted with its merge commit, and its question closes (PBI 194)", async () => {
+    const { ext, id, pr, run } = await held("NeedsInput", { pr: true });
+    await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [id]);
+    Object.assign(host.prs.find((p) => p.number === pr)!, { open: false, merged: true, mergeSha: "m3" });
+    await fake.adapter.close(ext);
+    await poll();
+    assert.equal((await row(ext)).state, "Accepted");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m3");
+    assert.equal((await db.pool.query("select 1 from question where item_id = $1 and closed_at is null", [id])).rowCount, 0);
+  });
+
+  test("a NeedsInput item whose PR closed without a merge is withdrawn (PBI 194)", async () => {
+    const { ext, pr, run } = await held("NeedsInput", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === pr)!, { open: false });
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, null);
+  });
+
+  test("a NeedsInput item with an open PR that conflicts, or has a newer review, stays NeedsInput, its question open (PBI 194)", async () => {
+    const { ext, id, pr } = await held("NeedsInput", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [id]);
+    Object.assign(host.prs.find((p) => p.number === pr)!, { mergeable: false });
+    await poll();
+    assert.equal((await row(ext)).state, "NeedsInput");
+    assert.equal((await db.pool.query("select 1 from question where item_id = $1 and closed_at is null", [id])).rowCount, 1);
+  });
+
   test("an InProgress item with an open PR and a newer review stays InProgress", async () => {
     const { ext, pr } = await held("InProgress", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
     Object.assign(host.prs.find((p) => p.number === pr)!, { mergeable: false });
