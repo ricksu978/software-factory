@@ -15,6 +15,8 @@
 // startWorker returns while a worker stands by. Worker.done settles when the worker stops, and rejects when it loses
 // the worker lock.
 //
+// PBI 158's steps run these hooks and workers too, so the hooks run for @pbi-158, and its steps reach this file's context.
+//
 // Tick intervals differ by worker, and a step that starts a worker returns just after the worker already running has
 // ticked. So until the lock keeps a second worker idle, the newest worker is the one that claims the next queued item,
 // and a scenario that says it claims nothing fails on its Then.
@@ -43,7 +45,7 @@ type Proxy = { port: number; cut(): void; refuse(): void; close(): Promise<void>
 type Log = { lines: string[]; sink: Pick<Console, "log" | "warn" | "error"> };
 type Exit = { error?: unknown };
 
-type Worker = {
+export type Worker = {
   name: string;
   app: string;
   pool: pg.Pool;
@@ -79,9 +81,11 @@ type Ctx = {
   missing?: string;
   /** How many workers have been started, counting those still starting. */
   reserved?: number;
+  /** Deps another feature's steps add to each worker's, by the worker's name, as PBI 158's steps add a clock. */
+  deps?: (name: string) => Record<string, unknown>;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi157?: Ctx };
   w.pbi157 ??= { workers: [] };
   return w.pbi157;
@@ -302,6 +306,7 @@ async function startOne(world: object): Promise<Worker> {
       tickMs: w.tickMs,
       pollMs: POLL_MS,
       log: w.log.sink,
+      ...c.deps?.(name),
     });
     watch(w.running, w);
   } catch (e) {
@@ -346,17 +351,18 @@ function started(c: Ctx): void {
 
 // ---- Hooks ----
 
-Before({ tags: "@pbi-157", ...long }, async function () {
+Before({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
   const c = ctx(this);
   const own = await ownPool("the worker");
   c.single = { ...own, log: logger("the worker") };
   // PBI 156's steps start the @ac-2 scenarios' worker with these in its deps.
-  w156(this).deps = { pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink };
+  // PBI 158's steps put a clock of their own in these deps too, so they're added to, not replaced.
+  w156(this).deps = { ...w156(this).deps, pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink };
 });
 
 const bounded = (p: Promise<unknown> | undefined) => Promise.race([Promise.resolve(p).catch(() => undefined), sleep(10_000)]);
 
-After({ tags: "@pbi-157", ...long }, async function () {
+After({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
   const c = ctx(this);
   const single = w156(this).worker;
   if (single && c.single) watch(single, c.single);

@@ -163,12 +163,14 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
 
 /**
  * The 100 newest events, newest first, for the activity log (PBI 105). Only `from`, `to` and `event` leave the
- * payload, so a reason, a decision's text or a readiness detail never reaches the page. A factory-wide event has no item.
+ * payload, so a decision's text or a readiness detail never reaches the page. A setting change (PBI 175) also gives its
+ * setting, and its reason (PBI 176), which an operator wrote for everyone to read. A factory-wide event has no item.
  */
 async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
   const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
     `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event,
-       coalesce(u.github_login, e.actor_id) as actor, e.payload->>'setting' as setting
+       coalesce(u.github_login, e.actor_id) as actor, e.payload->>'setting' as setting,
+       case when e.kind = 'setting' then e.payload->>'reason' end as reason
      from event e left join item i on i.id = e.item_id
        left join "user" u on e.kind = 'setting' and u.id::text = e.actor_id
      order by e.at desc, e.id desc limit 100`,
@@ -393,7 +395,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         return true;
       }
       const b = await form(req);
-      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "");
+      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "", b.reason);
       if (!outcome.ok) await view(outcome.status, { error: outcome.message });
       else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
       return true;

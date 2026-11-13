@@ -310,10 +310,10 @@ export function phase0Page(rows: Phase0Row[], readinessSpend: number, banner: st
   return page("Phase 0 report", `<h1>Phase 0 report</h1><p>${summary}</p>${spend}${table}`, banner);
 }
 
-/** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload. */
+/** One event as the activity log reads it: only `from`, `to` and `event` come out of the payload, and a setting change's own fields. */
 export type ActivityRow = { at: Date; external_id: string | null; repo: string | null; title: string | null; kind: string; from: string | null; to: string | null; event: string | null;
-  /** Who made a `setting` change, and the setting's name (PBI 175). */
-  actor?: string | null; setting?: string | null };
+  /** Who made a `setting` change, the setting's name (PBI 175), and why (PBI 176). */
+  actor?: string | null; setting?: string | null; reason?: string | null };
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
 // An SOP move (PBI 173) shows its old and new versions where a transition shows its states.
@@ -323,7 +323,8 @@ const MOVES = new Set(["transition", "override", "sop_moved"]);
 export function activityPage(rows: ActivityRow[], banner: string | null): string {
   const cell = (r: ActivityRow) => {
     if (r.kind === "setting") {
-      return `<td>${escapeHtml(r.actor ?? "")} changed ${escapeHtml(r.setting ?? "")} from ${escapeHtml(r.from ?? "not set")} to ${escapeHtml(r.to ?? "not set")}</td>`;
+      const why = r.reason ? ` because ${escapeHtml(r.reason)}` : "";
+      return `<td>${escapeHtml(r.actor ?? "")} changed ${escapeHtml(r.setting ?? "")} from ${escapeHtml(r.from ?? "not set")} to ${escapeHtml(r.to ?? "not set")}${why}</td>`;
     }
     if (!MOVES.has(r.kind)) return "<td></td>";
     const event = r.kind === "transition" && r.event ? ` <span class="muted">(${escapeHtml(r.event)})</span>` : "";
@@ -342,7 +343,7 @@ export type ConfigSetting = { key: string; label: string; value: string | null; 
 
 /**
  * The Configuration page (PBI 175). Runtime settings come first. An operator gets a form beside each one they can
- * change, and a viewer gets none. Env-backed settings are read-only, and each says it needs a restart.
+ * change, which asks for the change's reason too (PBI 176), and a viewer gets none. Env-backed settings are read-only, and each says it needs a restart.
  */
 export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null }, banner: string | null): string {
   const value = (v: string | null) => (v === null ? `<span class="muted">not set</span>` : escapeHtml(v));
@@ -352,7 +353,8 @@ export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSett
     if (!c.canOperate) return `<td>${note(s)}</td>`;
     const id = `setting-${escapeHtml(s.key)}`;
     return `<td><form method="post" action="/configuration"><input type="hidden" name="setting" value="${escapeHtml(s.key)}">
-<label for="${id}">New ${escapeHtml(s.label)}</label><input id="${id}" name="value" value="${escapeHtml(s.value ?? "")}"> <button>Change</button></form>${note(s)}</td>`;
+<label for="${id}">New ${escapeHtml(s.label)}</label><input id="${id}" name="value" value="${escapeHtml(s.value ?? "")}">
+<label for="reason-${escapeHtml(s.key)}">Reason</label><input id="reason-${escapeHtml(s.key)}" name="reason" required> <button>Change</button></form>${note(s)}</td>`;
   };
   const head = (third: string) => `<thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">${third}</th></tr></thead>`;
   const runtime = `<table>${head(c.canOperate ? "Change" : "Notes")}<tbody>${c.runtime

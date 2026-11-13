@@ -321,7 +321,7 @@ flowchart LR
   </ol>
   <p>A crash between an effect and the delete means the row is handled again, so every effect must be safe to repeat. Every idempotency key comes from the event id, and every text comes from the event's payload, never from state read when the row is handled. Two keys change for this. The decision announcement's key includes <code>Date.now()</code> (<code>src/control/decisions.ts:83</code>), and the waiting comment's key and question text are read from the item's current state (<code>src/control/board.ts:26</code>, <code>:56</code>). Whether <code>setStatus</code>, <code>claim</code>, <code>release</code>, <code>close</code> and <code>linkPr</code> are safe to repeat needs checking. <span class="tag open">Open</span></p>
   <h3>Health</h3>
-  <p>The worker records a heartbeat each tick. The API returns it with the floor, and the SPA shows "scheduler not ticking" when it goes stale, so a stopped worker doesn't look like a quiet factory. <span class="tag call">My call</span></p>
+  <p>The worker records a heartbeat each tick: the time the tick started, upserted into the one <code>worker_heartbeat</code> row once the tick ends, whether it had nothing to do, ran under the kill switch or failed. Only the worker holding the worker lock ticks, so a standby writes none. A heartbeat that can't be written is logged, and the worker keeps ticking (step 2c, PBI 158). The API returns it with the floor, and the SPA shows "scheduler not ticking" when it goes stale, so a stopped worker doesn't look like a quiet factory. <span class="tag call">My call</span></p>
 </section>
 
 <section id="data">
