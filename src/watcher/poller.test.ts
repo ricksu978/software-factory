@@ -181,7 +181,7 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await fake.comments(ext)).length, 1);
   });
 
-  test("an Eligible or NotReady item that left the backlog is never gated into Queued", async () => {
+  test("an Eligible or NotReady item that left the backlog is withdrawn to Abandoned, never gated (PBI 168)", async () => {
     verdict = "failed";
     const notReady = await seed();
     await poll();
@@ -195,9 +195,40 @@ describe("pollOnce", dbTest, () => {
     commit("c2", { ...files, ".factory/dor.md": "- [ ] Has a title\n\nEdited.\n" });
     judged = [];
     await poll();
-    assert.equal((await row(eligible)).state, "Eligible");
-    assert.equal((await row(notReady)).state, "NotReady");
+    assert.deepEqual([(await row(notReady)).state, (await row(eligible)).state], ["Abandoned", "Abandoned"]);
     assert.deepEqual(judged, []);
+    const moves = (await db.pool.query(
+      "select e.actor, e.payload->>'from' as from, e.payload->>'event' as event from event e where e.item_id = any($1) and e.payload->>'to' = 'Abandoned' order by e.payload->>'from'",
+      [[(await row(notReady)).id, (await row(eligible)).id]],
+    )).rows;
+    assert.deepEqual(moves, [{ actor: "system", from: "Eligible", event: "withdrawn" }, { actor: "system", from: "NotReady", event: "withdrawn" }]);
+  });
+
+  test("an item withdrawn from NotReady that gets its label back returns to Eligible and meets the gate (PBI 168)", async () => {
+    verdict = "failed";
+    const ext = await seed();
+    await poll();
+    await fake.seed({ externalId: ext, labels: [], repo: REPO });
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO });
+    verdict = "passed";
+    judged = [];
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    assert.deepEqual(judged, [ext]);
+    const moves = (await db.pool.query("select payload->>'from' as from, payload->>'to' as to from event where item_id = $1 and kind = 'transition' order by at", [(await row(ext)).id])).rows;
+    assert.deepEqual(moves.slice(-2), [{ from: "Abandoned", to: "Eligible" }, { from: "Eligible", to: "Queued" }]);
+  });
+
+  test("an item withdrawn from Queued or later stays Abandoned when its label comes back", async () => {
+    const { ext } = await held("Queued");
+    await fake.seed({ externalId: ext, labels: [], repo: REPO });
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO });
+    await poll();
+    assert.equal((await row(ext)).state, "Abandoned");
   });
 
   test("an item NotReady only on an open dependency is re-gated once the dependency closes", async () => {

@@ -46,6 +46,9 @@ Feature: PBI state machine
       | SignOff    | criteria_changed  | Queued     |
       | NeedsInput | criteria_changed  | Queued     |
       | InReview   | criteria_changed  | Queued     |
+      | Eligible   | withdrawn         | Abandoned  |
+      | NotReady   | withdrawn         | Abandoned  |
+      | Abandoned  | returned          | Eligible   |
 
   @ac-2
   Scenario: Every move the table doesn't list is refused

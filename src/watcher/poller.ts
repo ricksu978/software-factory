@@ -47,6 +47,8 @@ type Readiness = {
 
 const system = { actor: "system", actorId: "poller" } as const;
 const ACTIVE: ItemState[] = ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"];
+/** States an item waits in before the readiness gate passes it. It holds no run, so leaving the backlog only withdraws it. */
+const GATING: ItemState[] = ["Eligible", "NotReady"];
 const POLICIES: PolicyName[] = ["dor", "scenarios", "pr-review", "risk", "dod"];
 const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -196,9 +198,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   w.step("listing new and changed items");
   // 1. New and changed items. If any of them fails to go in, the cursor stays put so the next poll lists it again.
   const listed = await adapter.listEligible(src.cursor);
+  //    An item withdrawn before it was Queued that's listed again, its label back, returns to Eligible (PBI 168).
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
-    await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo });
+    const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo });
+    await returnWithdrawn(pool, id);
   });
 
   w.step("reading the PRs of items in review");
@@ -222,15 +226,16 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 
   w.step("checking the items the factory holds");
   // 3. Items the factory holds. listEligible can't see one that lost its label or closed, so each is read back.
-  //    A PR closes before its item moves, so a failed close is retried by the next poll.
-  await each(await items(pool, sourceId, ACTIVE), (row) => `checking item ${row.external_id}`, async (row) => {
+  //    A PR closes before its item moves, so a failed close is retried by the next poll. An Eligible or NotReady item
+  //    is only withdrawn, before step 4 can gate it (PBI 168).
+  await each(await items(pool, sourceId, [...GATING, ...ACTIVE]), (row) => `checking item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!eligible(fi)) {
       await closeOpenPr(repoHost, fi?.repo ?? repoFromUrl(row.run_repo_url), row, "This PR's item was withdrawn from the backlog.");
       await move(pool, row.id, "withdrawn");
       return;
     }
-    if (!fi) return;
+    if (!fi || GATING.includes(row.state)) return;
     const hash = criteriaHash(fi.acceptanceCriteria);
     if (row.criteria_hash !== null && row.criteria_hash !== hash) {
       // The comment and the close are idempotent and go before the move, so the next poll retries a failed one. The
@@ -248,7 +253,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   w.step("checking readiness");
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, open dependencies included, or when a
   //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
-  //    An item that left the backlog is skipped: it has no withdrawn edge, and it must never reach Queued.
+  //    An item that left the backlog is skipped: step 3 withdrew it, or failed to read it and retries next poll.
   const logic = deps.logic ?? readinessLogic();
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
@@ -298,6 +303,25 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   if (unlisted > 0) return { seen: listed.items.length, cursor: src.cursor ?? "" };
   await pool.query("update backlog_source set cursor = $2 where id = $1", [sourceId, listed.cursor]);
   return { seen: listed.items.length, cursor: listed.cursor };
+}
+
+/**
+ * Sends an Abandoned item back to Eligible through `returned` when its last move to Abandoned was a withdrawal from
+ * Eligible or NotReady, so it meets the readiness gate again (PBI 168). An item withdrawn from Queued or later, or
+ * abandoned any other way, stays where it is.
+ */
+async function returnWithdrawn(pool: pg.Pool, itemId: string): Promise<void> {
+  await withTx(pool, async (c) => {
+    const held = await c.query("select 1 from item where id = $1 and state = 'Abandoned' for update", [itemId]);
+    if (held.rowCount === 0) return;
+    const last = (await c.query<{ from: string; event: string | null }>(
+      `select payload->>'from' as from, payload->>'event' as event from event
+       where item_id = $1 and kind in ('transition', 'override') and payload->>'to' = 'Abandoned' order by at desc limit 1`,
+      [itemId],
+    )).rows[0];
+    if (last?.event !== "withdrawn" || !GATING.includes(last.from as ItemState)) return;
+    await transitionItem(c, itemId, "returned", system);
+  });
 }
 
 function newer(review: string | null, seen: Date | null): boolean {

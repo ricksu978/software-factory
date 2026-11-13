@@ -256,7 +256,7 @@ Phase 0a runs the whole walking skeleton on the owner's machine before anything 
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"`. `approvals_met` is reserved for Phase 1. In Phase 0 a person's merge is `merged`.
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned"`. `approvals_met` is reserved for Phase 1. In Phase 0 a person's merge is `merged`.
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`, which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`, which always succeeds. The caller logs it as an override event.
 
@@ -279,13 +279,14 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Abandoned", "reopened_signoff", "SignOff"], ["Abandoned", "reopened_question", "NeedsInput"],
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
     [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
+  ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
 test("answer alone does not move state", () => assert.equal(next("NeedsInput", "ready"), null));
 ```
 
-  Every move that needs a cell again goes to Queued, or to a waiting state, and then through `claimed`, because the item holds no slot until it's claimed. That covers `changes_requested`, `criteria_changed` and `usage_limited`. `criteria_changed` starts a new run, per Run contract 7. The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, and the answer itself is recorded on the `question` row. `reopened_signoff` and `reopened_question` return a re-queued Abandoned item to waiting when its question is still open.
+  Every move that needs a cell again goes to Queued, or to a waiting state, and then through `claimed`, because the item holds no slot until it's claimed. That covers `changes_requested`, `criteria_changed` and `usage_limited`. `criteria_changed` starts a new run, per Run contract 7. The spec draws "SignOff to InProgress" and "NeedsInput to InProgress" directly. Here both go through `claimed`, and the answer itself is recorded on the `question` row. `reopened_signoff` and `reopened_question` return a re-queued Abandoned item to waiting when its question is still open. Eligible and NotReady also have a `withdrawn` edge to Abandoned, and `returned` takes an Abandoned item back to Eligible, never to Queued, so a withdrawn item that gets its label back meets the readiness gate again (PBI 168).
 - [ ] **Step 2: Run `node --test src/core/states.test.ts`.** Expected: FAIL, module not found.
 - [ ] **Step 3: Implement `next` and `overrideTo`** in `src/core/states.ts` as a lookup table keyed `` `${from}:${event}` ``.
 - [ ] **Step 4: Run the test.** Expected: every case passes.
@@ -496,7 +497,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
 - Each `pollOnce` does five things, in this order:
   - lists new and changed eligible items from the cursor;
   - reads `prState` for every InReview item, before any withdrawal, so a PR merged just before its item closed still counts as a merge;
-  - calls `getItem` for every item the factory holds in Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
+  - calls `getItem` for every item the factory holds in Eligible, NotReady, Queued, InProgress, SignOff, NeedsInput or InReview, because `listEligible` can't see an item that lost its label or closed;
   - writes `openDependencies` into `item.blocked_by` for every Queued, SignOff and NeedsInput item, so `claimNext` skips an item whose dependency reopened after the gate passed it (Task 5);
   - runs `gate` on every Eligible item.
 - The moves below leave InProgress where the item was running, so `transitionItem` fences the old cell per Run contract 2.
@@ -516,6 +517,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
 
     The item gets a comment saying the scenarios need a new sign-off. The same holds from Queued, InProgress, SignOff and NeedsInput, and a second `pollOnce` after the change fires nothing.
   - **Withdrawal.** An InProgress item returned by `getItem` with the label gone, or with `closed: true`, moves to Abandoned through `withdrawn`, which fences its cell. An InReview item does the same. Either way the poller closes the run's PR if it's still open, with a comment that names the kept branch, since Run contract 8's hook only arrives in Task 12.
+  - **Withdrawal before the queue.** An Eligible or NotReady item with the label gone, or closed, moves to Abandoned through `withdrawn` and is never gated. Given its label back, an item withdrawn from NotReady moves to Eligible through `returned` and is gated in the same poll. One withdrawn from Queued stays Abandoned (PBI 168).
   - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`, or a `lastChangesRequestedAt` after `run.reviews_seen_at`, moves to Queued through `changes_requested`, with `run.next_stage = "address"`. Two tests cover the edges:
     - **Addressed review.** After address has run, a review older than its claim leaves the item in InReview on the next poll.
     - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
@@ -527,7 +529,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
   - **Closed PR.** An InReview or InProgress item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`, as the `pr_closed` webhook does in Task 17. Without this, Phase 0a, which has no webhooks, would keep such an item in InReview and in the waiting count for good. Only an InReview item goes back to address on a conflict or a requested change.
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
 - [ ] **Step 3: Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event, which Task 7's intake stores as an event of kind `webhook` whose `payload.event.kind` is `item_changed`.
-  - The eligibility label is `fieldMap.optInLabel` from `backlog_source.field_map`, the field Task 7's adapter lists by, or `factory` when it's unset. An Eligible or NotReady item that lost the label or closed is never gated, since neither state has a `withdrawn` edge. `upsertItem` also takes the item's `rank` into `item.backlog_rank`, and its `repo` into `item.repo` as `owner/name`, or null for a board item in no repo. Migration `008_item_repo.sql` adds the column. Each item the poll reads back with `getItem` has its `item.repo` refreshed too, so an item held from before the column gets its repo from the next poll that reads it, whatever its state. An item whose read fails keeps what it had (PBI 137).
+  - The eligibility label is `fieldMap.optInLabel` from `backlog_source.field_map`, the field Task 7's adapter lists by, or `factory` when it's unset. An Eligible or NotReady item that lost the label or closed moves to Abandoned through `withdrawn` before the gate runs, so it's never gated and leaves Floor's "Not ready" list. A listed item that's Abandoned, whose last move there was a withdrawal from Eligible or NotReady, moves back to Eligible through `returned` and is gated in the same poll. One abandoned any other way, or withdrawn from Queued or later, stays Abandoned (PBI 168). `upsertItem` also takes the item's `rank` into `item.backlog_rank`, and its `repo` into `item.repo` as `owner/name`, or null for a board item in no repo. Migration `008_item_repo.sql` adds the column. Each item the poll reads back with `getItem` has its `item.repo` refreshed too, so an item held from before the column gets its repo from the next poll that reads it, whatever its state. An item whose read fails keeps what it had (PBI 137).
   - Every item is handled on its own. A failure, such as `getItem`, `prState` or the judge throwing, is logged and that item waits for the next poll, while the rest of the poll runs and the cursor is saved. An `IllegalTransition` means another poll or a webhook moved the item first, and counts as done.
   - A withdrawal or criteria change closes the run's PR before the item moves, so a failed close leaves the item where the next poll repeats it. When the board item is gone, the repo comes from `run.repo_id`.
   - Every NotReady item is checked each poll. It moves to Eligible through `item_edited` when `readinessItemHash`, over its title, body, criteria, fields, repo and open dependencies, which are read only for a known repo, differs from `item.readiness_item_hash`, which the gate records with `readiness_policy_sha`. So a person's edit and a dependency closing both re-gate it, and the factory's own board writes, such as `setStatus`, don't. Otherwise it moves through `policy_changed` when `readinessSha` changed.
