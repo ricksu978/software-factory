@@ -12,7 +12,7 @@ import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
-import { cleanSummary } from "./pr-body.ts";
+import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
@@ -726,7 +726,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     for (let tried = 1, last: string[] = []; ; tried++) {
       const reply = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`, lockedNote(), retryNote(last)));
       await keepLock("open-pr", `open-pr(${tag}): summary`);
-      const clean = cleanSummary(reply.ok ? reply.text : "");
+      const clean = summaryOf(reply);
       if ("body" in clean) { text = clean.body; break; }
       if (current) current.message = clean.finding;
       if (tried >= tries) throw new Blocked(`Open-pr failed after ${tries} attempt${tries === 1 ? "" : "s"}:\n- ${clean.finding}`);

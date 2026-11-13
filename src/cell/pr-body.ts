@@ -1,3 +1,15 @@
+const ALONE = "Reply with the PR body alone, with nothing before or after it: no note to the reader and no fenced block around it.";
+
+/**
+ * The open-pr agent call's result, cleaned as cleanSummary does. A failed call wrote no PR body, so its finding says the
+ * call failed, with the first line of what it reported, instead of blaming the body it never wrote.
+ */
+export function summaryOf(reply: { ok: boolean; text: string }): { body: string } | { finding: string } {
+  if (reply.ok) return cleanSummary(reply.text);
+  const said = reply.text.trim().split("\n", 1)[0]!.slice(0, 200);
+  return { finding: `The open-pr agent call failed${said ? ` (${JSON.stringify(said)})` : ""}, so it wrote no PR body. ${ALONE}` };
+}
+
 /**
  * PBI 216: the open-pr agent's reply, cleaned into the summary part of the PR body. A reply that already starts with a
  * `## Problem` heading is the body as it is. Otherwise, a reply that wraps the body in one fenced block keeps only the
@@ -14,7 +26,7 @@ export function cleanSummary(reply: string): { body: string } | { finding: strin
   if (PROBLEM.test(body)) return { body };
   const first = (body || trimmed).split("\n", 1)[0]!.slice(0, 80);
   return {
-    finding: `The PR body must start with a \`## Problem\` heading, and this reply's ${body ? "starts with" : "has no `## ` heading, and starts with"} ${JSON.stringify(first)}. Reply with the PR body alone, with nothing before or after it: no note to the reader and no fenced block around it.`,
+    finding: `The PR body must start with a \`## Problem\` heading, and this reply ${body ? "starts with" : "has no `## ` heading, and starts with"} ${JSON.stringify(first)}. ${ALONE}`,
   };
 }
 

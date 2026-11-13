@@ -416,6 +416,17 @@ describe("runCell", () => {
     assert.ok(!h.agentCalls.some((a) => a.stage === "open-pr"), "no agent ran for a PR that can't open");
   });
 
+  test("an open-pr agent call that fails blocks the item saying the call failed, after its retry", async () => {
+    const h = harness({ nextStage: "open-pr", script: (a, stage) => stage === "open-pr" && a.mode === "cell" && !a.agent && !a.prompt.startsWith("# Definition of Done")
+      ? { ok: false, text: "API error 529" } : undefined });
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.prs, []);
+    const t = h.transitions().at(-1);
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /The open-pr agent call failed \("API error 529"\), so it wrote no PR body\./);
+    assert.doesNotMatch(t.question.body, /heading/);
+  });
+
   test("open-pr with no PR yet doesn't ask about one", async () => {
     const h = harness({ nextStage: "open-pr", ctx: { prNumber: null } });
     await h.run();

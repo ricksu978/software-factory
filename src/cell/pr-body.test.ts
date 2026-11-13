@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanSummary } from "./pr-body.ts";
+import { cleanSummary, summaryOf } from "./pr-body.ts";
 
 const BODY = "## Problem\n\nOrders over 100 items time out.\n\n## What changes\n\nOrders are saved in batches.";
 
@@ -34,6 +34,31 @@ describe("cleanSummary", () => {
       assert.ok("finding" in r, text);
       assert.match(r.finding, /must start with a `## Problem` heading/);
       assert.match(r.finding, /PR body alone, with nothing before or after it/);
+    }
+  });
+
+  test("the finding names what the reply starts with, in a whole sentence", () => {
+    const heading = cleanSummary("## What changes\n\nBatches.");
+    assert.ok("finding" in heading);
+    assert.match(heading.finding, /and this reply starts with "## What changes"\. Reply with/);
+    const none = cleanSummary("I couldn't find anything.");
+    assert.ok("finding" in none);
+    assert.match(none.finding, /and this reply has no `## ` heading, and starts with "I couldn't find anything\."\. Reply with/);
+  });
+});
+
+describe("summaryOf", () => {
+  test("cleans the text of a call that succeeded", () => {
+    assert.deepEqual(summaryOf({ ok: true, text: `Done.\n\n${BODY}` }), { body: BODY });
+  });
+
+  test("a failed call's finding says the call failed, not that the body lacked a heading", () => {
+    for (const [text, said] of [["API error 529\nretry later", / \("API error 529"\), so it wrote no PR body\./], ["", /failed, so it wrote no PR body\./]] as const) {
+      const r = summaryOf({ ok: false, text });
+      assert.ok("finding" in r, text);
+      assert.match(r.finding, /^The open-pr agent call failed/);
+      assert.match(r.finding, said);
+      assert.doesNotMatch(r.finding, /heading/);
     }
   });
 });
