@@ -4,8 +4,9 @@
 // and into commands at unquoted `;`, `&`, `|` and newlines (so `&&` and `||` too). Only the words cucumber-js gets
 // are read: those after a `cucumber-js` word, or after the `--` of `npm run <script>` (after the script name for
 // pnpm and yarn), since a `-t` before them, as in `docker run -t app npx cucumber-js`, belongs to another program.
-// A command with neither, such as a wrapper script, has every word read.
-// Every `--tags`, `--tags=` or `-t` among them is read. cucumber-js ANDs repeated ones, so this does too. A filter
+// A command with neither, such as a wrapper script, has every word read, but only for `--tags` and `--tags=`: a short
+// `-t` there, as in `docker run -t app ./scripts/bdd.sh`, is as likely another program's as cucumber-js's.
+// Every `--tags`, `--tags=` or `-t` among the words cucumber-js gets is read. cucumber-js ANDs repeated ones, so this does too. A filter
 // set anywhere else, such as a profile in a cucumber config file, isn't seen, and Red then expects every scenario.
 // So is an expression the shell expands, one with an unquoted or double-quoted `$` or backtick, as in
 // `--tags "$BDD_TAGS"` or `--tags "$(cat tags.txt)"`: its text isn't known until the shell runs it.
@@ -86,18 +87,19 @@ export function tagFilters(command: string): string[] {
   const segs = segments(command);
   const runs = segs.map((seg) => ({ seg, start: cucumberArgs(seg) })).filter((r) => r.start >= 0);
   // A command that runs its scenarios some other way, such as a wrapper script, has every word read, as no word can
-  // be told to be another program's.
-  if (runs.length === 0) return segs.flatMap(tagsIn);
-  return runs.flatMap((r) => tagsIn(r.seg.slice(r.start)));
+  // be told to be another program's. Only the long `--tags` is taken there: `-t` is a common flag elsewhere, such as
+  // docker's TTY flag, and reading its next word as a tag expression would leave out every scenario.
+  if (runs.length === 0) return segs.flatMap((seg) => tagsIn(seg, false));
+  return runs.flatMap((r) => tagsIn(r.seg.slice(r.start), true));
 }
 
 // An expression the shell expands is skipped: its text isn't known here, so, as with a filter in a config profile,
 // Red expects every scenario rather than reading `$BDD_TAGS` as a tag expression.
-function tagsIn(w: Word[]): string[] {
+function tagsIn(w: Word[], short: boolean): string[] {
   const out: string[] = [];
   for (let i = 0; i < w.length; i++) {
     const { text } = w[i]!;
-    if ((text === "--tags" || text === "-t") && i + 1 < w.length) {
+    if ((text === "--tags" || (short && text === "-t")) && i + 1 < w.length) {
       const expr = w[++i]!;
       if (!expr.expands) out.push(expr.text);
     } else if (text.startsWith("--tags=") && !w[i]!.expands) out.push(text.slice("--tags=".length));

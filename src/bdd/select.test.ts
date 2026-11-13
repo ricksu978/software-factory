@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { selects } from "./select.ts";
+import { selects, tagFilters } from "./select.ts";
 
 const local = ["@pbi-482", "@local"];
 const plain = ["@pbi-482"];
@@ -77,6 +77,15 @@ test("a quoted separator doesn't split the command", () => {
 test("a command that runs neither cucumber-js nor an npm script has its --tags read wherever they are", () => {
   assert.equal(selects('node fake/bdd.mjs --tags "not @local"')(local), false);
   assert.equal(selects('cp a b && echo --tags "not @local"')(local), false);
+  assert.equal(selects('docker run --rm -t app ./scripts/bdd.sh --tags "not @local"')(local), false);
+});
+
+test("a wrapper command's -t is taken for another program's, not cucumber-js's", () => {
+  for (const cmd of ["docker run --rm -t app ./scripts/bdd.sh", "docker run --rm -t app make bdd"]) {
+    assert.deepEqual(tagFilters(cmd), [], cmd);
+    assert.equal(selects(cmd)(plain), true, cmd);
+    assert.equal(selects(cmd)(local), true, cmd);
+  }
 });
 
 test("an expression the shell expands isn't read, so every scenario is expected", () => {
