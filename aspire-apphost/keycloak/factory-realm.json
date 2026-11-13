@@ -65,6 +65,7 @@
   ],
   "users": [
     {
+      "id": "5f0c1a9e-7b3d-4c62-9e1f-0a8d4b6c2e71",
       "username": "owner",
       "email": "owner@factory.localhost",
       "emailVerified": true,

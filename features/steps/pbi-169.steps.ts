@@ -116,11 +116,13 @@ function mapperAudience(m: Json): string | undefined {
   return m.config?.["included.custom.audience"] ?? m.config?.["included.client.audience"];
 }
 
-function testOwner(realm: Json): { username: string; password: string } | null {
+function testOwner(realm: Json): { id: string | undefined; username: string; password: string } | null {
   const users = Array.isArray(realm.users) ? (realm.users as Json[]) : [];
   for (const u of users) {
     const cred = (Array.isArray(u.credentials) ? (u.credentials as Json[]) : []).find((cr) => cr.type === "password" && typeof cr.value === "string");
-    if (typeof u.username === "string" && cred) return { username: u.username, password: cred.value };
+    if (typeof u.username === "string" && cred) {
+      return { id: typeof u.id === "string" ? u.id : undefined, username: u.username, password: cred.value };
+    }
   }
   return null;
 }
@@ -257,9 +259,21 @@ Then("it defines an audience mapper that adds the API's audience to access token
   assert.ok(found.length > 0, "no audience mapper that adds an audience to access tokens");
 });
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 Then("it defines a test owner user with a password", function () {
-  assert.ok(testOwner(needRealm(ctx(this))), "no user with a password credential");
+  const owner = testOwner(needRealm(ctx(this)));
+  assert.ok(owner, "no user with a password credential");
+  // Migrate seeds the owner from this user, so its subject must be known before anyone signs in (redesign §07, §13).
+  assert.match(owner.id ?? "", UUID, `the test owner has no fixed UUID id: ${JSON.stringify(owner.id)}`);
 });
+
+/** The token's subject is the test owner's fixed id from the realm import, so the seeding step can rely on it. */
+function assertOwnerSubject(realm: Json | null | undefined, sub: unknown): void {
+  const id = realm ? testOwner(realm)?.id : undefined;
+  assert.ok(id, "the realm import gives the test owner no fixed id");
+  assert.equal(sub, id, "the token's sub is not the test owner's fixed id from the realm import");
+}
 
 Then("it adds a Keycloak resource on port {int}", function (port: number) {
   const source = ctx(this).source;
@@ -386,7 +400,8 @@ Then("the discovery document has a JWKS address", function () {
 });
 
 Then("Keycloak issues an access token", function () {
-  accessToken(ctx(this));
+  const c = ctx(this);
+  assertOwnerSubject(c.realm, claims(c).sub);
 });
 
 Then("the e2e client can still get a token by direct grant as the test owner", long, async function () {
@@ -396,6 +411,8 @@ Then("the e2e client can still get a token by direct grant as the test owner", l
   assert.ok(t, "Keycloak never answered the token request after the restart");
   assert.equal(t.status, 200, `the token request got ${t.status}: ${JSON.stringify(t.body)}`);
   assert.equal(typeof t.body.access_token, "string");
+  const payload = JSON.parse(base64url((t.body.access_token as string).split(".")[1] ?? "").toString("utf8")) as Json;
+  assertOwnerSubject(c.realm, payload.sub);
 });
 
 Then("Keycloak refuses the request as an unauthorized client", function () {
