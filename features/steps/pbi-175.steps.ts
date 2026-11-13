@@ -76,12 +76,12 @@ export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).repl
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
 export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-BeforeStep({ tags: "@pbi-175 or @pbi-176" }, function ({ pickleStep }) {
+BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178" }, function ({ pickleStep }) {
   ctx(this).stepType = pickleStep.type;
 });
 
-// PBI 176 builds on this page, so its scenarios share these hooks and steps.
-Before({ tags: "(@pbi-175 or @pbi-176) and @db", ...long }, async function () {
+// PBI 176 and PBI 178 build on this page, so their scenarios share these hooks and steps.
+Before({ tags: "(@pbi-175 or @pbi-176 or @pbi-178) and @db", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
@@ -91,7 +91,7 @@ Before({ tags: "(@pbi-175 or @pbi-176) and @db", ...long }, async function () {
   );
 });
 
-After({ tags: "@pbi-175 or @pbi-176", ...long }, async function () {
+After({ tags: "@pbi-175 or @pbi-176 or @pbi-178", ...long }, async function () {
   const c = ctx(this);
   await c.close?.();
   if (c.server) {
@@ -190,7 +190,7 @@ function rows(html: string): Row[] {
 
 const SECTIONS = { runtime: "Runtime settings", env: "Env-backed settings" } as const;
 
-function settingRow(c: Ctx, which: keyof typeof SECTIONS, name: string): Row {
+export function settingRow(c: Ctx, which: keyof typeof SECTIONS, name: string): Row {
   const all = rows(section(okPage(c), SECTIONS[which]));
   const found = all.filter((r) => r.name.toLowerCase() === name.trim().toLowerCase());
   assert.equal(found.length, 1, `the ${SECTIONS[which].toLowerCase()} list "${name}" ${found.length} times; they list: ${all.map((r) => r.name).join(", ")}`);

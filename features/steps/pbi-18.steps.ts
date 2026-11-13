@@ -299,6 +299,8 @@ export async function runTheCell(world: object): Promise<void> {
         async openOrUpdatePr(p: { body: string }) { c.prBodies.push(p.body); return { number: 7, url: "https://github.com/acme/app/pull/7" }; },
         async requestReviewers() { return []; },
         async openReviewComments() { return comments; },
+        // The run's PR is still open, so address has something to address (PBI 194).
+        async prState() { return { open: true, merged: false, mergeSha: null, mergeable: true, lastChangesRequestedAt: null }; },
       },
       sop: loadSop(readFileSync(sopFile, "utf8")),
       config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],

@@ -57,6 +57,15 @@ describe("store", dbTest, () => {
     assert.deepEqual(await events(id), []);
   });
 
+  test("NeedsInput --merged--> Accepted closes the item's open question unanswered, and leaves an answered one be (PBI 194)", async () => {
+    const id = await item("NeedsInput", "lease_generation = 0");
+    await db.pool.query("insert into question (item_id, kind, body, asked_at, answer, answered_at) values ($1, 'needs_input', 'old', now(), 'yes', now())", [id]);
+    await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'open', now())", [id]);
+    assert.equal(await withTx(db.pool, (c) => transitionItem(c, id, "merged", system)), "Accepted");
+    const qs = (await db.pool.query("select body, answer, closed_at from question where item_id = $1 order by body", [id])).rows;
+    assert.deepEqual(qs.map((q) => [q.body, q.answer, q.closed_at !== null]), [["old", "yes", false], ["open", null, true]]);
+  });
+
   test("upsertItem with the same (source_id, external_id) returns the same id", async () => {
     const a = await upsertItem(db.pool, { sourceId: source, externalId: "same", title: "one" });
     const b = await upsertItem(db.pool, { sourceId: source, externalId: "same", title: "two" });

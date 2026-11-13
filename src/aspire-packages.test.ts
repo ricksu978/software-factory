@@ -1,5 +1,6 @@
 // Every Aspire integration pin in aspire.config.json must exist on NuGet, or `aspire run` fails its package restore.
-// It reads nuget.org, so it skips offline, except under CI.
+// It reads nuget.org, so it skips offline, except on GitHub Actions. A cell's commands run with CI=true and no network,
+// so it keys on GITHUB_ACTIONS, which the cell's command env never carries.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -12,7 +13,7 @@ for (const [id, version] of Object.entries(packages)) {
     try {
       r = await fetch(`https://api.nuget.org/v3-flatcontainer/${id.toLowerCase()}/index.json`, { signal: AbortSignal.timeout(30_000) });
     } catch (e) {
-      if (process.env.CI) throw e;
+      if (process.env.GITHUB_ACTIONS) throw e;
       return t.skip(`nuget.org unreachable: ${(e as Error).message}`);
     }
     assert.equal(r.status, 200);

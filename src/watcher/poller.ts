@@ -156,7 +156,7 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
 }
 
 /**
- * One pass over a backlog source. In order: new and edited items; the PRs of InReview and InProgress items;
+ * One pass over a backlog source. In order: new and edited items; the PRs of InReview, InProgress and NeedsInput items;
  * withdrawals, criteria changes and dependencies of the other items the factory holds; re-gates after a readiness
  * input changed; and the gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or
  * one unreachable PR never stops merge or withdrawal detection for the rest, and the cursor is always saved.
@@ -206,12 +206,13 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   });
 
   w.step("reading the PRs of items in review");
-  // 2. PRs of InReview items, and of InProgress items whose run has opened one, before withdrawal, so a merge just
-  //    before the item closes still counts as a merge. A merge or a close while the item is InProgress, during
-  //    address for example, is the fallback for a webhook that never came (PBI 142). Only an InReview item goes back
-  //    to address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
+  // 2. PRs of InReview items, and of InProgress and NeedsInput items whose run has opened one, before withdrawal, so a
+  //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
+  //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
+  //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
+  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
-  await each(await items(pool, sourceId, ["InReview", "InProgress"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
+  await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const repo = (await itemOf(row.external_id))?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
     // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).

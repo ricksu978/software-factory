@@ -100,7 +100,7 @@ function recordedSplit(item: FactoryItem, ctx: GateContext, deps: SplitDeps): Pr
       spent({ model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
       return r;
     },
-  }));
+  }, ctx.dor ?? undefined));
 }
 
 /**

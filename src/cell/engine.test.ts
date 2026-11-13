@@ -667,6 +667,31 @@ describe("runCell", () => {
     assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
   });
 
+  for (const [what, comments] of [["review text", [ownerComment]], ["no review text", []]] as const) {
+    test(`an address run with ${what} on a branch whose PR merged fails naming the PR, and neither blocks nor replies (PBI 194)`, async () => {
+      const h = harness({ nextStage: "address", ctx: { trustedComments: [...comments], prNumber: 7 } });
+      h.deps.repoHost.prState = async () => ({ merged: true, mergeSha: "m7", open: false, mergeable: null, lastChangesRequestedAt: null });
+      assert.equal(await h.run(), "failed");
+      const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body;
+      assert.equal(last.status, "failed");
+      assert.match(last.message, /PR #7 .*merged/);
+      assert.deepEqual(h.transitions(), []);
+      assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+      assert.ok(!h.routes().includes("/repo/replyToThread") && !h.routes().includes("/repo/commentOnPr"));
+    });
+  }
+
+  test("an address run whose PR merged asks before merging the base, so a conflicting base runs no merge pass (PBI 194)", async () => {
+    const h = harness({ nextStage: "address", conflict: true, ctx: { trustedComments: [ownerComment], prNumber: 7 } });
+    h.deps.repoHost.prState = async () => ({ merged: true, mergeSha: "m7", open: false, mergeable: null, lastChangesRequestedAt: null });
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(h.started(), ["address"]);
+    assert.deepEqual(h.agentCalls, []);
+    assert.deepEqual(h.transitions(), []);
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body;
+    assert.match(last.message, /PR #7 .*merged/);
+  });
+
   test("an address run there for a merge conflict, with no review text, resolves it and hands the PR back", async () => {
     const h = harness({ nextStage: "address", conflict: true, script: (a) => {
       if (a.prompt.includes("merge conflict")) {

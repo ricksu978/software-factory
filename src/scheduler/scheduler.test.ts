@@ -224,6 +224,25 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(r, { next_stage: "open-pr", pr_number: null, pr_url: null });
   });
 
+  test("re-queueing an item withdrawn from NeedsInput for a closed PR resumes at open-pr and closes its question (PBI 194)", async () => {
+    const id = await item("1", "Abandoned");
+    await openRun(id, `next_stage = 'address', pr_number = 9, repo_id = '${repoId}', config_sha = 'x'`);
+    await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', $2)", [id, ago(DAY)]);
+    repoHost.prs.push({
+      number: 9, repo: REPO, branch: "factory/pbi-1-r1", base: "main", title: "t", body: "", headSha: null, open: false, merged: false,
+      mergeSha: null, mergeable: null, reviewers: [], comments: [], reviews: [],
+    });
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await override("requeue", id);
+    await run();
+    // Back to NeedsInput holding PR 9, the next poll would withdraw it again, and every re-queue would end the same way.
+    assert.notEqual((await state(id)).state, "NeedsInput");
+    const r = (await db.pool.query("select next_stage, pr_number, pr_url from run where item_id = $1", [id])).rows[0];
+    assert.deepEqual(r, { next_stage: "open-pr", pr_number: null, pr_url: null });
+    const open = (await db.pool.query("select count(*)::int as n from question where item_id = $1 and answer is null and closed_at is null", [id])).rows[0].n;
+    assert.equal(open, 0);
+  });
+
   test("an item that names no repo is held with the reason", async () => {
     await backlog.seed({ externalId: "1", repo: null });
     const id = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '1', 't', 'Queued') returning id", [source])).rows[0].id;
@@ -248,6 +267,30 @@ describe("scheduler", dbTest, () => {
     }
     await run();
     assert.equal(started.length, 1);
+  });
+
+  test("one tick fills every free slot under the WIP limit, and no more (PBI 177)", async () => {
+    await db.pool.query("update wip_policy set current_wip = 3");
+    const running = await item("0", "InProgress", `lease_expires = '${new Date(NOW.getTime() + 300_000).toISOString()}'`);
+    const queued = [await item("1", "Queued", "backlog_rank = 1"), await item("2", "Queued", "backlog_rank = 2"), await item("3", "Queued", "backlog_rank = 3")];
+    await run();
+    assert.deepEqual(started.map((e) => e.ITEM_ID), queued.slice(0, 2));
+    assert.equal((await state(running)).state, "InProgress");
+    assert.equal((await state(queued[2])).state, "Queued");
+    await run();
+    assert.equal(started.length, 2);
+  });
+
+  test("a start that fails ends the tick's starts, so the item it sent back isn't claimed again the same tick", async () => {
+    await db.pool.query("update wip_policy set current_wip = 3");
+    await item("1", "Queued");
+    let calls = 0;
+    launcher.start = async () => {
+      calls++;
+      throw new Error("docker is down");
+    };
+    await run();
+    assert.equal(calls, 1);
   });
 
   test("a start that fails moves the item out of InProgress, so the generation it handed out is never valid again", async () => {
