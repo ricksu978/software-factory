@@ -13,7 +13,7 @@ export type FactoryWebhookEvent =
   | { kind: "pr_closed"; prNumber: number; repo: string; by: string } // `by`: the login that closed it
   | { kind: "checks_completed"; sha: string; repo: string }
   | { kind: "comment"; externalId: string; repo: string; login: string; body: string; commentId: string }
-  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string }
+  | { kind: "review"; prNumber: number; repo: string; state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body: string }
   | { kind: "ignored" };
 
 export interface BacklogAdapter {
@@ -104,7 +104,8 @@ export interface RepoHost {
   /**
    * `lastChangesRequestedAt` is the newest trusted review that requests changes or comments in a still-open thread, once
    * that comment has stood two minutes (Run contract 10). A thread `trustedBot` opened, the factory's own review's, never
-   * counts, whoever replies inside it (PBI 130).
+   * counts, whoever replies inside it, and neither does a review requesting changes whose only text sits in such a
+   * thread (PBI 130).
    */
   prState(repo: string, prNumber: number, trustedLogins: string[], trustedBot?: string | null): Promise<{
     merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null;

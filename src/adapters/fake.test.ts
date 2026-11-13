@@ -72,8 +72,8 @@ describe("fakeRepoHost", () => {
     const host = fakeRepoHost();
     const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });
     host.prs[0].reviews.push(
-      { state: "changes_requested", submittedAt: "2026-11-06T10:00:00Z", author: "owner" },
-      { state: "changes_requested", submittedAt: "2026-11-06T11:00:00Z", author: "stranger" },
+      { state: "changes_requested", submittedAt: "2026-11-06T10:00:00Z", author: "owner", body: "Fix it." },
+      { state: "changes_requested", submittedAt: "2026-11-06T11:00:00Z", author: "stranger", body: "Fix it." },
     );
     assert.equal((await host.prState(repo, number, ["owner"])).lastChangesRequestedAt, "2026-11-06T10:00:00Z");
     assert.equal((await host.prState(repo, number, [])).lastChangesRequestedAt, null);

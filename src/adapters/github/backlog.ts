@@ -97,7 +97,7 @@ export function parseGitHubWebhook(headers: Record<string, string>, body: unknow
       if (bot(b.review.user)) return { kind: "ignored" };
       const state = str(b.review.state).toLowerCase();
       if (state !== "approved" && state !== "changes_requested" && state !== "commented") return { kind: "ignored" };
-      return { kind: "review", prNumber: b.pull_request.number, repo, state, submittedAt: str(b.review.submitted_at), author: str(b.review.user?.login) };
+      return { kind: "review", prNumber: b.pull_request.number, repo, state, submittedAt: str(b.review.submitted_at), author: str(b.review.user?.login), body: str(b.review.body) };
     }
     if (event === "check_suite" && b.action === "completed" && b.check_suite?.head_sha && repo) {
       return { kind: "checks_completed", sha: str(b.check_suite.head_sha), repo };

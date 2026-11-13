@@ -85,17 +85,22 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const r = split(repo);
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
       // ponytail: one page of 100 reviews; a PR with more would miss the newest ones.
-      const reviews = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...r, pull_number: prNumber, per_page: 100 })).data as { state: string; submitted_at: string | null; user: { login: string } | null }[];
+      const reviews = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...r, pull_number: prNumber, per_page: 100 })).data as { id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } | null }[];
       const trusted = new Set(trustedLogins.map((l) => l.toLowerCase()));
-      const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())).map((v) => v.submitted_at as string);
       // A review that only comments still asks for changes when it leaves a thread open, as the PR reviewer's do.
       // Only an open PR needs it, so a failed GraphQL call can't hold up merge and close detection.
       // ponytail: the first 100 threads and 100 comments each, oldest first; past that the newest, which trigger, are cut.
       // A comment counts once it has stood for THREAD_SETTLE_MS.
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const settled = Date.now() - THREAD_SETTLE_MS;
-      const open = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { submittedAt: string | null } | null }[] } }[])
-        .filter((t) => !t.isResolved && !factoryThread(t.comments.nodes[0] && authorLogin(t.comments.nodes[0].author), trustedBot)).flatMap((t) => t.comments.nodes)
+      const threads = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { databaseId: number | null; submittedAt: string | null } | null }[] } }[])
+        .filter((t) => !factoryThread(t.comments.nodes[0] && authorLogin(t.comments.nodes[0].author), trustedBot));
+      // A review that requests changes counts only when it has a summary or a comment outside the factory's threads. One
+      // whose only text is a reply inside the factory's thread would hand the address run nothing to read (PBI 130).
+      const withText = new Set(threads.flatMap((t) => t.comments.nodes.map((c) => c.pullRequestReview?.databaseId)));
+      const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())
+        && ((v.body ?? "").trim() !== "" || withText.has(v.id))).map((v) => v.submitted_at as string);
+      const open = threads.filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
         .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
         .map((c) => c.pullRequestReview!.submittedAt!);
       const times = [...requested, ...open].sort();
@@ -197,7 +202,7 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
-    id isResolved path line comments(first: 100) { nodes { author { __typename login } body pullRequestReview { submittedAt } } } } }
+    id isResolved path line comments(first: 100) { nodes { author { __typename login } body pullRequestReview { databaseId submittedAt } } } } }
   reviews(first: 100) { nodes { id state body author { __typename login } } } } } }`;
 
 type Author = { __typename: string; login: string } | null;
