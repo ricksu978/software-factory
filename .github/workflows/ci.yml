@@ -1,7 +1,9 @@
 name: ci
 
+# A PR's pushes run once, under pull_request. Main runs on push, for the factory's post-merge check of the merge commit.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:

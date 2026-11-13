@@ -127,7 +127,7 @@ aspire-apphost/apphost.mts         Aspire app host for Phase 0a, with aspire.con
 config/sources.yml                 the repos and boards migrate upserts
 .factory/config.yml, dod.md, dor.md   this repo's own policy as a target
 features/*.feature, features/steps/*.ts   Gherkin scenarios and step definitions
-.github/workflows/ci.yml           typecheck, tests and scenarios on every push
+.github/workflows/ci.yml           typecheck, tests and scenarios on every PR and every push to main
 .github/workflows/deploy.yml       amd64 images to ACR, bicep deploy
 infra/main.bicep, infra/main.bicepparam
 db/migrations/001_init.sql

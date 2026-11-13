@@ -1,6 +1,7 @@
 name: prose
 on:
   push:
+    branches: [main]
   pull_request:
 jobs:
   lint:
