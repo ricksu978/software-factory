@@ -35,8 +35,10 @@ describe("egress proxy", () => {
       env: { ...process.env, EGRESS_PORT: String(proxyPort), EGRESS_ALLOW: `http:127.0.0.1:${upPort},sas:127.0.0.1:${sasPort}` },
       stdio: "ignore",
     });
-    // Wait until the proxy listens.
-    for (let i = 0; i < 50; i++) {
+    // Wait until the proxy listens. A busy machine running the whole suite in parallel can take seconds to start a
+    // node process, so allow 30 seconds and fail here, not in every test, if it never comes up.
+    let listening = false;
+    for (let i = 0; i < 300 && proxy.exitCode === null; i++) {
       const up = await new Promise<boolean>((resolve) => {
         const s = connect(proxyPort, "127.0.0.1");
         s.on("connect", () => {
@@ -45,9 +47,13 @@ describe("egress proxy", () => {
         });
         s.on("error", () => resolve(false));
       });
-      if (up) break;
+      if (up) {
+        listening = true;
+        break;
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
+    assert.ok(listening, `the egress proxy never listened on ${proxyPort} (exit code ${proxy.exitCode})`);
   });
   after(() => {
     proxy?.kill();
