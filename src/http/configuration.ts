@@ -1,5 +1,5 @@
 // The Configuration page's settings (PBI 175). Runtime settings are the one wip_policy row, read fresh on every request,
-// and an operator can change six of them. The scheduler picks up the current WIP and review capacity on its next tick, and a
+// and an operator can change six of them, each change with a reason that the logged event keeps (PBI 176). The scheduler picks up the current WIP and review capacity on its next tick, and a
 // cell reads the usage reserve. The WIP minimum and maximum only bound the current WIP, and the daily budget is stored but
 // not enforced yet. Env-backed settings are the
 // values the control plane read from its environment at start, shown read-only. Only the names in ENV_SETTINGS ever
@@ -67,29 +67,40 @@ const whole = (raw: string) => (/^\d{1,10}$/.test(raw) && Number(raw) >= 1 && Nu
 const decimal = (raw: string) => (/^\d{1,12}(\.\d{1,6})?$|^\.\d{1,6}$/.test(raw) ? Number(raw) : null);
 
 export type Update = { key: RuntimeKey; column: string; value: number | null };
-export type Checked = { ok: true; updates: Update[] } | { ok: false; status: number; message: string };
+type TurnedDown = { ok: false; status: number; message: string };
+export type Checked = { ok: true; updates: Update[]; reason: string } | TurnedDown;
 
 const col = (key: RuntimeKey) => RUNTIME_SETTINGS.find((s) => s.key === key)!.column;
-const turnDown = (message: string): Checked => ({ ok: false, status: 400, message });
+const turnDown = (message: string): TurnedDown => ({ ok: false, status: 400, message });
 
 /**
  * Checks a change against the policy as it is now, and returns the columns it writes. A new WIP minimum or maximum
  * that leaves the current WIP outside the range moves the current WIP to the nearest end, so min <= current <= max
- * always holds.
+ * always holds. A value that breaks a rule is turned down with that rule first; a value that keeps every rule still needs
+ * a reason that isn't only spaces (PBI 176).
  */
-export function checkChange(now: RuntimeValues, key: string, value: string): Checked {
+export function checkChange(now: RuntimeValues, key: string, value: string, reason?: string): Checked {
+  const updates = checkValue(now, key, value);
+  if (!Array.isArray(updates)) return updates;
+  const why = (reason ?? "").trim();
+  if (why === "") return turnDown("Give a reason for the change.");
+  return { ok: true, updates, reason: why };
+}
+
+/** The columns a change writes, or why it's turned down. */
+function checkValue(now: RuntimeValues, key: string, value: string): Update[] | TurnedDown {
   const setting = RUNTIME_SETTINGS.find((s) => s.key === key);
   if (!setting || !setting.editable) return turnDown("That setting can't be changed from the page.");
   const raw = value.trim();
   const min = Number(now.wip_min);
   const max = Number(now.wip_max);
   const current = Number(now.current_wip);
-  const one = (v: number | null): Checked => ({ ok: true, updates: [{ key: setting.key, column: setting.column, value: v }] });
-  const withCurrent = (k: RuntimeKey, v: number, lo: number, hi: number): Checked => {
+  const one = (v: number | null): Update[] => [{ key: setting.key, column: setting.column, value: v }];
+  const withCurrent = (k: RuntimeKey, v: number, lo: number, hi: number): Update[] => {
     const updates: Update[] = [{ key: k, column: col(k), value: v }];
     const moved = Math.min(Math.max(current, lo), hi);
     if (moved !== current) updates.push({ key: "current_wip", column: col("current_wip"), value: moved });
-    return { ok: true, updates };
+    return updates;
   };
   switch (setting.key) {
     case "wip_min": {
@@ -116,7 +127,7 @@ export function checkChange(now: RuntimeValues, key: string, value: string): Che
     }
     case "usage_reserve": {
       const n = decimal(raw);
-      if (n === null || n <= 0 || n > 1) return turnDown("Usage reserve must be more than 0 and at most 1.");
+      if (n === null || n < 0 || n > 1) return turnDown("Usage reserve must be a number from 0 to 1.");
       return one(n);
     }
     case "daily_budget": {
@@ -132,14 +143,15 @@ export function checkChange(now: RuntimeValues, key: string, value: string): Che
 
 /**
  * Applies one change in a transaction, against the policy row locked as it is now, and logs each column it moved as a
- * `setting` event whose actor_id is the user's id, as for every other human event, from what and to what. A change to the value already there logs nothing.
+ * `setting` event whose actor_id is the user's id, as for every other human event, from what, to what and why. A change
+ * to the value already there logs nothing.
  */
-export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string): Promise<Checked> {
+export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string, reason?: string): Promise<Checked> {
   const c = await pool.connect();
   try {
     await c.query("begin");
     const now = await runtimeValues(c, true);
-    const checked = checkChange(now, key, value);
+    const checked = checkChange(now, key, value, reason);
     if (!checked.ok) {
       await c.query("rollback");
       return checked;
@@ -151,7 +163,7 @@ export async function changeSetting(pool: pg.Pool, by: string, key: string, valu
       if (from !== null && to !== null && Number(from) === Number(to)) continue;
       if (from === to) continue;
       const label = RUNTIME_SETTINGS.find((s) => s.key === u.key)!.label;
-      await appendEvent(c, { actor: "human", actorId: by, itemId: null, kind: "setting", payload: { setting: label, from, to } });
+      await appendEvent(c, { actor: "human", actorId: by, itemId: null, kind: "setting", payload: { setting: label, from, to, reason: checked.reason } });
     }
     await c.query("commit");
     return checked;

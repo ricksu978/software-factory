@@ -5,7 +5,8 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
   current value. Runtime settings are the values in the factory's WIP policy: the WIP mode, the WIP minimum,
   maximum and current value, the review capacity, the usage reserve, the usage pause and the daily budget.
   An operator can change the WIP minimum, maximum and current value, the review capacity, the usage reserve
-  and the daily budget from the page, and the change takes effect without a restart. The WIP mode and the
+  and the daily budget from the page, and the change takes effect without a restart. PBI 176 adds that each
+  change needs a reason and that the usage reserve may be anything from 0 to 1, so these scenarios give one. The WIP mode and the
   usage pause are set by the factory itself, so the page shows them but doesn't change them.
   Env-backed settings are the values the control plane reads from its environment at start. They show
   read-only, and each is marked as needing a restart, because a change takes effect only when the factory
@@ -86,7 +87,7 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
       Given "octo" is an operator
       And the factory's WIP policy has WIP minimum set to 1, WIP maximum set to 3 and current WIP set to 1
       And the factory's WIP policy has <setting> set to <before>
-      When "octo" changes <setting> to "<after>" on the Configuration page
+      When "octo" changes <setting> to "<after>" on the Configuration page, giving the reason "Trying a new value."
       Then the page says "<setting> changed"
       And the runtime settings list "<setting>" with the value "<after>"
       And the factory's WIP policy has <setting> set to <after>
@@ -105,7 +106,7 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
       Given "octo" is an operator
       And the factory's WIP policy has WIP minimum set to 1, WIP maximum set to 3 and current WIP set to 1
       And one item is in progress and another is queued
-      When "octo" changes current WIP to "2" on the Configuration page
+      When "octo" changes current WIP to "2" on the Configuration page, giving the reason "Let the queued item start."
       And the scheduler takes its next turn, with no restart
       Then the queued item is in progress
       And "current WIP" isn't marked as needing a restart
@@ -114,7 +115,7 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
     Scenario: An operator clears the daily budget
       Given "octo" is an operator
       And the factory's WIP policy has daily budget set to 25
-      When "octo" clears daily budget on the Configuration page
+      When "octo" clears daily budget on the Configuration page, giving the reason "No budget this week."
       Then the runtime settings list "daily budget" as "not set"
       And the factory's WIP policy has no daily budget
 
@@ -122,7 +123,7 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
     Scenario: A change shows in the activity log with who made it
       Given "octo" is an operator
       And the factory's WIP policy has review capacity set to 3
-      When "octo" changes review capacity to "5" on the Configuration page
+      When "octo" changes review capacity to "5" on the Configuration page, giving the reason "Two more reviewers are in."
       Then the activity log shows that "octo" changed review capacity from "3" to "5"
 
     @ac-1 @db
@@ -143,8 +144,8 @@ Feature: A Configuration page lists every runtime and env-backed setting, and an
         | current WIP     | 5     | 1    | Current WIP must be a whole number from WIP minimum to WIP maximum. |
         | review capacity | 0     | 3    | Review capacity must be a whole number of at least 1.      |
         | review capacity | many  | 3    | Review capacity must be a whole number of at least 1.      |
-        | usage reserve   | 1.5   | 0.7  | Usage reserve must be more than 0 and at most 1.           |
-        | usage reserve   | 0     | 0.7  | Usage reserve must be more than 0 and at most 1.           |
+        | usage reserve   | 1.5   | 0.7  | Usage reserve must be a number from 0 to 1.                |
+        | usage reserve   | -0.1  | 0.7  | Usage reserve must be a number from 0 to 1.                |
         | daily budget    | -10   | 25   | Daily budget must be more than 0, or left empty for none.  |
 
     @ac-1 @db

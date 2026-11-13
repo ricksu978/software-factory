@@ -42,6 +42,12 @@ describe("activityPage", () => {
     const html = activityPage([{ at, external_id: null, repo: null, title: null, kind: "setting", from: "25", to: null, event: null, actor: "octo", setting: "daily budget" }], null);
     assert.match(html, /octo changed daily budget from 25 to not set/);
   });
+
+  test("shows a setting change's reason as text", () => {
+    const html = activityPage([{ at, external_id: null, repo: null, title: null, kind: "setting", from: "3", to: "5", event: null, actor: "octo", setting: "review capacity", reason: "<b>urgent</b> & now" }], null);
+    assert.match(html, /octo changed review capacity from 3 to 5 because &lt;b&gt;urgent&lt;\/b&gt; &amp; now/);
+    assert.doesNotMatch(html, /<b>urgent/);
+  });
 });
 
 describe("configurationPage", () => {
@@ -58,6 +64,7 @@ describe("configurationPage", () => {
     assert.match(html, /name="setting" value="review_capacity"/);
     assert.match(html, /name="setting" value="daily_budget"/);
     assert.doesNotMatch(html, /value="mode"/);
+    assert.equal(html.match(/<input id="reason-[a-z_]+" name="reason" required>/g)?.length, 2, "each form asks for a reason");
     const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
     assert.doesNotMatch(envPart, /<form|<input|<button/);
   });

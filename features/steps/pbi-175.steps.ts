@@ -391,8 +391,9 @@ When(/^"([^"]*)" changes (.+) to "([^"]*)" on the Configuration page$/, long, as
   await change(this, login, name, value);
 });
 
-When(/^"([^"]*)" clears (.+) on the Configuration page$/, long, async function (login: string, name: string) {
-  await change(this, login, name, "");
+// PBI 176 says every change needs a reason, clearing one too.
+When(/^"([^"]*)" clears (.+) on the Configuration page, giving the reason "(.*)"$/, long, async function (login: string, name: string, reason: string) {
+  await change(this, login, name, "", { reason });
 });
 
 When(/^"([^"]*)" sends a change of (.+) to "([^"]*)" to the Configuration page$/, long, async function (login: string, name: string, value: string) {
