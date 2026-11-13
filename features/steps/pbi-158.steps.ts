@@ -32,7 +32,7 @@ type Ctx = {
   clocks: Map<string, number[]>;
   /** The time of the single worker's latest tick when a Given looked. */
   firstTick?: number;
-  /** Whether the step running now is a Given, so a step shared with a Then records instead of asserting. */
+  /** Whether the step running now is a Given, so a step shared with a Then also records what it checked. */
   context?: boolean;
   refusing?: boolean;
   local?: Local;
@@ -183,8 +183,9 @@ Given("the factory's worker heartbeat was last recorded an hour ago", long, asyn
   await need().pool.query("insert into worker_heartbeat (ticked_at) values (now() - interval '1 hour')");
 });
 
-// Recorded for the Then that compares with it, which fails if the heartbeat never moved past it.
-Given("the heartbeat shows the time of that first tick", function () {
+// Checked, then recorded for the Then that compares with it, which fails if the heartbeat never moved past it.
+Given("the heartbeat shows the time of that first tick", long, async function () {
+  await showsLatest(this, single(this));
   ctx(this).firstTick = latestTick(this);
 });
 
@@ -215,13 +216,10 @@ When("the heartbeat can be written again", long, async function () {
 
 // ---- Then ----
 
-// Also a Given, before the worker's lock connection ends. There it records, and the Then after the loss checks.
+// Also a Given, before the worker's lock connection ends. There it checks and then records, for the Then after the loss.
 Then("the heartbeat shows the time of the worker's latest tick", long, async function () {
-  if (ctx(this).context) {
-    ctx(this).firstTick = latestTick(this);
-    return;
-  }
   await showsLatest(this, single(this));
+  if (ctx(this).context) ctx(this).firstTick = latestTick(this);
 });
 
 Then("the factory has exactly one worker heartbeat", long, async function () {
