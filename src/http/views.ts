@@ -1,6 +1,7 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
 export function escapeHtml(value: unknown): string {
@@ -345,12 +346,14 @@ export type ConfigSetting = { key: string; label: string; value: string | null; 
  * The Configuration page (PBI 175). Runtime settings come first. An operator gets a form beside each one they can
  * change, which asks for the change's reason too (PBI 176), and a viewer gets none. An operator also gets a button to clear an active usage pause (PBI 178). Env-backed settings are read-only, and each says it needs a restart.
  */
-export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null }, banner: string | null): string {
+export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null; now?: Date }, banner: string | null): string {
+  const at = c.now ?? new Date();
   const value = (v: string | null) => (v === null ? `<span class="muted">not set</span>` : escapeHtml(v));
   const note = (s: ConfigSetting) => (s.note ? `<span class="muted">${escapeHtml(s.note)}</span>` : "");
   const change = (s: ConfigSetting) => {
-    if (s.clearable && c.canOperate && s.value !== null) {
-      // PBI 178: an operator can clear an active usage pause, with a reason, but never set one.
+    if (s.clearable && c.canOperate && pauseActive(s.value, at)) {
+      // PBI 178: an operator can clear an active usage pause, with a reason, but never set one. A pause whose time
+      // has passed is no pause, so it gets no button.
       return `<td><form method="post" action="/configuration"><input type="hidden" name="setting" value="${escapeHtml(s.key)}"><input type="hidden" name="value" value="">
 <label for="reason-${escapeHtml(s.key)}">Reason</label><input id="reason-${escapeHtml(s.key)}" name="reason" required> <button>Clear</button></form>${note(s)}</td>`;
     }

@@ -380,10 +380,11 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     }
     if (path === "/configuration" && (req.method === "GET" || req.method === "POST")) {
       const canOperate = requireRole(user, "operator");
+      const clock = deps.now ?? (() => new Date());
       const view = async (status: number, extra: { notice?: string | null; error?: string | null }) => {
         const now = await runtimeValues(deps.pool);
         const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable, clearable: s.clearable, note: s.note }));
-        send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, ...extra }, banner));
+        send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, now: clock(), ...extra }, banner));
       };
       if (req.method === "GET") {
         const changed = RUNTIME_SETTINGS.find((s) => s.key === url.searchParams.get("changed"));
@@ -395,7 +396,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         return true;
       }
       const b = await form(req);
-      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "", b.reason);
+      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "", b.reason, clock());
       if (!outcome.ok) await view(outcome.status, { error: outcome.message });
       else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
       return true;

@@ -7,6 +7,7 @@ const policy: RuntimeValues = {
 };
 
 const why = "Two more reviewers are in.";
+const at = new Date("2026-11-13T12:00:00Z");
 
 describe("checkChange", () => {
   test("takes a change that keeps every rule, with its reason trimmed", () => {
@@ -72,17 +73,21 @@ describe("checkChange", () => {
 
   test("clears an active usage pause, with a reason (PBI 178)", () => {
     const paused = { ...policy, usage_pause: "2026-11-14T09:00:00Z" };
-    assert.deepEqual(checkChange(paused, "usage_pause", " ", ` ${why} `), { ok: true, reason: why, updates: [{ key: "usage_pause", column: "usage_paused_until", value: null }] });
-    const noReason = checkChange(paused, "usage_pause", "");
+    assert.deepEqual(checkChange(paused, "usage_pause", " ", ` ${why} `, at), { ok: true, reason: why, updates: [{ key: "usage_pause", column: "usage_paused_until", value: null }] });
+    const noReason = checkChange(paused, "usage_pause", "", undefined, at);
     assert.ok(!noReason.ok && noReason.message === "Give a reason for the change.");
   });
 
   test("turns down a clear with no usage pause, and any value but empty for the usage pause", () => {
-    const none = checkChange(policy, "usage_pause", "", why);
+    const none = checkChange(policy, "usage_pause", "", why, at);
     assert.ok(!none.ok && none.status === 400 && none.message === "There's no usage pause to clear.");
+    for (const until of ["2026-11-13T11:00:00Z", "2026-11-13T12:00:00Z"]) {
+      const expired = checkChange({ ...policy, usage_pause: until }, "usage_pause", "", why, at);
+      assert.ok(!expired.ok && expired.status === 400 && expired.message === "There's no usage pause to clear.", `a pause that ran out at ${until} is no pause`);
+    }
     const paused = { ...policy, usage_pause: "2026-11-14T09:00:00Z" };
     for (const p of [paused, policy]) {
-      const set = checkChange(p, "usage_pause", "2026-12-01T00:00:00Z", why);
+      const set = checkChange(p, "usage_pause", "2026-12-01T00:00:00Z", why, at);
       assert.ok(!set.ok && set.status === 400 && set.message === "The usage pause can only be cleared.");
     }
   });

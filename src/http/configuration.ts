@@ -52,6 +52,14 @@ const show = (v: unknown): string | null => {
   return String(v);
 };
 
+/**
+ * Whether a usage pause holds new starts back at `at`: a time still in the future. Nothing sets the column back to null
+ * when a pause runs out, so a time at or before now is no pause at all, as the scheduler reads it (PBI 178).
+ */
+export function pauseActive(value: string | null, at: Date): boolean {
+  return value !== null && Date.parse(value) > at.getTime();
+}
+
 export async function runtimeValues(pool: pg.Pool | pg.ClientBase, lock = false): Promise<RuntimeValues> {
   const cols = RUNTIME_SETTINGS.map((s) => `${s.column} as ${s.key}`).join(", ");
   const row = (await pool.query(`select ${cols} from wip_policy limit 1${lock ? " for update" : ""}`)).rows[0] ?? {};
@@ -80,8 +88,8 @@ const turnDown = (message: string): TurnedDown => ({ ok: false, status: 400, mes
  * always holds. A value that breaks a rule is turned down with that rule first; a value that keeps every rule still needs
  * a reason that isn't only spaces (PBI 176).
  */
-export function checkChange(now: RuntimeValues, key: string, value: string, reason?: string): Checked {
-  const updates = checkValue(now, key, value);
+export function checkChange(now: RuntimeValues, key: string, value: string, reason?: string, at: Date = new Date()): Checked {
+  const updates = checkValue(now, key, value, at);
   if (!Array.isArray(updates)) return updates;
   const why = (reason ?? "").trim();
   if (why === "") return turnDown("Give a reason for the change.");
@@ -89,12 +97,12 @@ export function checkChange(now: RuntimeValues, key: string, value: string, reas
 }
 
 /** The columns a change writes, or why it's turned down. */
-function checkValue(now: RuntimeValues, key: string, value: string): Update[] | TurnedDown {
+function checkValue(now: RuntimeValues, key: string, value: string, at: Date): Update[] | TurnedDown {
   const setting = RUNTIME_SETTINGS.find((s) => s.key === key);
   const raw = value.trim();
   if (setting?.clearable) {
     if (raw !== "") return turnDown(`The ${setting.label} can only be cleared.`);
-    if (now[setting.key] === null) return turnDown(`There's no ${setting.label} to clear.`);
+    if (!pauseActive(now[setting.key], at)) return turnDown(`There's no ${setting.label} to clear.`);
     return [{ key: setting.key, column: setting.column, value: null }];
   }
   if (!setting || !setting.editable) return turnDown("That setting can't be changed from the page.");
@@ -152,12 +160,12 @@ function checkValue(now: RuntimeValues, key: string, value: string): Update[] | 
  * `setting` event whose actor_id is the user's id, as for every other human event, from what, to what and why. A change
  * to the value already there logs nothing.
  */
-export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string, reason?: string): Promise<Checked> {
+export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string, reason?: string, at: Date = new Date()): Promise<Checked> {
   const c = await pool.connect();
   try {
     await c.query("begin");
     const now = await runtimeValues(c, true);
-    const checked = checkChange(now, key, value, reason);
+    const checked = checkChange(now, key, value, reason, at);
     if (!checked.ok) {
       await c.query("rollback");
       return checked;
