@@ -30,6 +30,13 @@ const storage = await builder.addAzureStorage('storage').runAsEmulator({
 });
 const blobs = await storage.addBlobs('blobs');
 
+// Keycloak is the local sign-in provider (redesign step 5a). It is pinned to 7430 even under FACTORY_FLOAT_PORTS,
+// because the issuer URL contains the port and users are keyed on the issuer. It has no data volume, so every start
+// imports the realm afresh from keycloak/: the `dashboard` client, the audience mapper, the test owner and the e2e
+// client. API_AUDIENCE is the `aud` the realm's audience mapper puts in access tokens. The two must agree.
+const apiAudience = 'factory-api';
+await builder.addKeycloak('keycloak', { port: 7430 }).withRealmImport('./keycloak');
+
 const secret = (name: string) => builder.addParameter(name, { secret: true });
 const claudeToken = await secret('claude-oauth-token');
 const appKey = await secret('github-app-key');
@@ -61,6 +68,8 @@ const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withEnvironment('CLAUDE_TOKEN_CREATED_AT', tokenCreatedAt)
   .withEnvironment('FACTORY_POLICY_DIR', './policy')
   .withEnvironment('CELL_BLOB_HOST', 'host.docker.internal')
+  // Nothing reads it until the API takes it over in redesign step 6.
+  .withEnvironment('API_AUDIENCE', apiAudience)
   .waitForCompletion(migrate, { exitCode: 0 });
 // From control's own endpoint, so it follows the port whether pinned or picked by Aspire.
 const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
