@@ -5,9 +5,11 @@ import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
+import { SOP_MOVED } from "../cell/sop-move.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
+import { appendEvent } from "../store/events.ts";
 import { renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
@@ -302,6 +304,18 @@ const routes: Record<string, Route> = {
   // Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
   "POST release": async (_deps, { c, run, now }) => {
     await releaseForRestart(c, run, now);
+    return { ok: true };
+  },
+
+  // PBI 173: a run pinned to an older SOP moves to the SOP in the cell image, keeping its config commit and stage. The
+  // move is a system event on the item. A move the run has already made is a no-op, so a retried call logs it once.
+  "POST sop-move": async (_deps, { c, run, body }) => {
+    const from = str(body.from, "from");
+    const to = str(body.to, "to");
+    if (run.sop_version === to) return { ok: true };
+    if (run.sop_version !== from) throw new BadRequest(`the run is pinned to SOP ${run.sop_version ?? "none"}, not ${from}`);
+    await c.query("update run set sop_version = $2 where id = $1", [run.run_id, to]);
+    await appendEvent(c, { actor: "system", actorId: "cell-api", itemId: run.item_id, kind: SOP_MOVED, payload: { from, to, runId: run.run_id } });
     return { ok: true };
   },
 

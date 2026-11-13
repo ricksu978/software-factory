@@ -315,7 +315,7 @@ stateDiagram-v2
 
 <section id="sop">
   <h2><span class="n">06</span>SOP</h2>
-  <p>You said the SOP is still to be defined. The factory treats it as data, a versioned file in a repo. Each run pins the SOP version it started with, so an SOP change never alters a run already in flight. Below is a v0 to start from. It works outside in. Gherkin scenarios define the behaviour at planning and must fail first. Unit tests then drive the code inside each scenario, and the scenarios pass last. Review uses the agents you already run.</p>
+  <p>You said the SOP is still to be defined. The factory treats it as data, a versioned file in a repo. Each run pins the SOP version of the cell image on its first claim. A cell image holds only one SOP, so when a run pinned to an older version resumes, it moves to the image's SOP and carries on from the stage it was at. The run records the new version, and the factory logs the move as a system event on the item. The one run that can't move is one whose next stage the image's SOP lacks. That run asks for input, and the question names the stage. Below is a v0 to start from. It works outside in. Gherkin scenarios define the behaviour at planning and must fail first. Unit tests then drive the code inside each scenario, and the scenarios pass last. Review uses the agents you already run.</p>
   <div class="tbl"><table>
     <thead><tr><th>#</th><th>Stage</th><th>Who</th><th>Exit gate</th><th>On failure</th></tr></thead>
     <tbody>
@@ -569,7 +569,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       <tr><td>Item</td><td>Stage</td><td>Rerun a stage, skip one, or send the item back to an earlier stage.</td></tr>
       <tr><td>Item</td><td>Risk tier</td><td>Raise a PR's tier, adding required approvals. No override lowers a tier.</td></tr>
       <tr><td>Item</td><td>Scenarios</td><td>Unlock signed-off scenarios, which sends the item back to Specify and then to the Product Owner again. Only the Product Owner signs off scenarios, overrides included.</td></tr>
-      <tr><td>Item</td><td>Resources</td><td>Change the model for a stage, raise the item's budget or retry count, or move the run to another SOP version.</td></tr>
+      <tr><td>Item</td><td>Resources</td><td>Change the model for a stage, raise the item's budget or retry count.</td></tr>
       <tr><td>Item</td><td>Ownership</td><td>Stop the run and hand the item to a person with its branch intact, or hand a person's item back to the factory.</td></tr>
     </tbody>
   </table></div>

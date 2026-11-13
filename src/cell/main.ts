@@ -11,6 +11,7 @@ import { loadSop } from "../config/sop.ts";
 import { httpCellApi } from "./api-client.ts";
 import { loadInputs, runCell } from "./engine.ts";
 import { cloneRun, shellGit } from "./git.ts";
+import { resumeOnImageSop } from "./sop-move.ts";
 
 const exec = promisify(execFile);
 
@@ -48,14 +49,19 @@ async function main() {
   };
   const inputs = await loadInputs(read, ctx.configSha);
   const sop = loadSop(await readFile(join(import.meta.dirname, "..", "..", "sop", "default.yml"), "utf8"));
-  if ("blocked" in inputs || sop.version !== ctx.sopVersion) {
-    const body = "blocked" in inputs ? inputs.blocked : `SOP ${ctx.sopVersion} isn't in this cell image, which has ${sop.version}`;
-    await cell.transition({ event: "blocked", question: { kind: "needs_input", body } });
+  if ("blocked" in inputs) {
+    await cell.transition({ event: "blocked", question: { kind: "needs_input", body: inputs.blocked } });
+    console.log("waiting");
+    return;
+  }
+  // PBI 173: a run pinned to an older SOP moves to this image's SOP, unless the image's SOP lacks its next stage.
+  const run = await resumeOnImageSop(cell, ctx, sop);
+  if (!run) {
     console.log("waiting");
     return;
   }
   const outcome = await runCell({
-    api: cell, ctx, agent: runAgent, git: shellGit(dir, ctx.branch), dir,
+    api: cell, ctx: run, agent: runAgent, git: shellGit(dir, ctx.branch), dir,
     repoHost: cellRepoHost(() => cell.githubToken()),
     sop, config: inputs.config, policies: inputs.policies, now: () => new Date(),
   });
