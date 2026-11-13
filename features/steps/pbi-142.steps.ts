@@ -167,9 +167,20 @@ function openPrStages(world: object): Record<string, any>[] {
 }
 
 function lastOpenPr(world: object): Record<string, any> {
-  const all = openPrStages(world);
-  assert.ok(all.length > 0, "open-pr never started");
+  return lastAttempt(world, "open-pr");
+}
+
+/** A stage's last report. PBI 194's address steps read it too, with "that attempt" naming the stage a Then last read. */
+export function lastAttempt(world: object, stage: string): Record<string, any> {
+  const all = cell(world).calls.filter((x) => x.route === "/stage" && x.body.stageId === stage).map((x) => x.body);
+  assert.ok(all.length > 0, `${stage} never started`);
+  (world as { thatStage?: string }).thatStage = stage;
   return all.at(-1)!;
+}
+
+/** The last report of the stage "that attempt" refers to: the one the last "…'s last attempt" step read, open-pr by default. */
+function thatAttempt(world: object): Record<string, any> {
+  return lastAttempt(world, (world as { thatStage?: string }).thatStage ?? "open-pr");
 }
 
 Then("no PR is opened or updated for the run's branch", function () {
@@ -186,13 +197,13 @@ Then("the open-pr stage's last attempt ends failed", function () {
 });
 
 Then("that attempt's message names PR {int} as already merged", function (n: number) {
-  const message = String(lastOpenPr(this).message ?? "");
+  const message = String(thatAttempt(this).message ?? "");
   assert.match(message, new RegExp(`(#|PR )${n}(?!\\d)`), `the message doesn't name PR ${n}: ${message}`);
   assert.match(message, /merged/i, `the message doesn't say the PR merged: ${message}`);
 });
 
 Then("that attempt's message holds {string}", function (text: string) {
-  const message = String(lastOpenPr(this).message ?? "");
+  const message = String(thatAttempt(this).message ?? "");
   assert.ok(message.includes(text), `the message lacks "${text}": ${message}`);
 });
 

@@ -152,6 +152,13 @@ describe("handleWebhook", dbTest, () => {
       assert.equal(await state(item), "Accepted");
     });
 
+    test("a merge while the item waits in NeedsInput moves it to Accepted with its merge commit (PBI 194)", async () => {
+      const { item, pr } = await inReview(null, "NeedsInput");
+      await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc5678" });
+      assert.equal(await state(item), "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where item_id = $1", [item])).rows[0].merge_sha, "abc5678");
+    });
+
     test("a changes-requested review with no summary is left to the poller, since its only text may sit in the factory's thread (PBI 130)", async () => {
       const { item, pr } = await inReview(null);
       await send({ ...review(pr, "reviewer", "2026-11-06T11:00:00Z"), body: "  " });

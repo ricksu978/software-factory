@@ -76,7 +76,10 @@ class Limited extends Error {
   }
 }
 class RenewalFailed extends Error {}
-/** The branch's PR merged already, so open-pr has nothing to open. The poller or the webhook moves the item (PBI 142). */
+/**
+ * The branch's PR merged already, so open-pr has nothing to open and address nothing to address. The poller or the
+ * webhook moves the item (PBI 142, PBI 194).
+ */
 class AlreadyMerged extends Error {}
 
 /**
@@ -925,6 +928,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // ---- the run ----
 
   try {
+    // A person may have merged the PR while the item waited in NeedsInput. There is nothing left to address, so the
+    // attempt fails and says why, as open-pr's does, and the poller or the webhook moves the item to Accepted (PBI 194).
+    // It's asked before the base merge: a squash- or rebase-merged branch lacks the commit that landed on the base, so
+    // merging the base could conflict and run a merge agent, or block, on a PR that has already merged.
+    if (ctx.nextStage === "address" && ctx.prNumber !== null) {
+      const state = await d.repoHost.prState(ctx.repo, ctx.prNumber, []);
+      if (state.merged) {
+        await begin("address");
+        throw new AlreadyMerged(`PR #${ctx.prNumber} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""}, so the factory has nothing to address on it.`);
+      }
+    }
+
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
     // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
     const conflict = await git.mergeBase(ctx.base);

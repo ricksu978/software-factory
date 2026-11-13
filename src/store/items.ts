@@ -51,6 +51,10 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, to]);
   }
+  // A merge answers whatever the item waited on, so its open question closes unanswered and nobody is asked any more (PBI 194).
+  if (from === "NeedsInput" && to === "Accepted") {
+    await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [itemId]);
+  }
   await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
   runHooks(c, itemId, from, to, event);
   return to;
