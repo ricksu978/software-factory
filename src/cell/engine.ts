@@ -767,7 +767,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // People are asked to look only once the factory's own review is done (spec §6 row 8), so this runs at the end of
   // pr-review, or of open-pr when the repo host has no review methods. It runs inside that stage's attempt, so a
   // failure ends the attempt failed with its message.
-  const askReviewers = async () => { await d.repoHost.requestReviewers(ctx.repo, opened?.number ?? ctx.prNumber!, config.reviewers); };
+  const askReviewers = async () => { await d.repoHost.requestReviewers(ctx.repo, opened!.number, config.reviewers); };
 
   // The PR goes to people: the item moves to InReview with the shadow tier open-pr recorded.
   const handOver = async () => {
@@ -998,25 +998,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await specify();
       return "waiting";
     }
-    if (start === "pr-review") {
-      // A cell stopped during the PR review, by a restart for example, comes back here with the PR open-pr opened. Its
-      // body stays as open-pr wrote it, since this cell has no summary to write it again from (PBI 212).
-      if (ctx.prNumber === null || !reviews) throw new Blocked("a cell can't resume at pr-review without the run's PR and a repo host that reviews");
-      const n = ctx.prNumber;
-      const url = `https://github.com/${ctx.repo}/pull/${n}`;
-      const back = await prReview({ number: n, url }, async () => {
-        await askReviewers();
-        await end("passed");
-        await transition({ event: "pr_opened", prNumber: n, prUrl: url });
-      });
-      if (!back) return "done";
-      carried = back;
-    }
     const order = ["red", "green", "self-review", "open-pr"];
-    const resumedAfter = start === "address" || start === "pr-review";
-    if (!resumedAfter && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
+    if (start !== "address" && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
     if (start === "red") await red();
-    let from = resumedAfter ? 1 : Math.max(order.indexOf(start), 1);
+    let from = start === "address" ? 1 : Math.max(order.indexOf(start), 1);
     for (;;) {
       if (from <= 1) await green(carried);
       if (from <= 2) await selfReview();

@@ -480,15 +480,6 @@ describe("runCell", () => {
     assert.equal(r.filter((x) => x === "/repo/requestReviewers").length, 1);
   });
 
-  test("a cell resumed at pr-review reviews the run's PR, then asks reviewers and hands it over, with no open-pr", async () => {
-    const h = harness({ nextStage: "pr-review" });
-    assert.equal(await h.run(), "done");
-    assert.deepEqual(h.started(), ["pr-review"]);
-    assert.deepEqual(h.prs, []);
-    assert.equal(h.routes().filter((x) => x === "/repo/requestReviewers").length, 1);
-    assert.deepEqual(h.transitions().map((t) => [t.event, t.prNumber]), [["pr_opened", 7]]);
-  });
-
   test("an error while asking for reviewers ends the pr-review attempt failed with its message, and moves no item", async () => {
     const h = harness({ nextStage: "open-pr" });
     h.deps.repoHost.requestReviewers = async () => { throw new Error("GitHub answered 502"); };

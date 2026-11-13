@@ -2,7 +2,8 @@
 //
 // The cell scenarios run PBI 18's engine harness. Each stage starts from the step that already sets it up: PBI 152's
 // "resumes at address", PBI 142's "resumes at open-pr", or this file's "resumes at pr-review" with PBI 128's scripted
-// PR reviewer and PR addresser. The run's PR is #57 on a fake repo host: PBI 128's for pr-review, otherwise one of
+// PR reviewer and PR addresser. The factory never resumes a cell at pr-review: a run gets there by passing open-pr, so
+// "resumes at pr-review" starts the cell at open-pr on the run's open PR, and the PR review follows once its CI passes. The run's PR is #57 on a fake repo host: PBI 128's for pr-review, otherwise one of
 // this file's own. Every reply and reviewer request on it is recorded in PBI 194's and PBI 142's contexts, so their
 // "no reply is posted" and "no reviewers are requested" Thens read it.
 //
@@ -151,8 +152,8 @@ const STAGE = "(open-pr|address|pr-review)";
 const PUSH = "(?:its push|the PR's head|the PR addresser's fix)";
 
 Given("a run for item {int} that resumes at pr-review", function (_item: number) {
-  const run = setUp(this, "pr-review", true);
-  // The PR open-pr opened, which the PR review reviews.
+  // open-pr updates the run's open PR 57, which the PR review then reviews.
+  const run = setUp(this, "open-pr", true);
   run.prNumber = 57;
 });
 
