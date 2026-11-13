@@ -71,6 +71,15 @@ describe("store", dbTest, () => {
     assert.equal(await repo(id), "acme/widgets");
   });
 
+  test("upsertItem stores the issue's creation time, and an upsert without one keeps it (PBI 187)", async () => {
+    const created = async (id: string) => (await db.pool.query<{ at: Date | null }>("select issue_created_at as at from item where id = $1", [id])).rows[0].at;
+    const id = await upsertItem(db.pool, { sourceId: source, externalId: "dated", title: "t" });
+    assert.equal(await created(id), null);
+    await upsertItem(db.pool, { sourceId: source, externalId: "dated", title: "t", issueCreatedAt: "2026-11-10T09:00:00Z" });
+    await upsertItem(db.pool, { sourceId: source, externalId: "dated", title: "t" });
+    assert.equal((await created(id))?.toISOString(), "2026-11-10T09:00:00.000Z");
+  });
+
   test("leaving InProgress raises the generation and clears the lease", async () => {
     const id = await item("InProgress");
     await withTx(db.pool, (c) => transitionItem(c, id, "pr_opened", system));
