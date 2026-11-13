@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { LineComment, ReviewComment, RepoHost } from "../adapters/types.ts";
+import type { CiCheck, LineComment, ReviewComment, RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
@@ -253,35 +253,64 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
   };
 }
 
-/** A named check CI reported on a commit, with the URL of its run (PBI 229). */
-export type CiCheck = { name: string; conclusion: "success" | "failure"; url: string };
+export type { CiCheck };
 
 /** The findings a stage gets from Definition of Done verdicts: one per failed line. */
 export const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
 
 /**
- * Checks the Definition of Done at `head` (Run contract 11): each `run:` line's command runs in the checkout, the
- * other lines go to `judge`, and the verdicts are stored with the commit they checked. `ciChecks` reads the checks CI
- * reported on a commit, or is null when there's no PR, and gives null when CI hasn't reported on that commit. The
- * findings are the stage's findings from this check.
+ * The verdict a line's named check gives, or null when it gives none. A check run twice on one commit, as a re-run
+ * leaves it, fails the line when either run failed, and gives no verdict while either still runs.
+ */
+function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | null {
+  const named = checks.filter((x) => x.name === c.ci);
+  if (!named.length) return null;
+  const failed = named.find((x) => x.conclusion === "failure");
+  if (failed) return { index: c.index, criterion: c.text, status: "failed", reason: `CI check "${failed.name}" failed: ${failed.url}` };
+  if (named.some((x) => x.conclusion === "pending")) return "pending";
+  return { index: c.index, criterion: c.text, status: "passed", reason: `CI check "${named[0].name}" passed: ${named[0].url}` };
+}
+
+/**
+ * Checks the Definition of Done at `head` (Run contract 11): a line whose `ci:` check passed or failed on `head` takes
+ * that check's verdict, each other `run:` line's command runs in the checkout, the rest go to `judge`, and the
+ * verdicts are stored with the commit they checked (PBI 229). `ciChecks` reads the checks CI reported on a commit, or
+ * is null when there's no PR, and gives null when CI hasn't reported on that commit. The findings are one per failed
+ * line, then one per named check CI reported no run of on `head`, whose line fell back to its command. Those are
+ * `missing` as well, since a missing check alone fails nothing: the caller fails the stage on the failed lines.
  */
 export async function checkDefinitionOfDone(d: {
   dir: string; head: string; dod: Policy;
   ciChecks: ((sha: string) => Promise<CiCheck[] | null>) | null;
   judge: (judged: Criterion[]) => Promise<Verdict[]>;
   store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
-}): Promise<{ verdicts: Verdict[]; findings: string[]; checkedSha: string }> {
+}): Promise<{ verdicts: Verdict[]; findings: string[]; missing: string[]; checkedSha: string }> {
   const { dir, head, dod } = d;
+  const named = dod.criteria.filter((x) => x.ci);
+  // Asked once, and only about `head`: a check that passed on an earlier commit never stands in for this one.
+  const checks = named.length && d.ciChecks ? await d.ciChecks(head) : null;
   const verdicts: Verdict[] = [];
-  for (const c of dod.criteria.filter((x) => x.run)) {
+  const missing: string[] = [];
+  const rest: Criterion[] = [];
+  for (const c of dod.criteria) {
+    const v = c.ci && checks ? ciVerdict(c, checks) : null;
+    if (v && v !== "pending") verdicts.push(v);
+    else {
+      if (c.ci && checks && v === null) {
+        missing.push(`the CI check "${c.ci}" that Definition of Done line ${c.index} names was missing on ${head}, so the line was judged without it`);
+      }
+      rest.push(c);
+    }
+  }
+  for (const c of rest.filter((x) => x.run)) {
     const r = await sh(c.run!, dir);
     verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason: r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}` });
   }
-  const judged = dod.criteria.filter((x) => !x.run);
+  const judged = rest.filter((x) => !x.run);
   if (judged.length) verdicts.push(...await d.judge(judged));
   verdicts.sort((a, b) => a.index - b.index);
   await d.store(head, verdicts);
-  return { verdicts, findings: dodFindings(verdicts), checkedSha: head };
+  return { verdicts, findings: [...dodFindings(verdicts), ...missing], missing, checkedSha: head };
 }
 
 export async function runCell(d: CellDeps): Promise<Outcome> {
@@ -478,10 +507,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Run contract 11: run: lines in the checkout, the rest judged by an agent, all stored with the commit they checked.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
     const dod = policies.dod;
-    const { verdicts, checkedSha } = await checkDefinitionOfDone({
-      dir, head: await git.head(), dod,
-      // ponytail: PBI 229 wires in the checks CI reported on the PR's commits.
-      ciChecks: null,
+    // PBI 229: a dod.md `ci:` check stands in for its line once a PR exists. Before then, as at Green, CI hasn't
+    // judged the item's commits, and the cell API gives null for a commit the cell hasn't pushed.
+    const ciChecks = (ctx.prNumber !== null || opened !== null) && api.ciChecks ? api.ciChecks.bind(api) : null;
+    const { verdicts, missing, checkedSha } = await checkDefinitionOfDone({
+      dir, head: await git.head(), dod, ciChecks,
       judge: async (judged) => {
         const r = await ask(stageId, brief(
           "# Definition of Done",
@@ -497,6 +527,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     });
     dodVerdicts = verdicts;
     dodSha = checkedSha;
+    // A missing check fails nothing, since its line fell back to its command, but the attempt's message says so.
+    if (missing.length && current) current.message = [current.message, ...missing].filter(Boolean).join("\n\n");
     return verdicts;
   };
   // Fresh DoD (Run contract 11): checked again unless the verdicts at this very commit all held.

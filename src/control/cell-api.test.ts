@@ -486,6 +486,21 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
   });
 
+  test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    const ci = [{ name: "ci", conclusion: "success" as const, url: "https://github.com/o/r/actions/runs/1" }];
+    host.ciChecks.set(`${repo}@def5678`, ci);
+    host.ciChecks.set(`${repo}@0a0a0a0`, ci);
+    host.ciChecks.set(`${repo}@0ff0ff0`, ci);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=main")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=def5678")).body, { checks: ci });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=abc1234")).body, { checks: null });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=0a0a0a0")).body, { checks: null });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=0ff0ff0")).body, { checks: null });
+  });
+
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {
     const cell = await claimed();
     const results = (file: string, status: string) => ({ file, source: "repo", stageId: "green", attempt: 1, checkedSha: "abc1234", verdicts: [{ index: 1, criterion: "Tests pass", status, reason: "r" }] });

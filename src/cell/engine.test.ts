@@ -608,6 +608,40 @@ describe("runCell", () => {
     assert.ok(checked.length > 0 && checked.every((s) => s && s !== h.lockSha));
   });
 
+  test("an address fix whose CI check passed takes the check's verdict, and the line's command doesn't run (PBI 229)", async () => {
+    const asked: string[] = [];
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] },
+      script: (a, stage) => { if (stage === "address") writeFileSync(join(a.cwd, "app.txt"), "fix\n"); } });
+    h.deps.api.ciChecks = async (sha) => (asked.push(sha), [{ name: "ci", conclusion: "success", url: "https://ci/1" }]);
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: false` `ci: ci`\n");
+    assert.equal(await h.run(), "done");
+    const stored = h.calls.filter((c) => c.route === "/policy-results").at(-1)!.body;
+    assert.deepEqual(asked, [stored.checkedSha]);
+    assert.deepEqual(stored.verdicts.map((v: any) => [v.status, v.reason]), [["passed", 'CI check "ci" passed: https://ci/1']]);
+  });
+
+  test("a missing CI check is in the address attempt's message, and the line's passing command passes it (PBI 229)", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] },
+      script: (a, stage) => { if (stage === "address") writeFileSync(join(a.cwd, "app.txt"), "fix\n"); } });
+    h.deps.api.ciChecks = async () => [{ name: "lint", conclusion: "success", url: "https://ci/2" }];
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: true` `ci: ci`\n");
+    assert.equal(await h.run(), "done");
+    const address = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address" && c.body.status !== "started");
+    assert.deepEqual(address.map((c) => c.body.status), ["passed"]);
+    assert.match(address[0].body.message ?? "", /the CI check "ci" that Definition of Done line 1 names was missing on [0-9a-f]{40}/);
+  });
+
+  test("green with no PR never asks CI about a check, and runs the line's command (PBI 229)", async () => {
+    const asked: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { prNumber: null } });
+    h.deps.api.ciChecks = async (sha) => (asked.push(sha), [{ name: "ci", conclusion: "failure", url: "https://ci/3" }]);
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: true` `ci: ci`\n");
+    assert.equal(await h.run(), "done");
+    const green = h.calls.find((c) => c.route === "/policy-results" && c.body.stageId === "green")!.body;
+    assert.deepEqual(green.verdicts.map((v: any) => v.reason), ["exit 0"]);
+    assert.ok(!asked.includes(green.checkedSha), `green asked CI about ${green.checkedSha}`);
+  });
+
   test("a self-review fix that edits a locked feature file has it restored and committed, and the review carries on", async () => {
     let reviews = 0;
     const h = harness({ nextStage: "self-review", script: (a) => {

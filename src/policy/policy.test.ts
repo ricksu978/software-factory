@@ -41,6 +41,12 @@ describe("loadPolicy", () => {
       e instanceof PolicyError && e.message === "pr-review.md: run: lines are allowed only in dod.md");
   });
 
+  test("a ci: line outside dod.md throws PolicyError naming the file", async () => {
+    const files = { ".factory/dor.md": "- [ ] Tests pass `ci: ci`\n" };
+    await assert.rejects(loadPolicy(repoFiles(files), "dor"), (e: unknown) =>
+      e instanceof PolicyError && e.message === "dor.md: ci: lines are allowed only in dod.md");
+  });
+
   test("a read that throws propagates and never falls back to the default", async () => {
     const failing = async () => {
       throw new Error("500 from the git host");
@@ -75,6 +81,17 @@ describe("parseCriteria", () => {
     assert.deepEqual(parseCriteria("- [ ] E2E suite passes `run: npm run e2e`\n"), [
       { index: 1, text: "E2E suite passes `run: npm run e2e`", run: "npm run e2e" },
     ]);
+  });
+
+  test("a ci: in backticks names the CI check that stands in for the line's command (PBI 229)", () => {
+    assert.deepEqual(parseCriteria("- [ ] Tests pass. `run: npm test` `ci: ci`\n"), [
+      { index: 1, text: "Tests pass. `run: npm test` `ci: ci`", run: "npm test", ci: "ci" },
+    ]);
+  });
+
+  test("a check name keeps its spaces, and an empty ci: names none", () => {
+    assert.equal(parseCriteria("- [ ] Builds. `run: make` `ci:  build / linux `\n")[0].ci, "build / linux");
+    assert.equal(parseCriteria("- [ ] Builds. `run: make` `ci: `\n")[0].ci, undefined);
   });
 });
 

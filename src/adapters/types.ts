@@ -93,12 +93,20 @@ export type LineComment = { path: string; line: number; body: string };
 /** The review thread one of a posted review's line comments opened, by the id resolveThread and replyToThread take. */
 export type OpenedThread = { threadId: string; path: string; line: number; body: string };
 
+/**
+ * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
+ * has reported nothing yet.
+ */
+export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
+
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
+  ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */

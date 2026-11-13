@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -200,6 +200,18 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
   return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
+/** Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, and any other end fails. */
+async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
+    { name: string; status: string; conclusion: string | null; html_url: string | null }[];
+  if (!runs.length) return null;
+  return runs.map((c) => ({
+    name: c.name, url: c.html_url ?? "",
+    conclusion: c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure",
+  }));
+}
+
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
     id isResolved path line comments(first: 100) { nodes { author { __typename login } body pullRequestReview { databaseId submittedAt } } } } }
@@ -236,6 +248,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async checksOnSha(repo, sha) {
       return checksOn(await client(), split(repo), sha);
+    },
+
+    async ciChecksOnSha(repo, sha) {
+      return namedChecksOn(await client(), split(repo), sha);
     },
 
     async checksOnHead(repo, prNumber) {

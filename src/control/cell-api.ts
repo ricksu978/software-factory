@@ -108,6 +108,23 @@ function repoOf(run: Run): string {
   return repoName(run.repo_url);
 }
 
+function shaOf(query: URLSearchParams): string {
+  const sha = query.get("sha") ?? "";
+  if (!/^[0-9a-f]{7,64}$/.test(sha)) throw new BadRequest("sha must be a commit sha");
+  return sha;
+}
+
+/** Why `sha` isn't one of the run's own commits, or null when it is. */
+async function notOwnCommit(deps: CellApiDeps, run: Run, sha: string): Promise<string | null> {
+  const repo = repoOf(run);
+  const branch = runBranch({ branch: run.branch, externalId: run.external_id, runNumber: run.run_number });
+  if (!(await deps.repoHost.onBranch(repo, branch, sha))) return `${sha} isn't on ${branch}`;
+  // The branch starts from main, so main's commits are its ancestors too. Only the branch's own commits pass, or a
+  // cell could ask about main's green head instead of its own push.
+  if (await deps.repoHost.onBranch(repo, BASE, sha)) return `${sha} is on ${BASE}, not only on ${branch}`;
+  return null;
+}
+
 /**
  * The PR's URL, built from the run's repo, never taken from the cell, because the board links it from a public item.
  * A `prUrl` the cell sends must be that same URL.
@@ -240,14 +257,10 @@ const routes: Record<string, Route> = {
   },
 
   "GET checks": async (deps, { c, run, query, now }) => {
-    const sha = query.get("sha") ?? "";
-    if (!/^[0-9a-f]{7,64}$/.test(sha)) throw new BadRequest("sha must be a commit sha");
+    const sha = shaOf(query);
     const repo = repoOf(run);
-    const branch = runBranch({ branch: run.branch, externalId: run.external_id, runNumber: run.run_number });
-    if (!(await deps.repoHost.onBranch(repo, branch, sha))) throw new BadRequest(`${sha} isn't on ${branch}`);
-    // The branch starts from main, so main's commits are its ancestors too. Only the branch's own commits pass, or a
-    // cell could ask about main's green head instead of its own push.
-    if (await deps.repoHost.onBranch(repo, BASE, sha)) throw new BadRequest(`${sha} is on ${BASE}, not only on ${branch}`);
+    const notOwn = await notOwnCommit(deps, run, sha);
+    if (notOwn) throw new BadRequest(notOwn);
     const watch = await c.query<{ first_asked_at: Date }>(
       `insert into check_watch (run_id, sha, first_asked_at) values ($1, $2, $3)
        on conflict (run_id, sha) do update set sha = excluded.sha returning first_asked_at`,
@@ -257,6 +270,14 @@ const routes: Record<string, Route> = {
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
     if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending" };
     return { status };
+  },
+
+  // PBI 229: the checks CI named on one of the run's own commits, for a dod.md line's `ci:` check. A commit the cell
+  // hasn't pushed, or one of main's, gets null, as a commit CI hasn't reported on does, so its line's command runs.
+  "GET ci-checks": async (deps, { run, query }) => {
+    const sha = shaOf(query);
+    if (await notOwnCommit(deps, run, sha)) return { checks: null };
+    return { checks: await deps.repoHost.ciChecksOnSha(repoOf(run), sha) };
   },
 
   "POST stage": async (deps, { c, run, body, now }) => {
