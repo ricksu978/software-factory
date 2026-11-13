@@ -422,6 +422,53 @@ describe("runCell", () => {
     assert.equal(h.prs.length, 2);
   });
 
+  // PBI 212: a person merges or closes the PR while open-pr waits for CI, and GET checks refuses the commit.
+  const refusedCi = (h: ReturnType<typeof harness>, state: { merged: boolean; open: boolean }) => {
+    h.deps.api.checks = async (sha) => { throw new Error(`GET /checks?sha=${sha}: 400 {"error":"${sha} isn't on ${BRANCH}"}`); };
+    let asked = 0;
+    // The first prState is open-pr's own check before it opens the PR. Only the second one sees the merge or close.
+    h.deps.repoHost.prState = async () => (++asked === 1
+      ? { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: null }
+      : { merged: state.merged, mergeSha: state.merged ? "m7" : null, open: state.open, mergeable: null, lastChangesRequestedAt: null });
+    return () => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body;
+  };
+
+  test("a PR merged while open-pr waits for CI ends the stage naming the merged PR, asks no reviewer and moves nothing", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: true, open: false });
+    assert.equal(await h.run(), "failed");
+    assert.match(last().message, /PR #7 .*already merged as m7/);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"));
+    assert.deepEqual(h.transitions(), []);
+    assert.equal(h.started().filter((s) => s === "open-pr").length, 1);
+  });
+
+  test("a PR closed without a merge while open-pr waits for CI ends the stage naming the closed PR and moves nothing", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: false, open: false });
+    assert.equal(await h.run(), "failed");
+    assert.match(last().message, /PR #7 .*closed without a merge/);
+    assert.doesNotMatch(last().message, /already merged/);
+    assert.deepEqual(h.transitions(), []);
+  });
+
+  test("a CI refusal while the PR is still open fails the attempt with the refusal, as before", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: false, open: true });
+    await assert.rejects(h.run(), /isn't on/);
+    assert.equal(last().status, "failed");
+    assert.match(last().message, /isn't on factory\//);
+  });
+
+  test("a CI error whose PR state can't be read either fails the attempt with the CI error", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { prNumber: null } });
+    h.deps.api.checks = async () => { throw new Error("GitHub answered 502"); };
+    h.deps.repoHost.prState = async () => { throw new Error("GitHub answered 503"); };
+    await assert.rejects(h.run(), /502/);
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body;
+    assert.match(last.message, /GitHub answered 502/);
+  });
+
   test("reviewers are asked only once the PR review passes, after every review the factory posts", async () => {
     const h = harness();
     assert.equal(await h.run(), "done");
@@ -431,6 +478,15 @@ describe("runCell", () => {
     assert.ok(asked > r.lastIndexOf("/repo/postReview"), "no reviewer is asked while the factory's rounds run");
     assert.ok(asked < passed, "asked inside the pr-review attempt");
     assert.equal(r.filter((x) => x === "/repo/requestReviewers").length, 1);
+  });
+
+  test("a cell resumed at pr-review reviews the run's PR, then asks reviewers and hands it over, with no open-pr", async () => {
+    const h = harness({ nextStage: "pr-review" });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["pr-review"]);
+    assert.deepEqual(h.prs, []);
+    assert.equal(h.routes().filter((x) => x === "/repo/requestReviewers").length, 1);
+    assert.deepEqual(h.transitions().map((t) => [t.event, t.prNumber]), [["pr_opened", 7]]);
   });
 
   test("an error while asking for reviewers ends the pr-review attempt failed with its message, and moves no item", async () => {
