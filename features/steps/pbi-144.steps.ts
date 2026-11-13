@@ -10,7 +10,7 @@ import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../src/gate/file-split.ts";
 import { gate } from "../../src/gate/readiness.ts";
-import { itemTextHash, SPLIT_HEADING, type SplitOutcome } from "../../src/gate/split.ts";
+import { itemTextHash, SPLIT_HEADING, type SplitChild, type SplitOutcome } from "../../src/gate/split.ts";
 import { loadPolicy, type Policy } from "../../src/policy/policy.ts";
 
 const HEADING = "Acceptance criteria";
@@ -21,8 +21,15 @@ type State = { state: "Eligible" | "NotReady" | "Queued"; hash: string };
 type Issue = ChildIssue & { repo: string };
 type Refusal = "file" | "sub-issue" | "board" | "block" | "comment";
 
-type Ctx = {
+export type Ctx = {
   fake: Fake;
+  /** The repo's .factory/dor.md, which a step may change between polls (PBI 202). */
+  dor: string;
+  /**
+   * The splits kept for filing, by item text hash, as the poller keeps them in the database (PBI 144's splits store).
+   * Unset, the gate is given no store, as PBI 144's own scenarios run. It survives a restart.
+   */
+  kept?: Map<string, SplitChild[]>;
   repo: string;
   label: string;
   backlogStatus: string;
@@ -50,10 +57,10 @@ type Ctx = {
   polls: number;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi144?: Ctx };
   w.pbi144 ??= {
-    fake: fakeBacklog(), repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
+    fake: fakeBacklog(), dor: DOR, repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
     requests: [], states: new Map(), seen: new Map(), runs: new Set(), filed: [], subIssues: new Map(), board: new Map(),
     blocks: new Map(), refusals: [], errors: [], polls: 0,
   };
@@ -159,8 +166,8 @@ function judge(c: Ctx) {
  * label back always re-gates the item), a NotReady item whose text changed is gated again, and every Eligible item is
  * gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each` does.
  */
-async function poll(c: Ctx): Promise<void> {
-  const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? DOR : null), "dor");
+export async function poll(c: Ctx): Promise<void> {
+  const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? c.dor : null), "dor");
   const listed = (await c.fake.adapter.listEligible(null)).items.filter((fi) => !fi.closed && fi.labels.includes(c.label));
   const ids = new Set(listed.map((fi) => fi.externalId));
   for (const id of [...c.states.keys()]) if (!ids.has(id)) c.states.delete(id);
@@ -186,6 +193,7 @@ async function poll(c: Ctx): Promise<void> {
       const out = await gate(fi, {
         readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true, openDeps,
         judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, file },
+        ...(c.kept ? { splits: keptStore(c.kept) } : {}),
       });
       st.state = out.ready ? "Queued" : "NotReady";
       st.hash = itemTextHash(fi);
@@ -197,7 +205,21 @@ async function poll(c: Ctx): Promise<void> {
   c.polls++;
 }
 
-function polled(c: Ctx): void {
+/** An in-memory stand-in for the poller's splits store: one split per item text, and the first one kept wins. */
+function keptStore(kept: Map<string, SplitChild[]>) {
+  return {
+    async get(fi: FactoryItem) {
+      return kept.get(itemTextHash(fi)) ?? null;
+    },
+    async keep(fi: FactoryItem, children: SplitChild[]) {
+      const key = itemTextHash(fi);
+      if (!kept.has(key)) kept.set(key, children);
+      return kept.get(key)!;
+    },
+  };
+}
+
+export function polled(c: Ctx): void {
   assert.ok(c.polls > 0, "the factory never polled");
 }
 
