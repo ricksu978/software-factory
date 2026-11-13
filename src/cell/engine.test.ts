@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, commandEnv, loadInputs, readReview, runCell, stageMeter, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { changedFiles, commandEnv, loadInputs, readReview, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -239,6 +239,99 @@ describe("stageMeter", () => {
     meter.close();
     await assert.rejects(meter.ask(args("between")), /AI call was made while no stage was open/);
     assert.deepEqual(asked, []);
+  });
+});
+
+describe("stageMeter's uploads of a running stage's transcript (PBI 209)", () => {
+  type Line = (l: string) => void;
+  /** An agent whose calls each wait for `finish`, telling onMessage of the lines `say` hands them first. */
+  function scripted() {
+    const calls: { say: Line; finish: (transcript: string) => void }[] = [];
+    const agent = (a: AgentArgs) => new Promise<AgentResult>((resolve) => {
+      calls.push({
+        say: (l) => a.onMessage?.(l),
+        finish: (transcript) => resolve({ ok: true, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0, model: "m", limit: null, usage: null, transcript }),
+      });
+    });
+    return { calls, agent };
+  }
+  const args: AgentArgs = { prompt: "p", model: "m", cwd: ".", mode: "cell", signal: new AbortController().signal };
+  const turn = () => new Promise((r) => setImmediate(r));
+
+  test("uploads the transcript so far each tick there's something new, across finished and running calls", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const sent: { stageId: string; attempt: number; body: string }[] = [];
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: async (b) => void sent.push(b) });
+    meter.open("green", 1);
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.length, 0, "nothing to upload before the first message");
+    const first = meter.ask(args);
+    calls[0].say("a");
+    calls[0].say("b");
+    calls[0].finish("a\nb\n");
+    await first;
+    void meter.ask(args);
+    calls[1].say("c");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS - 1);
+    await turn();
+    assert.equal(sent.length, 0, "not before the interval");
+    mock.timers.tick(1);
+    await turn();
+    assert.deepEqual(sent, [{ kind: "transcript", stageId: "green", attempt: 1, body: "a\nb\nc\n" }]);
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS * 3);
+    await turn();
+    assert.equal(sent.length, 1, "nothing new, nothing uploaded");
+    calls[1].say("d");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.at(-1)?.body, "a\nb\nc\nd\n");
+    meter.close();
+    calls[1].say("e");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.length, 2, "close stops the uploads");
+  });
+
+  test("a failed upload is logged, never fails the call, and the next tick tries again with nothing new", async (t) => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const logged = t.mock.method(console, "error", () => {});
+    let refuse = true;
+    const sent: string[] = [];
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: async (b) => { if (refuse) throw new Error("503"); sent.push(b.body); } });
+    meter.open("build", 2);
+    const call = meter.ask(args);
+    calls[0].say("a");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.match(String(logged.mock.calls[0]?.arguments[0]), /transcript upload for build-2 failed/);
+    refuse = false;
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.deepEqual(sent, ["a\n"]);
+    calls[0].finish("a\n");
+    assert.equal((await call).ok, true);
+  });
+
+  test("settled waits for an upload in flight when the stage closes", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let land!: () => void;
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: () => new Promise<void>((r) => (land = r)) });
+    meter.open("build", 1);
+    void meter.ask(args);
+    calls[0].say("a");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    meter.close();
+    let done = false;
+    const s = meter.settled().then(() => (done = true));
+    await turn();
+    assert.equal(done, false);
+    land();
+    await s;
+    assert.equal(done, true);
   });
 });
 

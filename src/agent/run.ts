@@ -83,13 +83,14 @@ export function agentOptions(a: AgentArgs): Options {
 }
 
 /** Folds a call's messages into its result. `onMessage` hears each one's transcript line as it arrives (PBI 209). */
-export async function foldMessages(msgs: AsyncIterable<SDKMessage>, _onMessage?: (line: string) => void): Promise<Omit<AgentResult, "model">> {
-  // ponytail: PBI 209 red stub. onMessage isn't told of any message yet.
+export async function foldMessages(msgs: AsyncIterable<SDKMessage>, onMessage?: (line: string) => void): Promise<Omit<AgentResult, "model">> {
   const r: Omit<AgentResult, "model"> = { ok: false, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0, limit: null, usage: null, transcript: "" };
   const lines: string[] = [];
   try {
     for await (const m of msgs) {
-      lines.push(JSON.stringify(m));
+      const line = JSON.stringify(m);
+      lines.push(line);
+      onMessage?.(line);
       if (m.type === "rate_limit_event") {
         const i = m.rate_limit_info;
         if (i.status === "rejected") r.limit = { resetsAt: i.resetsAt ?? Math.floor(Date.now() / 1000) + FALLBACK_WAIT_S };

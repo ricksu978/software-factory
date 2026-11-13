@@ -234,6 +234,9 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   const live = (s: RunDetail["stages"][number]) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
   const took = (s: RunDetail["stages"][number]) =>
     !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live(s) ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
+  // PBI 209: an attempt with no end says it's running while it's live, and stopped once its cell is gone, so a stage
+  // whose cell died reads as stopped beside the transcript it last uploaded.
+  const status = (s: RunDetail["stages"][number]) => (s.status !== "started" || s.ended_at ? s.status : live(s) ? "running" : "stopped");
   // Each Tokens and Cost cell keeps the exact figures in its title, so hovering shows them in full.
   const exactTokens = (tokensIn: number | null, tokensOut: number | null) => `<td title="${escapeHtml(`${tokensIn ?? 0} in, ${tokensOut ?? 0} out`)}">`;
   const exactCost = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">`;
@@ -244,7 +247,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
