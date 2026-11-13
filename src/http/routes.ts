@@ -25,6 +25,8 @@ export type DashboardDeps = {
   env?: Record<string, string | undefined>;
   /** Reads a stored transcript or report by its blob path, or null when it's missing. Without it, Run detail shows paths. */
   readBlob?: (path: string) => Promise<string | null>;
+  /** The time now, for the open spells Run detail's durations count up to (PBI 187). Defaults to the system clock. */
+  now?: () => Date;
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
