@@ -3,7 +3,7 @@ import type { ItemState } from "./states.ts";
 
 /** One move between states, from a transition or override event. */
 export type Move = { from: ItemState; to: ItemState; at: Date };
-/** `runEndedAt` is when the attempt's run ended, if it has: an attempt left open by a run that ended stops there. */
+/** `runEndedAt` is when the attempt's run ended, if it has: an attempt left open by a run that ended stops there at the latest. */
 export type StageSpan = { stageId: string; startedAt: Date; endedAt: Date | null; runEndedAt?: Date | null };
 export type QuestionSpan = { kind: "sign_off" | "needs_input"; askedAt: Date; answeredAt: Date | null; closedAt: Date | null };
 
@@ -41,9 +41,10 @@ export function itemDurations(d: { createdAt: Date | null; state: ItemState; now
 
   const stages = new Map<string, { stageId: string; ms: number; attempts: number; first: number }>();
   for (const s of d.stages) {
-    // A closed attempt counts as logged. One left open, as a stopped run or an expired lease leaves it, stops at its
-    // run's end if that run ended, otherwise at the item's end, and runs up to now only while the item is open.
-    const ms = s.endedAt ? Math.max(0, s.endedAt.getTime() - s.startedAt.getTime()) : span(s.startedAt, s.runEndedAt?.getTime() ?? now);
+    // A closed attempt counts as logged. One left open, as a stopped run, an expired lease or a failed launch leaves it,
+    // stops at the item's first move out of InProgress after it started, or its run's end, or the item's end, whichever
+    // comes first. Only an attempt still running, with the item InProgress since, counts up to now.
+    const ms = s.endedAt ? Math.max(0, s.endedAt.getTime() - s.startedAt.getTime()) : span(s.startedAt, openEnd(s, moves, now));
     const row = stages.get(s.stageId) ?? { stageId: s.stageId, ms: 0, attempts: 0, first: s.startedAt.getTime() };
     row.ms += ms;
     row.attempts += 1;
@@ -57,6 +58,13 @@ export function itemDurations(d: { createdAt: Date | null; state: ItemState; now
     waiting: { signOffMs, needsInputMs, inReviewMs, totalMs: signOffMs + needsInputMs + inReviewMs },
     stages: [...stages.values()].sort((a, b) => a.first - b.first).map(({ stageId, ms, attempts }) => ({ stageId, ms, attempts })),
   };
+}
+
+/** Where an attempt left open stops: the item's first move out of InProgress at or after its start, or its run's end. */
+function openEnd(s: StageSpan, moves: Move[], now: number): number {
+  const start = s.startedAt.getTime();
+  const left = moves.find((m) => m.from === "InProgress" && m.at.getTime() >= start)?.at.getTime() ?? now;
+  return Math.min(left, s.runEndedAt?.getTime() ?? now);
 }
 
 /**

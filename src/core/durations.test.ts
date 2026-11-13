@@ -115,7 +115,7 @@ test("an attempt left open on a Failed item stops at the item's end, not now", (
   assert.deepEqual(d.stages, [{ stageId: "green", ms: 60 * M, attempts: 1 }]);
 });
 
-test("an attempt left open by an earlier run that ended stops at that run's end", () => {
+test("an attempt left open by an earlier run that ended stops when the item left InProgress, or at the run's end", () => {
   const d = itemDurations({
     ...base, state: "InProgress", now: t("15:00"),
     moves: [move("InProgress", "Failed", "11:30"), move("Failed", "Queued", "12:00"), move("Queued", "InProgress", "12:00")],
@@ -124,5 +124,38 @@ test("an attempt left open by an earlier run that ended stops at that run's end"
       { stageId: "green", startedAt: t("14:00"), endedAt: null, runEndedAt: null },
     ],
   });
-  assert.deepEqual(d.stages, [{ stageId: "green", ms: (90 + 60) * M, attempts: 2 }]);
+  assert.deepEqual(d.stages, [{ stageId: "green", ms: (60 + 60) * M, attempts: 2 }]);
+  // With no move out of InProgress logged, the run's end is the cap.
+  const noMove = itemDurations({ ...base, state: "InProgress", now: t("15:00"), stages: [{ stageId: "green", startedAt: t("10:30"), endedAt: null, runEndedAt: t("12:00") }] });
+  assert.deepEqual(noMove.stages, [{ stageId: "green", ms: 90 * M, attempts: 1 }]);
+});
+
+test("an attempt left open by an expired lease stops when the item left InProgress, though the run stays open", () => {
+  const d = itemDurations({
+    ...base, state: "Done", now: t("08:00", 11),
+    moves: [
+      move("Queued", "InProgress", "10:00"), move("InProgress", "Queued", "11:00"), move("Queued", "InProgress", "11:10"),
+      move("InProgress", "Accepted", "11:45"), move("Accepted", "Done", "11:50"),
+    ],
+    stages: [
+      { stageId: "green", startedAt: t("10:30"), endedAt: null, runEndedAt: null },
+      { stageId: "green", startedAt: t("11:10"), endedAt: t("11:40"), runEndedAt: null },
+    ],
+  });
+  assert.deepEqual(d.stages, [{ stageId: "green", ms: 60 * M, attempts: 2 }]);
+});
+
+test("an attempt left open by a stopped run re-queued without a merge stops when the run was stopped", () => {
+  const d = itemDurations({
+    ...base, state: "InProgress", now: t("15:00"),
+    moves: [
+      move("Queued", "InProgress", "10:00"), move("InProgress", "Failed", "11:00"),
+      move("Failed", "Queued", "13:00"), move("Queued", "InProgress", "13:00"),
+    ],
+    stages: [
+      { stageId: "green", startedAt: t("10:30"), endedAt: null, runEndedAt: null },
+      { stageId: "green", startedAt: t("14:00"), endedAt: null, runEndedAt: null },
+    ],
+  });
+  assert.deepEqual(d.stages, [{ stageId: "green", ms: (30 + 60) * M, attempts: 2 }]);
 });

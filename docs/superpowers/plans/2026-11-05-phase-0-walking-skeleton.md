@@ -1027,7 +1027,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
       - **Sign-off** and **Needs input**, each question of that kind from `asked_at` to `answered_at`, or `closed_at` when it closed unanswered, or now while it's open. The time in the SignOff state doesn't count;
       - **In review**, the sum of every spell in InReview, an open one up to now;
       - **Waiting on a person**, the total of the three;
-      - a table of each stage that ran, in the order it first started, with its time summed over every attempt in every run, a running one up to now, and its attempt count. An attempt left open by a stopped run, a failed launch or an expired lease stops at its run's `ended_at` once that run has ended, otherwise at the item's end.
+      - a table of each stage that ran, in the order it first started, with its time summed over every attempt in every run, a running one up to now, and its attempt count. An attempt left open by a stopped run, a failed launch or an expired lease stops at the item's first move out of InProgress after the attempt started. Its run's `ended_at` and the item's end cap it too, whichever comes first, since those paths keep the run open and the next claim opens a new attempt instead of closing the old one.
       Each move starts a spell in its `to` state that lasts until the next move. Moves logged at the same instant follow their chain, each starting from the state the one before left. An ended item's end cuts short any spell or question still open.
   - **Token expiry.** A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
   - **Comment decisions.**
