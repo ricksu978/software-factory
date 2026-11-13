@@ -42,7 +42,7 @@ function ctx(world: object): Ctx {
 const pool = () => need().pool;
 const CELL_SECRET = "pbi-176-cell-secret";
 
-After({ tags: "@pbi-176", ...long }, async function () {
+After({ tags: "@pbi-176 or @pbi-178", ...long }, async function () {
   const s = ctx(this).cellServer;
   if (s) {
     s.closeAllConnections();
