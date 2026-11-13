@@ -12,11 +12,15 @@ export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string;
+  /** The session the call ran in, which a later call can resume (PBI 190). */
+  sessionId?: string;
 };
 
 export type AgentArgs = {
   prompt: string; model: string; cwd: string; agent?: string;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: ("WebSearch" | "WebFetch")[]; signal: AbortSignal;
+  /** A session to carry on, by the sessionId an earlier call returned, as when the PR reviewer restates (PBI 190). */
+  resume?: string;
 };
 
 const WEB_TOOLS = ["WebSearch", "WebFetch"] as const;
