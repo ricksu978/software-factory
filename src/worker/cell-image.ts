@@ -1,7 +1,7 @@
 // Keeps the cell image current with `main` while the factory runs (PBI 210). The worker builds `factory-cell:local` from
 // `main`'s fetched commit as it starts, unless `main` changes control plane or worker code compared with the checkout's
 // HEAD, the commit those processes run. Each poll fetches `main` again. When `main`'s new commits change only
-// cell-side files (sop/, policy/, cell/, src/cell/), it rebuilds the image from `main`'s newest commit. The control
+// cell-side files (sop/, policy/, cell/, src/cell/, but for SHARED_CELL_FILES), it rebuilds the image from `main`'s newest commit. The control
 // plane, the worker and any running cell carry on, and the next cell started runs the new image. When they also change
 // code the control plane or the worker runs, it builds nothing, and Floor says a restart is needed and names the commit a
 // restart would pick up. It builds from the fetched commit, never from the operator's checkout's working tree, branch or
@@ -44,8 +44,14 @@ export type CellImageDeps = {
   log?: Pick<Console, "log" | "error">;
 };
 
-/** The files only a cell runs. A change to nothing else needs no restart, only a new cell image. */
+/** The files only a cell runs, apart from SHARED_CELL_FILES. A change to nothing else needs no restart, only a new cell image. */
 export const CELL_SIDE = ["sop/", "policy/", "cell/", "src/cell/"];
+/**
+ * Files under a cell-side prefix that the control plane or the worker loads too: src/main.ts reads sop/default.yml for
+ * stageAfter, the judge, the split and the sopVersion a run is stamped with, and src/control/cell-api.ts imports
+ * src/cell/sop-move.ts. A change to one of them needs a restart.
+ */
+export const SHARED_CELL_FILES = ["sop/default.yml", "src/cell/sop-move.ts"];
 /** Files neither the control plane nor the worker runs, nor a cell: docs, the factory's own scenarios and tests. */
 const INERT = ["docs/", "features/", "reports/"];
 
@@ -54,6 +60,7 @@ const INERT = ["docs/", "features/", "reports/"];
  * runs do. Anything else, shared code such as src/core/ included, is code the control plane or the worker may run.
  */
 export function needsNoRestart(path: string): boolean {
+  if (SHARED_CELL_FILES.includes(path)) return false;
   if (CELL_SIDE.some((p) => path.startsWith(p)) || INERT.some((p) => path.startsWith(p))) return true;
   if (!path.includes("/") && path.endsWith(".md")) return true;
   return path.endsWith(".test.ts");

@@ -16,7 +16,7 @@ describe("which changes need no restart", () => {
     }
   });
   test("code the control plane or the worker runs, shared code included, needs one", () => {
-    for (const p of ["src/scheduler/scheduler.ts", "src/worker/main.ts", "src/control/cell-api.ts", "src/core/states.ts", "package.json", "db/migrations/012_cell_image.sql", "src/cellar.ts"]) {
+    for (const p of ["src/scheduler/scheduler.ts", "src/worker/main.ts", "src/control/cell-api.ts", "src/core/states.ts", "package.json", "db/migrations/012_cell_image.sql", "src/cellar.ts", "sop/default.yml", "src/cell/sop-move.ts"]) {
       assert.equal(needsNoRestart(p), false, p);
     }
   });

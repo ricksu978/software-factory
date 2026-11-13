@@ -33,7 +33,7 @@ npm run factory
 4. rebuilds the `factory-cell:local` image that cells run, so the egress proxy has an image to start from;
 5. runs `aspire run`.
 
-Once running, the worker builds `factory-cell:local` again from `main`'s fetched commit and checks `main` on each poll. A merged change to cell-side files only (`sop/`, `policy/`, `cell/`, `src/cell/`) is rebuilt into the image without a restart, and the next cell runs it. A change to anything the control plane or the worker runs is not, and Floor says a restart is needed. The build never reads your checkout's working tree or local commits.
+Once running, the worker builds `factory-cell:local` again from `main`'s fetched commit and checks `main` on each poll. A merged change to cell-side files only (`sop/`, `policy/`, `cell/`, `src/cell/`, except `sop/default.yml` and `src/cell/sop-move.ts`, which the control plane and the worker load too) is rebuilt into the image without a restart, and the next cell runs it. A change to anything the control plane or the worker runs is not, and Floor says a restart is needed. The build never reads your checkout's working tree or local commits.
 
 Run the same command each time you start the factory. Ctrl+C stops it. Postgres and Azurite keep their data in Aspire's volumes, so nothing is lost between runs.
 
