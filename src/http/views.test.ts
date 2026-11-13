@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { runInNewContext } from "node:vm";
 import { activityPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
@@ -244,5 +245,31 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
     assert.doesNotMatch(html, /<th[^>]*>[^<]*UTC/);
     assert.match(html, /Times show in UTC\./);
     assert.match(html, /document\.cookie = sent/);
+  });
+
+  /** Runs the page's zone script in a browser in `tz` whose cookie jar keeps writes or not, and counts reloads. */
+  const runZoneScript = (html: string, tz: string, keepsCookies: boolean, jar = "") => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1];
+    let reloads = 0;
+    const document = {
+      get cookie() { return jar; },
+      set cookie(v: string) { if (keepsCookies) jar = v.split(";")[0]; },
+    };
+    runInNewContext(script, { document, location: { reload: () => reloads++ }, Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: tz }) }) } });
+    return reloads;
+  };
+
+  test("a browser in another zone sets the cookie and reloads once", () => {
+    const html = runDetailPage(detail({}), null);
+    assert.equal(runZoneScript(html, "Europe/Paris", true), 1);
+    assert.equal(runZoneScript(html, "Europe/Paris", true, "tz=Europe%2FParis"), 0);
+  });
+
+  test("a browser that blocks cookies never reloads, so the page can't loop", () => {
+    assert.equal(runZoneScript(runDetailPage(detail({}), null), "Europe/Paris", false), 0);
+  });
+
+  test("a browser already in the page's zone doesn't reload", () => {
+    assert.equal(runZoneScript(runDetailPage(detail({ zone: "Europe/Paris" }), null), "Europe/Paris", true), 0);
   });
 });

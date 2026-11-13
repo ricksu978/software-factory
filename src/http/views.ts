@@ -187,7 +187,7 @@ export type RunDetail = {
 
 /**
  * Sets the `tz` cookie to the browser's time zone, so the server shows times in it, and reloads once when the page
- * came in another zone (PBI 189). A browser that can't tell its zone keeps the page as it is.
+ * came in another zone (PBI 189). A browser that can't tell its zone, or that drops the cookie, keeps the page as it is.
  */
 const zoneScript = (zone: string) => `<script>
 (() => {
@@ -197,7 +197,9 @@ const zoneScript = (zone: string) => `<script>
   // A cookie already holding this zone means the server had it, so a page in another zone never reloads in a loop.
   const had = document.cookie.split("; ").includes(sent);
   document.cookie = sent + "; path=/; max-age=31536000; samesite=lax";
-  if (!had && tz !== ${JSON.stringify(zone).replace(/</g, "\\u003c")}) location.reload();
+  // Reload only if the cookie stuck: a browser that blocks cookies would never send it, and would reload forever.
+  const stuck = document.cookie.split("; ").includes(sent);
+  if (!had && stuck && tz !== ${JSON.stringify(zone).replace(/</g, "\\u003c")}) location.reload();
 })();
 </script>`;
 
