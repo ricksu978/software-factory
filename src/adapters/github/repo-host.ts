@@ -201,7 +201,11 @@ async function jobLog(gh: GitHubClient, r: { owner: string; repo: string }, id: 
     const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: id })).data;
     const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : null;
     return text === null ? null : logTail(text);
-  } catch {
+  } catch (e) {
+    // A 403 means the App lacks Actions (read), so say so rather than pass it off as a check from another CI.
+    if ((e as { status?: number }).status === 403) {
+      console.error(`repo-host: GitHub refused the log of job ${id} on ${r.owner}/${r.repo}; does the App hold Actions (read)?`);
+    }
     return null;
   }
 }
