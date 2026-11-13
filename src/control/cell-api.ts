@@ -340,9 +340,12 @@ const routes: Record<string, Route> = {
       if (prNumber === null) throw new BadRequest("pr_opened needs a PR: send /pr first, or prNumber and prUrl");
       const tier = optional(body.tier, (v) => oneOf(v, "tier", ["Low", "Medium", "High"] as const));
       // Run contract 10: /pr starts the review clock. A pr_opened with no /pr before it starts it here instead.
+      // Run contract 1: an address run hands the item back here, its work done, so the resume pointer goes back to
+      // open-pr, where an InReview item's pointer stands, instead of reading as a run still headed to address.
       await c.query(
         `update run set pr_number = $2, pr_url = $3, risk_tier = coalesce($4, risk_tier),
-           tier_reasons = coalesce($5, tier_reasons), reviews_seen_at = coalesce(reviews_seen_at, $6) where id = $1`,
+           tier_reasons = coalesce($5, tier_reasons), reviews_seen_at = coalesce(reviews_seen_at, $6),
+           next_stage = case when next_stage = 'address' then 'open-pr' else next_stage end where id = $1`,
         [run.run_id, prNumber, prUrlFor(run, prNumber, body.prUrl), tier, optional(body.tierReasons, (v) => strings(v, "tierReasons")), now],
       );
     } else if (event === "retries_exhausted") {

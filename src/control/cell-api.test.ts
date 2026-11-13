@@ -414,6 +414,15 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await runRow(cell.runId)).reviews_seen_at, at);
   });
 
+  test("pr_opened at the end of an address run moves the resume pointer off address, so the item doesn't read as headed back there (PBI 191)", async () => {
+    const cell = await claimed("address");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9 })).status, 200);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "address", attempt: 1, status: "passed" })).status, 200);
+    assert.equal((await runRow(cell.runId)).next_stage, "address");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "pr_opened" })).status, 200);
+    assert.equal((await runRow(cell.runId)).next_stage, "open-pr");
+  });
+
   test("a PR URL that isn't the run's repo PR gets 400, so the board never links it", async () => {
     const cell = await claimed();
     assert.equal((await send(cell.runId, cell.token, "POST", "/pr", { prNumber: 9, prUrl: "https://evil.example/pull/9" })).status, 400);
