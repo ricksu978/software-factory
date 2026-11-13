@@ -104,7 +104,7 @@ describe("handleWebhook", dbTest, () => {
     }
     const send = (event: object) => handleWebhook({ pool: db.pool, secret, parse: () => event as never }, { headers: headers(`d-${++n}`, sign("sha256", body)), rawBody: body });
     const state = async (id: string) => (await db.pool.query("select state from item where id = $1", [id])).rows[0].state;
-    const review = (pr: number, author: string, submittedAt: string) => ({ kind: "review", prNumber: pr, repo: "o/r", state: "changes_requested", submittedAt, author });
+    const review = (pr: number, author: string, submittedAt: string) => ({ kind: "review", prNumber: pr, repo: "o/r", state: "changes_requested", submittedAt, author, body: "Fix it." });
 
     test("a merge moves InReview to Accepted and records merge_sha", async () => {
       const { item, pr } = await inReview(null);
@@ -150,6 +150,12 @@ describe("handleWebhook", dbTest, () => {
       // Accepted has no withdrawn edge, so transitionItem throws IllegalTransition, which applyPrEvent swallows.
       assert.deepEqual(await send({ kind: "pr_closed", prNumber: pr, repo: "o/r", by: "dev" }), { status: 204 });
       assert.equal(await state(item), "Accepted");
+    });
+
+    test("a changes-requested review with no summary is left to the poller, since its only text may sit in the factory's thread (PBI 130)", async () => {
+      const { item, pr } = await inReview(null);
+      await send({ ...review(pr, "reviewer", "2026-11-06T11:00:00Z"), body: "  " });
+      assert.equal(await state(item), "InReview");
     });
 
     test("only an allowlisted reviewer's review newer than reviews_seen_at sends the item to address", async () => {

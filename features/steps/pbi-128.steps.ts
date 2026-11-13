@@ -46,11 +46,13 @@ type AgentRecord = {
   head: string; originHead: string;
 };
 
-type Ctx = {
+export type Ctx = {
   host: Host;
   /** The factory's threads, in the order its reviews opened them. */
   threads: { threadId: string; body: string; path: string; line: number }[];
   personThreads: { threadId: string; body: string }[];
+  /** People's threads the addresser fixes with a new commit on every pass whose brief holds them (PBI 130). */
+  fixPersonEachTime: Set<string>;
   reviews: Map<number, ReviewSpec>;
   /** Threads held from a review on, by finding text. */
   heldFrom: { body: string; from: number; reason: string }[];
@@ -86,7 +88,7 @@ function cell(world: object): CellCtx {
   return w.pbi18;
 }
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi128?: Ctx };
   if (!w.pbi128) w.pbi128 = install(world);
   return w.pbi128;
@@ -111,12 +113,12 @@ function raise(c: Ctx, n: number, f: Finding) {
   c.last = f.body;
 }
 
-function that(c: Ctx): string {
+export function that(c: Ctx): string {
   assert.ok(c.last, "no finding was named before this step");
   return c.last;
 }
 
-function newPass(c: Ctx): AddressSpec {
+export function newPass(c: Ctx): AddressSpec {
   const a: AddressSpec = { actions: new Map() };
   c.addresses.push(a);
   return a;
@@ -155,7 +157,7 @@ function install(world: object): Ctx {
     mergeSha: null, mergeable: true, reviewers: [], comments: [], reviews: [],
   });
   const c: Ctx = {
-    host, threads: [], personThreads: [], reviews: new Map(), heldFrom: [], newFindingsUpTo: 0, cleanAfterGreensFix: false,
+    host, threads: [], personThreads: [], fixPersonEachTime: new Set(), reviews: new Map(), heldFrom: [], newFindingsUpTo: 0, cleanAfterGreensFix: false,
     addresses: [], replyEachTime: new Map(), last: null, raisedAt: new Map(),
     ci: { firstHeadFails: false, greensFailing: 0, addresserFirstFails: false, addresserAllFail: false },
     firstChecked: null, failedShas: [], agentCalls: [], reviewerCalls: [], addresserCalls: [], addresserShas: [], snapshots: new Map(), that: null,
@@ -250,6 +252,10 @@ function addresser(c: Ctx, rec: AgentRecord, cwd: string): string {
       ?? (c.replyEachTime.has(t.body) ? { kind: "reply", body: c.replyEachTime.get(t.body)! } : { kind: "fix" });
     if (action.kind === "fix") fixed.push(t.body);
     else if (replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: t.threadId, body: action.body }) + "\n");
+  }
+  // A person's thread in the brief, as the address stage hands it over (PBI 130), is fixed when the scenario says so.
+  for (const p of c.personThreads.filter((x) => rec.prompt.includes(x.threadId))) {
+    if (spec?.actions.get(p.body)?.kind === "fix" || c.fixPersonEachTime.has(p.body)) fixed.push(p.body);
   }
   if (fixed.length) {
     mkdirSync(join(cwd, "src"), { recursive: true });
@@ -406,19 +412,19 @@ Given("the PR addresser replies {string} on the thread for {string} each time, w
 
 // ---- Thens ----
 
-function done(world: object): { c: Ctx; run: CellCtx } {
+export function done(world: object): { c: Ctx; run: CellCtx } {
   const run = cell(world);
   assert.equal(run.error, null, `the cell failed: ${String(run.error)}`);
   return { c: ctx(world), run };
 }
 
-function reviewerCall(c: Ctx, n: number): AgentRecord {
+export function reviewerCall(c: Ctx, n: number): AgentRecord {
   const r = c.reviewerCalls[n - 1];
   assert.ok(r, `the PR reviewer ran ${c.reviewerCalls.length} times, so it has no review ${n}`);
   return r;
 }
 
-function posted(c: Ctx) {
+export function posted(c: Ctx) {
   return c.host.postedReviews.filter((r) => r.repo === REPO && r.prNumber === PR);
 }
 
@@ -442,7 +448,7 @@ function thatReview(c: Ctx) {
   return postedReview(c, c.that);
 }
 
-function threadFor(c: Ctx, body: string) {
+export function threadFor(c: Ctx, body: string) {
   const t = c.threads.find((x) => x.body === body);
   assert.ok(t, `the factory opened no thread for "${body}"; its threads are ${JSON.stringify(c.threads.map((x) => x.body))}`);
   return t;
@@ -452,7 +458,7 @@ function stateAt(c: Ctx, after: number, threadId: string): ThreadState {
   return (c.snapshots.get(after) ?? threadsNow(c)).get(threadId)!;
 }
 
-function stageReports(run: CellCtx, stageId: string) {
+export function stageReports(run: CellCtx, stageId: string) {
   return run.calls.map((x, i) => ({ ...x, i })).filter((x) => x.route === "/stage" && x.body.stageId === stageId);
 }
 

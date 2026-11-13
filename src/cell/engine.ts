@@ -727,10 +727,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const threadList = (list: ReviewThread[]) => list.map((t) =>
     `- \`${t.path}:${t.line}\`: ${t.body}${t.reason ? `\n  The PR reviewer still holds it: ${t.reason}` : ""}`).join("\n");
 
-  // Returns findings that send the item back to green, or null once a review brings no new finding and none of the
-  // factory's threads is open, which moves the item to InReview.
-  const prReview = async (): Promise<string[] | null> => {
+  // After open-pr, a clean review writes the PR body again, asks people to look and hands the PR over with its tier.
+  const handOverOpened = async () => {
     const pr = opened!;
+    await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(pr.summary, pr.risk) });
+    await askReviewers();
+    await end("passed");
+    await handOver();
+  };
+
+  // Returns findings that send the item back to green, or null once a review brings no new finding and none of the
+  // factory's threads is open. Then `pass` ends the stage and moves the item to InReview.
+  const prReview = async (pr: { number: number; url: string }, pass: () => Promise<void>): Promise<string[] | null> => {
     const stage = stageOf("pr-review");
     const maxRounds = Number(stage.max_rounds ?? 5);
     const maxReplies = Number(stage.max_replies ?? 2);
@@ -772,10 +780,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       for (const t of posted.threads) threads.push({ ...t, replies: 0, reason: null, conversation: [] });
 
       if (!review.findings.length && !threads.length) {
-        await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(pr.summary, pr.risk) });
-        await askReviewers();
-        await end("passed");
-        await handOver();
+        await pass();
         return null;
       }
       const stuck = threads.filter((t) => t.replies >= maxReplies);
@@ -863,7 +868,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       else await d.repoHost.replyToThread(ctx.repo, r.threadId, r.body);
     }
     await end("passed");
-    await transition({ event: "pr_opened", prNumber: ctx.prNumber! });
+    // PBI 130: the factory's own PR review looks at what address pushed, once CI passed on it, before people do again.
+    // The PR already holds its body and its reviewers, so a clean review only hands it back to them.
+    const back = () => transition({ event: "pr_opened", prNumber: ctx.prNumber! });
+    if (!reviews) { await back(); return null; }
+    return prReview({ number: ctx.prNumber!, url: `https://github.com/${ctx.repo}/pull/${ctx.prNumber}` }, async () => { await end("passed"); await back(); });
   };
 
   // ---- the run ----
@@ -896,9 +905,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
 
     const start = ctx.nextStage;
+    let carried: string[] = [];
     if (start === "address") {
-      await address(conflict.length > 0);
-      return "done";
+      // A PR review after address whose fix CI fails on goes back to green, as one after open-pr does.
+      const back = await address(conflict.length > 0);
+      if (!back) return "done";
+      carried = back;
     }
     if (start === "understand" || start === "specify") {
       if (start === "understand") await understand();
@@ -906,14 +918,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "waiting";
     }
     const order = ["red", "green", "self-review", "open-pr"];
-    if (!order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
+    if (start !== "address" && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
     if (start === "red") await red();
-    let carried: string[] = [];
-    let from = Math.max(order.indexOf(start), 1);
+    let from = start === "address" ? 1 : Math.max(order.indexOf(start), 1);
     for (;;) {
       if (from <= 1) await green(carried);
       if (from <= 2) await selfReview();
-      const back = (await openPr()) ?? (reviews ? await prReview() : null);
+      const back = (await openPr()) ?? (reviews ? await prReview(opened!, handOverOpened) : null);
       if (!back) return "done";
       carried = back;
       from = 1;

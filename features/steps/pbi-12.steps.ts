@@ -238,14 +238,14 @@ When("a person merges the item's PR", function () {
 
 When("{string}, who maps to no allowlisted user, requests changes on the item's PR", function (login: string) {
   const c = ctx(this);
-  if (c.host && c.pr) pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login });
+  if (c.host && c.pr) pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login, body: "Please change this." });
 });
 
 When("{string}, an allowlisted user, requests changes on the item's PR", long, async function (login: string) {
   const c = ctx(this);
   if (!c.host || !c.pr) return;
   await need().pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', $1, 'owner', $1)`, [login]);
-  pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login });
+  pr(c).reviews.push({ state: "changes_requested", submittedAt: new Date().toISOString(), author: login, body: "Please change this." });
 });
 
 Then("the factory holds the item in state {string}", long, async function (state: string) {

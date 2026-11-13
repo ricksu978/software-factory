@@ -72,9 +72,9 @@ describe("githubRepoHost", () => {
 
   test("prState takes the newest changes-requested review from a trusted login and ignores a stranger's newer one", async () => {
     const reviews = [
-      { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "Owner" } },
-      { state: "APPROVED", submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } },
-      { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T04:00:00Z", user: { login: "stranger" } },
+      { id: 1, state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T01:00:00Z", user: { login: "Owner" } },
+      { id: 2, state: "APPROVED", body: "", submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } },
+      { id: 3, state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T04:00:00Z", user: { login: "stranger" } },
     ];
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true }),
@@ -100,6 +100,31 @@ describe("githubRepoHost", () => {
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
     threads.push(thread(false, comment("owner", new Date().toISOString())));
     assert.equal((await host.prState("o/r", 3, ["owner"])).lastChangesRequestedAt, "2026-11-06T02:00:00Z", "a reply seconds old may be resolved next");
+  });
+
+  test("prState skips a thread the trusted bot opened, a trusted reply inside it included (PBI 130)", async () => {
+    const comment = (__typename: string, login: string) => ({ author: { __typename, login }, body: "x", pullRequestReview: { submittedAt: "2026-11-06T02:00:00Z" } });
+    const threads = [{ id: "t", isResolved: false, path: "a.ts", line: 1, comments: { nodes: [comment("Bot", "factory"), comment("User", "owner")] } }];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: null, state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
+    }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, null);
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory")).lastChangesRequestedAt, null, "stored without [bot]");
+    assert.equal((await host.prState("o/r", 3, ["owner"], "other[bot]")).lastChangesRequestedAt, "2026-11-06T02:00:00Z");
+  });
+
+  test("prState counts a changes-requested review with no summary only when it comments outside the factory's threads (PBI 130)", async () => {
+    const comment = (__typename: string, login: string, databaseId: number) => ({ author: { __typename, login }, body: "x", pullRequestReview: { databaseId, submittedAt: "2026-11-06T01:00:00Z" } });
+    const factory = { id: "ft", isResolved: false, path: "a.ts", line: 1, comments: { nodes: [comment("Bot", "factory", 1), comment("User", "owner", 2)] } };
+    const threads: unknown[] = [factory];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: null, state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [{ id: 2, state: "CHANGES_REQUESTED", body: null, submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } }],
+    }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, null, "its only text is a reply in the factory's thread");
+    threads.push({ id: "pt", isResolved: true, path: "b.ts", line: 2, comments: { nodes: [comment("User", "owner", 2)] } });
+    assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, "2026-11-06T03:00:00Z", "it also opened a thread of its own");
   });
 
   test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {
