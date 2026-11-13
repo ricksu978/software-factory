@@ -217,7 +217,7 @@ Phase 0a runs the whole walking skeleton on the owner's machine before anything 
   - `FACTORY_ENV=local` and `FACTORY_DEV_LOGIN` from `dev-login`, set only when `executionContext().isRunMode()` is true ([aspire.dev](https://aspire.dev/app-host/typescript-apphost/)), so nothing published from this AppHost carries them.
   - `FACTORY_DB_URI` from the database's `uriExpression()`, a `postgresql://` URI that `pg` reads. Passing the database resource itself would give a key-value connection string, which `pg` can't parse.
 
-  Under `aspire run`, `migrate` also gets a reference to `keycloak` through `withReference()`, which sets `services__keycloak__http__0` to where Keycloak answers, waits for Keycloak, and gets `FACTORY_FLOAT_PORTS` as `1` or `0` (step 5c, PBI 171).
+  Under `aspire run`, `migrate` also gets `FACTORY_FLOAT_PORTS` as `1` or `0` (step 5c, PBI 171). Only under `FACTORY_FLOAT_PORTS=1` does it get a reference to `keycloak` through `withReference()`, which sets `services__keycloak__http__0` to where Keycloak answers, and wait for Keycloak. With pinned ports migrate never asks Keycloak, so neither it nor control and the worker, which wait for migrate, wait on Keycloak.
 
   `control` also gets:
   - `FACTORY_BLOB` from the blob resource's `ConnectionString`. For Azurite that string holds a `BlobEndpoint` on `localhost` ([aspire.dev](https://aspire.dev/integrations/cloud/azure/azure-storage-blobs/azure-storage-blobs-connect/)), on a port Aspire picks, which a cell container can't reach as written.

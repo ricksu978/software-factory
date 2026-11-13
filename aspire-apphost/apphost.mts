@@ -101,9 +101,11 @@ if (runMode) {
     await app.withEnvironment('FACTORY_ENV', 'local').withEnvironment('FACTORY_DEV_LOGIN', devLogin);
   }
   // Migrate seeds the realm's test owner, keyed on the realm's issuer. Under floating ports it reads that issuer from
-  // the running Keycloak, which withReference() points it at through services__keycloak__http__0.
+  // the running Keycloak, which withReference() points it at through services__keycloak__http__0. With pinned ports
+  // migrate never asks Keycloak, so it doesn't wait for it, and control and the worker don't wait on it through migrate.
   if (keycloak) {
-    await migrate.withReference(keycloak).waitFor(keycloak).withEnvironment('FACTORY_FLOAT_PORTS', floatPorts ? '1' : '0');
+    await migrate.withEnvironment('FACTORY_FLOAT_PORTS', floatPorts ? '1' : '0');
+    if (floatPorts) await migrate.withReference(keycloak).waitFor(keycloak);
   }
   // The worker signs no one in, so it needs local mode but no dev login.
   await worker.withEnvironment('FACTORY_ENV', 'local');
