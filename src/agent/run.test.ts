@@ -233,3 +233,13 @@ test("haikuJudge reports a spend of nothing when the run itself throws, then thr
   await assert.rejects(judge(item, dor, (s) => heard.push(s)), /spawn failed/);
   assert.deepEqual(heard, [{ model: "claude-haiku-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 }]);
 });
+
+test("a run's session id comes back, so a later call can resume it (PBI 190)", async () => {
+  const r = await fold({ type: "system", subtype: "init", ...ids, session_id: "s-init" }, result("success", false, {}, { session_id: "s-7" }));
+  assert.equal(r.sessionId, "s-7");
+});
+
+test("a call that names a session resumes it, and one that names none starts fresh (PBI 190)", () => {
+  assert.equal(agentOptions({ ...base, mode: "cell", agent: "factory-pr-reviewer", resume: "s-7" }).resume, "s-7");
+  assert.equal("resume" in agentOptions({ ...base, mode: "cell" }), false);
+});
