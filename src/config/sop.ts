@@ -1,8 +1,8 @@
 // The SOP file, sop/default.yml (spec §6 "SOP", plan Task 9). Task 14 writes the file and the engine that runs it.
 import YAML from "yaml";
 
-/** The Phase 0 stages: the prompts plan Task 14 lists, plus sign-off, which no cell runs. */
-export const STAGE_IDS = ["understand", "specify", "sign-off", "red", "green", "self-review", "open-pr", "address"] as const;
+/** The Phase 0 stages: the prompts plan Task 14 lists, plus sign-off, which no cell runs, and PBI 128's pr-review. */
+export const STAGE_IDS = ["understand", "specify", "sign-off", "red", "green", "self-review", "open-pr", "pr-review", "address"] as const;
 export type StageId = (typeof STAGE_IDS)[number];
 
 export type SopStage = { id: StageId; model?: string } & Record<string, unknown>;
@@ -49,12 +49,13 @@ export function loadSop(yamlText: string): Sop {
 }
 
 /**
- * Where a run resumes after `stageId` passes (Run contract 1, issue #97): the next stage the SOP lists. Open-pr and
- * address hand the item back through pr_opened, and the merge pass isn't an SOP stage, so those, and any stage the
- * SOP doesn't list, give null and leave the resume pointer where it was.
+ * Where a run resumes after `stageId` passes (Run contract 1, issue #97): the next stage the SOP lists. Pr-review and
+ * address hand the item back through pr_opened, open-pr hands the run to pr-review in the same cell, and the merge pass
+ * isn't an SOP stage, so those, and any stage the SOP doesn't list, give null and leave the resume pointer where it
+ * was. A claim cut short during pr-review resumes at open-pr, which runs pr-review again.
  */
 export function stageAfter(sop: Sop, stageId: string): string | null {
-  if (stageId === "open-pr" || stageId === "address") return null;
+  if (stageId === "open-pr" || stageId === "pr-review" || stageId === "address") return null;
   const ids: string[] = sop.stages.map((s) => s.id);
   const i = ids.indexOf(stageId);
   return i < 0 ? null : ids[i + 1] ?? null;

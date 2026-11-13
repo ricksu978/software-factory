@@ -356,6 +356,9 @@ function reviewsOn(world: object, pr: number): Record<string, unknown>[] {
 }
 
 function theReview(world: object): Record<string, unknown> {
+  // PBI 128's engine scenarios pick "that review" from what the fake repo host recorded, in GitHub's request shape.
+  const own = (world as { reviewUnderTest?: () => Record<string, unknown> }).reviewUnderTest;
+  if (own) return own();
   const gh = needGitHub(world);
   const reviews = reviewsOn(world, gh.pr);
   assert.equal(reviews.length, 1, `GitHub received ${reviews.length} reviews on PR ${gh.pr}`);

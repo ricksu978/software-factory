@@ -120,7 +120,8 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
  * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS.
  * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
- * once, so the engine's tests can read what a stage posted.
+ * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
+ * `factory[bot]` in `reviewComments`, which postReview returns.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -134,6 +135,7 @@ export function fakeRepoHost(): RepoHost & {
 } {
   const postedReviews: PostedReview[] = [];
   const resolvedThreads: { repo: string; threadId: string }[] = [];
+  let openedThreads = 0;
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
   const files = new Map<string, string>();
@@ -219,6 +221,11 @@ export function fakeRepoHost(): RepoHost & {
     },
     async postReview({ repo, prNumber, commitSha, body, comments }) {
       postedReviews.push({ repo, prNumber, commitSha, body, comments: comments.map(({ path, line, body }) => ({ path, line, body })), event: "COMMENT" });
+      // Each line comment opens a thread by the factory's bot, as on GitHub.
+      const key = `${repo}#${prNumber}`;
+      const threads = comments.map(({ path, line, body }) => ({ threadId: `review-thread-${++openedThreads}`, path, line, body }));
+      if (threads.length) reviewComments.set(key, [...(reviewComments.get(key) ?? []), ...threads.map((t) => ({ ...t, author: "factory[bot]" }))]);
+      return { threads };
     },
     async resolveThread(repo, threadId) {
       const thread = [...reviewComments.entries()].find(([k, cs]) => k.startsWith(`${repo}#`) && cs.some((c) => c.threadId === threadId))?.[1]

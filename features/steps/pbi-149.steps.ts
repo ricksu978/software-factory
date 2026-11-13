@@ -14,7 +14,7 @@ import { baseFiles, baseline, ctx as pollCtx, poll, polled, REPO, setup, stateOf
 type Check = { texts: ReadinessTexts; logic: ReadinessLogic };
 type Ctx = { checks: Check[]; commentsBefore: Map<string, number> };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi149?: Ctx };
   w.pbi149 ??= { checks: [], commentsBefore: new Map() };
   return w.pbi149;
@@ -26,10 +26,10 @@ const files: ReadinessTexts = {
 };
 
 /** The same prompt with one word more, so it differs by exactly one word whatever the current prompt holds. */
-const oneWordOff = (logic: ReadinessLogic): ReadinessLogic => ({ ...logic, judgePrompt: `${logic.judgePrompt} Briefly.` });
+export const oneWordOff = (logic: ReadinessLogic): ReadinessLogic => ({ ...logic, judgePrompt: `${logic.judgePrompt} Briefly.` });
 const versionUp = (logic: ReadinessLogic): ReadinessLogic => ({ ...logic, version: logic.version + 1 });
 
-function first(world: object): Check {
+export function first(world: object): Check {
   const checks = ctx(world).checks;
   assert.ok(checks.length >= 1, "no readiness check was set up");
   return checks[0];
@@ -70,7 +70,7 @@ Before({ tags: "@pbi-149 and @db", ...long }, async function () {
 });
 
 /** The logic the factory runs with now: the last restart's, or its own current logic before any restart. */
-const running = (c: PollCtx): ReadinessLogic => c.logic ?? readinessLogic();
+export const running = (c: PollCtx): ReadinessLogic => c.logic ?? readinessLogic();
 
 /**
  * Gates each item into NotReady with a failing judge, which records the readiness files and logic it was checked
@@ -146,7 +146,7 @@ When("the poller runs three times", long, async function () {
 });
 
 /** How many times an item's history shows the event, by external id. */
-async function moves(c: PollCtx, ext: string, event: string): Promise<number> {
+export async function moves(c: PollCtx, ext: string, event: string): Promise<number> {
   const r = await need().pool.query<{ n: number }>(
     `select count(*)::int as n from event e join item i on i.id = e.item_id
      where i.source_id = $1 and i.external_id = $2 and e.kind = 'transition' and e.payload->>'event' = $3`,

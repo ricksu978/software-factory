@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
 import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
-import { githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
+import { cellRepoHost, githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
 
@@ -190,11 +190,36 @@ describe("githubRepoHost", () => {
   });
 
   test("postReview posts one review at the commit, with its body and line comments, as COMMENT", async () => {
-    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 1 }) });
+    const { calls, host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 1 }) },
+      () => ({ repository: { pullRequest: { reviewThreads: { nodes: [] } } } }));
     await host.postReview({ repo: "o/r", prNumber: 3, commitSha: "abc", body: "Two things", comments: [{ path: "a.ts", line: 4, body: "Name it" }] });
     assert.deepEqual(calls, [{ route: "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", params: {
       owner: "o", repo: "r", pull_number: 3, commit_id: "abc", body: "Two things", event: "COMMENT",
       comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "Name it" }] } }]);
+  });
+
+  test("postReview returns the threads its own line comments opened, by the review's id", async () => {
+    const thread = (id: string, review: number, path: string, line: number, body: string) =>
+      ({ id, path, line, comments: { nodes: [{ body, pullRequestReview: { databaseId: review } }] } });
+    const seen: any[] = [];
+    const { host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 42 }) }, (q, v) => (seen.push({ q, v }),
+      { repository: { pullRequest: { reviewThreads: { nodes: [thread("PRT_old", 41, "a.ts", 1, "Older"), thread("PRT_1", 42, "a.ts", 4, "Name it")] } } } }));
+    const r = await host.postReview({ repo: "o/r", prNumber: 3, commitSha: "abc", body: "One thing", comments: [{ path: "a.ts", line: 4, body: "Name it" }] });
+    assert.deepEqual(r, { threads: [{ threadId: "PRT_1", path: "a.ts", line: 4, body: "Name it" }] });
+    assert.deepEqual(seen[0].v, { owner: "o", repo: "r", number: 3 });
+    assert.doesNotMatch(seen[0].q, /mutation/);
+  });
+
+  test("postReview with no line comments asks GitHub for no threads", async () => {
+    const seen: any[] = [];
+    const { host } = stubGitHub({ "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => ({ id: 42 }) }, (q) => (seen.push(q), {}));
+    assert.deepEqual(await host.postReview({ repo: "o/r", prNumber: 3, commitSha: "abc", body: "Clean", comments: [] }), { threads: [] });
+    assert.equal(seen.length, 0);
+  });
+
+  test("the cell's repo host can post a review, resolve a thread and read the open threads", () => {
+    const host = cellRepoHost(async () => "t");
+    for (const k of ["postReview", "resolveThread", "openReviewComments"] as const) assert.equal(typeof host[k], "function", k);
   });
 
   test("postReview ignores an event a caller slips in", async () => {

@@ -479,7 +479,7 @@ describe("pollOnce", dbTest, () => {
 
   test("a new readiness logic re-gates a NotReady item in an unknown repo too", async () => {
     const ext = await seed({ repo: "someone/else" });
-    const pollWith = (version: number) => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge, sourceId, logic: { judgePrompt: "p", version } });
+    const pollWith = (version: number) => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge, sourceId, logic: { judgePrompt: "p", version, splitPrompt: "s" } });
     await pollWith(1);
     await pollWith(2);
     await pollWith(2);
@@ -547,7 +547,7 @@ describe("pollOnce", dbTest, () => {
   test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {
     verdict = "failed";
     const ext = await seed();
-    const logic = { judgePrompt: "Judge it.", version: 1 };
+    const logic = { judgePrompt: "Judge it.", version: 1, splitPrompt: "Split it." };
     const pollWith = (l: typeof logic) => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge, sourceId, logic: l });
     await pollWith(logic);
     await pollWith({ ...logic });
