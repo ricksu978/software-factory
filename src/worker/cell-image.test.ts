@@ -109,9 +109,33 @@ describe("keeping the cell image current with main", dbTest, () => {
     await pollCellImage(deps());
     assert.equal(built.length, 1);
     assert.deepEqual(await readCellImage(db.pool), { started: start, built: start, restart: newest });
-    // The restart starts the worker again, which builds main's commit and asks for no restart.
+    // A worker restarted without a pull still runs the old commit, so it builds nothing and still asks for a restart.
+    await startCellImage(deps());
+    assert.equal(built.length, 1);
+    assert.deepEqual(await readCellImage(db.pool), { started: start, built: start, restart: newest });
+    // A restart that pulls main runs main's commit, so it builds it and asks for no restart.
+    git(checkout, "pull", "-q", "--ff-only");
     await startCellImage(deps());
     assert.deepEqual(await readCellImage(db.pool), { started: newest, built: newest, restart: null });
+  });
+
+  test("a worker that starts behind main records the commit it runs, and builds main when main changes only cell-side files", async () => {
+    const running = git(seed, "rev-parse", "HEAD");
+    const next = push(["sop/sop.yml"]);
+    await startCellImage(deps());
+    assert.deepEqual(await readCellImage(db.pool), { started: running, built: next, restart: null });
+    const worker = push(["src/core/states.ts"]);
+    await pollCellImage(deps());
+    assert.equal(built.length, 1);
+    assert.deepEqual(await readCellImage(db.pool), { started: running, built: next, restart: worker });
+  });
+
+  test("a worker that starts behind a main that changes worker code builds nothing and asks for a restart", async () => {
+    const running = git(seed, "rev-parse", "HEAD");
+    const worker = push(["src/worker/main.ts"]);
+    await startCellImage(deps());
+    assert.equal(built.length, 0);
+    assert.deepEqual(await readCellImage(db.pool), { started: running, built: null, restart: worker });
   });
 
   test("moving worker code into cell/ holds the rebuild until a restart", async () => {

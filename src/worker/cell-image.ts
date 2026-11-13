@@ -1,5 +1,6 @@
 // Keeps the cell image current with `main` while the factory runs (PBI 210). The worker builds `factory-cell:local` from
-// `main`'s fetched commit as it starts, and each poll fetches `main` again. When `main`'s new commits change only
+// `main`'s fetched commit as it starts, unless `main` changes control plane or worker code compared with the checkout's
+// HEAD, the commit those processes run. Each poll fetches `main` again. When `main`'s new commits change only
 // cell-side files (sop/, policy/, cell/, src/cell/), it rebuilds the image from `main`'s newest commit. The control
 // plane, the worker and any running cell carry on, and the next cell started runs the new image. When they also change
 // code the control plane or the worker runs, it builds nothing, and Floor says a restart is needed and names the commit a
@@ -117,11 +118,33 @@ async function build(d: CellImageDeps, from: string | null, commit: string, anno
   return true;
 }
 
-/** Builds the cell image from `main`'s fetched commit as the worker starts, and records that commit as the last seen. */
+/**
+ * Lists the files that differ between `from` and `to` that the control plane or the worker runs. --no-renames lists both
+ * paths of a rename, so moving worker code into cell/ still counts as a change to worker code.
+ */
+async function heldChanges(d: CellImageDeps, from: string, to: string): Promise<string[]> {
+  if (from === to) return [];
+  const changed = (await git(d.checkout, ["diff", "--name-only", "--no-renames", from, to])).split("\n").filter(Boolean);
+  return changed.filter((p) => !needsNoRestart(p));
+}
+
+function askRestart(d: CellImageDeps, head: string, held: string[]): void {
+  (d.log ?? console).log(`main is at ${head}, which changes code the control plane or the worker runs (${held.slice(0, 5).join(", ")}), so the cell image waits for a restart.`);
+}
+
+/**
+ * Run as the worker starts. The control plane and the worker run the checkout's files, and `main` is only fetched, never
+ * checked out, so the commit they run is the checkout's HEAD, which may be behind `main` (Aspire restarts a worker that
+ * lost its lock without a pull) or hold local commits. That commit is recorded as the start commit. When `main` changes
+ * nothing the control plane or the worker runs compared with it, the image is built from `main`'s commit and no restart
+ * is asked for. Otherwise nothing is built, the image there was stays, and Floor asks for a restart that picks up `main`.
+ */
 export async function startCellImage(d: CellImageDeps): Promise<void> {
+  const running = await git(d.checkout, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const head = await fetchMain(d);
-  // The control plane and the worker now run main's commit, so no restart is needed yet.
-  await writeCellImage(d.pool, { started: head, restart: null });
+  const held = await heldChanges(d, running, head);
+  await writeCellImage(d.pool, { started: running, restart: held.length ? head : null });
+  if (held.length) return askRestart(d, head, held);
   await build(d, (await readCellImage(d.pool))?.built ?? null, head, false);
 }
 
@@ -130,15 +153,13 @@ export async function pollCellImage(d: CellImageDeps): Promise<void> {
   const head = await fetchMain(d);
   const s = await readCellImage(d.pool);
   if (!s) return startCellImage(d);
-  // Measured from the commit the control plane and the worker started at, so a cell-side commit after one that changes
-  // their code still waits for the restart, and the restart picks up main's newest commit.
-  // --no-renames lists both paths of a rename, so moving worker code into cell/ still counts as a change to worker code.
-  const changed = head === s.started ? [] : (await git(d.checkout, ["diff", "--name-only", "--no-renames", s.started, head])).split("\n").filter(Boolean);
-  const held = changed.filter((p) => !needsNoRestart(p));
+  // Measured from the commit the control plane and the worker run, so a cell-side commit after one that changes their
+  // code still waits for the restart, and the restart picks up main's newest commit.
+  const held = await heldChanges(d, s.started, head);
   if (held.length) {
     if (s.restart !== head) {
       await writeCellImage(d.pool, { restart: head });
-      (d.log ?? console).log(`main is at ${head}, which changes code the control plane or the worker runs (${held.slice(0, 5).join(", ")}), so the cell image waits for a restart.`);
+      askRestart(d, head, held);
     }
     return;
   }
