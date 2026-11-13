@@ -578,7 +578,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   </table></div>
   <ul>
     <li><b>Audit trail.</b> Each override stores who set it, when, a required reason and an optional expiry. It shows as a badge on the item in Floor and Run detail. Quality reports override counts per SOP stage, so you can see which stages people keep correcting.</li>
-    <li><b>Expiry.</b> An item override ends when the item reaches Done, Failed or Abandoned. A factory or backlog override lasts until cleared or until its expiry, and the dashboard flags any that have been active for more than 24 hours. <span class="tag call">My call</span></li>
+    <li><b>Expiry.</b> An item override ends when the item reaches Done, Failed, Abandoned or Split. A factory or backlog override lasts until cleared or until its expiry, and the dashboard flags any that have been active for more than 24 hours. <span class="tag call">My call</span></li>
     <li><b>Hard limits.</b> No override crosses the git host's branch protection and required reviews, the monthly budget ceiling, the egress allowlist or the kill switch. Skipping a stage in the SOP never skips a check the git host enforces. Specify, Red, Green and Risk approval can't be skipped at all, so every Increment carries its scenarios, its red evidence and the approvals its tier requires. No override lowers a risk tier. <span class="tag call">My call</span></li>
     <li><b>Who can override.</b> The operator role, held by the named few who can use the controls. Everyone else sees overrides but can't set them.</li>
     <li><b>One API.</b> The dashboard calls the control plane's override API, so a CLI or chat bot can use the same calls later with no new logic. <span class="tag call">My call</span></li>
