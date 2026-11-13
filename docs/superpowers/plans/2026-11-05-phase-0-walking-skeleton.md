@@ -840,10 +840,11 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     - When an unanswered item times out to Abandoned instead, the count drops to 2, and a Queued item starts.
     - With the count at 3 and two Queued items, a fresh one ranked first and one back from `changes_requested` with `next_stage = "address"`, `tick` claims the address item and leaves the fresh one waiting.
   - **Usage reserve.** With `usage_paused_until` in the future, `tick` starts nothing, and running cells' `/lease` replies keep `stop: false`, so they finish.
-  - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Two variants:
+  - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`, so a stopped run can be restarted. Four variants:
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput, through `reopened_signoff` or `reopened_question`, with `asked_at` reset to now and `reminders_sent` reset to 0.
     - A Failed item whose PR already merged starts a new run, numbered one above the item's last run, on a new branch, per Run contract 7.
     - An Abandoned item whose PR a person closed without merging, with `next_stage = "address"`, keeps its run and branch and gets `next_stage = "open-pr"`, per Run contract 1. Its `pr_number` and `pr_url` are cleared, so the poller, which reads the PR of an InProgress run, doesn't withdraw the item again while open-pr opens a fresh PR (PBI 142).
+    - An Abandoned item withdrawn from Eligible or NotReady, which `withdrawnBeforeQueue` in `store/items.ts` finds from its event log, goes back to Eligible through `returned`, as the poller's return does, so it meets the readiness gate again and never reaches Queued without passing it (PBI 168).
   - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria, through `criteriaHash` from Task 8.
   - **Egress boot.** `ensureEgress` with a stubbed `execFile`, in three cases:
     - `docker network create` answers "already exists", and `ensureEgress` still succeeds;
