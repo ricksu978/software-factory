@@ -274,6 +274,15 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return (await gh.request("GET /repos/{owner}/{repo}/branches/{branch}", { ...r, branch })).data.commit.sha;
     },
 
+    // PBI 181: stubs until the factory merges PRs itself.
+    async mergeView() {
+      throw new Error("mergeView is not built yet (PBI 181)");
+    },
+
+    async mergePr() {
+      throw new Error("mergePr is not built yet (PBI 181)");
+    },
+
   };
 }
 
