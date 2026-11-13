@@ -225,11 +225,14 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   const zone = d.zone ?? "UTC";
   const now = d.now ?? new Date();
   const started = (s: RunDetail["stages"][number]) => (s.started_at ? local(s.started_at, zone) : "");
-  // An attempt with no end is running only while the item is In progress on an open run: a cell that died mid-stage
-  // leaves its row open for good, and counting that against now would climb for ever.
-  const live = d.item.state === "InProgress" && d.run?.open === true;
+  // An attempt with no end is running only while the item is In progress on an open run, and only if it's the run's
+  // newest attempt: a cell that died mid-stage leaves its row open for good, and a new claim on the same run numbers
+  // its attempts after it, so counting that dead row against now would climb for ever.
+  const newest = d.stages.reduce<RunDetail["stages"][number] | null>(
+    (a, s) => (s.started_at && (!a?.started_at || s.started_at.getTime() >= a.started_at.getTime()) ? s : a), null);
+  const live = (s: RunDetail["stages"][number]) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
   const took = (s: RunDetail["stages"][number]) =>
-    !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
+    !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live(s) ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
   // Each Tokens and Cost cell keeps the exact figures in its title, so hovering shows them in full.
   const exactTokens = (tokensIn: number | null, tokensOut: number | null) => `<td title="${escapeHtml(`${tokensIn ?? 0} in, ${tokensOut ?? 0} out`)}">`;
   const exactCost = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">`;

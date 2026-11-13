@@ -295,6 +295,16 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
     }
   });
 
+  test("a dead cell's attempt left open on a run a new cell claimed doesn't count on against now", () => {
+    const deadRow = { ...stage, ended_at: null, status: "started", started_at: new Date("2026-11-09T15:30:00Z") };
+    const liveRow = { ...stage, attempt: 2, ended_at: null, status: "started", started_at: new Date("2026-11-10T17:30:00Z") };
+    const html = runDetailPage(detail({ stages: [deadRow, liveRow], run: openRun, now: new Date("2026-11-10T17:35:00Z") }), null);
+    const rows = html.split("<h2>Stages</h2>")[1].split("</tbody>")[0].split("<tr>").slice(2);
+    assert.match(rows[0], /<td>didn&#39;t finish<\/td>|<td>didn't finish<\/td>/);
+    assert.doesNotMatch(rows[0], /so far/);
+    assert.match(rows[1], /<td>5m 0s so far<\/td>/);
+  });
+
   test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
     const row = rowOf(runDetailPage(detail({ zone: "Asia/Tokyo" }), null), "Readiness checks");
     assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5<\/td><td title="1240 in, 80 out">1.2k in, 80 out<\/td><td title="\$0.055">\$0.06<\/td>/);
