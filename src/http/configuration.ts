@@ -1,5 +1,6 @@
 // The Configuration page's settings (PBI 175). Runtime settings are the one wip_policy row, read fresh on every request,
-// and an operator can change six of them, each change with a reason that the logged event keeps (PBI 176). The scheduler picks up the current WIP and review capacity on its next tick, and a
+// and an operator can change six of them, each change with a reason that the logged event keeps (PBI 176). An operator can
+// also clear an active usage pause, with a reason, but never set one: only a usage report sets it (PBI 178). The scheduler picks up the current WIP and review capacity on its next tick, and a
 // cell reads the usage reserve. The WIP minimum and maximum only bound the current WIP, and the daily budget is stored but
 // not enforced yet. Env-backed settings are the
 // values the control plane read from its environment at start, shown read-only. Only the names in ENV_SETTINGS ever
@@ -11,10 +12,10 @@ export type RuntimeKey = "mode" | "wip_min" | "wip_max" | "current_wip" | "revie
 
 /**
  * Each runtime setting in the order the page lists it: its label, its wip_policy column, whether an operator can change
- * it, and a note when a change does less than the page's heading says. Nothing outside this page reads the WIP minimum
+ * it, whether an operator can only clear it, and a note when a change does less than the page's heading says. Nothing outside this page reads the WIP minimum
  * and maximum yet, so they only bound the current WIP, and nothing enforces the daily budget yet.
  */
-export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string; editable: boolean; note?: string }[] = [
+export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string; editable: boolean; clearable?: boolean; note?: string }[] = [
   { key: "mode", label: "WIP mode", column: "mode", editable: false },
   { key: "wip_min", label: "WIP minimum", column: "wip_min", editable: true, note: "Only bounds the current WIP for now." },
   { key: "wip_max", label: "WIP maximum", column: "wip_max", editable: true, note: "Only bounds the current WIP for now." },
@@ -22,7 +23,7 @@ export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string;
   { key: "review_capacity", label: "review capacity", column: "review_capacity", editable: true },
   { key: "usage_reserve", label: "usage reserve", column: "usage_reserve_at", editable: true },
   { key: "daily_budget", label: "daily budget", column: "daily_budget", editable: true, note: "Stored, but not enforced yet." },
-  { key: "usage_pause", label: "usage pause", column: "usage_paused_until", editable: false },
+  { key: "usage_pause", label: "usage pause", column: "usage_paused_until", editable: false, clearable: true },
 ];
 
 /** The env names the page lists. A secret is never one of them: its value never leaves the process. */
@@ -50,6 +51,14 @@ const show = (v: unknown): string | null => {
   if (v instanceof Date) return v.toISOString().replace(/\.000Z$/, "Z");
   return String(v);
 };
+
+/**
+ * Whether a usage pause holds new starts back at `at`: a time still in the future. Nothing sets the column back to null
+ * when a pause runs out, so a time at or before now is no pause at all, as the scheduler reads it (PBI 178).
+ */
+export function pauseActive(value: string | null, at: Date): boolean {
+  return value !== null && Date.parse(value) > at.getTime();
+}
 
 export async function runtimeValues(pool: pg.Pool | pg.ClientBase, lock = false): Promise<RuntimeValues> {
   const cols = RUNTIME_SETTINGS.map((s) => `${s.column} as ${s.key}`).join(", ");
@@ -79,8 +88,8 @@ const turnDown = (message: string): TurnedDown => ({ ok: false, status: 400, mes
  * always holds. A value that breaks a rule is turned down with that rule first; a value that keeps every rule still needs
  * a reason that isn't only spaces (PBI 176).
  */
-export function checkChange(now: RuntimeValues, key: string, value: string, reason?: string): Checked {
-  const updates = checkValue(now, key, value);
+export function checkChange(now: RuntimeValues, key: string, value: string, reason?: string, at: Date = new Date()): Checked {
+  const updates = checkValue(now, key, value, at);
   if (!Array.isArray(updates)) return updates;
   const why = (reason ?? "").trim();
   if (why === "") return turnDown("Give a reason for the change.");
@@ -88,10 +97,15 @@ export function checkChange(now: RuntimeValues, key: string, value: string, reas
 }
 
 /** The columns a change writes, or why it's turned down. */
-function checkValue(now: RuntimeValues, key: string, value: string): Update[] | TurnedDown {
+function checkValue(now: RuntimeValues, key: string, value: string, at: Date): Update[] | TurnedDown {
   const setting = RUNTIME_SETTINGS.find((s) => s.key === key);
-  if (!setting || !setting.editable) return turnDown("That setting can't be changed from the page.");
   const raw = value.trim();
+  if (setting?.clearable) {
+    if (raw !== "") return turnDown(`The ${setting.label} can only be cleared.`);
+    if (!pauseActive(now[setting.key], at)) return turnDown(`There's no ${setting.label} to clear.`);
+    return [{ key: setting.key, column: setting.column, value: null }];
+  }
+  if (!setting || !setting.editable) return turnDown("That setting can't be changed from the page.");
   const min = Number(now.wip_min);
   const max = Number(now.wip_max);
   const current = Number(now.current_wip);
@@ -146,12 +160,12 @@ function checkValue(now: RuntimeValues, key: string, value: string): Update[] | 
  * `setting` event whose actor_id is the user's id, as for every other human event, from what, to what and why. A change
  * to the value already there logs nothing.
  */
-export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string, reason?: string): Promise<Checked> {
+export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string, reason?: string, at: Date = new Date()): Promise<Checked> {
   const c = await pool.connect();
   try {
     await c.query("begin");
     const now = await runtimeValues(c, true);
-    const checked = checkChange(now, key, value, reason);
+    const checked = checkChange(now, key, value, reason, at);
     if (!checked.ok) {
       await c.query("rollback");
       return checked;
