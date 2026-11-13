@@ -100,3 +100,50 @@ describe("the worker lock", dbTest, () => {
     assert.equal((await lockPids("noegress")).length, 0);
   });
 });
+
+describe("the worker heartbeat", dbTest, () => {
+  let db: Awaited<ReturnType<typeof startTestDb>>;
+  before(async () => {
+    db = await startTestDb();
+  });
+  after(async () => {
+    await db?.stop();
+  });
+
+  test("each tick records its time, a failed tick too, and a heartbeat that can't be written is logged", async () => {
+    await db.pool.query("delete from worker_heartbeat");
+    const lines: string[] = [];
+    const line = (...args: unknown[]) => void lines.push(format(...args));
+    const times: Date[] = [];
+    let failHeartbeat = true;
+    const pool = createPool(db.url);
+    const realQuery = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+    (pool as unknown as { query: unknown }).query = (...a: unknown[]) =>
+      failHeartbeat && typeof a[0] === "string" && a[0].includes("worker_heartbeat") ? Promise.reject(new Error("refused")) : realQuery(...a);
+    const w = await startWorker({
+      pool, sources: [], repoHost: fakeRepoHost(), launcher: { start: async () => "cell", stop: async () => {} },
+      egress: async () => {}, image: "i", controlUrl: "http://c", blob: "b",
+      judge: async () => "", killFlag: false, secret: "s", sopVersion: "default@1",
+      tickMs: 20, pollMs: 20, lockRetryMs: 50, log: { log: line, warn: line, error: line },
+      now: () => {
+        const d = new Date();
+        times.push(d);
+        return d;
+      },
+    });
+    try {
+      const ticks = () => w.runs.get("scheduler tick") ?? 0;
+      await until("the worker ticks", () => ticks() > 0);
+      assert.ok(lines.some((l) => /heartbeat couldn't be written/.test(l)), lines.join("\n"));
+      failHeartbeat = false;
+      const n = ticks();
+      await until("the worker ticks again", () => ticks() > n + 1);
+      const h = (await db.pool.query<{ ticked_at: Date }>("select ticked_at from worker_heartbeat")).rows;
+      assert.equal(h.length, 1);
+      assert.ok(times.some((t) => t.getTime() === h[0].ticked_at.getTime()));
+    } finally {
+      await w.stop();
+      await pool.end();
+    }
+  });
+});
