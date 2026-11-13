@@ -7,16 +7,24 @@
 // A command with neither, such as a wrapper script, has every word read.
 // Every `--tags`, `--tags=` or `-t` among them is read. cucumber-js ANDs repeated ones, so this does too. A filter
 // set anywhere else, such as a profile in a cucumber config file, isn't seen, and Red then expects every scenario.
+// So is an expression the shell expands, one with an unquoted or double-quoted `$` or backtick, as in
+// `--tags "$BDD_TAGS"` or `--tags "$(cat tags.txt)"`: its text isn't known until the shell runs it.
 import { parse } from "@cucumber/tag-expressions";
+
+/** A word as the shell splits it, and whether the shell expands part of it (an unquoted or double-quoted `$` or backtick). */
+interface Word {
+  text: string;
+  expands: boolean;
+}
 
 /**
  * The simple commands a POSIX shell splits `command` into at unquoted `;`, `&`, `|` and newlines, each as the words
  * it splits into, with quotes and backslash escapes removed.
  */
-function segments(command: string): string[][] {
-  const out: string[][] = [];
-  let seg: string[] = [];
-  let word: string | null = null;
+function segments(command: string): Word[][] {
+  const out: Word[][] = [];
+  let seg: Word[] = [];
+  let word: Word | null = null;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
     if (/[;&|\n]/.test(ch)) {
@@ -31,19 +39,23 @@ function segments(command: string): string[][] {
       word = null;
       continue;
     }
-    word ??= "";
-    if (ch === "\\" && i + 1 < command.length) word += command[++i];
+    word ??= { text: "", expands: false };
+    if (ch === "\\" && i + 1 < command.length) word.text += command[++i];
     else if (ch === "'") {
       const end = command.indexOf("'", i + 1);
       const stop = end < 0 ? command.length : end;
-      word += command.slice(i + 1, stop);
+      word.text += command.slice(i + 1, stop);
       i = stop;
     } else if (ch === '"') {
       for (i++; i < command.length && command[i] !== '"'; i++) {
         if (command[i] === "\\" && /["\\$`]/.test(command[i + 1] ?? "")) i++;
-        word += command[i];
+        else if (command[i] === "$" || command[i] === "`") word.expands = true;
+        word.text += command[i];
       }
-    } else word += ch;
+    } else {
+      if (ch === "$" || ch === "`") word.expands = true;
+      word.text += ch;
+    }
   }
   if (word !== null) seg.push(word);
   if (seg.length) out.push(seg);
@@ -54,7 +66,8 @@ function segments(command: string): string[][] {
  * The index of the first word in `seg` that cucumber-js, or the npm script that runs it, gets as an argument, or -1
  * if `seg` runs neither.
  */
-function cucumberArgs(seg: string[]): number {
+function cucumberArgs(words: Word[]): number {
+  const seg = words.map((w) => w.text);
   const bin = seg.findIndex((w) => /(^|\/)cucumber-js$/.test(w));
   if (bin >= 0) return bin + 1;
   const pm = seg.findIndex((w) => /(^|\/)(npm|pnpm|yarn)$/.test(w));
@@ -78,11 +91,16 @@ export function tagFilters(command: string): string[] {
   return runs.flatMap((r) => tagsIn(r.seg.slice(r.start)));
 }
 
-function tagsIn(w: string[]): string[] {
+// An expression the shell expands is skipped: its text isn't known here, so, as with a filter in a config profile,
+// Red expects every scenario rather than reading `$BDD_TAGS` as a tag expression.
+function tagsIn(w: Word[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < w.length; i++) {
-    if ((w[i] === "--tags" || w[i] === "-t") && i + 1 < w.length) out.push(w[++i]!);
-    else if (w[i]!.startsWith("--tags=")) out.push(w[i]!.slice("--tags=".length));
+    const { text } = w[i]!;
+    if ((text === "--tags" || text === "-t") && i + 1 < w.length) {
+      const expr = w[++i]!;
+      if (!expr.expands) out.push(expr.text);
+    } else if (text.startsWith("--tags=") && !w[i]!.expands) out.push(text.slice("--tags=".length));
   }
   return out;
 }

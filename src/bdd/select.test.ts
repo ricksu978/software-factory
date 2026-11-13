@@ -78,3 +78,32 @@ test("a command that runs neither cucumber-js nor an npm script has its --tags r
   assert.equal(selects('node fake/bdd.mjs --tags "not @local"')(local), false);
   assert.equal(selects('cp a b && echo --tags "not @local"')(local), false);
 });
+
+test("an expression the shell expands isn't read, so every scenario is expected", () => {
+  for (const cmd of [
+    'npx cucumber-js --tags "$BDD_TAGS"',
+    "npx cucumber-js --tags $BDD_TAGS",
+    'cucumber-js --tags "${BDD_TAGS}"',
+    'npm run bdd -- --tags "$(cat tags.txt)"',
+    "cucumber-js --tags `cat tags.txt`",
+    'cucumber-js --tags="$BDD_TAGS"',
+  ]) {
+    const s = selects(cmd);
+    assert.equal(s(plain), true, cmd);
+    assert.equal(s(local), true, cmd);
+  }
+});
+
+test("an expanded --tags doesn't hide a literal one beside it", () => {
+  const s = selects('cucumber-js --tags "$BDD_TAGS" --tags "not @local"');
+  assert.equal(s(plain), true);
+  assert.equal(s(local), false);
+});
+
+test("a $ in single quotes or escaped isn't expanded, so it's read as written", () => {
+  for (const cmd of ["cucumber-js --tags '@$x'", 'cucumber-js --tags "@\\$x"', "cucumber-js --tags @\\$x"]) {
+    const s = selects(cmd);
+    assert.equal(s(["@$x"]), true, cmd);
+    assert.equal(s(plain), false, cmd);
+  }
+});
