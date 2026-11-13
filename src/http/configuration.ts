@@ -1,5 +1,7 @@
 // The Configuration page's settings (PBI 175). Runtime settings are the one wip_policy row, read fresh on every request,
-// and an operator can change six of them, which the scheduler picks up on its next tick. Env-backed settings are the
+// and an operator can change six of them. The scheduler picks up the current WIP and review capacity on its next tick, and a
+// cell reads the usage reserve. The WIP minimum and maximum only bound the current WIP, and the daily budget is stored but
+// not enforced yet. Env-backed settings are the
 // values the control plane read from its environment at start, shown read-only. Only the names in ENV_SETTINGS ever
 // reach the page, so a secret such as GITHUB_APP_KEY or FACTORY_DB_URI can't show by being added to the environment.
 import type pg from "pg";
@@ -7,15 +9,19 @@ import { appendEvent } from "../store/events.ts";
 
 export type RuntimeKey = "mode" | "wip_min" | "wip_max" | "current_wip" | "review_capacity" | "usage_reserve" | "daily_budget" | "usage_pause";
 
-/** Each runtime setting in the order the page lists it: its label, its wip_policy column, and whether an operator can change it. */
-export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string; editable: boolean }[] = [
+/**
+ * Each runtime setting in the order the page lists it: its label, its wip_policy column, whether an operator can change
+ * it, and a note when a change does less than the page's heading says. Nothing outside this page reads the WIP minimum
+ * and maximum yet, so they only bound the current WIP, and nothing enforces the daily budget yet.
+ */
+export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string; editable: boolean; note?: string }[] = [
   { key: "mode", label: "WIP mode", column: "mode", editable: false },
-  { key: "wip_min", label: "WIP minimum", column: "wip_min", editable: true },
-  { key: "wip_max", label: "WIP maximum", column: "wip_max", editable: true },
+  { key: "wip_min", label: "WIP minimum", column: "wip_min", editable: true, note: "Only bounds the current WIP for now." },
+  { key: "wip_max", label: "WIP maximum", column: "wip_max", editable: true, note: "Only bounds the current WIP for now." },
   { key: "current_wip", label: "current WIP", column: "current_wip", editable: true },
   { key: "review_capacity", label: "review capacity", column: "review_capacity", editable: true },
   { key: "usage_reserve", label: "usage reserve", column: "usage_reserve_at", editable: true },
-  { key: "daily_budget", label: "daily budget", column: "daily_budget", editable: true },
+  { key: "daily_budget", label: "daily budget", column: "daily_budget", editable: true, note: "Stored, but not enforced yet." },
   { key: "usage_pause", label: "usage pause", column: "usage_paused_until", editable: false },
 ];
 
@@ -126,7 +132,7 @@ export function checkChange(now: RuntimeValues, key: string, value: string): Che
 
 /**
  * Applies one change in a transaction, against the policy row locked as it is now, and logs each column it moved as a
- * `setting` event naming who changed it, from what and to what. A change to the value already there logs nothing.
+ * `setting` event whose actor_id is the user's id, as for every other human event, from what and to what. A change to the value already there logs nothing.
  */
 export async function changeSetting(pool: pg.Pool, by: string, key: string, value: string): Promise<Checked> {
   const c = await pool.connect();

@@ -163,8 +163,10 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
 async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
   const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
     `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event,
-       e.actor_id as actor, e.payload->>'setting' as setting
-     from event e left join item i on i.id = e.item_id order by e.at desc, e.id desc limit 100`,
+       coalesce(u.github_login, e.actor_id) as actor, e.payload->>'setting' as setting
+     from event e left join item i on i.id = e.item_id
+       left join "user" u on e.kind = 'setting' and u.id::text = e.actor_id
+     order by e.at desc, e.id desc limit 100`,
   )).rows;
   const repos = await issueRepos(pool, [...new Set(rows.flatMap((r) => (r.item_id ? [r.item_id] : [])))]);
   return rows.map(({ item_id, ...r }) => ({ ...r, repo: item_id ? (repos.get(item_id) ?? null) : null }));
@@ -351,7 +353,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       const canOperate = requireRole(user, "operator");
       const view = async (status: number, extra: { notice?: string | null; error?: string | null }) => {
         const now = await runtimeValues(deps.pool);
-        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable }));
+        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable, note: s.note }));
         send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, ...extra }, banner));
       };
       if (req.method === "GET") {
@@ -364,7 +366,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         return true;
       }
       const b = await form(req);
-      const outcome = await changeSetting(deps.pool, user.github_login ?? identity.subject, b.setting ?? "", b.value ?? "");
+      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "");
       if (!outcome.ok) await view(outcome.status, { error: outcome.message });
       else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
       return true;

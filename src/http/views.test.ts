@@ -48,7 +48,7 @@ describe("configurationPage", () => {
   const runtime = [
     { key: "mode", label: "WIP mode", value: "fixed", editable: false },
     { key: "review_capacity", label: "review capacity", value: "3", editable: true },
-    { key: "daily_budget", label: "daily budget", value: null, editable: true },
+    { key: "daily_budget", label: "daily budget", value: null, editable: true, note: "Stored, but not enforced yet." },
   ];
   const env = [{ key: "FACTORY_POLICY_DIR", label: "FACTORY_POLICY_DIR", value: "<b>x</b>" }, { key: "FACTORY_KILL", label: "FACTORY_KILL", value: null }];
 
@@ -60,6 +60,10 @@ describe("configurationPage", () => {
     assert.doesNotMatch(html, /value="mode"/);
     const envPart = html.slice(html.indexOf("<h2>Env-backed settings</h2>"));
     assert.doesNotMatch(envPart, /<form|<input|<button/);
+  });
+
+  test("shows a setting's note to an operator and a viewer alike", () => {
+    for (const canOperate of [true, false]) assert.match(configurationPage({ runtime, env, canOperate }, null), /Stored, but not enforced yet\./);
   });
 
   test("gives a viewer no form at all", () => {

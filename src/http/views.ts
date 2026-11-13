@@ -279,7 +279,7 @@ export function activityPage(rows: ActivityRow[], banner: string | null): string
 }
 
 /** One setting as the Configuration page lists it: its key, its name, and its value, or null when it has none. */
-export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean };
+export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean; note?: string };
 
 /**
  * The Configuration page (PBI 175). Runtime settings come first. An operator gets a form beside each one they can
@@ -287,12 +287,13 @@ export type ConfigSetting = { key: string; label: string; value: string | null; 
  */
 export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSetting[]; canOperate: boolean; notice?: string | null; error?: string | null }, banner: string | null): string {
   const value = (v: string | null) => (v === null ? `<span class="muted">not set</span>` : escapeHtml(v));
+  const note = (s: ConfigSetting) => (s.note ? `<span class="muted">${escapeHtml(s.note)}</span>` : "");
   const change = (s: ConfigSetting) => {
     if (!s.editable) return `<td class="muted">Set by the factory</td>`;
-    if (!c.canOperate) return "<td></td>";
+    if (!c.canOperate) return `<td>${note(s)}</td>`;
     const id = `setting-${escapeHtml(s.key)}`;
     return `<td><form method="post" action="/configuration"><input type="hidden" name="setting" value="${escapeHtml(s.key)}">
-<label for="${id}">New ${escapeHtml(s.label)}</label><input id="${id}" name="value" value="${escapeHtml(s.value ?? "")}"> <button>Change</button></form></td>`;
+<label for="${id}">New ${escapeHtml(s.label)}</label><input id="${id}" name="value" value="${escapeHtml(s.value ?? "")}"> <button>Change</button></form>${note(s)}</td>`;
   };
   const head = (third: string) => `<thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">${third}</th></tr></thead>`;
   const runtime = `<table>${head(c.canOperate ? "Change" : "Notes")}<tbody>${c.runtime
@@ -302,6 +303,6 @@ export function configurationPage(c: { runtime: ConfigSetting[]; env: ConfigSett
   const notice = c.notice ? `<p class="banner" role="status">${escapeHtml(c.notice)}</p>` : "";
   const error = c.error ? `<p class="banner" role="alert">${escapeHtml(c.error)}</p>` : "";
   return page("Configuration", `<h1>Configuration</h1>${notice}${error}
-<h2>Runtime settings</h2><p class="muted">The factory's WIP policy, as it is now. A change takes effect on the scheduler's next turn, with no restart.</p>${runtime}
+<h2>Runtime settings</h2><p class="muted">The factory's WIP policy, as it is now. A change takes effect on the scheduler's next turn, with no restart, unless its note says it does less.</p>${runtime}
 <h2>Env-backed settings</h2><p class="muted">What the control plane read from its environment at start. A change takes effect only when the factory restarts. Secrets never show here.</p>${env}`, banner);
 }

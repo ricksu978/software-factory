@@ -522,6 +522,8 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 5);
     assert.match((await get("/configuration?changed=review_capacity", "octo")).html, /review capacity changed/);
     assert.match((await get("/activity", "octo")).html, /octo changed review capacity from 3 to 5/);
+    const octoId = (await db.pool.query(`select id from "user" where github_login = 'octo'`)).rows[0].id;
+    assert.equal((await db.pool.query(`select actor_id from event where kind = 'setting' order by id desc limit 1`)).rows[0].actor_id, octoId);
 
     const raised = await post("/configuration", "octo", "setting=wip_min&value=2");
     assert.equal(raised.status, 303);
