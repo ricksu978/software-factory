@@ -4,14 +4,18 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type pg from "pg";
 import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
+import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
+import type { ItemState } from "../core/states.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
+import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
-import { activityPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
+import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
+import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -25,6 +29,8 @@ export type DashboardDeps = {
   env?: Record<string, string | undefined>;
   /** Reads a stored transcript or report by its blob path, or null when it's missing. Without it, Run detail shows paths. */
   readBlob?: (path: string) => Promise<string | null>;
+  /** The time now: what Run detail's durations count open spells up to (PBI 187), and how long a running stage attempt has taken so far (PBI 189). Defaults to the system clock. */
+  now?: () => Date;
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
@@ -32,7 +38,7 @@ const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
 const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
-type User = { id: string; role: Role; product_owner: boolean };
+type User = { id: string; role: Role; product_owner: boolean; github_login: string | null };
 
 function send(res: ServerResponse, status: number, html: string, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", ...headers });
@@ -161,8 +167,11 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
  */
 async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
   const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
-    `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event
-     from event e left join item i on i.id = e.item_id order by e.at desc, e.id desc limit 100`,
+    `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event,
+       coalesce(u.github_login, e.actor_id) as actor, e.payload->>'setting' as setting
+     from event e left join item i on i.id = e.item_id
+       left join "user" u on e.kind = 'setting' and u.id::text = e.actor_id
+     order by e.at desc, e.id desc limit 100`,
   )).rows;
   const repos = await issueRepos(pool, [...new Set(rows.flatMap((r) => (r.item_id ? [r.item_id] : [])))]);
   return rows.map(({ item_id, ...r }) => ({ ...r, repo: item_id ? (repos.get(item_id) ?? null) : null }));
@@ -232,11 +241,33 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const scope = signing && fi?.body.trim() ? fi.body : null;
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
+  const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
+    durations,
   };
+}
+
+/** Where the item's time went (PBI 187): its moves, every run's stage attempts and its questions, read up to `now`. */
+async function itemTime(pool: pg.Pool, id: string, state: ItemState, now: Date) {
+  // An item held from before issue_created_at was stored counts from its first logged event until a poll fills it in.
+  const createdAt = (await pool.query<{ at: Date | null }>(
+    "select coalesce(issue_created_at, (select min(at) from event where item_id = $1)) as at from item where id = $1", [id],
+  )).rows[0].at;
+  const moves = (await pool.query<Move>(
+    `select payload->>'from' as from, payload->>'to' as to, at from event
+     where item_id = $1 and kind in ('transition', 'override') and payload ? 'to' order by at, id`, [id],
+  )).rows;
+  const stages = (await pool.query<StageSpan>(
+    `select s.stage_id as "stageId", s.started_at as "startedAt", s.ended_at as "endedAt", r.ended_at as "runEndedAt"
+     from stage_run s join run r on r.id = s.run_id where r.item_id = $1 order by s.started_at`, [id],
+  )).rows;
+  const questions = (await pool.query<QuestionSpan>(
+    `select kind, asked_at as "askedAt", answered_at as "answeredAt", closed_at as "closedAt" from question where item_id = $1`, [id],
+  )).rows;
+  return itemDurations({ createdAt, state, now, moves, stages, questions });
 }
 
 /**
@@ -296,7 +327,8 @@ function eventStreams(pool: pg.Pool) {
  * refused, so no request can pass as a webhook to a proxy and land on a dashboard route here (Review Focus 4).
  */
 export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promise<void> } {
-  const env = deps.env ?? process.env;
+  // A copy taken now, so the Configuration page shows the env the control plane started with.
+  const env = { ...(deps.env ?? process.env) };
   const streams = eventStreams(deps.pool);
   const handler: Handler = async (req, res) => {
     const raw = (req.url ?? "/").split("?")[0];
@@ -320,7 +352,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       send(res, 401, signInPage());
       return true;
     }
-    const user = (await deps.pool.query<User>(`select id, role, product_owner from "user" where provider = $1 and subject = $2`, [identity.provider, identity.subject])).rows[0];
+    const user = (await deps.pool.query<User>(`select id, role, product_owner, github_login from "user" where provider = $1 and subject = $2`, [identity.provider, identity.subject])).rows[0];
     if (!user) {
       send(res, 403, noAccessPage());
       return true;
@@ -342,6 +374,28 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     }
     if (req.method === "GET" && path === "/phase0") {
       send(res, 200, phase0Page(await phase0(deps.pool), await readinessSpend(deps.pool), banner));
+      return true;
+    }
+    if (path === "/configuration" && (req.method === "GET" || req.method === "POST")) {
+      const canOperate = requireRole(user, "operator");
+      const view = async (status: number, extra: { notice?: string | null; error?: string | null }) => {
+        const now = await runtimeValues(deps.pool);
+        const runtime = RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: now[s.key], editable: s.editable, note: s.note }));
+        send(res, status, configurationPage({ runtime, env: envSettings(env), canOperate, ...extra }, banner));
+      };
+      if (req.method === "GET") {
+        const changed = RUNTIME_SETTINGS.find((s) => s.key === url.searchParams.get("changed"));
+        await view(200, { notice: changed ? `Setting saved: ${changed.label} changed.` : null });
+        return true;
+      }
+      if (!canOperate) {
+        send(res, 403, "Only an operator can change the factory's settings.");
+        return true;
+      }
+      const b = await form(req);
+      const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "");
+      if (!outcome.ok) await view(outcome.status, { error: outcome.message });
+      else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
       return true;
     }
     const blob = BLOB_PATH.exec(path);
@@ -392,7 +446,8 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     if (itemPath && req.method === "GET" && !itemPath[2]) {
       const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"));
       if (!detail) send(res, 404, "No such item.");
-      else send(res, 200, runDetailPage(detail, banner));
+      // Times show in the zone the viewer's browser sent, and a running attempt's time so far runs to now (PBI 189).
+      else send(res, 200, runDetailPage({ ...detail, zone: zoneFrom(req.headers.cookie), now: deps.now?.() ?? new Date() }, banner));
       return true;
     }
     if (itemPath && req.method === "POST" && itemPath[2]) {

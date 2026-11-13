@@ -35,6 +35,10 @@ export type Ctx = {
   page?: string;
   /** The place and title the last "shows ... before ..." step checked, for a following "is not a link". */
   last?: { scope: string; n: string; title: string };
+  /** The viewer's IANA time zone, sent as their browser's `tz` cookie (PBI 189). Unset sends no cookie. */
+  viewerZone?: string;
+  /** The dashboard's clock (PBI 189). Unset is the real time. */
+  now?: () => Date;
 };
 
 export function ctx(world: object): Ctx {
@@ -257,7 +261,7 @@ async function dashboard(c: Ctx): Promise<void> {
   let handler: ReturnType<typeof dashboardRoutes> | undefined;
   c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
   c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId });
+  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId, now: () => c.now?.() ?? new Date() });
   c.close = handler.close;
 }
 
@@ -265,7 +269,8 @@ export async function open(world: object, path: string): Promise<void> {
   const c = ctx(world);
   await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer', 'viewer', 'viewer') on conflict (provider, subject) do nothing`);
   await dashboard(c);
-  const r = await fetch(`${c.origin}${path}`, { headers: headers("viewer"), redirect: "manual" });
+  const zone: Record<string, string> = c.viewerZone ? { cookie: `tz=${encodeURIComponent(c.viewerZone)}` } : {};
+  const r = await fetch(`${c.origin}${path}`, { headers: { ...headers("viewer"), ...zone }, redirect: "manual" });
   c.status = r.status;
   c.page = await r.text();
   recordResponse(world, c.status, c.page);

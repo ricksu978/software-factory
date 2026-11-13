@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { LineComment, ReviewComment, RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
-import { classify, greenGate, redGate, traceability } from "../bdd/messages.ts";
+import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
@@ -182,6 +182,18 @@ export function readReview(text: string, threads: ReviewThread[]):
 }
 
 /**
+ * The PR review's second ask, in the reviewer's own session, for an answer it couldn't read (PBI 190). It names why,
+ * and asks for the same review again in the required format, without the brief or a new review.
+ */
+export function restateBrief(reason: string): string {
+  return [
+    "The factory couldn't read your answer, for this reason:",
+    `> ${reason.replace(/\n/g, "\n> ")}`,
+    "Don't review the PR again. Restate the answer you just gave, in the format your brief asks for: one JSON line per new finding, with its text, a path and a line, one JSON line per open thread you judged, and a last line of APPROVED or \"OPEN: <n>\", and nothing after it.",
+  ].join("\n\n");
+}
+
+/**
  * Reads the run's repo config and four policies at its pinned commit. A broken or missing file comes back as the
  * reason the cell blocks, so it never crashes into a lease-expiry loop (plan Task 14 Step 5).
  */
@@ -272,7 +284,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
   const meter = stageMeter(d.agent);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
-  let current: { stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[] } | null = null;
+  let current: {
+    stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
+    /** PBI 190: each restate the PR reviewer was asked for in this attempt, by round, with why its answer couldn't be read. */
+    restates?: { round: number; reason: string }[];
+  } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
@@ -341,17 +357,20 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
       costUsd: m.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
+      ...(c.restates?.length ? { restates: c.restates } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
   };
 
-  const ask = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> =>
-    settle(await meter.ask({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal }));
+  // `resume` carries on an earlier call's session, as the PR review's restate does (PBI 190).
+  const ask = async (stageId: Recorded, prompt: string, agent?: string, resume?: string): Promise<AgentResult> =>
+    settle(await meter.ask({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal,
+      ...(resume ? { resume } : {}) }));
   // A stage's own prompted call, or the merge pass's. Its text is the stage's message on Floor, so a judge's or the
   // risk classifier's output, which go through ask or settle alone, never shows there.
-  const say = async (stageId: Recorded, prompt: string, agent?: string): Promise<AgentResult> => {
-    const r = await ask(stageId, prompt, agent);
+  const say = async (stageId: Recorded, prompt: string, agent?: string, resume?: string): Promise<AgentResult> => {
+    const r = await ask(stageId, prompt, agent, resume);
     if (current) current.message = r.text;
     return r;
   };
@@ -390,6 +409,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const bdd = async (which: "parse" | "run") => {
     const r = await sh(config.bdd[which], dir);
     return { code: r.code, out: r.out, report: await readReport() };
+  };
+  // bdd.run with `--dry-run` added (PBI 185). The report is removed first, so a dry run that writes none isn't read
+  // as the report bdd.parse left behind.
+  const dryRun = async () => {
+    await rm(join(dir, config.bdd.report), { force: true });
+    const r = await sh(`${config.bdd.run} --dry-run`, dir);
+    const path = join(dir, config.bdd.report);
+    return { code: r.code, out: r.out, report: existsSync(path) ? await readFile(path, "utf8") : null };
   };
 
   const item = () => {
@@ -523,11 +550,23 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (undone.length) return undone;
       const parse = await bdd("parse");
       if (parse.code !== 0) return [`bdd.parse exited ${parse.code}: ${parse.out.trim()}`];
-      const expected = [...classify(parse.report).values()].filter((r) => r.tags.includes(tag)).map((r) => r.name);
+      const listed = [...classify(parse.report).values()].filter((r) => r.tags.includes(tag)).length;
+      // Red expects only the scenarios bdd.run selects, so a @local one it leaves out isn't missing (PBI 185). A dry
+      // run of bdd.run itself lists them: cucumber-js emits a test case only for a scenario its filter selects, however
+      // that filter is set, in the command, a profile or an environment variable, or in an npm script the command
+      // runs with a trailing `--`, so the added flag reaches cucumber-js.
+      const dry = await dryRun();
+      if (dry.report === null) return [`bdd.run with --dry-run added wrote no report to ${config.bdd.report} (exit ${dry.code}): ${dry.out.trim()}`];
+      // The flag reaches cucumber-js only when it ends the command: `npm run <script>` keeps it for npm unless the
+      // command already passes `--`, and a trailing `|| true` or pipe sends it elsewhere. Then the "dry run" was a real
+      // one, whose report leaves out a selected scenario that didn't run, so that scenario would drop out of expected.
+      const real = notDryRun(dry.report);
+      if (real) return [`bdd.run with --dry-run added didn't do a dry run (${real}), so Red can't tell which scenarios bdd.run selects. Make bdd.run end in arguments cucumber-js reads, such as \`npm run bdd -- --tags "not @local"\`, so an added --dry-run reaches it.`];
+      const expected = [...classify(dry.report).values()].filter((r) => r.tags.includes(tag)).map((r) => r.name);
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(redResults, run.report);
-      return redGate(classify(run.report), tag, expected).findings;
+      return redGate(classify(run.report), tag, expected, listed).findings;
     });
     if (findings.length) throw new Blocked(`Red failed:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
@@ -746,11 +785,19 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     for (let round = 1; ; round++) {
       prRounds++;
       const head = await git.head();
-      const r = await say("pr-review", brief(await promptOf("pr-review"),
+      let r = await say("pr-review", brief(await promptOf("pr-review"),
         `The PR is #${pr.number}, ${pr.url}. Review its head \`${head}\`, and no other commit. The base is \`origin/${ctx.base}\`.`,
         lockedNote() && brief(lockedNote(), "No finding you post may ask for a change to a scenario, because the feature files are locked."),
         rubricOf(false), threadsBrief(threads)), "factory-pr-reviewer");
-      const review = readReview(r.text, threads);
+      let review = readReview(r.text, threads);
+      // PBI 190: an answer that can't be read gets one restate, in the reviewer's own session, saying why. It is no new
+      // round and no new attempt. A run with no session to resume, or one that failed, blocks as before.
+      if (r.ok && "unreadable" in review && r.sessionId) {
+        const reason = review.unreadable;
+        current!.restates = [...(current!.restates ?? []), { round, reason }];
+        r = await say("pr-review", restateBrief(reason), "factory-pr-reviewer", r.sessionId);
+        review = readReview(r.text, threads);
+      }
       if (!r.ok || "unreadable" in review) throw new Blocked(`The PR review couldn't read the PR reviewer's answer: ${"unreadable" in review ? review.unreadable : r.text.slice(0, 500)}`);
 
       // One review per round, at the head it reviewed, with one line comment per new finding. Then each thread the
