@@ -19,10 +19,15 @@ export type SopMoveApi = Pick<CellApi, "transition"> & {
  * back carries the new version. A run whose next stage the image's SOP lacks asks for input, naming the stage, and gets
  * null, so no stage runs.
  *
- * Red stub (PBI 173): it still asks the old question for any other version, as the cell did before.
+ * The run keeps its config commit, its branch and the stage it was at; only the SOP it goes on with changes.
  */
 export async function resumeOnImageSop(api: SopMoveApi, ctx: CellContext, sop: Sop): Promise<CellContext | null> {
   if (ctx.sopVersion === sop.version) return ctx;
-  await api.transition({ event: "blocked", question: { kind: "needs_input", body: `SOP ${ctx.sopVersion} isn't in this cell image, which has ${sop.version}` } });
-  return null;
+  if (!sop.stages.some((s) => s.id === ctx.nextStage)) {
+    const body = `This cell image has SOP ${sop.version}. The run is pinned to SOP ${ctx.sopVersion} and goes on at ${ctx.nextStage}, but SOP ${sop.version} has no ${ctx.nextStage} stage, so the run can't move to it.`;
+    await api.transition({ event: "blocked", question: { kind: "needs_input", body } });
+    return null;
+  }
+  await api.moveSop({ from: ctx.sopVersion, to: sop.version });
+  return { ...ctx, sopVersion: sop.version };
 }

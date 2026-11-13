@@ -344,6 +344,28 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 409);
   });
 
+  test("sop-move records the image's SOP on the run and logs one system event on the item, once", async () => {
+    const cell = await claimed("green");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);
+    const run = await runRow(cell.runId);
+    assert.equal(run.sop_version, "default@2");
+    assert.equal(run.config_sha, "cfg1");
+    assert.equal(run.next_stage, "green");
+    // A second cell of the same claim that moves again changes nothing and logs nothing more.
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);
+    const events = (await db.pool.query("select actor, kind, payload from event where item_id = $1 and kind = 'sop_moved'", [cell.itemId])).rows;
+    assert.deepEqual(events, [{ actor: "system", kind: "sop_moved", payload: { from: "default@1", to: "default@2", runId: cell.runId } }]);
+  });
+
+  test("sop-move refuses a move from a version the run isn't pinned to, and a stale token", async () => {
+    const cell = await claimed("green");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "other", to: "default@2" })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1" })).status, 400);
+    assert.equal((await runRow(cell.runId)).sop_version, "default@1");
+    assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 409);
+    assert.equal((await db.pool.query("select 1 from event where kind = 'sop_moved'")).rowCount, 0);
+  });
+
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'red', 1, 'passed'), ($1, 'green', 1, 'stopped')", [cell.runId]);
