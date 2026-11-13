@@ -90,11 +90,13 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   git(dir, "config", "user.name", "c");
   writeFileSync(join(fixtures, "parse.ndjson"), report(names, "red"));
   // The fake bdd.run copies run.ndjson. With `--dry-run` added, as Red adds it to list what bdd.run selects (PBI 185),
-  // it copies dry.ndjson if a test wrote one, or else parse.ndjson, as a bdd.run with no tag filter would list.
+  // it copies dry.ndjson if a test wrote one, or else parse.ndjson, as a bdd.run with no tag filter would list, with
+  // every step SKIPPED, as cucumber-js reports a dry run.
   const fx = (f: string) => `"${fwd(join(fixtures, f))}"`;
+  const skip = `sed -E 's/"status":"[A-Z]+"/"status":"SKIPPED"/g'`;
   writeFileSync(join(fixtures, "run.sh"), [
     "mkdir -p reports",
-    `if [ "$1" = --dry-run ]; then if [ -f ${fx("dry.ndjson")} ]; then cp ${fx("dry.ndjson")} reports/bdd.ndjson; else cp ${fx("parse.ndjson")} reports/bdd.ndjson; fi`,
+    `if [ "$1" = --dry-run ]; then if [ -f ${fx("dry.ndjson")} ]; then ${skip} ${fx("dry.ndjson")} > reports/bdd.ndjson; else ${skip} ${fx("parse.ndjson")} > reports/bdd.ndjson; fi`,
     `else cp ${fx("run.ndjson")} reports/bdd.ndjson; fi`, ""].join("\n"));
 
   const calls: Call[] = [];
@@ -773,8 +775,8 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "red"), ["red"]);
   });
 
-  test("Red takes bdd.run's filter from the dry run, so a filter kept in an npm script or a profile counts too", async () => {
-    // bdd.run names no --tags at all, as `npm run bdd:cell` doesn't, yet its dry run leaves the @local scenario out.
+  test("Red takes bdd.run's filter from the dry run, so a filter kept in a profile counts too", async () => {
+    // bdd.run names no --tags at all, as `cucumber-js --profile cell` doesn't, yet its dry run leaves the @local scenario out.
     const h = harness({ script: (_a, stage) => {
       if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
     } });
@@ -797,6 +799,20 @@ describe("runCell", () => {
     h.deps.config.bdd.run = `sh -c 'if [ "$0" = --dry-run ]; then echo bad flag >&2; exit 2; fi; ${h.deps.config.bdd.run}'`;
     assert.equal(await h.run(), "waiting");
     assert.match(h.transitions().at(-1).question.body, /bdd\.run with --dry-run added wrote no report to reports\/bdd\.ndjson \(exit 2\): bad flag/);
+  });
+
+  test("Red fails when the --dry-run it adds doesn't reach cucumber-js, as with `npm run <script>`, so a real run isn't read as the dry run", async () => {
+    // npm keeps a trailing --dry-run for itself, so the script runs for real. Here the real run leaves Criterion 2 out,
+    // which a real run read as the dry run would hide instead of reporting it "not run in the cell".
+    const h = harness({ script: (_a, stage) => {
+      if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds"], "red"));
+    } });
+    // `sh -c '<script>' --dry-run` puts the flag in $0, which the script never reads, as an npm script never sees it.
+    h.deps.config.bdd.run = `sh -c 'cp "${fwd(join(h.root, "fx", "run.ndjson"))}" reports/bdd.ndjson'`;
+    assert.equal(await h.run(), "waiting");
+    const body = h.transitions().at(-1).question.body;
+    assert.match(body, /bdd\.run with --dry-run added didn't do a dry run \(steps ran: 1 FAILED\)/);
+    assert.doesNotMatch(body, /not run in the cell/);
   });
 
   test("a cell resumed at open-pr still lists each scenario in the PR body", async () => {

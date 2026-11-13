@@ -127,3 +127,36 @@ export function traceability(results: Results, criteriaCount: number, pbiTag: st
   for (let n = 1; n <= criteriaCount; n++) if (!mine.some((r) => r.tags.includes(`@ac-${n}`))) missing.push(`@ac-${n}`);
   return missing;
 }
+
+// A dry run executes no step, so cucumber-js reports each one SKIPPED, or UNDEFINED or AMBIGUOUS when it has no single
+// step definition (PBI 185).
+const NOT_EXECUTED = new Set(["SKIPPED", "UNDEFINED", "AMBIGUOUS"]);
+
+// Why a report that should come from `--dry-run` doesn't, or null when it does: a step that finished PASSED, FAILED or
+// PENDING ran, and a test case that never started was cut short. The flag misses cucumber-js when the command hands it
+// to something else, as `npm run <script>` without `--` does, or a trailing `|| true` or pipe, and the command then
+// runs the suite for real.
+export function notDryRun(ndjson: string): string | null {
+  const cases = new Set<string>();
+  const started = new Set<string>();
+  const ran = new Map<string, number>();
+  for (const line of ndjson.split("\n")) {
+    if (!line.trim()) continue;
+    let m: Record<string, any>;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (m.testCase) cases.add(m.testCase.id);
+    else if (m.testCaseStarted) started.add(m.testCaseStarted.testCaseId);
+    else if (m.testStepFinished) {
+      const status = String(m.testStepFinished.testStepResult?.status);
+      if (!NOT_EXECUTED.has(status)) ran.set(status, (ran.get(status) ?? 0) + 1);
+    }
+  }
+  if (ran.size) return `steps ran: ${[...ran].map(([s, n]) => `${n} ${s}`).join(", ")}`;
+  const unstarted = [...cases].filter((c) => !started.has(c)).length;
+  if (unstarted) return `${unstarted} test case${unstarted === 1 ? "" : "s"} never started`;
+  return null;
+}

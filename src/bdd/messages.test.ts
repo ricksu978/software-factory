@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { classify, greenGate, redGate, traceability, type Results } from "./messages.ts";
+import { classify, greenGate, notDryRun, redGate, traceability, type Results } from "./messages.ts";
 
 // A real cucumber-js 13.3.0 run, trimmed to the four message kinds classify reads.
 const fixture = readFileSync(new URL("./fixtures/verdicts.ndjson", import.meta.url), "utf8");
@@ -120,4 +120,16 @@ test("green needs every scenario in the suite green, and a report with none fail
   assert.equal(greenGate(results([["a", ["@pbi-481"], "green"], ["b", ["@pbi-482"], "green"]])).ok, true);
   assert.deepEqual(greenGate(results([["a", ["@pbi-481"], "red"]])).findings, ["scenario is red: a: "]);
   assert.deepEqual(greenGate(new Map()).findings, ["the report holds no scenarios"]);
+});
+
+test("notDryRun accepts a report whose steps all finished SKIPPED, UNDEFINED or AMBIGUOUS, and names the steps that ran otherwise", () => {
+  const msgs = (...statuses: string[]) => [
+    { testCase: { id: "c0", pickleId: "p0", testSteps: statuses.map((_, i) => ({ id: `t${i}` })) } },
+    { testCaseStarted: { id: "r0", testCaseId: "c0" } },
+    ...statuses.map((status, i) => ({ testStepFinished: { testCaseStartedId: "r0", testStepId: `t${i}`, testStepResult: { status } } })),
+  ].map((m) => JSON.stringify(m)).join("\n");
+  assert.equal(notDryRun(msgs("SKIPPED", "UNDEFINED", "AMBIGUOUS")), null);
+  assert.equal(notDryRun(""), null);
+  assert.equal(notDryRun(msgs("PASSED", "PASSED", "FAILED")), "steps ran: 2 PASSED, 1 FAILED");
+  assert.equal(notDryRun(JSON.stringify({ testCase: { id: "c0", pickleId: "p0", testSteps: [] } })), "1 test case never started");
 });

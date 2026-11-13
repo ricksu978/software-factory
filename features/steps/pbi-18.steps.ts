@@ -267,7 +267,9 @@ When("the cell runs", { timeout: 60_000 }, async function () {
 /** Runs the engine against the run setUp built. A failure lands in ctx.error, so Thens can assert on it. */
 export async function runTheCell(world: object): Promise<void> {
   const c = ctx(world);
-  // bdd.run is wrapped in `sh -c` (PBI 185), so the `--dry-run` Red adds lands in $0 and its dry run copies the run's report.
+  // bdd.run is wrapped in `sh -c` (PBI 185), so the `--dry-run` Red adds lands in $0, and its dry run copies the run's
+  // report with every step SKIPPED, as cucumber-js reports a dry run, which Red checks.
+  const dryOrRun = (name: string) => `sh -c 'mkdir -p reports && if [ "$0" = --dry-run ]; then sed -E "s/\\"status\\":\\"[A-Z]+\\"/\\"status\\":\\"SKIPPED\\"/g" "${fwd(join(c.fixtures, name))}" > reports/bdd.ndjson; else cp "${fwd(join(c.fixtures, name))}" reports/bdd.ndjson; fi'`;
   const run = (cmd: string) => `mkdir -p reports && cp "${fwd(join(c.fixtures, cmd))}" reports/bdd.ndjson`;
   try {
     const file = join(repo, "src/cell/engine.ts");
@@ -300,7 +302,7 @@ export async function runTheCell(world: object): Promise<void> {
       },
       sop: loadSop(readFileSync(sopFile, "utf8")),
       config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
-        bdd: { parse: run("parse.ndjson"), run: `sh -c '${run("run.ndjson")}'`, report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
+        bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
         risk: policy("risk", "Low by default.\n"), dod: policy("dod", c.dod) },
       now: () => new Date(),
