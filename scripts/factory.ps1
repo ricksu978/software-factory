@@ -30,7 +30,9 @@ if ($LASTEXITCODE) {
 & "$PSScriptRoot/set-local-secrets.ps1" -MissingOnly
 if ($LASTEXITCODE) { throw 'Some AppHost parameters are still missing, and the factory waits on them forever.' }
 
-# Cells run factory-cell:local, so it's rebuilt from this checkout. Docker's cache makes an unchanged build quick.
+# The egress proxy and cells run factory-cell:local, so it's built here first, from this checkout. Once the worker starts,
+# it builds the image again from main's fetched commit and keeps it current with main (PBI 210). Docker's cache makes
+# an unchanged build quick.
 'Building factory-cell:local...'
 docker build -q -f cell/Dockerfile -t factory-cell:local . | Out-Null
 if ($LASTEXITCODE) { throw 'Building factory-cell:local failed.' }

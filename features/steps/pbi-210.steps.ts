@@ -397,7 +397,9 @@ Then("the image's {string} matches commit {string}, not commit {string}", functi
 Then("the operator's checkout still has its uncommitted edit to {string}", function (path: string) {
   const c = ctx(this);
   assert.equal(readOr(join(c.checkout, path)), c.checkoutEdit?.text, `the checkout's ${path} lost its edit`);
-  assert.match(git(c.checkout, "status", "--porcelain", "--", path), /^ M /, `the checkout's ${path} no longer shows as edited`);
+  // Read untrimmed: git() trims, which would drop the leading space that marks an edit not staged.
+  const status = execFileSync("git", ["status", "--porcelain", "--", path], { cwd: c.checkout, env: gitEnv, encoding: "utf8" });
+  assert.match(status, /^ M /, `the checkout's ${path} no longer shows as edited`);
 });
 
 Then("the operator's checkout is still on branch {string} at commit {string}", function (branch: string, name: string) {

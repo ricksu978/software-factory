@@ -110,6 +110,18 @@ describe("floorPage", () => {
     assert.match(html, /<a href="\/activity">/);
     assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
+
+  // PBI 210: the commit the cell image was built from, and a restart's commit when main changed the control plane's code.
+  test("shows the cell image's commit, and asks for a restart only when main needs one", () => {
+    const floor = (cellImage: { built: string | null; restart: string | null } | null) =>
+      floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false, cellImage }, null);
+    assert.doesNotMatch(floor(null), /cell image/);
+    const built = floor({ built: "aaa1111222233334444", restart: null });
+    assert.match(built, /cell image was built from commit <code>aaa1111<\/code>/);
+    assert.doesNotMatch(built, /restart is needed/);
+    assert.match(floor({ built: null, restart: null }), /built from commit not known yet/);
+    assert.match(floor({ built: "aaa1111", restart: "bbb2222333" }), /A restart is needed to pick up main's commit <code>bbb2222<\/code>/);
+  });
 });
 
 describe("issueRef", () => {

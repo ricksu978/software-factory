@@ -4,8 +4,11 @@
 // its own transitions onto the board, as the control plane mirrors its own. `aspire run` starts it as the worker
 // resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
 // on a connection of its own (PBI 157). One that can't take it stands by, and one whose lock connection closes exits.
-// Each scheduler tick records the worker's heartbeat, the time it started, in worker_heartbeat (PBI 158).
+// Each scheduler tick records the worker's heartbeat, the time it started, in worker_heartbeat (PBI 158). It builds the
+// cell image from `main`'s fetched commit before the egress proxy, which runs from it, and then keeps it current with
+// `main` on each poll, so a merged cell-side change reaches the next cell without a restart (PBI 210).
 import { App } from "@octokit/app";
+import { join } from "node:path";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
@@ -20,6 +23,7 @@ import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
+import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
 
@@ -55,6 +59,8 @@ export type WorkerDeps = {
   lockRetryMs?: number;
   /** Where the worker's log lines go. The console by default. */
   log?: Pick<Console, "log" | "warn" | "error">;
+  /** Keeps the cell image current with `main` (PBI 210). Without it, the worker leaves the image as it is. */
+  cellImage?: Omit<CellImageDeps, "pool" | "log">;
 };
 
 export type Worker = {
@@ -187,6 +193,8 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
 
   /** Sets up the egress proxy, then starts the jobs. Called once the worker holds the lock. */
   const work = async () => {
+    // A failed build is logged and leaves the image there was, so the worker still starts on it. A later poll tries again.
+    if (d.cellImage) await attempt("building the cell image from main", () => startCellImage({ ...d.cellImage!, pool: d.pool, log }), log);
     // Cells reach nothing but GitHub, npm, the cell API and the blobs, through the egress proxy (Task 13).
     try {
       await d.egress({ image: d.image, controlUrl: d.controlUrl, blob: d.blob });
@@ -273,6 +281,10 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
     loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
       () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split }), runs, log));
   }
+  if (d.cellImage) {
+    const cellImage = { ...d.cellImage, pool: d.pool, log };
+    loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, "polling main for the cell image", () => pollCellImage(cellImage), runs, log));
+  }
   return async () => {
     await Promise.all(loops.map((stop) => stop()));
     for (const off of hooks) off();
@@ -304,6 +316,8 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
     // One split cache for every poll, so a re-gate of item text already split doesn't ask the coding model again.
     split: { sop, agent: runAgent, seen: new Map() },
     killFlag: env.FACTORY_KILL === "1", secret, sopVersion: sop.version,
+    // The worker runs from the operator's checkout, which `main` is fetched into. Its working tree is never touched.
+    cellImage: { checkout: join(import.meta.dirname, "..", ".."), builder: dockerBuilder(), tag: image },
   });
 }
 

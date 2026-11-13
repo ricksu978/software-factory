@@ -6,7 +6,16 @@
 // restart would pick up. It builds from the fetched commit, never from the operator's checkout's working tree, branch or
 // local commits. Each image records its commit in REVISION_LABEL. A rebuild logs REBUILT_EVENT, naming the old and the
 // new commit. A failed build keeps the current image, logs BUILD_FAILED_EVENT and is tried again on a later poll.
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import type pg from "pg";
+import { readCellImage, writeCellImage } from "../store/cell-image.ts";
+import { appendEvent } from "../store/events.ts";
+
+const run = promisify(execFile);
 
 /** The tag cells run. The launcher's `docker run` resolves it as each cell starts, so a running cell keeps its image. */
 export const CELL_IMAGE = "factory-cell:local";
@@ -34,8 +43,120 @@ export type CellImageDeps = {
   log?: Pick<Console, "log" | "error">;
 };
 
+/** The files only a cell runs. A change to nothing else needs no restart, only a new cell image. */
+export const CELL_SIDE = ["sop/", "policy/", "cell/", "src/cell/"];
+/** Files neither the control plane nor the worker runs, nor a cell: docs, the factory's own scenarios and tests. */
+const INERT = ["docs/", "features/", "reports/"];
+
+/**
+ * Whether a change to `path` leaves the control plane and the worker as they are. Cell-side files and files no process
+ * runs do. Anything else, shared code such as src/core/ included, is code the control plane or the worker may run.
+ */
+export function needsNoRestart(path: string): boolean {
+  if (CELL_SIDE.some((p) => path.startsWith(p)) || INERT.some((p) => path.startsWith(p))) return true;
+  if (!path.includes("/") && path.endsWith(".md")) return true;
+  return path.endsWith(".test.ts");
+}
+
+const git = async (cwd: string, args: string[], env?: NodeJS.ProcessEnv) =>
+  (await run("git", args, { cwd, env: env && { ...process.env, ...env }, maxBuffer: 64 * 1024 * 1024 })).stdout.trim();
+
+/** Fetches `main` into the checkout's remote-tracking ref, leaving its working tree, index, branch and HEAD alone. */
+async function fetchMain(d: CellImageDeps): Promise<string> {
+  const remote = d.remote ?? "origin";
+  const branch = d.branch ?? "main";
+  const ref = `refs/remotes/${remote}/${branch}`;
+  await git(d.checkout, ["fetch", "--quiet", "--no-tags", remote, `+refs/heads/${branch}:${ref}`]);
+  return git(d.checkout, ["rev-parse", "--verify", `${ref}^{commit}`]);
+}
+
+const worker = { actor: "system", actorId: "worker", itemId: null } as const;
+
+async function inTransaction(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<void>): Promise<void> {
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await fn(c);
+    await c.query("commit");
+  } catch (e) {
+    await c.query("rollback").catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
+/**
+ * Builds the image from `commit`'s files, written out of the checkout's object store into a temporary directory through
+ * an index of its own, so neither the checkout's index nor its working tree is read or written. True when it built.
+ * A success records `commit` as the built one, and logs REBUILT_EVENT when `announce` is set. A failure logs
+ * BUILD_FAILED_EVENT and keeps the image there was.
+ */
+async function build(d: CellImageDeps, from: string | null, commit: string, announce: boolean): Promise<boolean> {
+  const log = d.log ?? console;
+  const dir = await mkdtemp(join(tmpdir(), "factory-cell-"));
+  try {
+    const context = join(dir, "context");
+    const index = { GIT_INDEX_FILE: join(dir, "index") };
+    await git(d.checkout, ["read-tree", commit], index);
+    await git(d.checkout, ["checkout-index", "--all", "--force", `--prefix=${context.split("\\").join("/")}/`], index);
+    await d.builder.build({ tag: d.tag ?? CELL_IMAGE, context, labels: { [REVISION_LABEL]: commit } });
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    log.error(`Building the cell image from ${commit} failed, so cells keep the image built from ${from ?? "an unknown commit"}. A later poll tries again:`, error);
+    await inTransaction(d.pool, (c) => appendEvent(c, { ...worker, kind: BUILD_FAILED_EVENT, payload: { commit, error } }));
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  await inTransaction(d.pool, async (c) => {
+    await writeCellImage(c, { built: commit });
+    if (announce) await appendEvent(c, { ...worker, kind: REBUILT_EVENT, payload: { from, to: commit } });
+  });
+  log.log(`The cell image was built from ${commit}${from && from !== commit ? `, replacing the one built from ${from}` : ""}.`);
+  return true;
+}
+
 /** Builds the cell image from `main`'s fetched commit as the worker starts, and records that commit as the last seen. */
-export async function startCellImage(_d: CellImageDeps): Promise<void> {}
+export async function startCellImage(d: CellImageDeps): Promise<void> {
+  const head = await fetchMain(d);
+  // The control plane and the worker now run main's commit, so no restart is needed yet.
+  await writeCellImage(d.pool, { started: head, restart: null });
+  await build(d, (await readCellImage(d.pool))?.built ?? null, head, false);
+}
 
 /** One poll: fetches `main`, then rebuilds the cell image, or holds the rebuild for a restart, as the header says. */
-export async function pollCellImage(_d: CellImageDeps): Promise<void> {}
+export async function pollCellImage(d: CellImageDeps): Promise<void> {
+  const head = await fetchMain(d);
+  const s = await readCellImage(d.pool);
+  if (!s) return startCellImage(d);
+  // Measured from the commit the control plane and the worker started at, so a cell-side commit after one that changes
+  // their code still waits for the restart, and the restart picks up main's newest commit.
+  const changed = head === s.started ? [] : (await git(d.checkout, ["diff", "--name-only", s.started, head])).split("\n").filter(Boolean);
+  const held = changed.filter((p) => !needsNoRestart(p));
+  if (held.length) {
+    if (s.restart !== head) {
+      await writeCellImage(d.pool, { restart: head });
+      (d.log ?? console).log(`main is at ${head}, which changes code the control plane or the worker runs (${held.slice(0, 5).join(", ")}), so the cell image waits for a restart.`);
+    }
+    return;
+  }
+  if (s.restart !== null) await writeCellImage(d.pool, { restart: null });
+  if (s.built !== head) await build(d, s.built, head, true);
+}
+
+/** Builds with the local Docker, from the commit's files, with the Dockerfile the commit holds. */
+export function dockerBuilder(): ImageBuilder {
+  return {
+    async build({ tag, context, labels }) {
+      const args = ["build", "--quiet", "-f", join(context, "cell", "Dockerfile"), "-t", tag];
+      for (const [k, v] of Object.entries(labels)) args.push("--label", `${k}=${v}`);
+      try {
+        await run("docker", [...args, context], { maxBuffer: 64 * 1024 * 1024 });
+      } catch (e) {
+        const stderr = (e as { stderr?: string }).stderr?.trim();
+        throw new Error(stderr ? stderr.split("\n").slice(-20).join("\n") : e instanceof Error ? e.message : String(e), { cause: e });
+      }
+    },
+  };
+}
