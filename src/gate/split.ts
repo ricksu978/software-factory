@@ -7,7 +7,7 @@ import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { fenced } from "../core/fence.ts";
 import type { FileSplitDeps } from "./file-split.ts";
-import { jsonLines } from "../policy/policy.ts";
+import { jsonLines, type Policy } from "../policy/policy.ts";
 
 /** One proposed child. `criteria` holds 1-based indices of the parent's acceptance criteria, `needs` 1-based child numbers. */
 export type SplitChild = { title: string; body: string; criteria: number[]; needs: number[] };
@@ -45,8 +45,13 @@ export const SPLIT_HEADING = "The factory proposes splitting this item into smal
 
 const SPLIT_TIMEOUT_MS = 120_000;
 
-/** The coding model's instructions: the parent as fenced data, then the shape of the one JSON line it answers. */
-export function splitPrompt(item: FactoryItem): string {
+/**
+ * The coding model's instructions: the parent as fenced data, then the shape of the one JSON line it answers.
+ * `dor` is the dor.md the readiness judge reads for the item, the repo's own or the factory default (PBI 202).
+ * Not yet used: PBI 202's Red stage adds the parameter only.
+ */
+export function splitPrompt(item: FactoryItem, dor?: Pick<Policy, "text" | "criteria">): string {
+  void dor;
   const data = JSON.stringify({ title: item.title, body: item.body, acceptanceCriteria: item.acceptanceCriteria }, null, 2);
   return [
     "A team's backlog item is too big for one Sprint. Propose splitting it into 2 to 4 smaller child items.",
