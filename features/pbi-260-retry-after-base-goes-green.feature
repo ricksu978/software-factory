@@ -136,20 +136,26 @@ Feature: An item stopped by a red base retries by itself once CI on the base pas
 
   Rule: The re-queued item merges the base when it's claimed, so a conflict that arose while it waited is resolved then
 
-    @ac-3
+    @ac-3 @db
     Scenario: The re-queued item's claim merges the newer base before its stage runs
-      Given item 482 on base "main" was re-queued after CI passed on commit "b4se002" of "main"
+      Given item 482 on base "main" waits in NeedsInput on a question saying the base fails in the cell at commit "b4se001"
+      And the item stopped at the green stage
       And "origin/main" is at commit "b4se002"
-      When the factory claims the run and its cell runs
+      And CI passes on commit "b4se002" of "main"
+      When the poller runs once
+      And the scheduler claims the item and its cell runs
       Then the cell merged commit "b4se002" into the item's branch
       And it merged before the green stage began
 
-    @ac-3
+    @ac-3 @db
     Scenario: A conflict with the base that arose while the item waited is resolved on the claim
-      Given item 482 on base "main" was re-queued after CI passed on commit "b4se002" of "main"
+      Given item 482 on base "main" waits in NeedsInput on a question saying the base fails in the cell at commit "b4se001"
+      And the item stopped at the green stage
       And "origin/main" is at commit "b4se002"
       And the item's branch conflicts with commit "b4se002"
-      When the factory claims the run and its cell runs
+      And CI passes on commit "b4se002" of "main"
+      When the poller runs once
+      And the scheduler claims the item and its cell runs
       Then the cell resolved the conflict before the green stage began
       And the item's branch holds commit "b4se002"
       And the green stage runs on the merged branch
