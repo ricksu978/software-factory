@@ -339,6 +339,17 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
     assert.match(rows[1], /<td>5m 0s so far<\/td>/);
   });
 
+  test("an attempt left open by a cell that died shows as stopped, and a live one as running (PBI 209)", () => {
+    const deadRow = { ...stage, ended_at: null, status: "started", started_at: new Date("2026-11-09T15:30:00Z") };
+    const liveRow = { ...stage, attempt: 2, ended_at: null, status: "started", started_at: new Date("2026-11-10T17:30:00Z") };
+    const html = runDetailPage(detail({ stages: [deadRow, liveRow], run: openRun, now: new Date("2026-11-10T17:35:00Z") }), null);
+    const rows = html.split("<h2>Stages</h2>")[1].split("</tbody>")[0].split("<tr>").slice(2);
+    assert.match(rows[0], /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
+    assert.match(rows[1], /<td>build<\/td><td>2<\/td><td>running<\/td>/);
+    const queued = rowOf(runDetailPage(detail({ stages: [deadRow], run: openRun, item: { ...detail({}).item, state: "Queued" } }), null), "Stages");
+    assert.match(queued, /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
+  });
+
   test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
     const row = rowOf(runDetailPage(detail({ zone: "Asia/Tokyo" }), null), "Readiness checks");
     assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5<\/td><td title="1240 in, 80 out">1.2k in, 80 out<\/td><td title="\$0.055">\$0.06<\/td>/);

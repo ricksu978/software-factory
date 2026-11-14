@@ -244,21 +244,67 @@ export type MeteredStage = {
   usage: AgentResult["usage"];
 };
 
+/** PBI 209: the most often a running stage's transcript so far is uploaded. */
+export const TRANSCRIPT_UPLOAD_MS = 15_000;
+
+/** PBI 209: where a running stage's transcript so far goes, the attempt's usual path, as CellApi.upload puts it. */
+export type TranscriptUploads = {
+  upload(b: { kind: "transcript"; stageId: string; attempt: number; body: string }): Promise<void>;
+};
+
 /**
  * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
  * is an error, and the model is never asked, so no call can go unrecorded.
+ *
+ * PBI 209: with `uploads`, while an attempt is open its transcript so far, every message its agent calls have written,
+ * is uploaded on a setInterval of TRANSCRIPT_UPLOAD_MS, when messages have arrived since the last upload that worked.
+ * A failed upload is logged and skipped, and never fails the call. close() stops the uploads, and settled() resolves
+ * once none is in flight, so the complete transcript the caller uploads after it lands last.
  */
-export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
+export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>, uploads?: TranscriptUploads): {
   open(stageId: string, attempt: number): void;
   close(): MeteredStage | null;
   ask(a: AgentArgs): Promise<AgentResult>;
+  settled(): Promise<void>;
 } {
   let open: MeteredStage | null = null;
+  // The open attempt's running calls, each the lines it has written so far.
+  let running = new Set<string[]>();
+  // True when the transcript so far has changed since the last upload that worked.
+  let fresh = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let inflight: Promise<void> = Promise.resolve();
+  let busy = false;
+
+  const tick = (stage: MeteredStage, calls: Set<string[]>) => {
+    if (!uploads || !fresh || busy) return;
+    const body = stage.transcript + [...calls].map((lines) => lines.map((l) => l + "\n").join("")).join("");
+    if (!body) return;
+    fresh = false;
+    busy = true;
+    inflight = uploads.upload({ kind: "transcript", stageId: stage.stageId, attempt: stage.attempt, body }).catch((e) => {
+      // The next tick tries again, even if nothing new arrives by then.
+      if (open === stage) fresh = true;
+      console.error(`transcript upload for ${stage.stageId}-${stage.attempt} failed, trying again in ${TRANSCRIPT_UPLOAD_MS / 1000}s:`, e);
+    }).finally(() => { busy = false; });
+  };
+
   return {
     open(stageId, attempt) {
-      open = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      clearInterval(timer);
+      const stage: MeteredStage = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      const calls = new Set<string[]>();
+      open = stage;
+      running = calls;
+      fresh = false;
+      if (uploads) {
+        timer = setInterval(() => tick(stage, calls), TRANSCRIPT_UPLOAD_MS);
+        timer.unref?.();
+      }
     },
     close() {
+      clearInterval(timer);
+      timer = undefined;
       const c = open;
       open = null;
       return c;
@@ -266,13 +312,23 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
     async ask(a) {
       const stage = open;
       if (!stage) throw new Error("An AI call was made while no stage was open, so its cost would go unrecorded");
-      const r = await agent(a);
+      const calls = running;
+      const lines: string[] = [];
+      calls.add(lines);
+      const r = await agent({ ...a, onMessage: (l) => {
+        lines.push(l);
+        if (open === stage) fresh = true;
+        a.onMessage?.(l);
+      } }).finally(() => calls.delete(lines));
       stage.costUsd += r.costUsd;
       stage.tokensIn += r.tokensIn;
       stage.tokensOut += r.tokensOut;
       stage.transcript += r.transcript;
       if (r.usage) stage.usage = r.usage;
       return r;
+    },
+    async settled() {
+      await inflight;
     },
   };
 }
@@ -309,7 +365,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
-  const meter = stageMeter(d.agent);
+  // PBI 209: the meter uploads a running attempt's transcript so far to the attempt's usual path.
+  const meter = stageMeter(d.agent, api);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
   let current: {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
@@ -366,6 +423,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!c) return;
     current = null;
     const m = meter.close()!;
+    // PBI 209: an upload of the transcript so far that's still going lands before the complete one, never after it.
+    await meter.settled();
     // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
     // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
     const upload = async (kind: "transcript" | "report", body: string) => {
