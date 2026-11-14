@@ -1031,7 +1031,7 @@ Stage behaviour, from spec §6 rows 1 to 7:
     - **Origin.** A signed-in `POST /items/:id/signoff` with `Origin: https://evil.example`, or with no `Origin`, gets 403 and changes nothing.
   - **Roles.** A viewer posting `/overrides` gets 403. An operator posting `/overrides` with an empty reason gets 400.
   - **Sign-off.** A sign-off from a user without `product_owner` gets 403. A sign-off from a product owner answers the open `sign_off` question, comments the decision on the PBI, and logs an event with `actor: "human"` and the user id.
-  - **Floor.** Floor lists every InProgress, SignOff, NeedsInput and InReview item. Each row shows the current stage, time in stage, the sum of `stage_run.cost_usd` and the last agent message, and a held item or active override shows a badge. The last agent message is the newest non-empty `stage_run.message` on the item's open run.
+  - **Floor.** Floor lists every InProgress, SignOff, NeedsInput and InReview item. Each row shows the current stage, time in stage, the sum of `stage_run.cost_usd` and the last agent message, and a held item or active override shows a badge. The last agent message is the newest non-empty `stage_run.message` on the item's open run that an agent sent. The factory's `LEASE_RAN_OUT` note on an attempt it closed isn't one, so Floor skips it, and Run detail still shows it on that attempt (PBI 239).
   - **Run detail.** Run detail shows:
     - the SOP version and config sha;
     - each policy file used, marked repo or default, with every criterion's result and reason from `policy_result`;

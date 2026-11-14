@@ -544,7 +544,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
   <div class="tbl"><table>
     <thead><tr><th>View</th><th>Shows</th></tr></thead>
     <tbody>
-      <tr><td>Floor</td><td>Every item in flight, with its stage, time in stage, cost so far and last agent message. Above it, three strips: what waits on you, the next five items in the factory queue, and items the readiness gate turned away, with its reasons. Updates live from the event log.</td></tr>
+      <tr><td>Floor</td><td>Every item in flight, with its stage, time in stage, cost so far and last agent message. The factory's own note on an attempt whose cell's lease ran out isn't an agent message, so Floor skips it and Run detail shows it. Above it, three strips: what waits on you, the next five items in the factory queue, and items the readiness gate turned away, with its reasons. Updates live from the event log.</td></tr>
       <tr><td>Inbox</td><td>Items at Needs input, scenarios waiting for sign-off and PRs waiting on a person, oldest first. You answer here, and the answer is also posted on the backlog item.</td></tr>
       <tr><td>Flow</td><td>Throughput per day, cycle time per stage, WIP over time, and the WIP formula's inputs next to its output.</td></tr>
       <tr><td>Quality</td><td>First-pass yield, meaning items merged with no human-requested changes. Self-review rounds per item, and bugs filed later against factory items. For BDD, scenarios per item, sign-offs that asked for changes, and locked scenarios reopened after sign-off. For risk, PRs per tier and bugs later traced to each tier, which shows whether the classifier puts too much in Low.</td></tr>
