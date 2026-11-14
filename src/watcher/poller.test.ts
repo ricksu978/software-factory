@@ -841,5 +841,27 @@ describe("pollOnce", dbTest, () => {
         assert.deepEqual(q, { closed_at: null, closed_note: null });
       }
     });
+
+    test("a NeedsInput PR with unaddressed trusted changes, an open trusted thread or a conflict isn't merged, and the item stays on its question (PBI 262)", async () => {
+      await allow("octo");
+      await allow("kim");
+      const seen = "2026-11-06T10:00:00Z";
+      const a = await ready("NeedsInput");
+      const b = await ready("NeedsInput");
+      const c = await ready("NeedsInput");
+      for (const h of [a, b, c]) await db.pool.query("update run set reviews_seen_at = $2 where id = $1", [h.run, seen]);
+      a.p.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:30:00Z", author: "kim", body: "Fix it." });
+      b.p.reviews.push({ state: "commented", submittedAt: "2026-11-06T10:30:00Z", author: "kim" });
+      host.reviewComments.set(`${b.p.repo}#${b.pr}`, [{ threadId: "t1", path: "a.ts", line: 1, author: "kim", body: "Cite the probe.", submittedAt: "2026-11-06T10:30:00Z" }]);
+      c.p.mergeable = false;
+      for (const h of [a, b, c]) await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [h.id]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b, c]) {
+        assert.equal((await row(h.ext)).state, "NeedsInput");
+        const q = (await db.pool.query("select closed_at, closed_note from question where item_id = $1", [h.id])).rows[0];
+        assert.deepEqual(q, { closed_at: null, closed_note: null });
+      }
+    });
   });
 });

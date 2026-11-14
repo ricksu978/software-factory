@@ -229,8 +229,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
-      await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+    } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
+      // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
+      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262).
+      if (row.state === "InReview") {
+        await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+      }
     } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
       // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
       // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
