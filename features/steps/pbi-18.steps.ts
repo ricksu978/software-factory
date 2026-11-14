@@ -255,9 +255,11 @@ function cellApi(c: Ctx) {
     async pr(b: Record<string, any>) { record("/pr", b); },
     async checks(sha: string) {
       record("/checks", { sha });
-      if (c.checks) return c.checks(sha);
-      if (c.ciOldOnly) return sha === c.startHead ? "success" : "failure";
-      return "success";
+      // A scenario's CI answers a status alone, or the cell API's whole answer with its failed checks (PBI 232).
+      const answer = (s: unknown) => (typeof s === "string" ? { status: s, failedChecks: [] } : s);
+      if (c.checks) return answer(await c.checks(sha));
+      if (c.ciOldOnly) return answer(sha === c.startHead ? "success" : "failure");
+      return answer("success");
     },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
   };

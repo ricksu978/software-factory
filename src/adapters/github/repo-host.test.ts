@@ -305,6 +305,28 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("failedChecksOnSha names each failed run with its URL and the last 100 lines of its job's log, or null when the log can't be read", async () => {
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`);
+    const runs = [
+      { id: 1, name: "build", status: "completed", conclusion: "success", html_url: "https://ci/1" },
+      { id: 2, name: "unit", status: "completed", conclusion: "failure", html_url: "https://ci/2" },
+      { id: 3, name: "lint", status: "completed", conclusion: "timed_out", html_url: null, details_url: "https://ci/3" },
+      { id: 4, name: "deploy", status: "completed", conclusion: "cancelled", html_url: "https://ci/4" },
+      { id: 5, name: "e2e", status: "in_progress", conclusion: null, html_url: "https://ci/5" },
+      { id: 6, name: "docs", status: "completed", conclusion: "neutral", html_url: "https://ci/6" },
+    ];
+    const logs: Record<number, string | ArrayBuffer> = { 2: lines(250).join("\n") + "\n", 3: new TextEncoder().encode(lines(12).join("\r\n")).buffer as ArrayBuffer };
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => logs[p.job_id] ?? (() => { throw Object.assign(new Error("404"), { status: 404 }); })(),
+    });
+    assert.deepEqual(await host.failedChecksOnSha("o/r", "abc"), [
+      { name: "unit", url: "https://ci/2", log: lines(250).slice(150).join("\n") },
+      { name: "lint", url: "https://ci/3", log: lines(12).join("\n") },
+      { name: "deploy", url: "https://ci/4", log: null },
+    ]);
+  });
+
   test("checksOnHead reads a head with no checks at all as pending", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,

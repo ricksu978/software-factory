@@ -492,12 +492,39 @@ describe("cell API", dbTest, () => {
     host.checks.set(`${repo}@0a0a0a0`, "success");
     assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0ff0ff0")).status, 400);
     assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0a0a0a0")).status, 400);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success" });
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success", failedChecks: [] });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending", failedChecks: [] });
     clock = new Date(at.getTime() + 599_000);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending", failedChecks: [] });
     clock = new Date(at.getTime() + 600_000);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none", failedChecks: [] });
+  });
+
+  test("checks: CI that failed answers each failed check with its URL and log, from the repo host (PBI 232)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    host.checks.set(`${repo}@abc1234`, "failure");
+    const failed = [{ name: "unit", url: "https://ci/unit", log: "1 failing" }, { name: "lint", url: "https://ci/lint", log: null }];
+    host.failedChecks.set(`${repo}@abc1234`, failed);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "failure", failedChecks: failed });
+  });
+
+  test("checks: CI that failed still answers failure, with no detail, when reading the failed checks errors (PBI 232)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    host.checks.set(`${repo}@abc1234`, "failure");
+    const original = host.failedChecksOnSha;
+    const originalError = console.error;
+    host.failedChecksOnSha = async () => { throw new Error("502 Bad Gateway"); };
+    console.error = () => {};
+    try {
+      const res = await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234");
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { status: "failure", failedChecks: [] });
+    } finally {
+      host.failedChecksOnSha = original;
+      console.error = originalError;
+    }
   });
 
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {

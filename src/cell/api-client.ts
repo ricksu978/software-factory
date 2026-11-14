@@ -1,6 +1,7 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
 import type { ItemEvent } from "../core/states.ts";
+import type { FailedCheck } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
 
@@ -9,6 +10,11 @@ export class LeaseLost extends Error {
 }
 
 export type CheckStatus = "pending" | "success" | "failure" | "none";
+/**
+ * The cell API's answer about CI on a commit. On failure it names each failed check with its URL and the last 100
+ * lines of its log, or a null log when the repo host couldn't give it (PBI 232). Otherwise `failedChecks` is empty.
+ */
+export type CheckAnswer = { status: CheckStatus; failedChecks: FailedCheck[] };
 export type StageReport = {
   stageId: string; attempt: number; status: "started" | "passed" | "failed" | "stopped"; model: string;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
@@ -33,7 +39,7 @@ export type CellApi = {
   transition(b: TransitionBody): Promise<void>;
   policyResults(b: PolicyResults): Promise<void>;
   pr(b: { prNumber: number; prUrl: string }): Promise<void>;
-  checks(sha: string): Promise<CheckStatus>;
+  checks(sha: string): Promise<CheckAnswer>;
   /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
@@ -68,7 +74,10 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     pr: async (b) => void (await call("POST", "/pr", b)),
     release: async () => void (await call("POST", "/release", {})),
     moveSop: async (b) => void (await call("POST", "/sop-move", b)),
-    checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
+    checks: async (sha) => {
+      const a = await call("GET", `/checks?sha=${encodeURIComponent(sha)}`);
+      return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
+    },
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
       const res = await fetch(url, { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body });
