@@ -5,7 +5,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { startServer } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
-import { claimNext, expireLeases, transitionItem } from "../store/items.ts";
+import { claimNext, expireLeases, LEASE_RAN_OUT, transitionItem } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { mirrorBoard } from "./board.ts";
 import { cellApi, runToken } from "./cell-api.ts";
@@ -394,6 +394,33 @@ describe("cell API", dbTest, () => {
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'red', 1, 'passed'), ($1, 'green', 1, 'stopped')", [cell.runId]);
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'green', 2, 'failed')", [cell.runId]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
+  });
+
+  test("context offers no resume for an attempt closed because its cell's lease ran out, so the next cell starts the stage fresh (PBI 239)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query(
+      "insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'red', 1, 'passed', null), ($1, 'green', 1, 'stopped', $2)",
+      [cell.runId, LEASE_RAN_OUT],
+    );
+    const body = (await send(cell.runId, cell.token, "GET", "/context")).body;
+    assert.equal(body.resume, null);
+    assert.equal(body.stageAttempts.green, 1);
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 2, 'stopped', 'work in progress')", [cell.runId]);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 2 });
+  });
+
+  test("context still resumes a lease-message attempt whose cell a restart's wrap-up stopped (PBI 140, PBI 239)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 1, 'stopped', $2)", [cell.runId, LEASE_RAN_OUT]);
+    const item = (await runRow(cell.runId)).item_id;
+    const expired = (reason?: string) => db.pool.query(
+      "insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'scheduler', $1, 'transition', $2)",
+      [item, JSON.stringify({ ...(reason ? { reason } : {}), from: "InProgress", to: "Queued", event: "lease_expired" })],
+    );
+    await expired("restart");
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+    await expired();
     assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
   });
 
