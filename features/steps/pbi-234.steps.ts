@@ -198,10 +198,3 @@ Then("the PR reviewer never reviewed the PR addresser's fix", function () {
   assert.ok(c.reviewerCalls.length > 0, "the PR reviewer never ran");
   assert.ok(c.reviewerCalls.every((r) => r.head !== fix && !r.prompt.includes(fix)), `the PR reviewer reviewed ${fix}, the PR addresser's fix`);
 });
-
-Then("address ran {int} time", function (n: number) {
-  const run = cell(this);
-  assert.equal(run.error, null, `the cell failed: ${String(run.error)}`);
-  const starts = run.calls.filter((x) => x.route === "/stage" && x.body.status === "started" && x.body.stageId === "address");
-  assert.equal(starts.length, n);
-});

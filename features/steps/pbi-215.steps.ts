@@ -310,12 +310,12 @@ Then("the question names the base commit {string}", function (label: string) {
   assert.ok(q.includes(s.slice(0, 7)), `the question doesn't name the base commit ${s.slice(0, 7)}: ${q}`);
 });
 
+// Shared with PBI 212, whose cell ends sending no transition at all.
 Then("the item doesn't move to Failed", function () {
   const c = cell(this);
   settled(c);
-  const t = c.calls.filter((x) => x.route === "/transition").at(-1);
-  assert.ok(t, "the cell sent no transition");
-  assert.notEqual(next("InProgress", t.body.event as ItemEvent), "Failed");
+  const moves = c.calls.filter((x) => x.route === "/transition").map((x) => x.body.event as ItemEvent);
+  assert.ok(!moves.some((e) => next("InProgress", e) === "Failed"), `the item moved to Failed: ${JSON.stringify(moves)}`);
 });
 
 Then("the question doesn't say Green failed after its attempts", function () {
