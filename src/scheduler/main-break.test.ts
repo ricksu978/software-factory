@@ -21,7 +21,34 @@ describe("failingTests (PBI 255)", () => {
     assert.deepEqual(failingTests(log), ["reads the board"]);
   });
 
-  test("names nothing for a log with no TAP lines, or no log", () => {
+  // Node 26's spec reporter, as `npm test` prints it on CI, with GitHub's timestamps and the reporter's colours.
+  const spec = [
+    "▶ suite one", "  ✖ parses the config (0.58ms)", "  ✔ passes (0.10ms)", "✖ suite one (1.22ms)", "✖ reads the board (0.11ms)",
+    "⚠ later (0.10ms) # TODO", "ℹ tests 4", "ℹ fail 2", "", "✖ failing tests:", "", "test at src/a.test.ts:3:31",
+    "\x1b[31m✖ parses the config (0.58ms)\x1b[39m", "  AssertionError [ERR_ASSERTION]: 1 == 2", "      at TestContext.<anonymous> (file:///src/a.test.ts:3:70)",
+    "", "test at src/a.test.ts:4:1", "✖ reads the board (0.11ms)", "  Error: x", "", "test at src/a.test.ts:5:6", "⚠ later (0.10ms) # TODO", "  Error: t",
+  ].map((l) => `2026-11-14T10:00:00.1234567Z ${l}`).join("\n");
+
+  test("names each failing test in the spec reporter's failing tests list, and no suite or TODO", () => {
+    assert.deepEqual(failingTests(spec), ["parses the config", "reads the board"]);
+  });
+
+  test("names each scenario cucumber's summary lists as failed or ambiguous, with its file and line", () => {
+    const log = [
+      "##[group]Run npm run bdd -- --tags \"not @local\"", "##[endgroup]", "FA.", "", "Ambiguous scenarios:", "  1) Two steps match # features/a.feature:4",
+      "       Given amb", "           Multiple matching step definitions found:", "             • amb # features/steps/s.ts:3", "",
+      "Failed scenarios:",
+      "  1) The stage reads the PR's diff at the head the reviewer reviewed before it posts the review # features/pbi-266-review-findings-outside-diff.feature:27",
+      "       Given a thing # features/steps/s.ts:2", "           Error: boom", "", "3 scenarios (1 passed, 1 ambiguous, 1 failed)", "3 steps (1 passed, 1 ambiguous, 1 failed)",
+      "##[error]Process completed with exit code 1.",
+    ].map((l) => `2026-11-14T10:00:00.1234567Z ${l}`).join("\n");
+    assert.deepEqual(failingTests(log), [
+      "Two steps match (features/a.feature:4)",
+      "The stage reads the PR's diff at the head the reviewer reviewed before it posts the review (features/pbi-266-review-findings-outside-diff.feature:27)",
+    ]);
+  });
+
+  test("names nothing for a log that names no test, or no log", () => {
     assert.deepEqual(failingTests("src/main.ts(3,1): error TS1005: ';' expected."), []);
     assert.deepEqual(failingTests(null), []);
   });

@@ -265,6 +265,48 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from main_break where cleared_at is null")).rows[0].n, 1);
   });
 
+  test("one read of main per pass answers every waiting item and standing break on it (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    const third = await redMerge("3", "m3", "m2", [check("test", "failure")], [check("test", "failure")], 40_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "m3"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    const commitsAfter = repoHost.commitsAfter;
+    const asked: string[] = [];
+    repoHost.commitsAfter = async (repo, branch, sha) => { asked.push(sha); return commitsAfter(repo, branch, sha); };
+    await run();
+    assert.deepEqual(asked, ["m1"]);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "m3", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    asked.length = 0;
+    await run();
+    repoHost.commitsAfter = commitsAfter;
+    assert.deepEqual(asked, ["m1"]);
+    assert.equal((await state(second)).state, "Done");
+    assert.equal((await state(third)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+  });
+
+  test("a merge onto a main already red with no standing break records the break at its first parent, charges nothing and files no bug item (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    await run();
+    assert.equal((await state(first)).state, "Accepted");
+    assert.equal((await state(second)).state, "Accepted");
+    assert.equal(backlog.filed.length, 0);
+    const breaks = (await db.pool.query("select merge_sha, item_id, failed_checks, cleared_at from main_break")).rows;
+    assert.deepEqual(breaks, [{ merge_sha: "p1", item_id: null, failed_checks: [{ name: "test", url: `https://github.com/${REPO}/runs/test`, tests: [] }], cleared_at: null }]);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await run();
+    assert.equal((await state(first)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+  });
+
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {
     const id = await item("1", "Abandoned", "held = true");
     await openRun(id, "next_stage = 'sign-off'");

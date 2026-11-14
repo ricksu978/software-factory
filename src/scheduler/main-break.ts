@@ -23,26 +23,56 @@ export function compareWithParent(merge: CheckRun[], parent: CheckRun[]): Compar
   return { verdict: "already red", failed };
 }
 
-// A TAP result line, as node's test runner prints it, after any timestamp GitHub Actions puts in front of each log line.
-const TAP_LINE = /^(?:\d{4}-\d\d-\d\dT[\d:.]+Z )?(\s*)(not ok|ok) \d+(?: - (.*))?$/;
+// What GitHub Actions puts in front of each log line, and the colours a reporter may print in CI.
+const STAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const ANSI = /\x1b\[[\d;]*m/g;
+// A TAP result line, as node's test runner printed it before Node 23, or with `--test-reporter tap`.
+const TAP_LINE = /^(\s*)(not ok|ok) \d+(?: - (.*))?$/;
+// The spec reporter, node's default since Node 23, lists each failing leaf test once more after its summary, under
+// `✖ failing tests:`, as `✖ <name> (<duration>)` after a `test at <file>` line.
+const SPEC_HEADING = /^✖ failing tests:\s*$/;
+const SPEC_LINE = /^✖ (.+?)(?: \([\d.]+m?s\))?\s*$/;
+// Cucumber's summary lists each scenario that didn't pass under `Failed scenarios:`, `Ambiguous scenarios:` and the
+// like, as `  1) <scenario> # <file>:<line>`.
+const CUCUMBER_HEADING = /^(?:Failed|Ambiguous|Undefined|Pending) scenarios:\s*$/;
+const CUCUMBER_LINE = /^ {2}\d+\) (.+?) # (\S+:\d+)\s*$/;
 
 /**
- * The failing tests a check's log names: each `not ok` line of TAP, once each, in order. A failing suite is left out
- * when a test inside it failed, so only the leaf is named, and a TODO doesn't count. A log with no TAP names none.
+ * The failing tests a check's log names, once each, in order: node's test runner's failures in its spec reporter's
+ * `failing tests` list or as TAP `not ok` lines, and cucumber's failed scenarios, each with its file and line. A
+ * failing TAP suite is left out when a test inside it failed, so only the leaf is named, and a TODO doesn't count. A
+ * log with none of these names none.
  */
 export function failingTests(log: string | null): string[] {
-  const results: { indent: number; failed: boolean; name: string }[] = [];
-  for (const line of (log ?? "").split(/\r?\n/)) {
+  const names: string[] = [];
+  const add = (name: string) => {
+    if (name && !names.includes(name)) names.push(name);
+  };
+  const tap: { indent: number; failed: boolean; name: string }[] = [];
+  let section: "spec" | "cucumber" | null = null;
+  for (const raw of (log ?? "").split(/\r?\n/)) {
+    const line = raw.replace(STAMP, "").replace(ANSI, "");
+    // A step's group marker ends whatever list the step before it printed.
+    if (line.startsWith("##[")) section = null;
+    if (SPEC_HEADING.test(line)) section = "spec";
+    else if (CUCUMBER_HEADING.test(line)) section = "cucumber";
+    else if (section === "spec") {
+      const m = SPEC_LINE.exec(line);
+      if (m) add(m[1]);
+    } else if (section === "cucumber") {
+      const m = CUCUMBER_LINE.exec(line);
+      if (m) add(`${m[1]} (${m[2]})`);
+      else if (line.trim() && !line.startsWith(" ")) section = null;
+    }
     const m = TAP_LINE.exec(line);
     if (!m || /\s#\s*TODO\b/i.test(m[3] ?? "")) continue;
-    results.push({ indent: m[1].length, failed: m[2] === "not ok", name: (m[3] ?? "").replace(/\s+#\s*SKIP\b.*$/i, "").trim() });
+    tap.push({ indent: m[1].length, failed: m[2] === "not ok", name: (m[3] ?? "").replace(/\s+#\s*SKIP\b.*$/i, "").trim() });
   }
-  const names: string[] = [];
-  results.forEach((r, i) => {
-    if (!r.failed || !r.name) return;
+  tap.forEach((r, i) => {
+    if (!r.failed) return;
     // A suite's own line comes after its tests' lines, which are indented deeper.
-    for (let k = i - 1; k >= 0 && results[k].indent > r.indent; k--) if (results[k].failed) return;
-    if (!names.includes(r.name)) names.push(r.name);
+    for (let k = i - 1; k >= 0 && tap[k].indent > r.indent; k--) if (tap[k].failed) return;
+    add(r.name);
   });
   return names;
 }

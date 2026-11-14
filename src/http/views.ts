@@ -170,9 +170,12 @@ function mainRedNotice(rows: MainBreakRow[]): string {
     const bug = r.bug_external_id === null
       ? "The factory is filing its bug item."
       : `Its bug item ${r.bug_id && r.bug_title ? named({ id: r.bug_id, title: r.bug_title, external_id: r.bug_external_id, repo: r.repo }) : issueRef(r.bug_external_id, r.repo)} ${r.bug_state === "Failed" ? `failed to make ${escapeHtml(r.branch)} pass, so ${escapeHtml(r.branch)} stays red until it's re-queued or someone fixes it` : "is claimed first"}.`;
+    // A break with no item charged came from outside the factory, which files no bug item for it.
+    if (r.charged === null) return `<li><code>${escapeHtml(r.branch)}</code> was already red at commit <code>${escapeHtml(r.sha.slice(0, 7))}</code>, which the factory didn't merge, so it filed no bug item. Someone needs to fix <code>${escapeHtml(r.branch)}</code>.</li>`;
     return `<li>Commit <code>${escapeHtml(r.sha.slice(0, 7))}</code> broke <code>${escapeHtml(r.branch)}</code>${from ? `, the merge of ${from}` : ""}. ${bug}</li>`;
   });
-  return `<section id="main-red" class="banner" role="status"><p>${branches} is red. The factory fixes it before it builds anything else, and an item merged onto it meanwhile waits for it to pass again.</p><ul>${items.join("")}</ul></section>`;
+  const fixes = rows.some((r) => r.charged !== null) ? "The factory fixes it before it builds anything else, and an" : "An";
+  return `<section id="main-red" class="banner" role="status"><p>${branches} is red. ${fixes} item merged onto it meanwhile waits for it to pass again.</p><ul>${items.join("")}</ul></section>`;
 }
 
 /**

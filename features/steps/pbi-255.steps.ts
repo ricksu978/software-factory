@@ -10,7 +10,8 @@
 // repo host's `branches` entry "acme/widgets@main", oldest first, each one's first parent the one before it, in
 // `parents` too. A commit's checks are its `runs`, and its overall status in `checks` follows them: failure when any
 // failed, pending when any hasn't finished, success otherwise. "Every check" is test, bdd, lint and build. A check's log
-// is TAP, as node's test runner prints it: one `not ok <n> - <test name>` line for each failing test.
+// is a GitHub Actions job log of `npm test` on Node 26: each line after GitHub's timestamp, and node's spec reporter
+// listing each failing test under `✖ failing tests:`, as CI prints it.
 //
 // A bug item is an item the factory filed on the board through fileItem, which the fake board lists in `filed`. What it
 // names is read from its title and body together:
@@ -185,9 +186,13 @@ function ci(world: object, sha: string, set: { name: string; status: CheckRun["s
   c.host.checks.set(key, status);
 }
 
-const tap = (passing: string[], failing: string[]) =>
-  ["TAP version 13", ...passing.map((t, i) => `ok ${i + 1} - ${t}`), ...failing.map((t, i) => `not ok ${passing.length + i + 1} - ${t}`),
-    `1..${passing.length + failing.length}`, `# fail ${failing.length}`].join("\n");
+const specLog = (passing: string[], failing: string[]) =>
+  ["##[group]Run npm test", "> node --test \"src/**/*.test.ts\"", "##[endgroup]",
+    ...passing.map((t) => `✔ ${t} (0.4ms)`), ...failing.map((t) => `✖ ${t} (1.2ms)`),
+    `ℹ tests ${passing.length + failing.length}`, `ℹ pass ${passing.length}`, `ℹ fail ${failing.length}`, "", "✖ failing tests:", "",
+    ...failing.flatMap((t, i) => [`test at src/board.test.ts:${10 * (i + 1)}:3`, `✖ ${t} (1.2ms)`, "  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:", ""]),
+    "##[error]Process completed with exit code 1."]
+    .map((l, i) => `2026-11-14T10:00:${String(i % 60).padStart(2, "0")}.1234567Z ${l}`).join("\n");
 
 // ---- the background ----
 
@@ -249,7 +254,7 @@ Given("CI ran these checks on commit {string}:", function (sha: string, table: {
 });
 
 Given("the log of the check {string} on commit {string} names the failing tests {string} and {string}", function (check: string, sha: string, a: string, b: string) {
-  pollCtx(this).host!.logs.set(`${REPO}@${sha}:${check}`, tap(["loads the policy"], [a, b]));
+  pollCtx(this).host!.logs.set(`${REPO}@${sha}:${check}`, specLog(["loads the policy"], [a, b]));
 });
 
 Given("the log of the check {string} on commit {string} names no failing test", function (check: string, sha: string) {
