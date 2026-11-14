@@ -20,6 +20,22 @@ export type AppLike = {
 // the token every permission the App holds.
 export const CELL_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write" } as const;
 
+const COMPARE_PAGE = 100;
+type CompareCommit = { sha: string; parents?: { sha: string }[] };
+
+/**
+ * The first-parent line from the branch head back to `sha`, oldest first. The head is the newest listed commit no
+ * other listed commit has as a parent. A commit that came in through a merge commit's second parent isn't on it.
+ */
+export function firstParentLine(commits: CompareCommit[], sha: string): string[] {
+  const bySha = new Map(commits.map((c) => [c.sha, c]));
+  const parents = new Set(commits.flatMap((c) => (c.parents ?? []).map((p) => p.sha)));
+  const head = commits.findLast((c) => !parents.has(c.sha));
+  const line: string[] = [];
+  for (let c = head; c && c.sha !== sha; c = bySha.get(c.parents?.[0]?.sha ?? "")) line.push(c.sha);
+  return line.reverse();
+}
+
 const split = (repo: string) => {
   const [owner, name] = repo.split("/");
   return { owner, repo: name };
@@ -228,6 +244,14 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
   return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
+/** PBI 234: each check run not yet completed, by name, and each commit status still pending, by context. */
+async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<string[]> {
+  // ponytail: one page of 100 check runs and the combined status's statuses, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string }[];
+  const statuses = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.statuses ?? []) as { context: string; state: string }[];
+  return [...runs.filter((c) => c.status !== "completed").map((c) => c.name), ...statuses.filter((s) => s.state === "pending").map((s) => s.context)];
+}
+
 /** Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, and any other end fails. */
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
@@ -282,6 +306,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return failedOn(await client(), split(repo), sha);
     },
 
+    async pendingChecksOnSha(repo, sha) {
+      return pendingChecksOn(await client(), split(repo), sha);
+    },
+
     async ciChecksOnSha(repo, sha) {
       return namedChecksOn(await client(), split(repo), sha);
     },
@@ -300,6 +328,29 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         return status === "ahead" || status === "identical";
       } catch (e) {
         if (notFound(e)) return false; // a sha GitHub doesn't know
+        throw e;
+      }
+    },
+
+    async commitsAfter(repo, branch, sha) {
+      // Compare lists every commit the branch holds that `sha` doesn't, so a PR merged with a merge commit brings in
+      // the PR's own commits, whose checks come from PR CI. Only the branch's first-parent line is the base's history.
+      const gh = await client();
+      const compare = async (page?: number) =>
+        (await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...split(repo), basehead: `${sha}...${branch}`, ...(page ? { per_page: COMPARE_PAGE, page } : {}) })).data;
+      try {
+        const first = await compare();
+        if (first.status !== "ahead") return [];
+        let commits: CompareCommit[] = first.commits ?? [];
+        if ((first.total_commits ?? 0) > commits.length) {
+          // ponytail: unpaged, compare stops at its 250 oldest commits. The last two pages hold the newest, which is
+          // enough for the 20 the poller reads; a first-parent line longer than the window is cut at its edge.
+          const last = Math.ceil(first.total_commits / COMPARE_PAGE);
+          commits = (await Promise.all([last - 1, last].filter((p) => p >= 1).map(compare))).flatMap((d) => d.commits ?? []);
+        }
+        return firstParentLine(commits, sha);
+      } catch (e) {
+        if (notFound(e)) return [];
         throw e;
       }
     },

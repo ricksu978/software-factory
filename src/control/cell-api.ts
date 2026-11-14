@@ -125,6 +125,14 @@ async function notOwnCommit(deps: CellApiDeps, run: Run, sha: string): Promise<s
   return null;
 }
 
+/** The `sha` a cell asks about, which must be one of its branch's own commits, with the run's repo. */
+async function ownCommit(deps: CellApiDeps, run: Run, query: URLSearchParams): Promise<{ repo: string; sha: string }> {
+  const sha = shaOf(query);
+  const notOwn = await notOwnCommit(deps, run, sha);
+  if (notOwn) throw new BadRequest(notOwn);
+  return { repo: repoOf(run), sha };
+}
+
 /**
  * The PR's URL, built from the run's repo, never taken from the cell, because the board links it from a public item.
  * A `prUrl` the cell sends must be that same URL.
@@ -142,10 +150,13 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   return str(q?.body, "question.body");
 }
 
-/** A needs_input question's base failure (PBI 215): the base commit and the tests that fail on it, or null. */
-function baseFailure(v: unknown): { sha: string; tests: string[] } | null {
-  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown } | undefined | null;
-  return optional(f, () => ({ sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests") }));
+/** A blocked question's base failure: the base commit, its failing tests, and the base branch, which PBI 260 re-queues on. */
+function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string } | null {
+  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown; base?: unknown } | undefined | null;
+  return optional(f, () => {
+    const base = optional(f!.base, (b) => str(b, "question.baseFailure.base"));
+    return { sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests"), ...(base === null ? {} : { base }) };
+  });
 }
 
 /** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
@@ -279,10 +290,7 @@ const routes: Record<string, Route> = {
   },
 
   "GET checks": async (deps, { c, run, query, now }) => {
-    const sha = shaOf(query);
-    const repo = repoOf(run);
-    const notOwn = await notOwnCommit(deps, run, sha);
-    if (notOwn) throw new BadRequest(notOwn);
+    const { repo, sha } = await ownCommit(deps, run, query);
     const watch = await c.query<{ first_asked_at: Date }>(
       `insert into check_watch (run_id, sha, first_asked_at) values ($1, $2, $3)
        on conflict (run_id, sha) do update set sha = excluded.sha returning first_asked_at`,
@@ -300,6 +308,13 @@ const routes: Record<string, Route> = {
       console.error(`checks: reading why CI failed on ${sha} in ${repo} failed:`, e);
       return { status, failedChecks: [] };
     }
+  },
+
+  // PBI 234: the names of the checks still pending on one of the run's own commits, for the question a cell asks when
+  // CI stays pending for 60 minutes.
+  "GET pending-checks": async (deps, { run, query }) => {
+    const { repo, sha } = await ownCommit(deps, run, query);
+    return { checks: await deps.repoHost.pendingChecksOnSha(repo, sha) };
   },
 
   // PBI 229: the checks CI named on one of the run's own commits, for a dod.md line's `ci:` check. A commit the cell

@@ -27,8 +27,8 @@ export type StageReport = {
 };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
-  /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215). */
-  question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[] } }; scenariosSha?: string; lockedFiles?: string[];
+  /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */
+  question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[]; base?: string } }; scenariosSha?: string; lockedFiles?: string[];
   prNumber?: number; prUrl?: string; resumeAt?: string; tier?: "Low" | "Medium" | "High"; tierReasons?: string[];
 };
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
@@ -40,6 +40,8 @@ export type CellApi = {
   policyResults(b: PolicyResults): Promise<void>;
   pr(b: { prNumber: number; prUrl: string }): Promise<void>;
   checks(sha: string): Promise<CheckAnswer>;
+  /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
+  pendingChecks?(sha: string): Promise<string[]>;
   /**
    * The checks CI named on one of the run's own commits, or null when none has reported there (PBI 229). A cell API
    * without it judges every dod.md line by its command or the judge, as before.
@@ -83,6 +85,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
       const a = await call("GET", `/checks?sha=${encodeURIComponent(sha)}`);
       return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
     },
+    pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
     ciChecks: async (sha) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });

@@ -84,7 +84,10 @@ Before({ tags: "@pbi-225 and @db", ...long }, async function () {
   const k = ctx(this);
   k.sourceId = (await d.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:' || gen_random_uuid()) returning id")).rows[0].id;
   const world = this;
-  ctx144(this).driver = () => realPoll(world);
+  ctx144(this).driver = async (c) => {
+    await realPoll(world);
+    c.polls++;
+  };
 });
 
 /** The repo is known only once the Background names it, so its row and readiness files are added then. */

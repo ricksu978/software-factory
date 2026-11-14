@@ -157,10 +157,18 @@ export interface RepoHost {
    * can't give it (PBI 232). A check that passed, was skipped or ended neutral isn't one of them.
    */
   failedChecksOnSha(repo: string, sha: string): Promise<FailedCheck[]>;
+  /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
+  pendingChecksOnSha(repo: string, sha: string): Promise<string[]>;
   /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
   ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
+  /**
+   * The commits on `branch` after `sha`, oldest first, so the last is the branch head (PBI 260). Only the branch's
+   * first-parent line counts: a PR's own commits that came in through a merge commit didn't run the branch's CI. Empty
+   * when `sha` is the head, or isn't on the branch at all.
+   */
+  commitsAfter(repo: string, branch: string, sha: string): Promise<string[]>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
   /**
