@@ -230,14 +230,18 @@ const routes: Record<string, Route> = {
     const stopped = l?.status === "stopped" && (l.message !== LEASE_RAN_OUT || l.restarted);
     const resume = stopped ? { stageId: run.next_stage, attempt: l.attempt } : null;
     let trustedComments: ReviewComment[] = [];
+    // Each open thread's comment count at the claim, every author's. Before it resolves a thread it answered, address
+    // reads the threads again and leaves open one that gained a comment it never read (PBI 258).
+    let threadCommentCounts: Record<string, number> = {};
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief. A thread the
     // factory's own review opened belongs to the PR review stage, so none of it does, a person's reply included (PBI 130).
     if (run.next_stage === "address" && run.pr_number !== null) {
       const users = await c.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`);
       const trusted = new Set(users.rows.map((u) => loginKey(u.github_login)));
       if (run.trusted_bot) trusted.add(botKey(run.trusted_bot));
-      trustedComments = withoutFactoryThreads(await deps.repoHost.openReviewComments(repo, run.pr_number), run.trusted_bot)
-        .filter((x) => trusted.has(loginKey(x.author)));
+      const all = await deps.repoHost.openReviewComments(repo, run.pr_number);
+      for (const x of all) if (x.path !== null) threadCommentCounts[x.threadId] = (threadCommentCounts[x.threadId] ?? 0) + 1;
+      trustedComments = withoutFactoryThreads(all, run.trusted_bot).filter((x) => trusted.has(loginKey(x.author)));
     }
     return {
       externalId: run.external_id, title: item?.title ?? run.title, acceptanceCriteria: item?.acceptanceCriteria ?? [],
@@ -251,6 +255,7 @@ const routes: Record<string, Route> = {
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       scenarioNotes: run.scenario_notes ?? [],
       trustedComments,
+      threadCommentCounts,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       resume,
     };

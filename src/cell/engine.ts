@@ -30,6 +30,8 @@ export type CellContext = {
   /** The last passed self-review's scenario notes, for a PR body written in a later claim (PBI 152). */
   scenarioNotes?: string[];
   trustedComments: ReviewComment[];
+  /** Each open thread's comment count at the claim, every author's, so address can tell a comment that came later (PBI 258). */
+  threadCommentCounts?: Record<string, number>;
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
   /**
@@ -52,7 +54,7 @@ export type CellDeps = {
    * hands the PR to people as it did before PBI 128. The cell's own GitHub host always has both.
    */
   repoHost: Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState">
-    & Partial<Pick<RepoHost, "postReview" | "resolveThread">>;
+    & Partial<Pick<RepoHost, "postReview" | "resolveThread" | "openReviewComments">>;
   sop: Sop; config: RepoConfig; policies: Policies; now: () => Date;
   /** Waits between CI polls. Tests pass one that returns at once. */
   sleep?: (ms: number) => Promise<void>;
@@ -1156,9 +1158,25 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // Each person's thread the addresser answered, by a fix CI has passed on or a reply now posted, is resolved, so
     // the person needn't, and a reply of theirs in it can't send the item back again. One it didn't answer stays open
     // (PBI 258). A summary has no thread to resolve.
+    //
+    // The brief's comments were read at the claim, and CI ran since, so a reviewer may have replied in a thread meanwhile.
+    // The threads are read again first, and one with more comments than it had at the claim, plus the reply posted
+    // above, stays open: address never read that comment, and the poller sends the item back for it. With no fresh
+    // read, nothing is resolved, since a thread left open is only asked about again (PBI 258).
     const answered = new Set([...replies.map((r) => r.threadId), ...fixed]);
-    if (d.repoHost.resolveThread) {
-      for (const id of answered) if (byThread.get(id)!.path !== null) await d.repoHost.resolveThread(ctx.repo, id);
+    const toResolve = [...answered].filter((id) => byThread.get(id)!.path !== null);
+    if (d.repoHost.resolveThread && d.repoHost.openReviewComments && toResolve.length) {
+      const now = await d.repoHost.openReviewComments(ctx.repo, ctx.prNumber!).catch(() => null);
+      const count = (list: { threadId: string }[], id: string) => list.filter((c) => c.threadId === id).length;
+      const replied = new Set(replies.map((r) => r.threadId));
+      for (const id of toResolve) {
+        if (!now) break;
+        const atClaim = ctx.threadCommentCounts?.[id] ?? count(comments, id);
+        const seen = count(now, id);
+        // A thread missing from the fresh read is already resolved, by a person, so it needs nothing.
+        if (seen === 0 || seen > atClaim + (replied.has(id) ? 1 : 0)) continue;
+        await d.repoHost.resolveThread(ctx.repo, id);
+      }
     }
     await end("passed");
     // PBI 130: the factory's own PR review looks at what address pushed, once CI passed on it, before people do again.

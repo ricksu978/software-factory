@@ -158,6 +158,9 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
         return { threads: p.comments.map((c, i) => ({ threadId: `rt-${calls.length}-${i}`, ...c })) };
       },
       resolveThread: async (_r, threadId) => rec("/repo/resolveThread", { threadId }),
+      // The PR's open threads as they stand: the claim's comments, then each reply posted since (PBI 258).
+      openReviewComments: async () => (rec("/repo/openReviewComments"), [...deps.ctx.trustedComments,
+        ...calls.filter((c) => c.route === "/repo/replyToThread").map((c) => ({ threadId: c.body.threadId, path: "app.txt", line: 1, author: "factory[bot]", body: c.body.body }))]),
     },
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
@@ -1010,6 +1013,23 @@ describe("runCell", () => {
     assert.ok(at("/repo/resolveThread", "t1") > at("/repo/replyToThread", "t1"), "resolved after its reply");
     const checked = h.calls.map((c, i) => [c, i] as const).filter(([c]) => c.route === "/checks").at(0)![1];
     assert.ok(at("/repo/resolveThread", "t2") > checked, "resolved after CI passed on the fix");
+  });
+
+  test("address leaves open a thread it answered that a reviewer replied in while CI ran, and resolves the rest (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar")], threadCommentCounts: { t1: 1, t2: 1 } },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        writeFileSync(file, '{"threadId":"t1","body":"renamed"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    const read = h.deps.repoHost.openReviewComments!;
+    h.deps.repoHost.openReviewComments = async (r, n) => [...await read(r, n), thread("t2", "Not fixed")];
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2, whose newer reply address never read");
+    const at = (route: string) => h.calls.findIndex((c) => c.route === route);
+    assert.ok(at("/repo/openReviewComments") > at("/repo/replyToThread"), "the threads are read again after the replies are posted");
   });
 
   for (const [what, comments] of [["review text", [ownerComment]], ["no review text", []]] as const) {
