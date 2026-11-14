@@ -7,7 +7,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { criteriaHash, pollOnce } from "./poller.ts";
+import { criteriaHash, pollOnce, readinessFingerprint } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -268,15 +268,24 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await row(ext)).state, "Abandoned");
   });
 
-  test("an item NotReady only on an open dependency is re-gated once the dependency closes", async () => {
+  test("an item with an open dependency is queued blocked by it in the same poll, so no claim takes it early (PBI 237)", async () => {
     const ext = await seed();
-    fake.setDependencies(ext, ["#7"]);
+    fake.setDependencies(ext, ["7"]);
+    await poll();
+    const r = await row(ext);
+    assert.equal(r.state, "Queued");
+    assert.deepEqual(r.blocked_by, ["7"]);
+  });
+
+  test("a NotReady item isn't re-gated when only its dependencies change, since they no longer touch the verdict", async () => {
+    verdict = "failed";
+    const ext = await seed();
+    await poll();
+    fake.setDependencies(ext, ["7"]);
+    judged = [];
     await poll();
     assert.equal((await row(ext)).state, "NotReady");
-    assert.match((await fake.comments(ext))[0], /depends on #7/);
-    fake.setDependencies(ext, []);
-    await poll();
-    assert.equal((await row(ext)).state, "Queued");
+    assert.deepEqual(judged, []);
   });
 
   test("a listed item that fails to go in keeps the cursor, so the next poll lists it again", async () => {
@@ -660,6 +669,54 @@ describe("pollOnce", dbTest, () => {
     }
   });
 
+  test("given a defaults reader, the gate and the fingerprint read the defaults from it, not the policy directory (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const held: Record<string, string> = { dor: "- [ ] Names the user it serves\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" };
+    const defaults = async (name: string) => held[name];
+    const asked: string[] = [];
+    const recording = async (item: FactoryItem, dor: Policy) => {
+      asked.push(...dor.criteria.map((c) => c.text));
+      return judge(item, dor);
+    };
+    const pollWith = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: recording, sourceId, defaults });
+    verdict = "failed";
+    const ext = await seed();
+    await pollWith();
+    assert.deepEqual(asked, ["Names the user it serves"]);
+    const before = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal((await row(ext)).readiness_policy_sha, before);
+    await pollWith();
+    assert.deepEqual(judged, [ext], "the same defaults don't re-gate");
+    held.risk = "r changed\n";
+    assert.notEqual(await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults }), before);
+    verdict = "passed";
+    await pollWith();
+    assert.equal((await row(ext)).state, "Queued");
+  });
+
+  test("a pinnable defaults reader is pinned once per poll, so a move mid-poll can't mix two commits (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const commits: Record<string, string>[] = [{ dor: "- [ ] Old\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" }];
+    let pins = 0;
+    // Each pin fixes the latest commit; a fresh read of the moving ref follows the latest, and moves it after the dor read.
+    const moving = async (name: string) => {
+      const text = commits[commits.length - 1][name];
+      if (name === "dor") commits.push({ dor: "- [ ] New\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r new\n" });
+      return text;
+    };
+    const defaults = Object.assign(moving, {
+      pin: async () => {
+        pins++;
+        const at = commits[commits.length - 1];
+        return async (name: string) => at[name];
+      },
+    });
+    const sha = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal(pins, 1, "one pin for the whole poll");
+    const pinnedFirst = { ...commits[0] };
+    assert.equal(sha, await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults: async (n: string) => pinnedFirst[n] }));
+  });
+
   test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {
     verdict = "failed";
     const ext = await seed();
@@ -806,6 +863,89 @@ describe("pollOnce", dbTest, () => {
       await poll();
       assert.equal((await row(a.ext)).state, "Accepted");
       assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
+    });
+  });
+
+  describe("re-queuing an item stopped by a red base once CI passes on it (PBI 260)", () => {
+    /** A NeedsInput item whose open question says the base failed at `sha`, or asks something else with `sha` null. */
+    async function waiting(sha: string | null, base?: string) {
+      const h = await held("NeedsInput");
+      const failure = sha === null ? null : { sha, tests: ["parses the config"], ...(base ? { base } : {}) };
+      const q = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, base_failure) values ($1, 'needs_input', 'The base fails in the cell.', $2) returning id",
+        [h.id, failure === null ? null : JSON.stringify(failure)],
+      )).rows[0].id;
+      return { ...h, question: q };
+    }
+    const question = async (id: string) =>
+      (await db.pool.query("select answer, answered_by, decision from question where id = $1", [id])).rows[0];
+    const requeues = async (itemId: string) =>
+      (await db.pool.query("select actor, actor_id, payload from event where item_id = $1 and kind = 'requeued_after_base_passed'", [itemId])).rows;
+
+    test("CI passing on a newer base commit answers the question as the factory and logs one system event", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b3`, "pending");
+      host.checks.set(`${REPO}@b2`, "success");
+      const w = await waiting("b1", "main");
+      await poll();
+      await poll();
+      const q = await question(w.question);
+      assert.equal(q.answered_by, null);
+      assert.match(q.answer, /CI passed on .*b2/);
+      const events = await requeues(w.id);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].actor, "system");
+      assert.equal(events[0].payload.sha, "b2");
+      assert.equal(events[0].payload.base, "main");
+    });
+
+    test("CI on the failing commit, an older one, or still pending or failing on a newer one leaves the question open", async () => {
+      host.branches.set(`${REPO}@main`, ["b0", "b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b0`, "success");
+      host.checks.set(`${REPO}@b1`, "success");
+      host.checks.set(`${REPO}@b2`, "pending");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
+    test("a pass behind a newer failing commit leaves the question open, since the base is red again", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1", "main");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
+    test("a question with no base failure, or a held item, isn't answered, and a released one is", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const other = await waiting(null);
+      const hold = await waiting("b1", "main");
+      await db.pool.query("update item set held = true where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.equal((await question(hold.question)).answer, null);
+      await db.pool.query("update item set held = false where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.notEqual((await question(hold.question)).answer, null);
+      assert.deepEqual(await requeues(other.id), []);
+    });
+
+    test("an item waits on its own base branch's CI, and a question without a branch waits on main", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.branches.set(`${REPO}@release`, ["r1"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const onRelease = await waiting("r1", "release");
+      const onMain = await waiting("b1");
+      await poll();
+      assert.equal((await question(onRelease.question)).answer, null);
+      assert.notEqual((await question(onMain.question)).answer, null);
     });
   });
 });

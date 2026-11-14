@@ -3,8 +3,9 @@ Feature: The factory files a proposed split as child PBIs for the owner to appro
   When the readiness gate finds an item oversized and the coding model proposes a valid split, the
   factory already posts the split on the parent as a proposal. With this item the factory also
   files each proposed child as an issue of its own: a sub-issue of the parent, on the parent's
-  board in the backlog status, blocked by the earlier children it needs. No child carries the
-  opt-in label, so the owner decides which children enter the factory, and when. The parent leaves
+  board in the backlog status, blocked by the earlier children it needs. Since PBI 237 each child
+  carries the opt-in label as it's filed, and the owner withdraws a child by taking it off; PBI
+  237's scenarios cover that, so this file no longer says no child carries it. The parent leaves
   the factory and says where its children are. Filing is safe to repeat: a parent that already has
   sub-issues is never split again, and filing that stops partway is finished on the next poll
   without filing any child twice. The board, the repo and the coding model are scripted here, so
@@ -98,20 +99,7 @@ Feature: The factory files a proposed split as child PBIs for the owner to appro
       And child "Card payments" is blocked by nothing
       And child "Bank transfers" is blocked by nothing
 
-  Rule: No child carries the opt-in label, so none enters the factory until the owner adds it
-
-    @ac-3
-    Scenario: No filed child carries the opt-in label
-      When the factory polls the backlog
-      Then the parent issue has 3 sub-issues
-      And none of the parent's sub-issues carries the label "factory"
-
-    @ac-3
-    Scenario: The factory takes up no child on the next poll
-      Given the factory has polled the backlog once
-      When the factory polls the backlog again
-      Then the parent issue has 3 sub-issues
-      And the factory has started no run for any of the parent's sub-issues
+  Rule: A child enters the factory once it carries the opt-in label, and one it waits on holds it back
 
     @ac-3
     Scenario: A child enters the factory once the owner adds the opt-in label to it
