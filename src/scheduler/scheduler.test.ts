@@ -6,7 +6,7 @@ import { runToken } from "../control/cell-api.ts";
 import { clearRestartOnStart, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
-import { tick } from "./scheduler.ts";
+import { FAILED_RECHECK_MS, tick, type CiMemo } from "./scheduler.ts";
 
 // The scenarios in features/pbi-17-scheduler.feature cover WIP, the brake, the kill switch, stop and re-queue. These
 // cover the rest of plan Task 13's list.
@@ -286,6 +286,30 @@ describe("scheduler", dbTest, () => {
     assert.equal((await state(second)).state, "Done");
     assert.equal((await state(third)).state, "Done");
     assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+  });
+
+  test("a red main's failed commits are read once per recheck window, not every tick, and a re-run turned green is seen after it (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "x1", "x2"]);
+    for (const sha of ["x1", "x2"]) repoHost.checks.set(`${REPO}@${sha}`, "failure");
+    await db.pool.query("update wip_policy set current_wip = 0");
+    const ciMemo: CiMemo = new Map();
+    const memoRun = (now: Date) =>
+      tick({ pool: db.pool, launcher, now, killFlag: false, repoHost, backlogFor: () => backlog.adapter, secret: "s3cret", controlUrl: "http://control:7400", sopVersion: "default@1", ciMemo });
+    await memoRun(NOW);
+    await memoRun(NOW);
+    const checksOnSha = repoHost.checksOnSha;
+    const read: string[] = [];
+    repoHost.checksOnSha = async (repo, sha) => { read.push(sha); return checksOnSha(repo, sha); };
+    await memoRun(new Date(NOW.getTime() + 15_000));
+    assert.equal(read.length, 0);
+    repoHost.checks.set(`${REPO}@x2`, "success");
+    await memoRun(new Date(NOW.getTime() + FAILED_RECHECK_MS));
+    repoHost.checksOnSha = checksOnSha;
+    assert.ok(read.includes("x2"));
+    assert.equal((await state(second)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "x2");
   });
 
   test("a merge onto a main already red with no standing break records the break at its first parent, charges nothing and files no bug item (PBI 255)", async () => {

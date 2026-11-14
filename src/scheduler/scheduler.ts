@@ -39,6 +39,8 @@ export type TickDeps = {
   sopVersion: string;
   /** Where a tick that runs long warns, and the clock that times it (PBI 134). */
   slow?: Slow;
+  /** Failed CI reads kept across ticks, so a long red main doesn't re-read every commit each tick. Absent, each pass reads afresh. */
+  ciMemo?: CiMemo;
 };
 export type TickResult = { started: string[]; stopped: string[]; expired: string[] };
 
@@ -282,7 +284,18 @@ async function chaseQuestions(d: TickDeps) {
 /** The newest commits of a branch that a green one is looked for in, so a long red stretch costs a bounded number of reads. */
 const GREEN_LOOKBACK = 50;
 
-type MergedCiDeps = Pick<TickDeps, "pool" | "repoHost" | "backlogFor" | "now">;
+/**
+ * How long a failed CI read of a branch commit is trusted before it's read again. The green search on a red branch
+ * walks up to GREEN_LOOKBACK commits, and every one is red, so reading each afresh every 15-second tick would cost
+ * thousands of GitHub requests an hour. A failure rarely changes, but a re-run can turn it green, so it's re-read
+ * after this long. A commit not yet failed, a new head among them, is read every pass.
+ */
+export const FAILED_RECHECK_MS = 10 * 60_000;
+
+/** Failed CI reads of branch commits, keyed by repo and sha, with when each was read. One lives for the worker's life. */
+export type CiMemo = Map<string, number>;
+
+type MergedCiDeps = Pick<TickDeps, "pool" | "repoHost" | "backlogFor" | "now" | "ciMemo">;
 
 /**
  * An Accepted item is Done once CI on its merge commit passes, and Failed when it never reports within an hour. A red
@@ -307,7 +320,25 @@ export async function pollMergedCi(d: MergedCiDeps) {
     `update main_break b set bug_item_id = i.id from item i, item charged
      where b.bug_item_id is null and b.bug_external_id = i.external_id and charged.id = b.item_id and i.source_id = charged.source_id`,
   );
-  await settleBranches(d, greenOn(d, status));
+  await settleBranches(d, greenOn(d, remembered(d, status)));
+}
+
+/**
+ * The status of a branch commit for the green search, answered "failure" from the memo while the failure was read
+ * less than FAILED_RECHECK_MS ago. Only the green search uses it: an Accepted item's own merge commit is read afresh.
+ */
+function remembered(d: MergedCiDeps, status: Status): Status {
+  const memo = d.ciMemo;
+  if (!memo) return status;
+  const now = d.now.getTime();
+  for (const [key, at] of memo) if (now - at >= FAILED_RECHECK_MS) memo.delete(key);
+  return async (repo, sha) => {
+    const key = `${repo}@${sha}`;
+    if (memo.has(key)) return "failure";
+    const state = await status(repo, sha);
+    if (state === "failure") memo.set(key, now);
+    return state;
+  };
 }
 
 type Status = (repo: string, sha: string) => Promise<string>;
