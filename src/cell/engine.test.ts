@@ -609,6 +609,23 @@ describe("runCell", () => {
     assert.match(t.question.body, /work so far is pushed to its branch/);
   });
 
+  test("a base failure whose lease check before the push finds the lease lost pushes nothing", async () => {
+    const marks = mkdtempSync(join(tmpdir(), "engine-lease-"));
+    roots.push(marks);
+    const ran = join(marks, "ran.txt");
+    const h = harness({ nextStage: "green", script: (a, stage) => { if (stage === "green") writeFileSync(join(a.cwd, "app.txt"), "half done\n"); },
+      lease: async () => {
+      if (existsSync(ran)) throw new LeaseLost("fenced");
+      return { stop: false };
+    } });
+    h.deps.policies.dod = policy("dod", `- [ ] Unit tests pass. \`run: echo x > "${fwd(ran)}"; echo 'not ok 1 - parses the config'; exit 1\`\n`);
+    const before = git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH);
+    assert.equal(await h.run(), "stopped");
+    assert.notEqual(git(h.dir, "rev-parse", "HEAD"), before);
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), before);
+    assert.ok(!h.transitions().length);
+  });
+
   test("a Definition of Done line that fails only on the item's branch is retried, runs on the base once, and exhausts green", async () => {
     const h = harness({ nextStage: "green" });
     const log = join(h.root, "runs.txt");

@@ -1062,28 +1062,30 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
    * that commit. A lease that's lost, or that can't be checked, pushes nothing: another cell may own the branch now.
    */
   async function wrapUp(): Promise<Outcome> {
-    await git.commitAll("work in progress, stopped").catch(() => {});
-    try {
-      await api.lease();
-    } catch {
-      return "stopped";
-    }
     // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
     // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
-    await pushWorkInProgress("work in progress, stopped");
+    if (!(await pushWorkInProgress("work in progress, stopped"))) return "stopped";
     // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
     if (current) await end("stopped");
     else await api.release();
     return "stopped";
   }
 
-  // Commits what the agent left and pushes it, unless a commit changed a locked feature file. A push that fails leaves
-  // the branch at the last commit pushed, which is where the next cell carries on.
-  async function pushWorkInProgress(msg: string): Promise<void> {
+  // Commits what the agent left, checks the lease once more and pushes it, unless a commit changed a locked feature
+  // file. A lease that's lost, or that can't be checked, pushes nothing and returns false: another cell may own the
+  // branch now, and the renewal timer may not have seen it yet. A push that fails leaves the branch at the last commit
+  // pushed, which is where the next cell carries on.
+  async function pushWorkInProgress(msg: string): Promise<boolean> {
     await git.commitAll(msg).catch(() => {});
+    try {
+      await api.lease();
+    } catch {
+      return false;
+    }
     const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
     if (locked) console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
     else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
+    return true;
   }
 
   async function finish(e: unknown): Promise<Outcome> {
