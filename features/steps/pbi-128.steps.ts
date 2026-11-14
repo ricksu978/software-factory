@@ -277,8 +277,11 @@ function addresser(c: Ctx, rec: AgentRecord, cwd: string): string {
     else if (replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: t.threadId, body: action.body }) + "\n");
   }
   // A person's thread in the brief, as the address stage hands it over (PBI 130), is fixed when the scenario says so.
+  // PBI 258: or answered with a reply, which goes to the reply file as for the factory's own threads.
   for (const p of c.personThreads.filter((x) => rec.prompt.includes(x.threadId))) {
-    if (spec?.actions.get(p.body)?.kind === "fix" || c.fixPersonEachTime.has(p.body)) fixed.push(p.body);
+    const action = spec?.actions.get(p.body);
+    if (action?.kind === "fix" || c.fixPersonEachTime.has(p.body)) fixed.push(p.body);
+    else if (action?.kind === "reply" && replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: p.threadId, body: action.body }) + "\n");
   }
   if (fixed.length) {
     mkdirSync(join(cwd, "src"), { recursive: true });

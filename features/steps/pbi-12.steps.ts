@@ -46,6 +46,8 @@ export type Ctx = {
    */
   metered?: GateJudge;
   polls: number;
+  /** PBI 258: webhook deliveries a scenario made, which act in place of a poll. */
+  deliveries?: number;
   error?: unknown;
 };
 
@@ -125,7 +127,7 @@ export async function baseline(c: Ctx): Promise<Baseline> {
 
 export function polled(c: Ctx): void {
   assert.equal(c.error, undefined, `the poll failed: ${String(c.error)}`);
-  assert.ok(c.polls > 0, "the poller didn't run");
+  assert.ok(c.polls > 0 || (c.deliveries ?? 0) > 0, "the poller didn't run");
 }
 
 export async function stateOf(c: Ctx, extId: string): Promise<string | undefined> {
