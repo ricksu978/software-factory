@@ -13,6 +13,12 @@ export type Criterion = {
 export type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string };
 export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] };
 
+/**
+ * Reads the text of the factory's default for a policy a repo has no `.factory/<name>.md` for (PBI 261). The worker's
+ * reads the default from the commit of `main` it last fetched, not from the checkout's disk. dod.md has no default.
+ */
+export type DefaultPolicies = (name: Exclude<PolicyName, "dod">) => Promise<string>;
+
 export class PolicyError extends Error {
   override name = "PolicyError";
 }

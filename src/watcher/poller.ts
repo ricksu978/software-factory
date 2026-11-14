@@ -9,7 +9,7 @@ import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { keepSplit, keptSplit } from "../store/splits.ts";
-import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
+import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
@@ -35,6 +35,11 @@ export type PollDeps = {
    * poller uses the code's own, readinessLogic().
    */
   logic?: ReadinessLogic;
+  /**
+   * Where the default policies come from, for a repo without its own (PBI 261): the worker reads them from the commit
+   * of `main` it last fetched, for both the fingerprint and the gate's criteria. Not read yet.
+   */
+  defaults?: DefaultPolicies;
 };
 
 type Row = {
@@ -155,6 +160,16 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
     sha: readinessSha(texts, logic), head, dor: loaded.get("dor") ?? null, policyErrors,
     dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true,
   };
+}
+
+/**
+ * The readiness fingerprint the poller takes for `repo` (PBI 261): the sha a NotReady item's stored one is compared
+ * with. `defaults` isn't read yet, so the defaults still come from the policy directory on disk.
+ */
+export async function readinessFingerprint(d: {
+  pool: pg.Pool; repoHost: RepoHost; repo: string; logic?: ReadinessLogic; defaults?: DefaultPolicies;
+}): Promise<string> {
+  return (await readiness(d.pool, d.repoHost, d.repo, d.logic ?? readinessLogic())).sha;
 }
 
 /**
