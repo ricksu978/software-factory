@@ -159,3 +159,8 @@ test("an attempt left open by a stopped run re-queued without a merge stops when
   });
   assert.deepEqual(d.stages, [{ stageId: "green", ms: (30 + 60) * M, attempts: 2 }]);
 });
+
+test("a Split parent's total stops when it went Split (PBI 225)", () => {
+  const d = itemDurations({ ...base, state: "Split", now: t("15:00"), moves: [move("NotReady", "Split", "10:00")] });
+  assert.equal(d.totalMs, 60 * M);
+});
