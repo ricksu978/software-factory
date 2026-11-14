@@ -14,8 +14,8 @@ export type Verdict = { index: number; criterion: string; status: "passed" | "fa
 export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] };
 
 /**
- * Reads the text of the factory's default for a policy a repo has no `.factory/<name>.md` for (PBI 261). The worker's
- * reads the default from the commit of `main` it last fetched, not from the checkout's disk. dod.md has no default.
+ * Reads the text of the factory's default for a policy a repo has no `.factory/<name>.md` for (PBI 261). The worker
+ * reads each default from the commit of `main` it last fetched, not from the checkout's disk. dod.md has no default.
  */
 export type DefaultPolicies = (name: Exclude<PolicyName, "dod">) => Promise<string>;
 
@@ -49,14 +49,18 @@ export function parseCriteria(markdown: string): Criterion[] {
 /**
  * Loads `.factory/<name>.md` through `read`, or the factory's default when the repo has none. `read` returns null
  * only on a 404, and any error it throws propagates, so a failed read never falls back to the default. A missing
- * dod.md has no default and returns null. A `run:` or `ci:` line outside dod.md throws PolicyError.
+ * dod.md has no default and returns null. A `run:` or `ci:` line outside dod.md throws PolicyError. The default comes
+ * from `defaults` when given, as the worker's comes from `main`'s fetched commit (PBI 261), and otherwise from the
+ * policy directory beside the code, as a cell's comes from its image.
  */
-export async function loadPolicy(read: (path: string) => Promise<string | null>, name: PolicyName): Promise<Policy | null> {
+export async function loadPolicy(
+  read: (path: string) => Promise<string | null>, name: PolicyName, defaults?: DefaultPolicies,
+): Promise<Policy | null> {
   let text = await read(`.factory/${name}.md`);
   let source: Policy["source"] = "repo";
   if (text === null) {
     if (name === "dod") return null;
-    text = await readFile(join(policyDir(), `${name}.md`), "utf8");
+    text = defaults ? await defaults(name) : await readFile(join(policyDir(), `${name}.md`), "utf8");
     source = "default";
   }
   if (name !== "dod" && /`run:[^`]*`/.test(text)) throw new PolicyError(`${name}.md: run: lines are allowed only in dod.md`);

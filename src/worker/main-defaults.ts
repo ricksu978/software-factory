@@ -2,7 +2,11 @@
 // it last fetched into the operator's checkout, the commit it builds the cell image from, so a merged change to one
 // takes effect on the next poll with no restart, and an edit or a local commit in the checkout never counts. Cells
 // keep reading the defaults baked into their image.
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { DefaultPolicies } from "../policy/policy.ts";
+
+const run = promisify(execFile);
 
 export type MainDefaultsDeps = {
   /** The operator's checkout, which `main` is fetched into. */
@@ -13,9 +17,21 @@ export type MainDefaultsDeps = {
   branch?: string;
 };
 
-/** Reads each default policy from the fetched `main`'s `policy/<name>.md`. Not built yet. */
-export function mainDefaults(_d: MainDefaultsDeps): DefaultPolicies {
+/**
+ * Reads each default policy from `policy/<name>.md` at the checkout's remote-tracking ref for `main`, the commit the
+ * worker's last successful fetch left there. It reads the object store only, never the working tree, index or HEAD. A
+ * fetch that fails leaves the ref, so the defaults stay those of the last commit fetched. A file the commit doesn't hold
+ * throws, naming the file and the ref.
+ */
+export function mainDefaults(d: MainDefaultsDeps): DefaultPolicies {
+  const ref = `refs/remotes/${d.remote ?? "origin"}/${d.branch ?? "main"}`;
   return async (name) => {
-    throw new Error(`reading the default ${name}.md from main isn't built yet`);
+    const path = `policy/${name}.md`;
+    try {
+      // cat-file blob gives the bytes as committed, with no textconv or line-ending filter.
+      return (await run("git", ["cat-file", "blob", `${ref}:${path}`], { cwd: d.checkout, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })).stdout;
+    } catch (e) {
+      throw new Error(`the default ${path} couldn't be read from ${ref} in ${d.checkout}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 }

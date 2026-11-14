@@ -7,7 +7,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { criteriaHash, pollOnce } from "./poller.ts";
+import { criteriaHash, pollOnce, readinessFingerprint } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -621,6 +621,31 @@ describe("pollOnce", dbTest, () => {
       else process.env.FACTORY_POLICY_DIR = old;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("given a defaults reader, the gate and the fingerprint read the defaults from it, not the policy directory (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const held: Record<string, string> = { dor: "- [ ] Names the user it serves\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" };
+    const defaults = async (name: string) => held[name];
+    const asked: string[] = [];
+    const recording = async (item: FactoryItem, dor: Policy) => {
+      asked.push(...dor.criteria.map((c) => c.text));
+      return judge(item, dor);
+    };
+    const pollWith = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: recording, sourceId, defaults });
+    verdict = "failed";
+    const ext = await seed();
+    await pollWith();
+    assert.deepEqual(asked, ["Names the user it serves"]);
+    const before = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal((await row(ext)).readiness_policy_sha, before);
+    await pollWith();
+    assert.deepEqual(judged, [ext], "the same defaults don't re-gate");
+    held.risk = "r changed\n";
+    assert.notEqual(await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults }), before);
+    verdict = "passed";
+    await pollWith();
+    assert.equal((await row(ext)).state, "Queued");
   });
 
   test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {

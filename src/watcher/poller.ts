@@ -37,7 +37,8 @@ export type PollDeps = {
   logic?: ReadinessLogic;
   /**
    * Where the default policies come from, for a repo without its own (PBI 261): the worker reads them from the commit
-   * of `main` it last fetched, for both the fingerprint and the gate's criteria. Not read yet.
+   * of `main` it last fetched, for both the fingerprint and the gate's criteria. Unset, they come from the policy
+   * directory beside the code.
    */
   defaults?: DefaultPolicies;
 };
@@ -120,7 +121,9 @@ async function closeOpenPr(host: RepoHost, repo: string | null, row: Row, why: s
 }
 
 /** Reads every readiness input for one repo at its default branch head, once per poll. */
-async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic): Promise<Readiness> {
+async function readiness(
+  pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic, defaults?: DefaultPolicies,
+): Promise<Readiness> {
   const known = repo !== null && (await pool.query("select 1 from repo where url = $1", [`https://github.com/${repo}`])).rowCount === 1;
   if (!repo || !known) {
     // The logic still counts, so a change to it re-checks these items too (PBI 149).
@@ -136,14 +139,14 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
   const texts = { config: raw.get(".factory/config.yml") ?? null } as Parameters<typeof readinessSha>[0];
   for (const name of POLICIES) {
     const text = raw.get(`.factory/${name}.md`) ?? null;
-    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name))!.text);
+    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name, defaults))!.text);
   }
 
   const policyErrors: string[] = [];
   const loaded = new Map<PolicyName, Policy | null>();
   for (const name of POLICIES) {
     try {
-      loaded.set(name, await loadPolicy(read, name));
+      loaded.set(name, await loadPolicy(read, name, defaults));
     } catch (e) {
       if (!(e instanceof PolicyError)) throw e;
       policyErrors.push(e.message);
@@ -162,14 +165,23 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
   };
 }
 
+/** Reads each default once, so one poll reads them all from one commit, however many repos use them. */
+function oncePerPoll(defaults: DefaultPolicies): DefaultPolicies {
+  const read = new Map<string, Promise<string>>();
+  return (name) => {
+    if (!read.has(name)) read.set(name, defaults(name));
+    return read.get(name)!;
+  };
+}
+
 /**
  * The readiness fingerprint the poller takes for `repo` (PBI 261): the sha a NotReady item's stored one is compared
- * with. `defaults` isn't read yet, so the defaults still come from the policy directory on disk.
+ * with. Given `defaults`, the defaults come from it, as the worker's come from `main`'s fetched commit.
  */
 export async function readinessFingerprint(d: {
   pool: pg.Pool; repoHost: RepoHost; repo: string; logic?: ReadinessLogic; defaults?: DefaultPolicies;
 }): Promise<string> {
-  return (await readiness(d.pool, d.repoHost, d.repo, d.logic ?? readinessLogic())).sha;
+  return (await readiness(d.pool, d.repoHost, d.repo, d.logic ?? readinessLogic(), d.defaults && oncePerPoll(d.defaults))).sha;
 }
 
 /**
@@ -283,10 +295,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: step 3 withdrew it, or failed to read it and retries next poll.
   const logic = deps.logic ?? readinessLogic();
+  const defaults = deps.defaults && oncePerPoll(deps.defaults);
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
     const key = fi.repo ?? "";
-    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic));
+    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
