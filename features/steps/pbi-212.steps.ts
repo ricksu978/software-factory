@@ -239,7 +239,7 @@ Then("that attempt's message says the commit isn't on the run's branch", functio
   assert.ok(message.includes(BRANCH) || /run's branch/.test(message), `the message doesn't name the run's branch: ${message}`);
 });
 
-// "the item doesn't move to Failed" is defined once, in pbi-215.steps.ts, which PBI 215's feature shares.
+// "the item doesn't move to Failed" is defined once, in pbi-215.steps.ts, and PBI 212's feature uses it too.
 
 Then("the item is still InProgress when the cell ends", function () {
   const run = cell(this);
