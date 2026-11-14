@@ -11,6 +11,7 @@ import { issueRepos } from "../store/issues.ts";
 import { LEASE_RAN_OUT, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { readCellImage } from "../store/cell-image.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -92,6 +93,10 @@ async function floor(pool: pg.Pool) {
        and p.at = (select max(at) from policy_result where item_id = i.id and file = 'dor')
      where i.state = 'NotReady' group by i.id order by i.title`,
   )).rows;
+  // A Queued item the gate passed but whose dependencies are still open waits here, not in Next up (PBI 237).
+  const blocked = (await pool.query<{ id: string; external_id: string; title: string; blocked_by: string[] }>(
+    "select id, external_id, title, blocked_by from item where state = 'Queued' and cardinality(blocked_by) > 0 order by title",
+  )).rows;
   // PBI 215: items waiting on a question that says the base fails in the cell, for Floor's notice.
   const baseFails = (await pool.query<{ id: string; external_id: string; title: string; sha: string; tests: string[] }>(
     `select i.id, i.external_id, i.title, q.base_failure->>'sha' as sha,
@@ -124,12 +129,12 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...active, ...next, ...baseFails].map((r) => r.id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
-    active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), factory,
+    active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
     baseFails: withRepo(baseFails),
-    restart,
+    restart, cellImage: await readCellImage(pool),
   };
 }
 

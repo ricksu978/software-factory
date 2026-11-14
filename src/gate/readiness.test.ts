@@ -15,7 +15,7 @@ async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? dorText : null), "dor");
   const judged: string[] = [];
   const ctx = (judgeReply: string, extra: Partial<GateContext> = {}): GateContext => ({
-    readinessSha: "sha", dor, dodExists: true, configValid: true, repoKnown: true, openDeps: [], adapter: fake.adapter,
+    readinessSha: "sha", dor, dodExists: true, configValid: true, repoKnown: true, adapter: fake.adapter,
     judge: async (i: FactoryItem, _d: Policy) => {
       judged.push(i.externalId);
       return judgeReply;
@@ -34,7 +34,6 @@ describe("gate", () => {
       [{ dodExists: false }, {}, /No \.factory\/dod\.md in this repo/],
       [{ configValid: false }, {}, /No valid \.factory\/config\.yml in this repo/],
       [{}, { acceptanceCriteria: [] }, /no acceptance criteria/],
-      [{ openDeps: ["#12"] }, {}, /depends on #12/],
       [{ repoKnown: false, dor: null }, {}, /doesn't know this item's repo/],
     ];
     for (const [extra, item, reason] of cases) {
@@ -237,7 +236,7 @@ describe("gate: an oversized item (PBI 143)", () => {
       const b = restartBoard(new Set(["create:Bank"]));
       await assert.rejects(gate(s.item, s.ctx(judged(true, "failed"), { splits: b.splits, split: { ...split(true, three), file: b.file } })), /refused Bank/);
       assert.deepEqual(b.issues.map((i) => i.title), ["Card"], next);
-      const extra = next === "engine rule" ? { openDeps: ["#7"] } : {};
+      const extra = next === "engine rule" ? { dodExists: false } : {};
       const out = await gate(s.item, s.ctx(judged(false, "passed"), { ...extra, splits: b.splits, split: { ...split(true, two), file: b.file } }));
       assert.equal(out.ready, false, next);
       assert.equal(out.filed, true, next);
