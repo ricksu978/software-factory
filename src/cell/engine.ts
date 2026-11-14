@@ -15,6 +15,7 @@ import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
+import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import type { Git } from "./git.ts";
 
@@ -484,9 +485,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
+    const began = d.now().getTime();
     for (;;) {
       const s = await api.checks(sha);
       if (s !== "pending") return s;
+      const question = await pendingCiQuestion(api, sha, d.now().getTime() - began);
+      if (question) throw new Blocked(question);
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
     }
