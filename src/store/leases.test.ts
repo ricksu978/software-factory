@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { withTx } from "./db.ts";
-import { claimNext, expireLeases, LEASE_EXPIRY_MS, releaseLease, renewLease } from "./items.ts";
+import { claimNext, closeStartedAttempts, expireLeases, LEASE_EXPIRY_MS, LEASE_RAN_OUT, releaseLease, renewLease } from "./items.ts";
 import { dbTest, startTestDb } from "./test-db.ts";
 
 const t0 = new Date("2026-11-06T10:00:00Z");
@@ -131,5 +131,33 @@ describe("leases", dbTest, () => {
     await withTx(db.pool, (c) => releaseLease(c, id, 5));
     assert.equal((await row(id)).lease_owner, "cell-a");
     assert.deepEqual(await withTx(db.pool, (c) => expireLeases(c, t0)), [id]);
+  });
+  test("expireLeases closes every started attempt of the item's open run as stopped, and leaves ended attempts alone", async () => {
+    const id = await item("InProgress", `lease_generation = 1, lease_owner = 'a', lease_expires = '2026-11-06T09:00:00Z'`);
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, next_stage) values ($1, 'green') returning id", [id])).rows[0].id;
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, started_at, ended_at, message) values
+         ($1, 'specify', 1, 'passed', '2026-11-06T08:00:00Z', '2026-11-06T08:05:00Z', 'Wrote 4 scenarios'),
+         ($1, 'red', 1, 'started', '2026-11-06T08:10:00Z', null, null),
+         ($1, 'green', 1, 'started', '2026-11-06T08:20:00Z', null, null)`,
+      [run],
+    );
+    await withTx(db.pool, (c) => expireLeases(c, t0));
+    const rows = (await db.pool.query("select stage_id, status, ended_at, message from stage_run where run_id = $1 order by started_at", [run])).rows;
+    assert.deepEqual(rows.map((r) => [r.stage_id, r.status, r.ended_at.toISOString(), r.message]), [
+      ["specify", "passed", "2026-11-06T08:05:00.000Z", "Wrote 4 scenarios"],
+      ["red", "stopped", t0.toISOString(), LEASE_RAN_OUT],
+      ["green", "stopped", t0.toISOString(), LEASE_RAN_OUT],
+    ]);
+  });
+
+  test("closeStartedAttempts leaves the attempts of an ended run, and of other items, started", async () => {
+    const id = await item("InProgress");
+    const other = await item("InProgress");
+    const ended = (await db.pool.query<{ id: string }>("insert into run (item_id, ended_at) values ($1, now()) returning id", [id])).rows[0].id;
+    const elsewhere = (await db.pool.query<{ id: string }>("insert into run (item_id) values ($1) returning id", [other])).rows[0].id;
+    for (const r of [ended, elsewhere]) await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'green', 1, 'started')", [r]);
+    await withTx(db.pool, (c) => closeStartedAttempts(c, id, t0));
+    assert.deepEqual((await db.pool.query("select status from stage_run order by run_id")).rows.map((r) => r.status), ["started", "started"]);
   });
 });
