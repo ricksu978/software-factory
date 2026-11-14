@@ -331,6 +331,24 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
   });
 
+  test("a merge found broken after a later merge recorded main red at it uncharged takes that break over and files its bug item (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "pending")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    assert.equal((await state(first)).state, "Accepted");
+    assert.equal((await db.pool.query("select item_id from main_break where merge_sha = 'm1'")).rows[0].item_id, null);
+    repoHost.runs.set(`${REPO}@p1`, [check("test", "success")]);
+    await run();
+    assert.equal((await state(first)).state, "Failed");
+    assert.equal((await state(second)).state, "Accepted");
+    const breaks = (await db.pool.query("select merge_sha, item_id, pr_number, bug_external_id from main_break")).rows;
+    assert.equal(breaks.length, 1);
+    assert.deepEqual(breaks[0], { merge_sha: "m1", item_id: first, pr_number: 9, bug_external_id: backlog.filed[0] });
+    assert.equal(backlog.filed.length, 1);
+  });
+
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {
     const id = await item("1", "Abandoned", "held = true");
     await openRun(id, "next_stage = 'sign-off'");

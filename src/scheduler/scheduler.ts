@@ -441,9 +441,12 @@ async function charge(d: MergedCiDeps, row: { item_id: string; repo_id: string; 
   await withTx(d.pool, async (c) => {
     await transitionItem(c, row.item_id, "dod_failed", system);
     if (broke) {
+      // A later merge onto this one may have found main already red and recorded an uncharged break here while this
+      // merge was still undecided. This merge broke main, so it takes that row over, and its bug item gets filed.
       await c.query(
         `insert into main_break (repo_id, branch, merge_sha, item_id, pr_number, failed_checks, at) values ($1, $2, $3, $4, $5, $6, $7)
-         on conflict (repo_id, merge_sha) do nothing`,
+         on conflict (repo_id, merge_sha) do update set item_id = excluded.item_id, pr_number = excluded.pr_number, failed_checks = excluded.failed_checks
+         where main_break.item_id is null`,
         [row.repo_id, BASE, row.merge_sha, row.item_id, row.pr_number, JSON.stringify(broke), d.now],
       );
     }
