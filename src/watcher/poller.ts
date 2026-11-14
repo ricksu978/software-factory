@@ -12,7 +12,7 @@ import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
+import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -262,10 +262,15 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
-      await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
-    } else if (row.state === "InReview" && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
-      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181).
+    } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
+      // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
+      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262).
+      if (row.state === "InReview") {
+        await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+      }
+    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
+      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
+      // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
   });
@@ -423,7 +428,7 @@ async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: s
 }
 
 /**
- * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that an allowlisted
+ * The factory's merge (PBI 181). An InReview or NeedsInput item (PBI 262) that isn't held, whose PR GitHub reads `clean`, that an allowlisted
  * user approved and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at
  * the head the view was read at. First the attempt, with the PR, the head and the approvers, is logged as
  * `factory_merge_attempt` in its own committed write, so a merge GitHub made while the call failed is still logged as
@@ -431,7 +436,9 @@ async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: s
  * so a Hold or a claim that lands meanwhile waits, and the re-read under the lock sees the one that came first. A merge
  * moves the item through `merged`, as a person's would, and logs `factory_merged`. A refusal logs
  * `factory_merge_refused` with GitHub's message, and the next poll tries again. An item held or moved between the
- * two writes isn't merged, and `factory_merge_refused` closes its attempt.
+ * two writes isn't merged, and `factory_merge_refused` closes its attempt. A NeedsInput item's open question closes
+ * unanswered with a note naming the merge, and `factory_merged` says the item waited in NeedsInput and names the
+ * question (PBI 262).
  */
 async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
   // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
@@ -441,11 +448,15 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
   if (mergeBlocker(view) !== null) return;
   const mayMerge = async (c: pg.PoolClient) => {
     const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
-    return !!cur && cur.state === "InReview" && !cur.held;
+    return !!cur && cur.state === row.state && !cur.held;
   };
   const attempted = await withTx(pool, async (c) => {
     if (!(await mayMerge(c))) return false;
-    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy } });
+    // A NeedsInput item's attempt names the question it waits on, so a merge recovered from it is logged as this one
+    // would be (PBI 262).
+    const asked = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
+    const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: asked?.body ?? null, questionId: asked?.id ?? null } : {};
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy, ...waiting } });
     return true;
   });
   if (!attempted) return;
@@ -461,10 +472,23 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
       await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });
       return;
     }
+    // The question a NeedsInput item waited on, which the move to Accepted closes unanswered (PBI 194).
+    const question = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
     await transitionItem(c, row.id, "merged", system);
     await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, res.sha]);
-    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy } });
+    if (question) {
+      await c.query("update question set closed_note = $2 where id = $1", [question.id, mergedNote(prNumber, res.sha)]);
+    }
+    const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: question?.body ?? null } : {};
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy, ...waiting } });
   });
+}
+
+/** The newest question the item waits on, still unanswered and open. */
+async function openQuestion(c: pg.ClientBase, itemId: string): Promise<{ id: string; body: string } | null> {
+  return (await c.query<{ id: string; body: string }>(
+    "select id, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [itemId],
+  )).rows[0] ?? null;
 }
 
 /**

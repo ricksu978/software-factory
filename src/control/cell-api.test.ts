@@ -554,6 +554,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
   });
 
+  test("pending-checks: names the checks still pending on one of the run's own commits, and a sha off the branch or on main gets 400", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.pendingChecks.set(`${repo}@abc1234`, ["ci", "e2e"]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0ff0ff0")).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0a0a0a0")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
+  });
+
   test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {
     const cell = await claimed();
     host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
