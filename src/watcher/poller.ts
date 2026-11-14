@@ -165,11 +165,17 @@ async function readiness(
   };
 }
 
-/** Reads each default once, so one poll reads them all from one commit, however many repos use them. */
+/**
+ * Reads each default once per poll, so every repo in the poll sees the same text for it. A source that can be pinned
+ * is pinned to one commit before the first read, so all the defaults in one poll come from that commit, even if a
+ * fetch moves `main` mid-poll. Nothing is read, and nothing pinned, in a poll that needs no default.
+ */
 function oncePerPoll(defaults: DefaultPolicies): DefaultPolicies {
+  let source: Promise<(name: Parameters<DefaultPolicies>[0]) => Promise<string>> | undefined;
   const read = new Map<string, Promise<string>>();
   return (name) => {
-    if (!read.has(name)) read.set(name, defaults(name));
+    source ??= defaults.pin ? defaults.pin() : Promise.resolve(defaults);
+    if (!read.has(name)) read.set(name, source.then((r) => r(name)));
     return read.get(name)!;
   };
 }

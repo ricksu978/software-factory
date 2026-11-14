@@ -59,6 +59,22 @@ describe("reading the default policies from main's fetched commit", () => {
     assert.equal(await read("dor"), "- [ ] Names the user it serves\n");
   });
 
+  test("a pinned reader keeps reading the commit it pinned after a fetch moves main", async () => {
+    push("policy/risk.md", "r\n");
+    git(checkout, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
+    const pinned = await mainDefaults({ checkout }).pin!();
+    assert.equal(await pinned("dor"), "- [ ] Size is 5 or less\n");
+    push("policy/dor.md", "- [ ] Names the user it serves\n");
+    push("policy/risk.md", "r changed\n");
+    git(checkout, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
+    assert.equal(await pinned("risk"), "r\n", "the pinned commit, not the one fetched since");
+    assert.equal(await (await mainDefaults({ checkout }).pin!())("risk"), "r changed\n", "a new pin sees the new commit");
+  });
+
+  test("pinning a ref that doesn't exist throws, naming the ref", async () => {
+    await assert.rejects(mainDefaults({ checkout, branch: "nope" }).pin!(), /refs\/remotes\/origin\/nope/);
+  });
+
   test("honours another remote and branch", async () => {
     git(checkout, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/up/trunk");
     push("policy/dor.md", "- [ ] Later\n");

@@ -17,7 +17,13 @@ export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string
  * Reads the text of the factory's default for a policy a repo has no `.factory/<name>.md` for (PBI 261). The worker
  * reads each default from the commit of `main` it last fetched, not from the checkout's disk. dod.md has no default.
  */
-export type DefaultPolicies = (name: Exclude<PolicyName, "dod">) => Promise<string>;
+export type DefaultPolicies = ((name: Exclude<PolicyName, "dod">) => Promise<string>) & {
+  /**
+   * A reader fixed to the commit the defaults come from right now, so every read through it sees one commit even if
+   * the source moves meanwhile. The poller pins once per poll. A source that can't move has no `pin`.
+   */
+  pin?: () => Promise<(name: Exclude<PolicyName, "dod">) => Promise<string>>;
+};
 
 export class PolicyError extends Error {
   override name = "PolicyError";

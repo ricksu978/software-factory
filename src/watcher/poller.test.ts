@@ -694,6 +694,29 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await row(ext)).state, "Queued");
   });
 
+  test("a pinnable defaults reader is pinned once per poll, so a move mid-poll can't mix two commits (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const commits: Record<string, string>[] = [{ dor: "- [ ] Old\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" }];
+    let pins = 0;
+    // Each pin fixes the latest commit; a fresh read of the moving ref follows the latest, and moves it after the dor read.
+    const moving = async (name: string) => {
+      const text = commits[commits.length - 1][name];
+      if (name === "dor") commits.push({ dor: "- [ ] New\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r new\n" });
+      return text;
+    };
+    const defaults = Object.assign(moving, {
+      pin: async () => {
+        pins++;
+        const at = commits[commits.length - 1];
+        return async (name: string) => at[name];
+      },
+    });
+    const sha = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal(pins, 1, "one pin for the whole poll");
+    const pinnedFirst = { ...commits[0] };
+    assert.equal(sha, await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults: async (n: string) => pinnedFirst[n] }));
+  });
+
   test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {
     verdict = "failed";
     const ext = await seed();
