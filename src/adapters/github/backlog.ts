@@ -337,8 +337,21 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await issue(externalId)), state: "closed", state_reason: "completed" });
     },
 
-    async fileItem() {
-      throw new Error("not implemented: filing an item (PBI 255)");
+    // PBI 255: a filed issue carries the dedupe key as a marker, so a retry finds the App's own issue and files no
+    // second one, since findIssues trusts only the App's own issues. It gets the board's opt-in label along with the caller's, and goes on the board where the factory
+    // reads new work, so the poller takes it in as it does any item.
+    async fileItem({ title, body, labels, repo }, dedupeKey) {
+      if (!repo) throw new Error("filing an item needs a repo to open its issue in");
+      const marker = `<!-- factory:${dedupeKey} -->`;
+      // A retry after a lost answer finds the issue and still puts it on the board, which a second add leaves as it is.
+      const [owner, name] = repo.split("/");
+      const filed = (await splitBoard.findIssues(repo, marker))[0] ?? child(repo, (await (await app()).request("POST /repos/{owner}/{repo}/issues", {
+        owner, repo: name, title, body: `${marker}\n${body}`, labels: [...new Set([...labels, cfg.fieldMap.optInLabel])],
+      })).data as RestIssue);
+      const status = cfg.fieldMap.statusFor.Eligible ?? cfg.fieldMap.statusFor.NotReady;
+      if (status) await splitBoard.addToBoard(filed.externalId, status);
+      else await (await board()).graphql(ADD_TO_PROJECT, { project: (await resolve()).id, content: (await rest(filed.externalId)).node_id });
+      return filed.externalId;
     },
 
     parseWebhook: parseGitHubWebhook,

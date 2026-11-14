@@ -90,7 +90,8 @@ export const LEASE_EXPIRY_MS = 300_000;
 const system = (actorId: string): Actor => ({ actor: "system", actorId });
 
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
-// `resumeOnly`, the waiting-count brake.
+// `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
+// main before it builds anything else (PBI 255).
 const CLAIMABLE = `from item i
      where not i.held and cardinality(i.blocked_by) = 0
        and ((i.state = 'Queued'
@@ -98,7 +99,7 @@ const CLAIMABLE = `from item i
          or (i.state in ('SignOff', 'NeedsInput')
            and exists (select from question q where q.item_id = i.id and q.answer is not null)
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
-     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id`;
+     order by not exists (select from main_break b where b.bug_item_id = i.id and b.cleared_at is null), i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id`;
 
 /** The first `limit` items claimNext would pick with the same `resumeOnly`, in order, without claiming or locking. */
 export async function nextUp(
@@ -108,8 +109,9 @@ export async function nextUp(
 }
 
 /**
- * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. Answered SignOff and NeedsInput items
- * come before Queued ones, then highest priority, then lowest backlog rank. Held items and items with an open
+ * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. The bug item of a standing break on main
+ * comes first (PBI 255), then answered SignOff and NeedsInput items before Queued ones, then highest priority, then
+ * lowest backlog rank. Held items and items with an open
  * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
  * With `resumeOnly`, the waiting-count brake is on, so a Queued item counts only when its open run already has a

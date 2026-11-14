@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
+import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
 import { clearRestartOnStart, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
@@ -171,6 +172,67 @@ describe("scheduler", dbTest, () => {
     assert.equal((await state(silent)).state, "Failed");
     assert.match((await backlog.comments("1")).join(), /No CI ran on main/);
     assert.equal((await state(green)).state, "Done");
+  });
+
+  // PBI 255: a red merge commit compared with its first parent. The scenarios cover the rest.
+  async function redMerge(externalId: string, sha: string, parent: string, mergeRuns: CheckRun[], parentRuns: CheckRun[], mergedAgo = 60_000) {
+    const id = await item(externalId, "Accepted");
+    await openRun(id, `merge_sha = '${sha}', repo_id = '${repoId}', pr_number = 9`);
+    await db.pool.query("insert into event (at, actor, actor_id, item_id, kind, payload) values ($1, 'system', 't', $2, 'transition', '{\"to\":\"Accepted\"}')", [ago(mergedAgo), id]);
+    repoHost.parents.set(`${REPO}@${sha}`, parent);
+    repoHost.runs.set(`${REPO}@${sha}`, mergeRuns);
+    repoHost.runs.set(`${REPO}@${parent}`, parentRuns);
+    repoHost.checks.set(`${REPO}@${sha}`, "failure");
+    return id;
+  }
+  const check = (name: string, status: CheckRun["status"]): CheckRun => ({ name, status, url: `https://github.com/${REPO}/runs/${name}` });
+
+  test("a red merge whose failed check still runs on its first parent waits a poll, and counts it passed after an hour (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "pending")]);
+    await run();
+    assert.equal((await state(id)).state, "Accepted");
+    await run(new Date(NOW.getTime() + 3_600_000));
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 1);
+  });
+
+  test("a red merge with no failed check run, as with CI that reports statuses, is charged and files no bug item (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [], []);
+    await run();
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 0);
+    assert.equal((await db.pool.query("select count(*)::int as n from main_break")).rows[0].n, 0);
+  });
+
+  test("a bug item whose filing fails is filed on a later tick, and once (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const fileItem = backlog.adapter.fileItem;
+    backlog.adapter.fileItem = async () => { throw new Error("GitHub is down"); };
+    await run();
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 0);
+    backlog.adapter.fileItem = fileItem;
+    await run();
+    await run();
+    assert.equal(backlog.filed.length, 1);
+    assert.equal((await db.pool.query("select bug_external_id from main_break")).rows[0].bug_external_id, backlog.filed[0]);
+  });
+
+  test("a bug item stops coming first once main is green again (PBI 255)", async () => {
+    const charged = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    await run();
+    const bug = await item(backlog.filed[0], "Queued", "priority = 0");
+    const urgent = await item("90", "Queued", "priority = 9");
+    assert.ok(charged && bug && urgent);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    assert.ok((await db.pool.query("select cleared_sha from main_break where bug_item_id = $1", [bug])).rows[0]?.cleared_sha === "f1");
+    await db.pool.query("update wip_policy set current_wip = 1");
+    await run();
+    assert.equal((await state(urgent)).state, "InProgress");
+    assert.equal((await state(bug)).state, "Queued");
   });
 
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {

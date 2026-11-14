@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -188,10 +188,13 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
   }
 }
 
+/** The conclusions of a completed check run that pass. */
+const PASSING = ["success", "neutral", "skipped"];
+
 async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { status: string; conclusion: string | null }[];
-  if (runs.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""))) return "failure";
+  if (runs.some((c) => c.status === "completed" && !PASSING.includes(c.conclusion ?? ""))) return "failure";
   if (runs.length === 0) {
     // "none" only when no commit status has reported either, so a repo whose CI reports statuses still reads pending.
     const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
@@ -309,20 +312,56 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       }
     },
 
-    async checkRuns() {
-      throw new Error("not implemented: reading check runs (PBI 255)");
+    async checkRuns(repo, sha) {
+      // ponytail: one page of 100 check runs, as checksOn reads; commit statuses aren't check runs, so they aren't listed.
+      const runs = (await (await client()).request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...split(repo), ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string; conclusion: string | null; html_url: string }[];
+      return runs.map((c): CheckRun => ({
+        name: c.name, url: c.html_url,
+        status: c.status !== "completed" ? "pending" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure",
+      }));
     },
 
-    async checkLog() {
-      throw new Error("not implemented: reading a check's log (PBI 255)");
+    async checkLog(repo, sha, check) {
+      // A GitHub Actions check run's id is its job's id, so the job's log is the check's. A check run another App
+      // reports has no such log, and GitHub expires old logs, so either one reads as no log.
+      const gh = await client();
+      const r = split(repo);
+      const run = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, check_name: check, per_page: 1 })).data.check_runs as { id: number; name: string }[])
+        .find((c) => c.name === check);
+      if (!run) return null;
+      try {
+        const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: run.id })).data;
+        return typeof data === "string" ? data : data instanceof ArrayBuffer ? Buffer.from(data).toString("utf8") : null;
+      } catch (e) {
+        if ([403, 404, 410].includes((e as { status?: number }).status ?? 0)) return null;
+        throw e;
+      }
     },
 
-    async firstParent() {
-      throw new Error("not implemented: reading a commit's first parent (PBI 255)");
+    async firstParent(repo, sha) {
+      const commit = (await (await client()).request("GET /repos/{owner}/{repo}/commits/{ref}", { ...split(repo), ref: sha })).data as { parents: { sha: string }[] };
+      return commit.parents[0]?.sha ?? null;
     },
 
-    async commitsAfter() {
-      throw new Error("not implemented: listing a branch's later commits (PBI 255)");
+    async commitsAfter(repo, branch, sha) {
+      const gh = await client();
+      const r = split(repo);
+      let compare: { status: string; commits: { sha: string; parents: { sha: string }[] }[] };
+      try {
+        compare = (await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${sha}...${branch}` })).data;
+      } catch (e) {
+        if (notFound(e)) return []; // a sha or branch GitHub doesn't know
+        throw e;
+      }
+      if (compare.status !== "ahead") return [];
+      // Compare lists every commit the branch has that `sha` lacks, a merged-in side branch's included, so the branch's
+      // own commits are found by walking first parents back from its head.
+      // ponytail: compare lists at most 250 commits; past that the walk stops at the oldest it was given.
+      const parent = new Map(compare.commits.map((c) => [c.sha, c.parents[0]?.sha ?? null]));
+      const head = (await gh.request("GET /repos/{owner}/{repo}/branches/{branch}", { ...r, branch })).data.commit.sha as string;
+      const out: string[] = [];
+      for (let at: string | null = head; at && at !== sha && parent.has(at); at = parent.get(at)!) out.push(at);
+      return out.reverse();
     },
   };
 }

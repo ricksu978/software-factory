@@ -47,7 +47,7 @@ const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
-const BASE = "main";
+export const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
