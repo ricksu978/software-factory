@@ -20,10 +20,16 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
     [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
   // PBI 168: an item that leaves the backlog before it's Queued is withdrawn too, and comes back through the gate.
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
+  // PBI 225: a parent whose split is filed rests in Split.
+  ["NotReady", "split_filed", "Split"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
 test("a returning item never skips the gate", () => assert.equal(next("Abandoned", "ready"), null));
 test("answer alone does not move state", () => assert.equal(next("NeedsInput", "ready"), null));
+test("a Split item has no way back to the gate", () => {
+  for (const ev of ["returned", "policy_changed", "item_edited", "withdrawn", "ready"] as ItemEvent[]) assert.equal(next("Split", ev), null);
+});
+test("split_filed moves only a NotReady item", () => assert.equal(next("Eligible", "split_filed"), null));
 test("override goes anywhere", () => assert.equal(overrideTo("Done", "Queued"), "Queued"));

@@ -55,6 +55,11 @@ export type Ctx = {
   /** A step's setting that waits for its child to exist, such as the owner labelling a child that wasn't filed. */
   errors: unknown[];
   polls: number;
+  /**
+   * PBI 225: a poll by the real poller over Postgres, which replaces this harness's in-memory pass for the scenarios
+   * that set it. Unset, a poll is the in-memory pass below.
+   */
+  driver?: () => Promise<void>;
 };
 
 export function ctx(world: object): Ctx {
@@ -77,20 +82,20 @@ function splitReply(table: DataTable): string {
 const titleOf = (c: Ctx, id: string) => c.filed.find((i) => i.externalId === id)?.title ?? `#${id}`;
 
 /** Throws once for the first matching refusal, then forgets it. */
-function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
+export function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
   const at = c.refusals.findIndex((r) => r.kind === kind && r.title === title && (r.blocker === undefined || r.blocker === blocker));
   if (at === -1) return;
   c.refusals.splice(at, 1);
   throw new Error(`the repo refused a ${kind} write for "${title}"`);
 }
 
-async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
+export async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
   const fi = await c.fake.adapter.getItem(id);
   assert.ok(fi, `no item ${id}`);
   await c.fake.seed({ ...fi, ...change(fi), externalId: id });
 }
 
-function scriptedBoard(c: Ctx): SplitBoard {
+export function scriptedBoard(c: Ctx): SplitBoard {
   const issue = (id: string): ChildIssue => {
     const found = c.filed.find((i) => i.externalId === id);
     assert.ok(found, `no filed issue ${id}`);
@@ -146,7 +151,7 @@ function scriptedBoard(c: Ctx): SplitBoard {
   };
 }
 
-function agent(c: Ctx) {
+export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
     return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
@@ -154,7 +159,7 @@ function agent(c: Ctx) {
 }
 
 /** The judge passes every dor.md line and raises no flag; only the parent, once set so, is oversized. */
-function judge(c: Ctx) {
+export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
     JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
@@ -167,6 +172,11 @@ function judge(c: Ctx) {
  * gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each` does.
  */
 export async function poll(c: Ctx): Promise<void> {
+  if (c.driver) {
+    await c.driver();
+    c.polls++;
+    return;
+  }
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? c.dor : null), "dor");
   const listed = (await c.fake.adapter.listEligible(null)).items.filter((fi) => !fi.closed && fi.labels.includes(c.label));
   const ids = new Set(listed.map((fi) => fi.externalId));

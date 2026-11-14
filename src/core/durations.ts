@@ -8,7 +8,7 @@ export type StageSpan = { stageId: string; startedAt: Date; endedAt: Date | null
 export type QuestionSpan = { kind: "sign_off" | "needs_input"; askedAt: Date; answeredAt: Date | null; closedAt: Date | null };
 
 export type ItemDurations = {
-  /** From the issue's creation to Done, Failed or Abandoned, or to now while the item is open. Null with no creation time. */
+  /** From the issue's creation to Done, Failed, Abandoned or Split, or to now while the item is open. Null with no creation time. */
   totalMs: number | null;
   /** Every spell Queued, waiting for a WIP slot. */
   queuedMs: number;
@@ -17,7 +17,7 @@ export type ItemDurations = {
   stages: { stageId: string; ms: number; attempts: number }[];
 };
 
-const ENDED: ItemState[] = ["Done", "Failed", "Abandoned"];
+const ENDED: ItemState[] = ["Done", "Failed", "Abandoned", "Split"];
 
 export function itemDurations(d: { createdAt: Date | null; state: ItemState; now: Date; moves: Move[]; stages: StageSpan[]; questions: QuestionSpan[] }): ItemDurations {
   const now = d.now.getTime();
