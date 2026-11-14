@@ -165,7 +165,9 @@ export type RunDetail = {
     /** When the attempt started and ended, null while it still runs (PBI 189). */
     started_at?: Date; ended_at?: Date | null;
     /** PBI 190: the PR reviewer's restates in the attempt. */
-    restates?: { round: number; reason: string }[] }[];
+    restates?: { round: number; reason: string }[];
+    /** What the attempt's cell, or the factory closing it, said about it, such as that the cell's lease ran out (PBI 239). */
+    message?: string | null }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
   readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
@@ -227,13 +229,18 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   const now = d.now ?? new Date();
   const started = (s: RunDetail["stages"][number]) => (s.started_at ? local(s.started_at, zone) : "");
   // An attempt with no end is running only while the item is In progress on an open run, and only if it's the run's
-  // newest attempt: a cell that died mid-stage leaves its row open for good, and a new claim on the same run numbers
-  // its attempts after it, so counting that dead row against now would climb for ever.
+  // newest attempt: a cell that died mid-stage leaves its row open until its lease runs out and the factory closes it
+  // (PBI 239), and a row left open anyway must never count against now, or its time would climb for ever.
   const newest = d.stages.reduce<RunDetail["stages"][number] | null>(
     (a, s) => (s.started_at && (!a?.started_at || s.started_at.getTime() >= a.started_at.getTime()) ? s : a), null);
   const live = (s: RunDetail["stages"][number]) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
   const took = (s: RunDetail["stages"][number]) =>
     !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live(s) ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
+  // An attempt's notes: its message, then each time the PR reviewer needed a second ask (PBI 190, PBI 239).
+  const notes = (s: RunDetail["stages"][number]) => [
+    ...(s.message ? [escapeHtml(s.message)] : []),
+    ...(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`),
+  ].join("<br>");
   // Each Tokens and Cost cell keeps the exact figures in its title, so hovering shows them in full.
   const exactTokens = (tokensIn: number | null, tokensOut: number | null) => `<td title="${escapeHtml(`${tokensIn ?? 0} in, ${tokensOut ?? 0} out`)}">`;
   const exactCost = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">`;
@@ -244,7 +251,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length

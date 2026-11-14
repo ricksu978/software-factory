@@ -10,7 +10,7 @@ import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { renewLease, transitionItem } from "../store/items.ts";
+import { closeStartedAttempts, renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
@@ -131,7 +131,10 @@ async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise
     "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
     [now],
   );
-  if (restart.rowCount) await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
+  if (!restart.rowCount) return;
+  // Any attempt still started belongs to a cell that died before this one (PBI 239). The cell's own attempt is reported by now.
+  await closeStartedAttempts(c, run.item_id, now);
+  await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
 }
 
 const routes: Record<string, Route> = {
