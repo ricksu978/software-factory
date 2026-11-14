@@ -57,7 +57,7 @@ const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli
 
 // Every app shares the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
 // The control plane (plan Task 15): the webhook and the dashboard. Its console shows this start's dashboard sign-in
-// link, built from PORT.
+// link, built from DASHBOARD_ORIGIN, the endpoint's proxied port.
 const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withNpm({ install: false })
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7400, env: 'PORT' })
