@@ -99,6 +99,23 @@ export type OpenedThread = { threadId: string; path: string; line: number; body:
  */
 export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
 
+/** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */
+export type MergeState = "clean" | "blocked" | "behind" | "unstable" | "unknown" | "dirty" | "draft" | "has_hooks";
+
+/** What the poller reads to decide whether to merge a PR (PBI 181). */
+export type MergeView = {
+  mergeState: MergeState;
+  /** The head the view was read at, which mergePr passes back so a head that moved since makes GitHub refuse. */
+  headSha: string | null;
+  /** The PR body, whose Definition of Done section holds the lines left for the person who merges. */
+  body: string;
+  /** Each reviewer whose latest review that isn't a plain comment approves the PR. */
+  approvedBy: string[];
+};
+
+/** A merge GitHub made, with its commit, or one it refused, with GitHub's message. A refusal never throws. */
+export type MergeResult = { merged: true; sha: string } | { merged: false; reason: string };
+
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
@@ -138,4 +155,8 @@ export interface RepoHost {
   postReview(p: { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[] }): Promise<{ threads: OpenedThread[] }>;
   /** Resolves one review thread by its id. Resolving a thread that's already resolved succeeds and changes nothing. */
   resolveThread(repo: string, threadId: string): Promise<void>;
+  /** What decides a factory merge: GitHub's merge state, the head, the body and the approvers (PBI 181). */
+  mergeView(repo: string, prNumber: number): Promise<MergeView>;
+  /** Squash-merges the PR at `headSha`. GitHub refusing, a moved head for one, comes back as `merged: false`. */
+  mergePr(repo: string, prNumber: number, p: { method: "squash"; headSha: string | null }): Promise<MergeResult>;
 }

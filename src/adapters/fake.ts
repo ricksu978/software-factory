@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -108,7 +108,15 @@ type FakePr = {
   number: number; repo: string; branch: string; base: string; title: string; body: string; headSha: string | null;
   open: boolean; merged: boolean; mergeSha: string | null; mergeable: boolean | null; reviewers: string[]; comments: string[];
   reviews: { state: "changes_requested" | "approved" | "commented"; submittedAt: string; author: string; body?: string }[];
+  /** PBI 181: what GitHub reports as the PR's merge state. Unset, it reads `unknown`, so no PR merges by accident. */
+  mergeState?: MergeState;
+  /** PBI 181: the commit a merge of this PR makes. Unset, `merge-<number>`. */
+  mergeAs?: string;
+  /** PBI 181: GitHub's messages for the next merges it refuses, the first one first. */
+  refusals?: string[];
 };
+/** A merge mergePr was asked for, and what it answered. */
+type MergeCall = { repo: string; prNumber: number; method: string; headSha: string | null; merged: boolean };
 type Status = "pending" | "success" | "failure";
 /** A review postReview recorded. Its event is always COMMENT, as on GitHub. */
 type PostedReview = { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[]; event: "COMMENT" };
@@ -136,7 +144,9 @@ export function fakeRepoHost(): RepoHost & {
   reviewComments: Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>;
   postedReviews: PostedReview[];
   resolvedThreads: { repo: string; threadId: string }[];
+  mergeCalls: MergeCall[];
 } {
+  const mergeCalls: MergeCall[] = [];
   const postedReviews: PostedReview[] = [];
   const resolvedThreads: { repo: string; threadId: string }[] = [];
   let openedThreads = 0;
@@ -155,7 +165,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads,
+    prs, checks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -244,6 +254,25 @@ export function fakeRepoHost(): RepoHost & {
       if (thread.every((c) => c.resolved)) return;
       for (const c of thread) c.resolved = true;
       resolvedThreads.push({ repo, threadId });
+    },
+    async mergeView(repo, n) {
+      const p = pr(repo, n);
+      const latest = new Map<string, { author: string; state: string }>();
+      for (const r of [...p.reviews].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))) {
+        if (r.state !== "commented") latest.set(loginKey(r.author), r);
+      }
+      const approvedBy = [...latest.values()].filter((r) => r.state === "approved").map((r) => r.author);
+      return { mergeState: p.mergeState ?? "unknown", headSha: p.headSha, body: p.body, approvedBy };
+    },
+    // Merges any open PR it isn't told to refuse, as an admin's token could, so only the factory's own checks hold one.
+    async mergePr(repo, n, { method, headSha }) {
+      const p = pr(repo, n);
+      const refusal = p.refusals?.shift()
+        ?? (!p.open ? "Pull Request is not mergeable" : headSha !== null && headSha !== p.headSha ? "Head branch was modified. Review and try the merge again." : null);
+      mergeCalls.push({ repo, prNumber: n, method, headSha, merged: refusal === null });
+      if (refusal !== null) return { merged: false, reason: refusal };
+      Object.assign(p, { open: false, merged: true, mergeSha: p.mergeAs ?? `merge-${n}` });
+      return { merged: true, sha: p.mergeSha! };
     },
   };
 }
