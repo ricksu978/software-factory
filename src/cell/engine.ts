@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { LineComment, ReviewComment, RepoHost } from "../adapters/types.ts";
+import type { CiCheck, LineComment, ReviewComment, RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
@@ -14,7 +14,7 @@ import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
-import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
+import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
 import type { Git } from "./git.ts";
@@ -333,6 +333,73 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>, upload
   };
 }
 
+export type { CiCheck };
+
+/** The findings a stage gets from Definition of Done verdicts: one per failed line. */
+export const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
+
+/**
+ * The verdict a line's named check gives, or null when it gives none. A check run twice on one commit, as a re-run
+ * leaves it, fails the line when either run failed, and gives no verdict while either still runs.
+ */
+function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | null {
+  const named = checks.filter((x) => x.name === c.ci);
+  if (!named.length) return null;
+  const failed = named.find((x) => x.conclusion === "failure");
+  if (failed) return { index: c.index, criterion: c.text, status: "failed", reason: `CI check "${failed.name}" failed: ${failed.url}` };
+  if (named.some((x) => x.conclusion === "pending")) return "pending";
+  return { index: c.index, criterion: c.text, status: "passed", reason: `CI check "${named[0].name}" passed: ${named[0].url}` };
+}
+
+/**
+ * Checks the Definition of Done at `head` (Run contract 11): a line whose `ci:` check passed or failed on `head` takes
+ * that check's verdict, each other `run:` line's command runs in the checkout, the rest go to `judge`, and the
+ * verdicts are stored with the commit they checked (PBI 229). `ciChecks` reads the checks CI reported on a commit, or
+ * is null when there's no PR, and gives null when CI hasn't reported on that commit. The findings are one per failed
+ * line, then one per named check CI reported no run of on `head`, whose line fell back to its command. Those are
+ * `missing` as well, since a missing check alone fails nothing: the caller fails the stage on the failed lines.
+ */
+export async function checkDefinitionOfDone(d: {
+  dir: string; head: string; dod: Policy;
+  ciChecks: ((sha: string) => Promise<CiCheck[] | null>) | null;
+  judge: (judged: Criterion[]) => Promise<Verdict[]>;
+  store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
+  /** PBI 215: called when a run: line's command fails. A string it returns goes before the line's reason. */
+  onRunFailed?: (c: Criterion, r: { code: number; out: string; all: string }) => Promise<string | undefined>;
+}): Promise<{ verdicts: Verdict[]; findings: string[]; missing: string[]; checkedSha: string }> {
+  const { dir, head, dod } = d;
+  const named = dod.criteria.filter((x) => x.ci);
+  // Asked once, and only about `head`: a check that passed on an earlier commit never stands in for this one.
+  const checks = named.length && d.ciChecks ? await d.ciChecks(head) : null;
+  const verdicts: Verdict[] = [];
+  const missing: string[] = [];
+  const rest: Criterion[] = [];
+  for (const c of dod.criteria) {
+    const v = c.ci && checks ? ciVerdict(c, checks) : null;
+    if (v && v !== "pending") verdicts.push(v);
+    else {
+      if (c.ci && checks && v === null) {
+        missing.push(`the CI check "${c.ci}" that Definition of Done line ${c.index} names was missing on ${head}, so the line was judged without it`);
+      }
+      rest.push(c);
+    }
+  }
+  for (const c of rest.filter((x) => x.run)) {
+    const r = await sh(c.run!, dir);
+    let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
+    if (r.code !== 0 && d.onRunFailed) {
+      const prefix = await d.onRunFailed(c, r);
+      if (prefix) reason = `${prefix}: ${reason}`;
+    }
+    verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
+  }
+  const judged = rest.filter((x) => !x.run);
+  if (judged.length) verdicts.push(...await d.judge(judged));
+  verdicts.sort((a, b) => a.index - b.index);
+  await d.store(head, verdicts);
+  return { verdicts, findings: [...dodFindings(verdicts), ...missing], missing, checkedSha: head };
+}
+
 export async function runCell(d: CellDeps): Promise<Outcome> {
   const { api, ctx, git, dir, sop, config, policies } = d;
   const tag = `@pbi-${ctx.externalId}`;
@@ -372,6 +439,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
     /** PBI 190: each restate the PR reviewer was asked for in this attempt, by round, with why its answer couldn't be read. */
     restates?: { round: number; reason: string }[];
+    /** Notes the factory adds, such as a missing CI check (PBI 229). They go before the message, since the cell API
+     *  keeps only its first 500 characters, and a later `say` doesn't replace them. */
+    notes?: string[];
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
@@ -441,7 +511,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     };
     if (status === "stopped") await uploads();
     await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
-      costUsd: m.costUsd, ...(c.message === undefined ? {} : { message: c.message }),
+      costUsd: m.costUsd, ...(c.message === undefined && !c.notes?.length ? {} : { message: [...(c.notes ?? []), c.message].filter(Boolean).join("\n\n") }),
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       ...(c.restates?.length ? { restates: c.restates } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
@@ -551,52 +621,50 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // A run: line that fails is run again on the base commit (PBI 215). When every failed line's tests all fail there too,
   // the check stops with BaseFails once its verdicts are stored, so the stage asks about the base instead of retrying.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
-    const head = await git.head();
     const dod = policies.dod;
-    const verdicts: Verdict[] = [];
+    // PBI 229: a dod.md `ci:` check stands in for its line once a PR exists. Before then, as at Green, CI hasn't
+    // judged the item's commits, and the cell API gives null for a commit the cell hasn't pushed.
     const shared: { criterion: string; tests: string[] }[] = [];
     const sharedIdx = new Set<number>();
     let baseSha = "";
-    for (const c of dod.criteria.filter((x) => x.run)) {
-      const r = await sh(c.run!, dir);
-      let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
-      if (r.code !== 0) {
+    const ciChecks = (ctx.prNumber !== null || opened !== null) && api.ciChecks ? api.ciChecks.bind(api) : null;
+    const { verdicts, missing, checkedSha } = await checkDefinitionOfDone({
+      dir, head: await git.head(), dod, ciChecks,
+      judge: async (judged) => {
+        const r = await ask(stageId, brief(
+          "# Definition of Done",
+          "Judge whether this branch meets each line of the team's Definition of Done, which follows whole.",
+          fenced(dod.text, "markdown"),
+          "The lines to judge, one JSON line each:",
+          judged.map((c) => JSON.stringify({ index: c.index, criterion: c.text })).join("\n"),
+          'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed"|"person","reason":"<why>"}. Use "person" for a line only a person can check, or one that can only hold after merge, such as a deploy. Write nothing else, and change no file.',
+        ));
+        return parseJudgement(r.text, { ...dod, criteria: judged });
+      },
+      onRunFailed: async (c, r) => {
         const tests = failingTests(r.all);
         const b = await onBase(c.run!);
-        if (sharedWithBase(tests, b.tests)) {
-          shared.push({ criterion: c.text, tests });
-          sharedIdx.add(c.index);
-          baseSha = b.sha;
-          reason = `the base commit ${b.sha.slice(0, 7)} fails the same tests: ${reason}`;
-        }
-      }
-      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
-    }
-    const judged = dod.criteria.filter((x) => !x.run);
-    if (judged.length) {
-      const r = await ask(stageId, brief(
-        "# Definition of Done",
-        "Judge whether this branch meets each line of the team's Definition of Done, which follows whole.",
-        fenced(dod.text, "markdown"),
-        "The lines to judge, one JSON line each:",
-        judged.map((c) => JSON.stringify({ index: c.index, criterion: c.text })).join("\n"),
-        'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed"|"person","reason":"<why>"}. Use "person" for a line only a person can check, or one that can only hold after merge, such as a deploy. Write nothing else, and change no file.',
-      ));
-      verdicts.push(...parseJudgement(r.text, { ...dod, criteria: judged }));
-    }
-    verdicts.sort((a, b) => a.index - b.index);
-    await api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha: head, verdicts });
+        if (!sharedWithBase(tests, b.tests)) return undefined;
+        shared.push({ criterion: c.text, tests });
+        sharedIdx.add(c.index);
+        baseSha = b.sha;
+        return `the base commit ${b.sha.slice(0, 7)} fails the same tests`;
+      },
+      store: (checkedSha, verdicts) => api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha, verdicts }),
+    });
     dodVerdicts = verdicts;
-    dodSha = head;
+    dodSha = checkedSha;
+    // A missing check fails nothing, since its line fell back to its command, but the attempt's message says so, first,
+    // so the cell API's 500-character cut never drops it behind a long agent reply.
+    if (missing.length && current) current.notes = [...(current.notes ?? []), ...missing];
     // The base is blamed only when every failed line is one whose failing tests the base shares. A line that fails only
-    // on the branch, names no test, or was judged failed stays the item's, so the stage retries as before.
+    // on the branch, names no test, was judged failed, or failed its CI check stays the item's, so the stage retries as before.
     const failed = verdicts.filter((v) => v.status === "failed");
     if (shared.length && failed.every((v) => sharedIdx.has(v.index))) {
       throw new BaseFails(ctx.base, baseSha, shared);
     }
     return verdicts;
   };
-  const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
   // Fresh DoD (Run contract 11): checked again unless the verdicts at this very commit all held.
   const freshDod = async (stageId: StageId, attempt: number) =>
     (await git.head()) === dodSha && dodFindings(dodVerdicts).length === 0 ? [] : dodFindings(await checkDod(stageId, attempt));

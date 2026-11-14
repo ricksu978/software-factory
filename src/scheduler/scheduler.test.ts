@@ -148,6 +148,14 @@ describe("scheduler", dbTest, () => {
     assert.equal(left.rowCount, 0);
   });
 
+  test("a Split parent's overrides end, since Split is an end state", async () => {
+    const id = await item("1", "Split");
+    await override("hold", id);
+    await run();
+    const left = await db.pool.query("select 1 from override where target_id = $1 and cleared_at is null", [id]);
+    assert.equal(left.rowCount, 0);
+  });
+
   test("a question gets a reminder at 2 days and at 4, once each", async () => {
     const id = await item("1", "SignOff");
     await openRun(id, "next_stage = 'sign-off'");

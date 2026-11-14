@@ -150,8 +150,8 @@ async function itemRow(c: pg.Pool | pg.PoolClient, itemId: string) {
 /**
  * hold and unhold set `item.held`. stop_run stops the cell, fails the item through overrideTo and holds it. requeue
  * clears the hold and sends a Failed or Abandoned item back. Every one but hold is used up once applied, and an item's
- * other overrides end when it reaches Done, Failed or Abandoned. A requeue stays until it runs, so one that throws
- * retries next tick.
+ * other overrides end when it reaches Done, Failed, Abandoned or Split. A requeue stays until it runs, so one that
+ * throws retries next tick.
  */
 async function applyItemOverrides(d: TickDeps, overrides: Awaited<ReturnType<typeof activeOverrides>>, result: TickResult) {
   for (const o of overrides) {
@@ -175,7 +175,7 @@ async function applyItemOverrides(d: TickDeps, overrides: Awaited<ReturnType<typ
   await d.pool.query(
     `update override o set cleared_at = $1 from item i
      where o.cleared_at is null and o.scope = 'item' and o.kind <> 'requeue' and o.target_id = i.id
-       and i.state in ('Done', 'Failed', 'Abandoned')`,
+       and i.state in ('Done', 'Failed', 'Abandoned', 'Split')`,
     [d.now],
   );
 }
