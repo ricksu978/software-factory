@@ -2,7 +2,7 @@
 // harness and PBI 142's "the factory holds an item in state ... whose open run has PR" setup, and serve the real
 // dashboard on the same database to read Floor and the item's Run detail. The cell scenarios reuse PBI 18's engine
 // harness through PBI 152's "a run for item ... that resumes at address", with the fake repo host holding the run's PR as a person merged it.
-import { After, Before, Given, Then } from "@cucumber/cucumber";
+import { After, Before, BeforeStep, Given, Then } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -18,7 +18,7 @@ import { cellPr } from "./pbi-212.steps.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 
 type Host = ReturnType<typeof fakeRepoHost>;
-type Ctx = { replies: unknown[]; server?: Server; close?: () => Promise<void>; origin?: string };
+type Ctx = { replies: unknown[]; server?: Server; close?: () => Promise<void>; origin?: string; stepType?: string };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi194?: Ctx };
@@ -41,7 +41,7 @@ Before({ tags: "@pbi-194 and @db", ...long }, async function () {
   if (d) await d.pool.query('truncate item, event, backlog_source, repo, "user" cascade');
 });
 
-After({ tags: "@pbi-194", ...long }, async function () {
+After({ tags: "@pbi-194 or @pbi-262", ...long }, async function () {
   const s = (this as { pbi194?: Ctx }).pbi194;
   if (!s) return;
   await s.close?.();
@@ -49,6 +49,11 @@ After({ tags: "@pbi-194", ...long }, async function () {
     s.server.closeAllConnections();
     await new Promise<void>((resolve) => s.server!.close(() => resolve()));
   }
+});
+
+// PBI 262 says "the item has no open question" as a Given too, where it sets the item up rather than checks it.
+BeforeStep({ tags: "@pbi-194 or @pbi-262" }, function ({ pickleStep }) {
+  ctx(this).stepType = pickleStep.type;
 });
 
 // ---- the poller ----
@@ -105,6 +110,10 @@ async function question(world: object, body: string): Promise<{ answer: string |
 }
 
 Then("the item has no open question", long, async function () {
+  if (ctx(this).stepType === "Context") {
+    await pool().query("delete from question where item_id = $1 and answer is null and closed_at is null", [await itemId(this)]);
+    return;
+  }
   polled(pollCtx(this));
   const r = await pool().query<{ body: string }>("select body from question where item_id = $1 and answer is null and closed_at is null", [await itemId(this)]);
   assert.deepEqual(r.rows.map((q) => q.body), [], "the item still has an open question");

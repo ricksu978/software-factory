@@ -16,6 +16,7 @@ import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
+import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
 import type { Git } from "./git.ts";
@@ -681,6 +682,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
   // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
+    const began = d.now().getTime();
     for (;;) {
       const s = await api.checks(sha).catch(async (e: unknown) => {
         // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
@@ -697,6 +699,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         throw e;
       });
       if (s !== "pending") return s;
+      const question = await pendingCiQuestion(api, sha, d.now().getTime() - began);
+      if (question) throw new Blocked(question);
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
     }

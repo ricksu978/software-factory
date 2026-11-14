@@ -25,12 +25,13 @@
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { recordReadinessCheck } from "../../src/store/readiness-checks.ts";
-import { ctx as itemCtx, open } from "./pbi-131.steps.ts";
+import { ctx as itemCtx, open, type Item } from "./pbi-131.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 type Ctx = {
-  runId?: string;
-  /** The stage attempts made so far, by "<stage>#<attempt>". */
+  /** Each item's run, by item id. */
+  runs: Map<string, string>;
+  /** The stage attempts made so far, by "<item id>:<stage>#<attempt>". */
   stages: Set<string>;
   /** How many readiness checks this scenario has recorded, so each default time is a minute after the last. */
   checks: number;
@@ -38,7 +39,7 @@ type Ctx = {
 
 function ctx(world: object): Ctx {
   const w = world as { pbi189?: Ctx };
-  w.pbi189 ??= { stages: new Set(), checks: 0 };
+  w.pbi189 ??= { runs: new Map(), stages: new Set(), checks: 0 };
   return w.pbi189;
 }
 
@@ -61,33 +62,44 @@ After({ tags: "@pbi-189", ...long }, async function () {
   }
 });
 
-function item(world: object) {
-  const it = itemCtx(world).items.at(-1);
+/** The item "the item" means: the one a scenario named so (PBI 263), else the last one made. */
+function item(world: object): Item {
+  const c = itemCtx(world);
+  const it = c.the ?? c.items.at(-1);
   assert.ok(it, "no item was set up");
   return it;
 }
 
 // ---- the item's run and its stage attempts ----
 
-async function run(world: object): Promise<string> {
+/** Has the item's stage attempts go on a run another file made for it, such as PBI 263's run in flight. */
+export function useRun(world: object, itemId: string, runId: string): void {
+  ctx(world).runs.set(itemId, runId);
+}
+
+async function run(world: object, it: Item): Promise<string> {
   const c = ctx(world);
-  if (c.runId) return c.runId;
-  const it = item(world);
+  const known = c.runs.get(it.id);
+  if (known) return known;
   await pool().query("update item set state = 'InProgress' where id = $1", [it.id]);
-  c.runId = (await pool().query<{ id: string }>(
+  const runId = (await pool().query<{ id: string }>(
     "insert into run (item_id, repo_id, run_number, next_stage, branch, started_at) values ($1, $2, 1, 'build', $3, '2026-11-09T08:00:00Z') returning id",
     [it.id, it.repoId, `factory/pbi-${it.ext}-r1`],
   )).rows[0].id;
-  return c.runId;
+  c.runs.set(it.id, runId);
+  return runId;
 }
 
-type Attempt = { tokensIn?: number; tokensOut?: number; cost?: string; startedAt?: string; endedAt?: string | null };
+type Attempt = { tokensIn?: number; tokensOut?: number; cost?: string | null; startedAt?: string; endedAt?: string | null };
 
-/** Makes the stage attempt, a finished one by default, or changes what's given of the one already made. */
-async function attempt(world: object, stage: string, n: number, a: Attempt): Promise<void> {
+/**
+ * Makes the stage attempt, a finished one by default, or changes what's given of the one already made. It's the
+ * item's, "the item" unless another is given.
+ */
+export async function attempt(world: object, stage: string, n: number, a: Attempt, it: Item = item(world)): Promise<void> {
   const c = ctx(world);
-  const runId = await run(world);
-  const key = `${stage}#${n}`;
+  const runId = await run(world, it);
+  const key = `${it.id}:${stage}#${n}`;
   if (!c.stages.has(key)) {
     // Attempts start in the order they're made, a minute apart, unless a step says when.
     const started = new Date(Date.parse("2026-11-09T09:00:00Z") + c.stages.size * 60_000);
@@ -197,14 +209,14 @@ const decode = (e: string) => {
   const n = /^&#(x?)([0-9a-f]+);$/i.exec(e);
   return n ? String.fromCodePoint(parseInt(n[2], n[1] ? 16 : 10)) : e;
 };
-const text = (h: string) => h
+export const text = (h: string) => h
   .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ")
   .replace(/<[^>]*>/g, " ")
   .replace(/&[#\w]+;/g, decode)
   .replace(/\s+/g, " ")
   .trim();
 
-function section(world: object, name: string): string | null {
+export function section(world: object, name: string): string | null {
   for (const part of html(world).split(/<h2\b[^>]*>/i).slice(1)) {
     const end = part.search(/<\/h2>/i);
     if (text(part.slice(0, end)) === name) return part.slice(end + 5);
