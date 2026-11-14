@@ -77,6 +77,11 @@ async function realPoll(world: object): Promise<void> {
   k.passes++;
 }
 
+/** Counts one pass of a real poller another feature drives over PBI 144's board, so "polls ... more times" counts it (PBI 227). */
+export function countPass(world: object): void {
+  ctx(world).passes++;
+}
+
 Before({ tags: "@pbi-225 and @db", ...long }, async function () {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
