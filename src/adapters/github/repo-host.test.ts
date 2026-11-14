@@ -305,6 +305,33 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("ciChecksOnSha names each check run with its verdict and URL, and gives null when none reported (PBI 229)", async () => {
+    const run = (name: string, status: string, conclusion: string | null) => ({ name, status, conclusion, html_url: `https://github.com/o/r/runs/${name}` });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run("ci", "completed", "success"), run("lint", "completed", "failure"), run("docs", "in_progress", null),
+        run("skip", "completed", "skipped"), run("slow", "completed", "timed_out"),
+      ] }),
+    });
+    assert.deepEqual(await host.ciChecksOnSha("o/r", "abc"), [
+      { name: "ci", conclusion: "success", url: "https://github.com/o/r/runs/ci" },
+      { name: "lint", conclusion: "failure", url: "https://github.com/o/r/runs/lint" },
+      { name: "docs", conclusion: "pending", url: "https://github.com/o/r/runs/docs" },
+      { name: "skip", conclusion: "success", url: "https://github.com/o/r/runs/skip" },
+      { name: "slow", conclusion: "failure", url: "https://github.com/o/r/runs/slow" },
+    ]);
+    assert.equal(calls[0].params.ref, "abc");
+    const none = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [] }) });
+    assert.equal(await none.host.ciChecksOnSha("o/r", "abc"), null);
+  });
+
+  test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {
+    const fake = fakeRepoHost();
+    fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "success", url: "u" }]);
+    assert.deepEqual(await fake.ciChecksOnSha("o/r", "abc"), [{ name: "ci", conclusion: "success", url: "u" }]);
+    assert.equal(await fake.ciChecksOnSha("o/r", "def"), null);
+  });
+
   test("checksOnHead reads a head with no checks at all as pending", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,

@@ -240,9 +240,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       const own = await ownLogin();
       return list.filter((i) => !i.pull_request && i.user?.type === "Bot" && i.user.login === own && (i.title.includes(text) || (i.body ?? "").includes(text))).reverse().map((i) => child(repo, i));
     },
-    async createIssue(repo, title, body) {
+    async createIssue(repo, title, body, labels = []) {
       const [owner, name] = repo.split("/");
-      const created = (await (await app()).request("POST /repos/{owner}/{repo}/issues", { owner, repo: name, title, body })).data as RestIssue;
+      // Labels go on in the same request, so a child never exists without the label it was filed with (PBI 237).
+      const params = { owner, repo: name, title, body, ...(labels.length > 0 ? { labels } : {}) };
+      const created = (await (await app()).request("POST /repos/{owner}/{repo}/issues", params)).data as RestIssue;
       return child(repo, created);
     },
     async addSubIssue(parentId, childId) {
