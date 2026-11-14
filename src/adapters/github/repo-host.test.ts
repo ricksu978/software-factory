@@ -368,3 +368,49 @@ describe("ownersOf", () => {
     assert.deepEqual(ownersOf([{ pattern: ".factory/", owners: ["@ops"] }], "a/.factory/config.yml"), ["@ops"]);
   });
 });
+
+describe("githubRepoHost merges (PBI 181)", () => {
+  test("mergeView reads the merge state, head and body, and names each reviewer whose latest non-comment review approves", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ mergeable_state: "clean", head: { sha: "h1" }, body: "the body" }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [
+        { state: "APPROVED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "octo" } },
+        { state: "COMMENTED", submitted_at: "2026-11-06T02:00:00Z", user: { login: "octo" } },
+        { state: "APPROVED", submitted_at: "2026-11-06T01:00:00Z", user: { login: "kim" } },
+        { state: "CHANGES_REQUESTED", submitted_at: "2026-11-06T03:00:00Z", user: { login: "kim" } },
+        { state: "COMMENTED", submitted_at: "2026-11-06T03:00:00Z", user: { login: "lee" } },
+        { state: "PENDING", submitted_at: null, user: { login: "pat" } },
+      ],
+    });
+    assert.deepEqual(await host.mergeView("o/r", 3), { mergeState: "clean", headSha: "h1", body: "the body", approvedBy: ["octo"] });
+  });
+
+  test("mergeView reads a missing merge state or body as unknown and empty", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ head: { sha: "h1" }, body: null }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
+    });
+    assert.deepEqual(await host.mergeView("o/r", 3), { mergeState: "unknown", headSha: "h1", body: "", approvedBy: [] });
+  });
+
+  test("mergePr squash-merges at the head it was given and returns the merge commit", async () => {
+    const { calls, host } = stubGitHub({ "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => ({ merged: true, sha: "m1" }) });
+    assert.deepEqual(await host.mergePr("o/r", 3, { method: "squash", headSha: "h1" }), { merged: true, sha: "m1" });
+    assert.deepEqual(calls[0].params, { owner: "o", repo: "r", pull_number: 3, merge_method: "squash", sha: "h1" });
+  });
+
+  test("mergePr returns GitHub's message when it refuses the merge, and throws on any other failure", async () => {
+    for (const status of [405, 409, 422]) {
+      const { host } = stubGitHub({
+        "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => {
+          throw Object.assign(new Error("raw"), { status, response: { data: { message: "Head branch was modified. Review and try the merge again." } } });
+        },
+      });
+      assert.deepEqual(await host.mergePr("o/r", 3, { method: "squash", headSha: "h1" }), { merged: false, reason: "Head branch was modified. Review and try the merge again." });
+    }
+    const { host } = stubGitHub({
+      "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => { throw Object.assign(new Error("boom"), { status: 500 }); },
+    });
+    await assert.rejects(host.mergePr("o/r", 3, { method: "squash", headSha: null }), /boom/);
+  });
+});
