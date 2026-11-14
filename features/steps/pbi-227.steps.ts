@@ -425,10 +425,12 @@ When("a viewer opens the parent's Run detail again", long, async function () {
   await parentDetail(this);
 });
 
-// The viewer has the page open before the child moves. What it showed then isn't checked here: the Thens that follow
-// check what it shows after, so the scenario fails on them, not on this setup, while no "Split into" shows.
-Given("a viewer has seen child {string} show the state {string} on the parent's Run detail", long, async function (_child: string, _state: string) {
+// The viewer has the page open before the child moves, and it shows the child's state then, so the Thens that follow
+// prove the state changed rather than passing on a page that never showed it.
+Given("a viewer has seen child {string} show the state {string} on the parent's Run detail", long, async function (child: string, state: string) {
   await parentDetail(this);
+  const kid = childIn(detailChildren(this), child);
+  assert.ok(hasWord(kid.text.replace(child, ""), state), `child ${child} doesn't show "${state}": ${kid.text}`);
 });
 
 When("a viewer opens the Run detail of child {string}", long, async function (child: string) {
