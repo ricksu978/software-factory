@@ -82,6 +82,9 @@ const rewriteRequests = (c: Ctx144, title?: string) =>
 function install(world: object, k: Ctx): void {
   k.installed = true;
   const c = ctx144(world);
+  // These scenarios gate a child that needs an earlier, still open child on its own dor.md lines, so the scripted
+  // board reports no open dependency. The engine rule for one is out of scope here.
+  c.gateExtras = { openDeps: [], ...c.gateExtras };
   c.judgeOverride = async (item: FactoryItem, dor: Policy) => {
     const titles = proposedTitles(c);
     const isFiled = c.filed.some((i) => i.externalId === item.externalId);

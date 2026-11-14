@@ -301,7 +301,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.
     if (splitUnanswered(out.split)) throw new Error("the coding model gave no answer for the item's split proposal");
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi, openDeps)]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(out.item ?? fi, openDeps)]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)

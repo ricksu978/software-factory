@@ -121,7 +121,9 @@ describe("pollOnce", dbTest, () => {
   test("a parent whose split is filed moves NotReady to Split, and stays there with its label back and a new policy (PBI 225)", async () => {
     const big = async (item: FactoryItem, dor: Policy) => {
       judged.push(item.externalId);
-      return [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");
+      // A proposed child, judged before it's filed (PBI 264), carries a split marker and passes.
+      const child = item.body.includes("factory-split-");
+      return [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: child ? "passed" : "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: !child })].join("\n");
     };
     const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
     const agent = async () => ({ ok: true, text: JSON.stringify({ children }) }) as never;

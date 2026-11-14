@@ -101,7 +101,7 @@ export type ReadinessTexts = Record<"dor" | "scenarios" | "pr-review" | "risk" |
 export type ReadinessLogic = { judgePrompt: string; version: number; splitPrompt: string };
 
 /** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
-export const READINESS_VERSION = 1;
+export const READINESS_VERSION = 2;
 
 /**
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its
