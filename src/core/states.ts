@@ -27,7 +27,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "merged", "Accepted"],
   // A person may merge the PR while the item waits on a question asked after the PR opened (PBI 194).
   ["NeedsInput", "merged", "Accepted"],
-  ["InReview", "approvals_met", "Accepted"], // Phase 1. In Phase 0 a person's merge is `merged`.
+  ["InReview", "approvals_met", "Accepted"], // Phase 1. In Phase 0 a merge is `merged`, a person's or the factory's (PBI 181).
   ["Accepted", "dod_verified", "Done"],
   ["Accepted", "dod_failed", "Failed"],
   ["InProgress", "retries_exhausted", "Failed"],

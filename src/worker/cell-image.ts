@@ -87,7 +87,7 @@ async function fetchMain(d: CellImageDeps): Promise<string> {
 
 const worker = { actor: "system", actorId: "worker", itemId: null } as const;
 
-async function inTransaction(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<void>): Promise<void> {
+async function inTransaction(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<unknown>): Promise<void> {
   const c = await pool.connect();
   try {
     await c.query("begin");
