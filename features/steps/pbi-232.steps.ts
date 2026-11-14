@@ -21,7 +21,7 @@
 //
 // Log lines are `step <n> of <total> in job <k>`, with the scenario's ending as the last line, so no line holds a check's
 // name and no line is part of another.
-import { After, Given, Then, When } from "@cucumber/cucumber";
+import { After, Given, Status, Then, When } from "@cucumber/cucumber";
 import type { DataTable } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -235,11 +235,19 @@ Then("the answer says the log of {string} couldn't be read", function (name: str
 // ---- the engine scenarios ----
 
 type FailedCheck = { name: string; url: string; log: string | null; lines: string[] };
+/** A check on the commit CI fails on, with the result it completed with. */
+type RunCheck = { name: string; url: string; log: string | null; result: "failure" | "success" };
 type RunCtx = {
   /** The checks that fail on the commit CI fails on, as the cell API answers them. */
   failing: FailedCheck[];
+  /** The checks that pass on the commit CI fails on. The cell API's answer leaves them out by their result. */
+  passing: RunCheck[];
   /** The commits CI answered "failure" about. */
   failedShas: string[];
+  /** Every answer CI gave, in order. */
+  answers: { sha: string; status: string }[];
+  /** Set by "CI passes on the next commit green pushes": CI must answer "success" on a commit after the failed one. */
+  expectsPassAfterFailure?: boolean;
   /** Every agent call, with the stage it ran in and how many cell API calls came before it. */
   briefs: { stage: string; prompt: string; index: number }[];
   /** Restores fetch after "the cell can't reach GitHub". */
@@ -262,14 +270,32 @@ After(function () {
   (this as { pbi232run?: RunCtx }).pbi232run?.restore?.();
 });
 
+// "CI passes on the next commit green pushes" can only be checked once the cell has run, so it's checked here.
+After(function ({ result }) {
+  const r = (this as { pbi232run?: RunCtx }).pbi232run;
+  if (!r?.expectsPassAfterFailure || result?.status !== Status.PASSED) return;
+  const failed = r.failedShas[0];
+  assert.ok(failed, "CI never answered \"failure\" about a commit");
+  assert.ok(
+    r.answers.some((a) => a.status === "success" && a.sha !== failed),
+    `CI never answered "success" about a commit other than ${failed}: ${JSON.stringify(r.answers)}`,
+  );
+});
+
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 /** The cell API's answer about CI on `sha`, given whether CI failed on it. */
 function ciAnswer(r: RunCtx, sha: string, status: string) {
   if (status === "failure" && !r.failedShas.includes(sha)) r.failedShas.push(sha);
+  r.answers.push({ sha, status });
+  // Every check on the commit, failed and passed, filtered by its result as the real cell API does.
+  const checks: RunCheck[] = [
+    ...r.failing.map((x): RunCheck => ({ name: x.name, url: x.url, log: x.log, result: "failure" })),
+    ...r.passing,
+  ];
   return {
     status,
-    failedChecks: status === "failure" ? r.failing.map((x) => ({ name: x.name, url: x.url, log: x.log })) : [],
+    failedChecks: status === "failure" ? checks.filter((x) => x.result === "failure").map(({ name, url, log }) => ({ name, url, log })) : [],
   };
 }
 
@@ -301,7 +327,7 @@ function failing(r: RunCtx, name: string, url: string, total: number, ending?: s
 
 Given("a run that reaches open-pr with a commit CI fails on", function () {
   const run = setUp(this, "red", true);
-  const r: RunCtx = { failing: [], failedShas: [], briefs: [] };
+  const r: RunCtx = { failing: [], passing: [], failedShas: [], answers: [], briefs: [] };
   (this as { pbi232run?: RunCtx }).pbi232run = r;
   recordBriefs(this, r, true);
   // The first commit CI is asked about, the PR's head at open-pr, fails. Every later one passes.
@@ -317,8 +343,10 @@ Given("CI's check {string} fails on that commit at {string} with a log of {int} 
 });
 
 Given("CI passes on the next commit green pushes", function () {
-  // The run's CI already passes on every commit after the first.
-  runCtx(this);
+  // The run's CI already passes on every commit after the first. The After hook checks that it did.
+  const r = runCtx(this);
+  assert.ok(r.failing.length > 0, "no check fails on the commit CI fails on");
+  r.expectsPassAfterFailure = true;
 });
 
 Given("CI's checks {string} at {string} and {string} at {string} fail on that commit", function (a: string, au: string, b: string, bu: string) {
@@ -327,9 +355,11 @@ Given("CI's checks {string} at {string} and {string} at {string} fail on that co
   failing(r, b, bu, 20);
 });
 
-Given("CI's check {string} passes on that commit", function (_name: string) {
-  // A check that passed is no failure, so the cell API's answer leaves it out.
-  runCtx(this);
+Given("CI's check {string} passes on that commit", function (name: string) {
+  // A check that passed is no failure, so the cell API's answer leaves it out by its result.
+  const r = runCtx(this);
+  assert.ok(!r.failing.some((x) => x.name === name), `the check "${name}" already fails on that commit`);
+  r.passing.push({ name, url: `https://ci.example/checks/${encodeURIComponent(name)}`, log: null, result: "success" });
 });
 
 Given("CI's check {string} fails on that commit at {string} with a log ending {string}", function (name: string, url: string, ending: string) {
@@ -358,7 +388,7 @@ Given("a run whose PR review finds a problem the PR addresser fixes with a new c
   review.reviews.set(1, { findings: [{ path: "src/totals.ts", line: 12, body: "This misses the VAT." }], verdicts: new Map(), clean: false });
   review.raisedAt.set("This misses the VAT.", 1);
   review.last = "This misses the VAT.";
-  const r: RunCtx = { failing: [], failedShas: [], briefs: [] };
+  const r: RunCtx = { failing: [], passing: [], failedShas: [], answers: [], briefs: [] };
   (this as { pbi232run?: RunCtx }).pbi232run = r;
   recordBriefs(this, r, false);
   const base = run.checks!;
