@@ -17,6 +17,7 @@ import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
+import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
 import type { Git } from "./git.ts";
 
 /** The body of GET /context (Run contract 5). */
@@ -68,6 +69,22 @@ const run = promisify(execFile);
 // How a run leaves runCell early. Each maps to one exit in `finish`.
 class Stop extends Error {}
 class Blocked extends Error {}
+/** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
+class BaseFails extends Blocked {
+  readonly baseFailure: { sha: string; tests: string[] };
+  readonly base: string;
+  readonly lines: { criterion: string; tests: string[] }[];
+  constructor(base: string, sha: string, lines: { criterion: string; tests: string[] }[]) {
+    super(baseQuestion(base, sha, lines, false));
+    this.base = base;
+    this.lines = lines;
+    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))] };
+  }
+  /** The question to ask, which says the work is on the branch only when the cell pushed it. */
+  question(pushed: boolean): string {
+    return baseQuestion(this.base, this.baseFailure.sha, this.lines, pushed);
+  }
+}
 class Exhausted extends Error {}
 class Limited extends Error {
   readonly resetsAt: number;
@@ -82,6 +99,11 @@ class RenewalFailed extends Error {}
  * webhook moves the item (PBI 142, PBI 194).
  */
 class AlreadyMerged extends Error {}
+/**
+ * The run's PR closed without a merge while a stage waited for CI on it, and its branch went with it. The stage stops
+ * as it does for a merged PR, and the poller withdraws the item (PBI 212).
+ */
+class ClosedUnmerged extends Error {}
 
 /**
  * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
@@ -94,11 +116,13 @@ export function commandEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
   return out;
 }
 
-export function sh(command: string, cwd: string): Promise<{ code: number; out: string }> {
+/** Runs a command as Run contract 11 says. `out` is the output's last 2000 characters, `all` the whole of it. */
+export function sh(command: string, cwd: string): Promise<{ code: number; out: string; all: string }> {
   return new Promise((resolve) => {
     execFile("sh", ["-c", command], { cwd, timeout: COMMAND_TIMEOUT_MS, env: commandEnv(), maxBuffer: 64 * 1024 * 1024 }, (e, stdout, stderr) => {
       const code = e ? (typeof e.code === "number" ? e.code : 1) : 0;
-      resolve({ code, out: `${stdout}${stderr}`.slice(-2000) });
+      const all = `${stdout}${stderr}`;
+      resolve({ code, out: all.slice(-2000), all });
     });
   });
 }
@@ -221,21 +245,67 @@ export type MeteredStage = {
   usage: AgentResult["usage"];
 };
 
+/** PBI 209: the most often a running stage's transcript so far is uploaded. */
+export const TRANSCRIPT_UPLOAD_MS = 15_000;
+
+/** PBI 209: where a running stage's transcript so far goes, the attempt's usual path, as CellApi.upload puts it. */
+export type TranscriptUploads = {
+  upload(b: { kind: "transcript"; stageId: string; attempt: number; body: string }): Promise<void>;
+};
+
 /**
  * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
  * is an error, and the model is never asked, so no call can go unrecorded.
+ *
+ * PBI 209: with `uploads`, while an attempt is open its transcript so far, every message its agent calls have written,
+ * is uploaded on a setInterval of TRANSCRIPT_UPLOAD_MS, when messages have arrived since the last upload that worked.
+ * A failed upload is logged and skipped, and never fails the call. close() stops the uploads, and settled() resolves
+ * once none is in flight, so the complete transcript the caller uploads after it lands last.
  */
-export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
+export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>, uploads?: TranscriptUploads): {
   open(stageId: string, attempt: number): void;
   close(): MeteredStage | null;
   ask(a: AgentArgs): Promise<AgentResult>;
+  settled(): Promise<void>;
 } {
   let open: MeteredStage | null = null;
+  // The open attempt's running calls, each the lines it has written so far.
+  let running = new Set<string[]>();
+  // True when the transcript so far has changed since the last upload that worked.
+  let fresh = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let inflight: Promise<void> = Promise.resolve();
+  let busy = false;
+
+  const tick = (stage: MeteredStage, calls: Set<string[]>) => {
+    if (!uploads || !fresh || busy) return;
+    const body = stage.transcript + [...calls].map((lines) => lines.map((l) => l + "\n").join("")).join("");
+    if (!body) return;
+    fresh = false;
+    busy = true;
+    inflight = uploads.upload({ kind: "transcript", stageId: stage.stageId, attempt: stage.attempt, body }).catch((e) => {
+      // The next tick tries again, even if nothing new arrives by then.
+      if (open === stage) fresh = true;
+      console.error(`transcript upload for ${stage.stageId}-${stage.attempt} failed, trying again in ${TRANSCRIPT_UPLOAD_MS / 1000}s:`, e);
+    }).finally(() => { busy = false; });
+  };
+
   return {
     open(stageId, attempt) {
-      open = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      clearInterval(timer);
+      const stage: MeteredStage = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      const calls = new Set<string[]>();
+      open = stage;
+      running = calls;
+      fresh = false;
+      if (uploads) {
+        timer = setInterval(() => tick(stage, calls), TRANSCRIPT_UPLOAD_MS);
+        timer.unref?.();
+      }
     },
     close() {
+      clearInterval(timer);
+      timer = undefined;
       const c = open;
       open = null;
       return c;
@@ -243,13 +313,23 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
     async ask(a) {
       const stage = open;
       if (!stage) throw new Error("An AI call was made while no stage was open, so its cost would go unrecorded");
-      const r = await agent(a);
+      const calls = running;
+      const lines: string[] = [];
+      calls.add(lines);
+      const r = await agent({ ...a, onMessage: (l) => {
+        lines.push(l);
+        if (open === stage) fresh = true;
+        a.onMessage?.(l);
+      } }).finally(() => calls.delete(lines));
       stage.costUsd += r.costUsd;
       stage.tokensIn += r.tokensIn;
       stage.tokensOut += r.tokensOut;
       stage.transcript += r.transcript;
       if (r.usage) stage.usage = r.usage;
       return r;
+    },
+    async settled() {
+      await inflight;
     },
   };
 }
@@ -286,7 +366,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
-  const meter = stageMeter(d.agent);
+  // PBI 209: the meter uploads a running attempt's transcript so far to the attempt's usual path.
+  const meter = stageMeter(d.agent, api);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
   let current: {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
@@ -343,6 +424,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!c) return;
     current = null;
     const m = meter.close()!;
+    // PBI 209: an upload of the transcript so far that's still going lands before the complete one, never after it.
+    await meter.settled();
     // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
     // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
     const upload = async (kind: "transcript" | "report", body: string) => {
@@ -445,14 +528,50 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return findings;
   };
 
+  // PBI 215: each command's run on the base commit, kept for the cell, since `origin/<base>` stays where the claim's
+  // merge fetched it. A command runs there only after it failed on the item's branch, and at most once. A base run that
+  // throws counts as one that shares no failing test.
+  const baseRuns = new Map<string, Promise<{ sha: string; tests: string[] }>>();
+  const onBase = (command: string) => {
+    let r = baseRuns.get(command);
+    if (!r) {
+      // A base run that can't run at all (no origin/<base>, no temp folder, a locked worktree) proves nothing against the
+      // base, so the failure stays the item's and is retried as before, instead of ending the cell.
+      r = runOnBase(dir, ctx.base, command, config.commands.setup)
+        .then((b) => ({ sha: b.sha, tests: b.code === 0 ? [] : failingTests(b.out) }))
+        .catch((e) => {
+          console.error(`running a Definition of Done command on origin/${ctx.base} failed, so its failure stays the item's:`, e);
+          return { sha: "", tests: [] as string[] };
+        });
+      baseRuns.set(command, r);
+    }
+    return r;
+  };
+
   // Run contract 11: run: lines in the checkout, the rest judged by an agent, all stored with the commit they checked.
+  // A run: line that fails is run again on the base commit (PBI 215). When every failed line's tests all fail there too,
+  // the check stops with BaseFails once its verdicts are stored, so the stage asks about the base instead of retrying.
   const checkDod = async (stageId: StageId, attempt: number): Promise<Verdict[]> => {
     const head = await git.head();
     const dod = policies.dod;
     const verdicts: Verdict[] = [];
+    const shared: { criterion: string; tests: string[] }[] = [];
+    const sharedIdx = new Set<number>();
+    let baseSha = "";
     for (const c of dod.criteria.filter((x) => x.run)) {
       const r = await sh(c.run!, dir);
-      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason: r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}` });
+      let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
+      if (r.code !== 0) {
+        const tests = failingTests(r.all);
+        const b = await onBase(c.run!);
+        if (sharedWithBase(tests, b.tests)) {
+          shared.push({ criterion: c.text, tests });
+          sharedIdx.add(c.index);
+          baseSha = b.sha;
+          reason = `the base commit ${b.sha.slice(0, 7)} fails the same tests: ${reason}`;
+        }
+      }
+      verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
     }
     const judged = dod.criteria.filter((x) => !x.run);
     if (judged.length) {
@@ -470,6 +589,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await api.policyResults({ file: "dod", source: dod.source, stageId, attempt, checkedSha: head, verdicts });
     dodVerdicts = verdicts;
     dodSha = head;
+    // The base is blamed only when every failed line is one whose failing tests the base shares. A line that fails only
+    // on the branch, names no test, or was judged failed stays the item's, so the stage retries as before.
+    const failed = verdicts.filter((v) => v.status === "failed");
+    if (shared.length && failed.every((v) => sharedIdx.has(v.index))) {
+      throw new BaseFails(ctx.base, baseSha, shared);
+    }
     return verdicts;
   };
   const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "failed").map((x) => `Definition of Done line ${x.index} failed: ${x.criterion}: ${x.reason}`);
@@ -484,9 +609,25 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return head === dodSha ? [] : [`the Definition of Done check committed to the branch: ${dodSha} became ${head}`];
   };
 
+  // A person may merge or close the PR while a stage waits for CI on its push. `GET checks` then refuses the commit,
+  // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
+  // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
     for (;;) {
-      const s = await api.checks(sha);
+      const s = await api.checks(sha).catch(async (e: unknown) => {
+        // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
+        if (e instanceof LeaseLost) throw e;
+        const n = opened?.number ?? ctx.prNumber;
+        if (n === null) throw e;
+        // A PR state that can't be read leaves the refusal itself as the attempt's message.
+        const state = await Promise.resolve().then(() => d.repoHost.prState(ctx.repo, n, [])).catch(() => null);
+        if (!state) throw e;
+        if (state.merged) {
+          throw new AlreadyMerged(`PR #${n} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""} while the factory waited for CI on ${sha}, so the stage stops here.`);
+        }
+        if (!state.open) throw new ClosedUnmerged(`PR #${n} for \`${ctx.branch}\` was closed without a merge while the factory waited for CI on ${sha}, so the stage stops here.`);
+        throw e;
+      });
       if (s !== "pending") return s;
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
@@ -1022,22 +1163,33 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
    * that commit. A lease that's lost, or that can't be checked, pushes nothing: another cell may own the branch now.
    */
   async function wrapUp(): Promise<Outcome> {
-    await git.commitAll("work in progress, stopped").catch(() => {});
-    try {
-      await api.lease();
-    } catch {
-      return "stopped";
-    }
     // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
     // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
-    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
-    if (locked) console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
-    // A push that fails leaves the branch at the last commit pushed, which is where the next cell carries on.
-    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
+    if (!(await pushWorkInProgress("work in progress, stopped")).leased) return "stopped";
     // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
     if (current) await end("stopped");
     else await api.release();
     return "stopped";
+  }
+
+  // Commits what the agent left, checks the lease once more and pushes it, unless a commit changed a locked feature
+  // file. A lease that's lost, or that can't be checked, pushes nothing and reports `leased: false`: another cell may
+  // own the branch now, and the renewal timer may not have seen it yet. A push that fails leaves the branch at the last
+  // commit pushed, which is where the next cell carries on. `pushed` is true only when the push went through.
+  async function pushWorkInProgress(msg: string): Promise<{ leased: boolean; pushed: boolean }> {
+    await git.commitAll(msg).catch(() => {});
+    try {
+      await api.lease();
+    } catch {
+      return { leased: false, pushed: false };
+    }
+    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
+    if (locked) {
+      console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
+      return { leased: true, pushed: false };
+    }
+    const pushed = await git.push().then(() => true, (e) => { console.error("pushing the work in progress failed:", e); return false; });
+    return { leased: true, pushed };
   }
 
   async function finish(e: unknown): Promise<Outcome> {
@@ -1051,8 +1203,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "limited";
     }
     if (e instanceof Blocked) {
+      // PBI 215: the base blocks an attempt whose work may be committed but not pushed yet, as Green's is when its DoD
+      // check finds the base at fault. Pushed, it's on the branch the next cell clones once the owner answers, so the
+      // stage runs again on that work instead of from scratch. A commit that changed a locked feature file isn't pushed.
+      // The question says the work is on the branch only when this push put it there.
+      const body = e instanceof BaseFails ? e.question((await pushWorkInProgress("work in progress, the base fails")).pushed) : e.message;
       await end("failed");
-      await transition({ event: "blocked", question: { kind: "needs_input", body: e.message } });
+      await transition({ event: "blocked", question: { kind: "needs_input", body, ...(e instanceof BaseFails ? { baseFailure: e.baseFailure } : {}) } });
       return "waiting";
     }
     if (e instanceof Exhausted) {
@@ -1061,9 +1218,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "failed";
     }
     // Any other error ends the open attempt failed with its message, so no attempt is left looking as if it still
-    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted.
+    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted. Nor does
+    // one closed without a merge: the poller withdraws the item (PBI 212).
     if (current) current.message = e instanceof Error ? e.message : String(e);
-    if (e instanceof AlreadyMerged) {
+    if (e instanceof AlreadyMerged || e instanceof ClosedUnmerged) {
       await end("failed");
       return "failed";
     }

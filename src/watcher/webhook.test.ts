@@ -89,6 +89,24 @@ describe("handleWebhook", dbTest, () => {
     assert.deepEqual(await count("d-3"), { deliveries: 0, events: [] });
   });
 
+  test("a comment writes one comment command row per item with its number on any board, and none for an unknown number (PBI 218)", async () => {
+    const number = String(Math.floor(Math.random() * 1e9));
+    const items: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'outbox:' || gen_random_uuid()) returning id")).rows[0].id;
+      items.push((await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, $2, 't', 'InReview') returning id", [source, number])).rows[0].id);
+    }
+    const comment = (externalId: string) => ({ pool: db.pool, secret, parse: () => ({ kind: "comment" as const, externalId, repo: "o/r", login: "pat", body: "/approve", commentId: "c" }) });
+    const rows = async (delivery: string) => (await db.pool.query<{ consumer: string; item_id: string }>(
+      "select o.consumer, o.item_id from outbox o join event e on e.id = o.event_id where e.payload->>'deliveryId' = $1", [delivery],
+    )).rows;
+    assert.deepEqual(await handleWebhook(comment(number), { headers: headers("d-outbox-1", sign("sha256", body)), rawBody: body }), { status: 204 });
+    assert.deepEqual((await rows("d-outbox-1")).map((r) => r.item_id).sort(), [...items].sort());
+    assert.ok((await rows("d-outbox-1")).every((r) => r.consumer === "comment_commands"));
+    assert.deepEqual(await handleWebhook(comment("no-such-issue"), { headers: headers("d-outbox-2", sign("sha256", body)), rawBody: body }), { status: 204 });
+    assert.deepEqual(await rows("d-outbox-2"), []);
+  });
+
   describe("PR events (plan Task 17)", () => {
     let n = 0;
     /** An InReview item whose open run holds PR 7 in o/r, with reviews counted from `seen`. */
@@ -111,6 +129,16 @@ describe("handleWebhook", dbTest, () => {
       await send({ kind: "pr_merged", prNumber: pr, repo: "O/R", mergeSha: "abc1234" });
       assert.equal(await state(item), "Accepted");
       assert.equal((await db.pool.query("select merge_sha from run where item_id = $1", [item])).rows[0].merge_sha, "abc1234");
+    });
+
+    test("a merge after the factory's unanswered merge attempt logs factory_merged with the attempt's approvers (PBI 181)", async () => {
+      const { item, pr } = await inReview(null);
+      const attempt = { repo: "o/r", prNumber: pr, headSha: "h1", approvers: ["Reviewer"] };
+      await db.pool.query("insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'poller', $1, 'factory_merge_attempt', $2)", [item, attempt]);
+      await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc1234" });
+      assert.equal(await state(item), "Accepted");
+      const logged = (await db.pool.query("select payload from event where item_id = $1 and kind = 'factory_merged'", [item])).rows.map((r) => r.payload);
+      assert.deepEqual(logged, [{ repo: "o/r", prNumber: pr, mergeSha: "abc1234", approvers: ["Reviewer"] }]);
     });
 
     test("a person closing the PR unmerged withdraws the item", async () => {

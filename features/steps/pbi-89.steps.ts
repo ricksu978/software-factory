@@ -12,6 +12,7 @@ import { runToken } from "../../src/control/cell-api.ts";
 import { startFactory, type Factory } from "../../src/e2e.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import { startServer, type Handler } from "../../src/http/server.ts";
+import { cellApiHandler } from "../../src/cell-api/main.ts";
 import { controlHandlers } from "../../src/main.ts";
 import { fakeLauncher } from "../../src/scheduler/launcher.ts";
 import { tick, TICK_MS } from "../../src/scheduler/scheduler.ts";
@@ -140,13 +141,14 @@ export async function startControlPlane(world: object): Promise<void> {
     return false;
   }], { port: 0 });
   c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
+  const sources = [{ id: c.sourceId, adapter: c.fake.adapter }];
+  const uploadUrl = async (path: string) => `http://blob.test/${path}`;
   const control = controlHandlers({
-    pool: pool(), local: false, auth: createAuth({ mode: "azure" }), origin: c.origin,
-    sources: [{ id: c.sourceId, adapter: c.fake.adapter }], repoHost: c.host, secret: CELL_SECRET,
-    webhookSecret: WEBHOOK_SECRET, claudeToken: "unused", uploadUrl: async (path) => `http://blob.test/${path}`,
-    readBlob: async (path) => c.blobs!.get(path) ?? null,
+    pool: pool(), local: false, auth: createAuth({ mode: "azure" }), origin: c.origin, sources, repoHost: c.host,
+    webhookSecret: WEBHOOK_SECRET, uploadUrl, readBlob: async (path) => c.blobs!.get(path) ?? null,
   });
-  handlers.push(...control.handlers);
+  // A cell's stage report goes to the cell API, its own service since PBI 222. This test server runs both.
+  handlers.push(cellApiHandler({ pool: pool(), sources, repoHost: c.host, secret: CELL_SECRET, claudeToken: "unused", modelUpstream: "http://127.0.0.1:9", uploadUrl }), ...control.handlers);
   c.close = control.close;
 }
 

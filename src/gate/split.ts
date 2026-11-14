@@ -80,6 +80,7 @@ export function splitPrompt(item: FactoryItem, dor?: SplitDor): string {
     ...item.acceptanceCriteria.map((text, i) => JSON.stringify({ index: i + 1, criterion: text })),
     "",
     `Give each child a "title", a "body" that names the parent item ${JSON.stringify(item.title)}, and "criteria": the indices of the parent's criteria it takes.`,
+    "Leave acceptance criteria out of each child's body: the factory adds each child's acceptance criteria itself, word for word from the parent's criteria the child takes.",
     "Each child's body cites every spec section or plan task that child itself implements or changes, even when the parent's body doesn't cite it, and not only the ones the parent's body cites.",
     ...(dor ? ["Write each child's body so it meets every criterion of the dor.md above."] : []),
     "Every parent criterion goes to exactly one child.",
