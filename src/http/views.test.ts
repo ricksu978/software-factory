@@ -289,6 +289,13 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(row, /Needed a second ask of the PR reviewer in round 2: its last line is neither APPROVED nor OPEN: &lt;n&gt;: &lt;b&gt;fine&lt;\/b&gt;/);
   });
 
+  test("Run detail's stage row shows the attempt's message in its notes, before any restate (PBI 239)", () => {
+    const d = detail([]);
+    d.stages = [{ ...d.stages[0], status: "stopped", message: "The cell's <lease> ran out", restates: [{ round: 1, reason: "unread" }] }];
+    const row = /<tbody>([\s\S]*?)<\/tbody>/.exec(runDetailPage(d, null).split("<h2>Stages</h2>")[1])![1];
+    assert.match(row, /<td>The cell&#39;s &lt;lease&gt; ran out<br>Needed a second ask of the PR reviewer in round 1: unread<\/td><\/tr>/);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });
@@ -337,6 +344,17 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
     assert.match(rows[0], /<td>didn&#39;t finish<\/td>|<td>didn't finish<\/td>/);
     assert.doesNotMatch(rows[0], /so far/);
     assert.match(rows[1], /<td>5m 0s so far<\/td>/);
+  });
+
+  test("an attempt left open by a cell that died shows as stopped, and a live one as running (PBI 209)", () => {
+    const deadRow = { ...stage, ended_at: null, status: "started", started_at: new Date("2026-11-09T15:30:00Z") };
+    const liveRow = { ...stage, attempt: 2, ended_at: null, status: "started", started_at: new Date("2026-11-10T17:30:00Z") };
+    const html = runDetailPage(detail({ stages: [deadRow, liveRow], run: openRun, now: new Date("2026-11-10T17:35:00Z") }), null);
+    const rows = html.split("<h2>Stages</h2>")[1].split("</tbody>")[0].split("<tr>").slice(2);
+    assert.match(rows[0], /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
+    assert.match(rows[1], /<td>build<\/td><td>2<\/td><td>running<\/td>/);
+    const queued = rowOf(runDetailPage(detail({ stages: [deadRow], run: openRun, item: { ...detail({}).item, state: "Queued" } }), null), "Stages");
+    assert.match(queued, /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
   });
 
   test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {

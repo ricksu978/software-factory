@@ -89,6 +89,24 @@ describe("handleWebhook", dbTest, () => {
     assert.deepEqual(await count("d-3"), { deliveries: 0, events: [] });
   });
 
+  test("a comment writes one comment command row per item with its number on any board, and none for an unknown number (PBI 218)", async () => {
+    const number = String(Math.floor(Math.random() * 1e9));
+    const items: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'outbox:' || gen_random_uuid()) returning id")).rows[0].id;
+      items.push((await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, $2, 't', 'InReview') returning id", [source, number])).rows[0].id);
+    }
+    const comment = (externalId: string) => ({ pool: db.pool, secret, parse: () => ({ kind: "comment" as const, externalId, repo: "o/r", login: "pat", body: "/approve", commentId: "c" }) });
+    const rows = async (delivery: string) => (await db.pool.query<{ consumer: string; item_id: string }>(
+      "select o.consumer, o.item_id from outbox o join event e on e.id = o.event_id where e.payload->>'deliveryId' = $1", [delivery],
+    )).rows;
+    assert.deepEqual(await handleWebhook(comment(number), { headers: headers("d-outbox-1", sign("sha256", body)), rawBody: body }), { status: 204 });
+    assert.deepEqual((await rows("d-outbox-1")).map((r) => r.item_id).sort(), [...items].sort());
+    assert.ok((await rows("d-outbox-1")).every((r) => r.consumer === "comment_commands"));
+    assert.deepEqual(await handleWebhook(comment("no-such-issue"), { headers: headers("d-outbox-2", sign("sha256", body)), rawBody: body }), { status: 204 });
+    assert.deepEqual(await rows("d-outbox-2"), []);
+  });
+
   describe("PR events (plan Task 17)", () => {
     let n = 0;
     /** An InReview item whose open run holds PR 7 in o/r, with reviews counted from `seen`. */

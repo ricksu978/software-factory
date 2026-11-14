@@ -98,6 +98,11 @@ class RenewalFailed extends Error {}
  * webhook moves the item (PBI 142, PBI 194).
  */
 class AlreadyMerged extends Error {}
+/**
+ * The run's PR closed without a merge while a stage waited for CI on it, and its branch went with it. The stage stops
+ * as it does for a merged PR, and the poller withdraws the item (PBI 212).
+ */
+class ClosedUnmerged extends Error {}
 
 /**
  * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
@@ -239,21 +244,67 @@ export type MeteredStage = {
   usage: AgentResult["usage"];
 };
 
+/** PBI 209: the most often a running stage's transcript so far is uploaded. */
+export const TRANSCRIPT_UPLOAD_MS = 15_000;
+
+/** PBI 209: where a running stage's transcript so far goes, the attempt's usual path, as CellApi.upload puts it. */
+export type TranscriptUploads = {
+  upload(b: { kind: "transcript"; stageId: string; attempt: number; body: string }): Promise<void>;
+};
+
 /**
  * Charges every agent call a cell makes to the stage open at the time (PBI 132). A call made while no stage is open
  * is an error, and the model is never asked, so no call can go unrecorded.
+ *
+ * PBI 209: with `uploads`, while an attempt is open its transcript so far, every message its agent calls have written,
+ * is uploaded on a setInterval of TRANSCRIPT_UPLOAD_MS, when messages have arrived since the last upload that worked.
+ * A failed upload is logged and skipped, and never fails the call. close() stops the uploads, and settled() resolves
+ * once none is in flight, so the complete transcript the caller uploads after it lands last.
  */
-export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
+export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>, uploads?: TranscriptUploads): {
   open(stageId: string, attempt: number): void;
   close(): MeteredStage | null;
   ask(a: AgentArgs): Promise<AgentResult>;
+  settled(): Promise<void>;
 } {
   let open: MeteredStage | null = null;
+  // The open attempt's running calls, each the lines it has written so far.
+  let running = new Set<string[]>();
+  // True when the transcript so far has changed since the last upload that worked.
+  let fresh = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let inflight: Promise<void> = Promise.resolve();
+  let busy = false;
+
+  const tick = (stage: MeteredStage, calls: Set<string[]>) => {
+    if (!uploads || !fresh || busy) return;
+    const body = stage.transcript + [...calls].map((lines) => lines.map((l) => l + "\n").join("")).join("");
+    if (!body) return;
+    fresh = false;
+    busy = true;
+    inflight = uploads.upload({ kind: "transcript", stageId: stage.stageId, attempt: stage.attempt, body }).catch((e) => {
+      // The next tick tries again, even if nothing new arrives by then.
+      if (open === stage) fresh = true;
+      console.error(`transcript upload for ${stage.stageId}-${stage.attempt} failed, trying again in ${TRANSCRIPT_UPLOAD_MS / 1000}s:`, e);
+    }).finally(() => { busy = false; });
+  };
+
   return {
     open(stageId, attempt) {
-      open = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      clearInterval(timer);
+      const stage: MeteredStage = { stageId, attempt, costUsd: 0, tokensIn: 0, tokensOut: 0, transcript: "", usage: null };
+      const calls = new Set<string[]>();
+      open = stage;
+      running = calls;
+      fresh = false;
+      if (uploads) {
+        timer = setInterval(() => tick(stage, calls), TRANSCRIPT_UPLOAD_MS);
+        timer.unref?.();
+      }
     },
     close() {
+      clearInterval(timer);
+      timer = undefined;
       const c = open;
       open = null;
       return c;
@@ -261,13 +312,23 @@ export function stageMeter(agent: (a: AgentArgs) => Promise<AgentResult>): {
     async ask(a) {
       const stage = open;
       if (!stage) throw new Error("An AI call was made while no stage was open, so its cost would go unrecorded");
-      const r = await agent(a);
+      const calls = running;
+      const lines: string[] = [];
+      calls.add(lines);
+      const r = await agent({ ...a, onMessage: (l) => {
+        lines.push(l);
+        if (open === stage) fresh = true;
+        a.onMessage?.(l);
+      } }).finally(() => calls.delete(lines));
       stage.costUsd += r.costUsd;
       stage.tokensIn += r.tokensIn;
       stage.tokensOut += r.tokensOut;
       stage.transcript += r.transcript;
       if (r.usage) stage.usage = r.usage;
       return r;
+    },
+    async settled() {
+      await inflight;
     },
   };
 }
@@ -304,7 +365,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
-  const meter = stageMeter(d.agent);
+  // PBI 209: the meter uploads a running attempt's transcript so far to the attempt's usual path.
+  const meter = stageMeter(d.agent, api);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
   let current: {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
@@ -361,6 +423,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!c) return;
     current = null;
     const m = meter.close()!;
+    // PBI 209: an upload of the transcript so far that's still going lands before the complete one, never after it.
+    await meter.settled();
     // A stopped attempt's uploads are best effort: a failed blob PUT must not keep the stopped report from going out,
     // or the item stays InProgress until its lease runs out. A lost lease still ends the run, since nothing more may be sent.
     const upload = async (kind: "transcript" | "report", body: string) => {
@@ -544,9 +608,25 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return head === dodSha ? [] : [`the Definition of Done check committed to the branch: ${dodSha} became ${head}`];
   };
 
+  // A person may merge or close the PR while a stage waits for CI on its push. `GET checks` then refuses the commit,
+  // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
+  // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
     for (;;) {
-      const s = await api.checks(sha);
+      const s = await api.checks(sha).catch(async (e: unknown) => {
+        // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
+        if (e instanceof LeaseLost) throw e;
+        const n = opened?.number ?? ctx.prNumber;
+        if (n === null) throw e;
+        // A PR state that can't be read leaves the refusal itself as the attempt's message.
+        const state = await Promise.resolve().then(() => d.repoHost.prState(ctx.repo, n, [])).catch(() => null);
+        if (!state) throw e;
+        if (state.merged) {
+          throw new AlreadyMerged(`PR #${n} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""} while the factory waited for CI on ${sha}, so the stage stops here.`);
+        }
+        if (!state.open) throw new ClosedUnmerged(`PR #${n} for \`${ctx.branch}\` was closed without a merge while the factory waited for CI on ${sha}, so the stage stops here.`);
+        throw e;
+      });
       if (s !== "pending") return s;
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
@@ -1125,9 +1205,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "failed";
     }
     // Any other error ends the open attempt failed with its message, so no attempt is left looking as if it still
-    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted.
+    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted. Nor does
+    // one closed without a merge: the poller withdraws the item (PBI 212).
     if (current) current.message = e instanceof Error ? e.message : String(e);
-    if (e instanceof AlreadyMerged) {
+    if (e instanceof AlreadyMerged || e instanceof ClosedUnmerged) {
       await end("failed");
       return "failed";
     }

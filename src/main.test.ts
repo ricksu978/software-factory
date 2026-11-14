@@ -44,12 +44,19 @@ describe("main.ts at startup", () => {
     }
   });
 
-  test("locally it logs this start's sign-in link, on the port the dashboard answers on", () => {
-    const r = start({ FACTORY_ENV: "local", FACTORY_DEV_LOGIN: "octo", CELL_CONTROL_URL: "http://host.docker.internal:7999" });
+  test("locally it logs this start's sign-in link, on PORT and not on the cell API's port", () => {
+    const r = start({ FACTORY_ENV: "local", FACTORY_DEV_LOGIN: "octo", PORT: "7999", CELL_CONTROL_URL: "http://host.docker.internal:7401" });
     assert.match(r.stdout, /http:\/\/localhost:7999\/dev-login\?token=[0-9a-f]{64}\b/);
     // Nothing else is set here, so it stops after the link and names the first missing variable.
     assert.equal(r.status, 1);
     assert.match(r.stderr, /is not set/);
+  });
+
+  test("without PORT it refuses to start, naming PORT", () => {
+    const r = start({ FACTORY_ENV: "local", FACTORY_DEV_LOGIN: "octo", CELL_CONTROL_URL: "http://host.docker.internal:7401" });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /\bPORT is not set/);
+    assert.doesNotMatch(r.stdout, /answers on port/);
   });
 });
 
@@ -67,8 +74,8 @@ describe("control plane handlers", dbTest, () => {
     sourceId = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'main') returning id")).rows[0].id;
     control = controlHandlers({
       pool: db.pool, local: true, auth: createAuth({ mode: "local", devLogin: "octo" }), origin: "http://localhost:7400",
-      sources: [{ id: sourceId, adapter: fake.adapter }], repoHost: fakeRepoHost(), secret: "cell-secret",
-      webhookSecret: secret, claudeToken: "unused", uploadUrl: async (path) => `http://blob.test/${path}`, readBlob: async () => null,
+      sources: [{ id: sourceId, adapter: fake.adapter }], repoHost: fakeRepoHost(),
+      webhookSecret: secret, uploadUrl: async (path) => `http://blob.test/${path}`, readBlob: async () => null,
     });
     server = await startServer(control.handlers, { port: 0 });
   });
@@ -108,12 +115,15 @@ describe("control plane handlers", dbTest, () => {
     assert.match((await fake.comments(ext))[0], /signed off/);
   });
 
-  test("a webhook with a wrong signature gets 401, and the cell API answers before the dashboard", async () => {
+  test("a webhook with a wrong signature gets 401, and a cell route or a model request gets 404", async () => {
     const port = (server.address() as AddressInfo).port;
     const hook = await fetch(`http://127.0.0.1:${port}/webhooks/github`, { method: "POST", body: "{}", headers: { "x-hub-signature-256": "sha256=00", "x-github-delivery": "d" } });
     assert.equal(hook.status, 401);
     const cell = await fetch(`http://127.0.0.1:${port}/internal/cells/${randomUUID()}/lease`, { method: "POST", body: "{}" });
-    assert.equal(cell.status, 409);
+    // The cell routes and the model gateway are the cell API service's since PBI 222.
+    assert.equal(cell.status, 404);
+    const model = await fetch(`http://127.0.0.1:${port}/internal/model/v1/messages`, { method: "POST", body: "{}" });
+    assert.equal(model.status, 404);
     assert.equal((await fetch(`http://127.0.0.1:${port}/internal/cells/ping`, { method: "POST" })).status, 204);
   });
 });

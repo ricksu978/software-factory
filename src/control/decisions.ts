@@ -6,6 +6,7 @@ import type { ItemState } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { transitionItem } from "../store/items.ts";
+import { CONSUMER, writeOutboxRows } from "../store/outbox.ts";
 
 export type DecisionKind = "approve" | "changes" | "answer";
 export type Decision = { itemId: string; userId: string; kind: DecisionKind; text: string; via: "dashboard" | "comment" };
@@ -38,7 +39,8 @@ function allowed(kind: DecisionKind, u: { role: string; product_owner: boolean }
  * Answers the item's open question with the decision. Run contract 1 sets the resume point: approve resumes at red
  * and locks the scenarios, changes sends the run back to specify, and an answer leaves the resume point where the
  * question was asked. An Abandoned item comes back through `requeued`. A user without the right role gets
- * `forbidden`, and an item with no open question of the right kind gets `ignored`.
+ * `forbidden`, and an item with no open question of the right kind gets `ignored`. An applied decision writes its
+ * event and the event's decision announcement outbox row on the caller's transaction.
  */
 export async function decide(c: pg.PoolClient, d: Decision): Promise<Outcome> {
   const user = (await c.query<{ role: string; product_owner: boolean }>(`select role, product_owner from "user" where id = $1`, [d.userId])).rows[0];
@@ -61,7 +63,8 @@ export async function decide(c: pg.PoolClient, d: Decision): Promise<Outcome> {
     await c.query(`update run set next_stage = 'specify' where id = ${run}`, [d.itemId]);
   }
   if (item.state === "Abandoned") await transitionItem(c, d.itemId, "requeued", { actor: "human", actorId: d.userId });
-  await appendEvent(c, { actor: "human", actorId: d.userId, itemId: d.itemId, kind: "decision", payload: { kind: d.kind, via: d.via, text: d.text } });
+  const eventId = await appendEvent(c, { actor: "human", actorId: d.userId, itemId: d.itemId, kind: "decision", payload: { kind: d.kind, via: d.via, text: d.text } });
+  await writeOutboxRows(c, CONSUMER.decisionAnnouncement, eventId, [d.itemId]);
   return "applied";
 }
 

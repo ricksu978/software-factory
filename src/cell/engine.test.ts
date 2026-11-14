@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, commandEnv, loadInputs, readReview, runCell, stageMeter, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { changedFiles, commandEnv, loadInputs, readReview, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -242,6 +242,99 @@ describe("stageMeter", () => {
   });
 });
 
+describe("stageMeter's uploads of a running stage's transcript (PBI 209)", () => {
+  type Line = (l: string) => void;
+  /** An agent whose calls each wait for `finish`, telling onMessage of the lines `say` hands them first. */
+  function scripted() {
+    const calls: { say: Line; finish: (transcript: string) => void }[] = [];
+    const agent = (a: AgentArgs) => new Promise<AgentResult>((resolve) => {
+      calls.push({
+        say: (l) => a.onMessage?.(l),
+        finish: (transcript) => resolve({ ok: true, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0, model: "m", limit: null, usage: null, transcript }),
+      });
+    });
+    return { calls, agent };
+  }
+  const args: AgentArgs = { prompt: "p", model: "m", cwd: ".", mode: "cell", signal: new AbortController().signal };
+  const turn = () => new Promise((r) => setImmediate(r));
+
+  test("uploads the transcript so far each tick there's something new, across finished and running calls", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const sent: { stageId: string; attempt: number; body: string }[] = [];
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: async (b) => void sent.push(b) });
+    meter.open("green", 1);
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.length, 0, "nothing to upload before the first message");
+    const first = meter.ask(args);
+    calls[0].say("a");
+    calls[0].say("b");
+    calls[0].finish("a\nb\n");
+    await first;
+    void meter.ask(args);
+    calls[1].say("c");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS - 1);
+    await turn();
+    assert.equal(sent.length, 0, "not before the interval");
+    mock.timers.tick(1);
+    await turn();
+    assert.deepEqual(sent, [{ kind: "transcript", stageId: "green", attempt: 1, body: "a\nb\nc\n" }]);
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS * 3);
+    await turn();
+    assert.equal(sent.length, 1, "nothing new, nothing uploaded");
+    calls[1].say("d");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.at(-1)?.body, "a\nb\nc\nd\n");
+    meter.close();
+    calls[1].say("e");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.equal(sent.length, 2, "close stops the uploads");
+  });
+
+  test("a failed upload is logged, never fails the call, and the next tick tries again with nothing new", async (t) => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const logged = t.mock.method(console, "error", () => {});
+    let refuse = true;
+    const sent: string[] = [];
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: async (b) => { if (refuse) throw new Error("503"); sent.push(b.body); } });
+    meter.open("build", 2);
+    const call = meter.ask(args);
+    calls[0].say("a");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.match(String(logged.mock.calls[0]?.arguments[0]), /transcript upload for build-2 failed/);
+    refuse = false;
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    await turn();
+    assert.deepEqual(sent, ["a\n"]);
+    calls[0].finish("a\n");
+    assert.equal((await call).ok, true);
+  });
+
+  test("settled waits for an upload in flight when the stage closes", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let land!: () => void;
+    const { calls, agent } = scripted();
+    const meter = stageMeter(agent, { upload: () => new Promise<void>((r) => (land = r)) });
+    meter.open("build", 1);
+    void meter.ask(args);
+    calls[0].say("a");
+    mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+    meter.close();
+    let done = false;
+    const s = meter.settled().then(() => (done = true));
+    await turn();
+    assert.equal(done, false);
+    land();
+    await s;
+    assert.equal(done, true);
+  });
+});
+
 describe("runCell", () => {
   test("every cell-mode agent call carries the repo's web tools", async () => {
     const h = harness();
@@ -422,6 +515,53 @@ describe("runCell", () => {
     assert.equal(h.prs.length, 2);
   });
 
+  // PBI 212: a person merges or closes the PR while open-pr waits for CI, and GET checks refuses the commit.
+  const refusedCi = (h: ReturnType<typeof harness>, state: { merged: boolean; open: boolean }) => {
+    h.deps.api.checks = async (sha) => { throw new Error(`GET /checks?sha=${sha}: 400 {"error":"${sha} isn't on ${BRANCH}"}`); };
+    let asked = 0;
+    // The first prState is open-pr's own check before it opens the PR. Only the second one sees the merge or close.
+    h.deps.repoHost.prState = async () => (++asked === 1
+      ? { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: null }
+      : { merged: state.merged, mergeSha: state.merged ? "m7" : null, open: state.open, mergeable: null, lastChangesRequestedAt: null });
+    return () => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body;
+  };
+
+  test("a PR merged while open-pr waits for CI ends the stage naming the merged PR, asks no reviewer and moves nothing", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: true, open: false });
+    assert.equal(await h.run(), "failed");
+    assert.match(last().message, /PR #7 .*already merged as m7/);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"));
+    assert.deepEqual(h.transitions(), []);
+    assert.equal(h.started().filter((s) => s === "open-pr").length, 1);
+  });
+
+  test("a PR closed without a merge while open-pr waits for CI ends the stage naming the closed PR and moves nothing", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: false, open: false });
+    assert.equal(await h.run(), "failed");
+    assert.match(last().message, /PR #7 .*closed without a merge/);
+    assert.doesNotMatch(last().message, /already merged/);
+    assert.deepEqual(h.transitions(), []);
+  });
+
+  test("a CI refusal while the PR is still open fails the attempt with the refusal, as before", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const last = refusedCi(h, { merged: false, open: true });
+    await assert.rejects(h.run(), /isn't on/);
+    assert.equal(last().status, "failed");
+    assert.match(last().message, /isn't on factory\//);
+  });
+
+  test("a CI error whose PR state can't be read either fails the attempt with the CI error", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { prNumber: null } });
+    h.deps.api.checks = async () => { throw new Error("GitHub answered 502"); };
+    h.deps.repoHost.prState = async () => { throw new Error("GitHub answered 503"); };
+    await assert.rejects(h.run(), /502/);
+    const last = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body;
+    assert.match(last.message, /GitHub answered 502/);
+  });
+
   test("reviewers are asked only once the PR review passes, after every review the factory posts", async () => {
     const h = harness();
     assert.equal(await h.run(), "done");
@@ -473,6 +613,35 @@ describe("runCell", () => {
     assert.deepEqual(passed.filter(([s]) => !s.endsWith("review")), [["red", "said at red"], ["green", "said at green"], ["open-pr", "said at open-pr"]]);
     assert.match(passed[2][1], /APPROVED$/);
     assert.equal(passed[4][1], "APPROVED");
+  });
+
+  test("a transcript-so-far upload still going when a stage ends lands before the complete transcript (PBI 209)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let ticked = false;
+    const h = harness({
+      script: (a, stage) => {
+        if (stage !== "red" || a.mode !== "cell" || ticked) return;
+        ticked = true;
+        a.onMessage?.("line");
+        // The meter's tick starts an upload of the transcript so far, which is held open past the stage's end.
+        mock.timers.tick(TRANSCRIPT_UPLOAD_MS);
+        return { transcript: "line\nmore\n" };
+      },
+    });
+    const sent = h.deps.api.upload;
+    const landed: string[] = [];
+    h.deps.api.upload = async (b) => {
+      const red = b.kind === "transcript" && b.stageId === "red" && b.attempt === 1;
+      // A real timer, which no await in the stage's end can be waiting on, releases the held upload.
+      if (red && b.body === "line\n") await new Promise((r) => setTimeout(r, 50));
+      await sent(b);
+      if (red) landed.push(b.body);
+    };
+    assert.equal(await h.run(), "done");
+    assert.ok(ticked, "the red stage made no cell call");
+    assert.equal(landed[0], "line\n", "the transcript so far wasn't uploaded while red ran");
+    assert.equal(landed.length, 2);
+    assert.match(landed[1], /^line\nmore\n/, "the complete transcript didn't land last");
   });
 
   test("each stage ends with /stage passed, then its uploads, then the transition", async () => {
