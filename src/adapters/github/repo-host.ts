@@ -43,7 +43,7 @@ const split = (repo: string) => {
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
 type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState"
-  | "openReviewComments" | "postReview" | "resolveThread">;
+  | "openReviewComments" | "postReview" | "resolveThread" | "diffLines">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -87,6 +87,10 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const nodes = res.repository.pullRequest.reviewThreads.nodes as { id: string; path: string; line: number | null; comments: { nodes: { body: string; pullRequestReview: { databaseId: number | null } | null }[] } }[];
       return { threads: nodes.filter((t) => t.comments.nodes[0]?.pullRequestReview?.databaseId === review.id)
         .map((t) => ({ threadId: t.id, path: t.path, line: t.line ?? 0, body: t.comments.nodes[0].body })) };
+    },
+
+    async diffLines(_repo, _prNumber, _commitSha) {
+      throw new Error("diffLines is not built yet (PBI 266)");
     },
 
     async resolveThread(_repo, threadId) {

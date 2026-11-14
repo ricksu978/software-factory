@@ -253,6 +253,9 @@ export function fakeRepoHost(): RepoHost & {
       if (threads.length) reviewComments.set(key, [...(reviewComments.get(key) ?? []), ...threads.map((t) => ({ ...t, author: "factory[bot]" }))]);
       return { threads };
     },
+    async diffLines(_repo, _prNumber, _commitSha) {
+      throw new Error("diffLines is not built yet (PBI 266)");
+    },
     async resolveThread(repo, threadId) {
       const thread = [...reviewComments.entries()].find(([k, cs]) => k.startsWith(`${repo}#`) && cs.some((c) => c.threadId === threadId))?.[1]
         .filter((c) => c.threadId === threadId);

@@ -47,11 +47,11 @@ export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited";
 export type CellDeps = {
   api: CellApi; ctx: CellContext; agent: (a: AgentArgs) => Promise<AgentResult>; git: Git; dir: string;
   /**
-   * The PR review needs `postReview` and `resolveThread`. A repo host with neither gets no PR review stage, and open-pr
+   * The PR review needs `postReview` and `resolveThread`, and reads the PR's diff with `diffLines` before it posts. A repo host with neither gets no PR review stage, and open-pr
    * hands the PR to people as it did before PBI 128. The cell's own GitHub host always has both.
    */
   repoHost: Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState">
-    & Partial<Pick<RepoHost, "postReview" | "resolveThread">>;
+    & Partial<Pick<RepoHost, "postReview" | "resolveThread" | "diffLines">>;
   sop: Sop; config: RepoConfig; policies: Policies; now: () => Date;
   /** Waits between CI polls. Tests pass one that returns at once. */
   sleep?: (ms: number) => Promise<void>;
