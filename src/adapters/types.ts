@@ -72,6 +72,25 @@ export function withoutFactoryThreads<T extends { threadId: string; author: stri
   return comments.filter((c) => !factoryThread(first.get(c.threadId), trustedBot));
 }
 
+/**
+ * Why an item went back to address, as its `changes_requested` event names it (PBI 258): a trusted review's summary, a
+ * trusted comment in a thread that was unresolved when it was read, or GitHub reporting the PR not mergeable.
+ */
+export type ChangeCause =
+  | { kind: "review"; author: string; body: string; submittedAt: string }
+  | { kind: "thread_comment"; threadId: string; author: string; body: string; submittedAt: string }
+  | { kind: "not_mergeable" };
+
+/** The newest of `causes` by `submittedAt`. On a tie a thread comment wins, since it holds the text the review asked with. */
+export function newestCause<T extends { kind: string; submittedAt: string }>(causes: T[]): T | null {
+  let best: T | null = null;
+  for (const c of causes) {
+    const d = best ? Date.parse(c.submittedAt) - Date.parse(best.submittedAt) : 1;
+    if (d > 0 || (d === 0 && c.kind === "thread_comment")) best = c;
+  }
+  return best;
+}
+
 export type Review = { id: string; author: string; state: "changes_requested" | "approved" | "commented" | "dismissed"; body: string };
 
 /**
@@ -124,10 +143,12 @@ export interface RepoHost {
    * `lastChangesRequestedAt` is the newest trusted review that requests changes or comments in a still-open thread, once
    * that comment has stood two minutes (Run contract 10). A thread `trustedBot` opened, the factory's own review's, never
    * counts, whoever replies inside it, and neither does a review requesting changes whose only text sits in such a
-   * thread (PBI 130).
+   * thread (PBI 130), or in a thread that is resolved when it's read (PBI 258).
    */
   prState(repo: string, prNumber: number, trustedLogins: string[], trustedBot?: string | null): Promise<{
     merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null;
+    /** What `lastChangesRequestedAt` dates: the review summary or the thread comment (PBI 258). */
+    lastChangesRequested?: ChangeCause | null;
   }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;

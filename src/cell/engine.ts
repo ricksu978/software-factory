@@ -1018,12 +1018,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
   };
 
-  const address = async (mergedConflict: boolean) => {
+  const address = async () => {
     const comments = ctx.trustedComments;
-    // Issue #28 AC-3: with no trusted review text, only a merge conflict is a reason to be here.
-    if (!comments.length && !mergedConflict) throw new Blocked("no trusted review text to address");
+    // With no trusted review text and no conflict, there is nothing to address: a person may have resolved their thread
+    // after the poller sent the item back. The stage still passes, with no agent run and nothing posted, and the PR
+    // review below hands the PR back once it passes, as after any address (PBI 258).
     const byThread = new Map(comments.map((c) => [c.threadId, c]));
     let replies: { threadId: string; body: string }[] = [];
+    let fixed = new Set<string>();
     const findings = await attempts("address", retriesOf("address") + 1, async (attempt, last) => {
       const replyFile = join(tmpdir(), `factory-replies-${process.pid}-${attempt}.jsonl`);
       // A summary has no path: it's the reviewer's top-level summary, not a line comment (Run contract 10).
@@ -1043,10 +1045,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (ci === "failure") return [`CI failed on ${head}`];
       const stale = await freshDod("address", attempt);
       if (stale.length) return stale;
-      replies = existsSync(replyFile)
-        ? jsonLines(await readFile(replyFile, "utf8")).filter((r): r is { threadId: string; body: string } =>
-          typeof r.threadId === "string" && typeof r.body === "string" && byThread.has(r.threadId))
-        : [];
+      const lines = existsSync(replyFile) ? jsonLines(await readFile(replyFile, "utf8")) : [];
+      replies = lines.filter((r): r is { threadId: string; body: string } =>
+        typeof r.threadId === "string" && typeof r.body === "string" && r.body.trim() !== "" && byThread.has(r.threadId));
+      // A thread the addresser fixed, as it says with `"fixed": true`, is resolved like one it replied to (PBI 258).
+      fixed = new Set(lines.filter((r) => typeof r.threadId === "string" && r.fixed === true && byThread.has(r.threadId)).map((r) => r.threadId as string));
       return [];
     });
     if (findings.length) throw new Blocked(`Address failed:\n${findings.map((f) => `- ${f}`).join("\n")}`);
@@ -1057,6 +1060,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const target = byThread.get(r.threadId)!;
       if (target.path === null) await d.repoHost.commentOnPr(ctx.repo, ctx.prNumber!, `${target.body.replace(/^/gm, "> ")}\n\n${r.body}`);
       else await d.repoHost.replyToThread(ctx.repo, r.threadId, r.body);
+    }
+    // Each person's thread the addresser answered, by a fix CI has passed on or a reply now posted, is resolved, so
+    // the person needn't, and a reply of theirs in it can't send the item back again. One it didn't answer stays open
+    // (PBI 258). A summary has no thread to resolve.
+    const answered = new Set([...replies.map((r) => r.threadId), ...fixed]);
+    if (d.repoHost.resolveThread) {
+      for (const id of answered) if (byThread.get(id)!.path !== null) await d.repoHost.resolveThread(ctx.repo, id);
     }
     await end("passed");
     // PBI 130: the factory's own PR review looks at what address pushed, once CI passed on it, before people do again.
@@ -1111,7 +1121,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let carried: string[] = [];
     if (start === "address") {
       // A PR review after address whose fix CI fails on goes back to green, as one after open-pr does.
-      const back = await address(conflict.length > 0);
+      const back = await address();
       if (!back) return "done";
       carried = back;
     }

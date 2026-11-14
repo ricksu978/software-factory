@@ -389,7 +389,7 @@ Given("no other trusted review text waits on the run's PR {int}", function (n: n
 Given("the PR addresser fixes that thread with a new commit", function () {
   const c = pr128(this);
   assert.ok(c.last, "no thread was named before this step");
-  c.addresses.push({ actions: new Map([[c.last, { kind: "fix" }]]) });
+  c.addresses.push({ actions: new Map([[c.last, { kind: "fix", reported: true }]]) });
 });
 
 Given("the PR addresser replies {string} on the thread {string}, and neither fixes nor replies to {string}", function (reply: string, body: string, other: string) {

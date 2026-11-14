@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { type ChangeCause, loginKey, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -198,11 +198,16 @@ export function fakeRepoHost(): RepoHost & {
       const settled = Date.now() - THREAD_SETTLE_MS;
       const trusted = new Set(trustedLogins.map(loginKey));
       const own = withoutFactoryThreads(p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [], trustedBot);
-      const open = own.filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
-      // A comment belongs to the review its author submitted at its submittedAt.
-      const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
-      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r)).map((r) => r.submittedAt), ...open].sort();
-      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
+      const open = own.filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author)));
+      // A comment belongs to the review its author submitted at its submittedAt. Only one in a thread still unresolved
+      // gives the review text (PBI 258).
+      const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => !c.resolved && c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" }>>([
+        ...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r))
+          .map((r) => ({ kind: "review" as const, author: r.author, body: r.body ?? "", submittedAt: r.submittedAt })),
+        ...open.map((c) => ({ kind: "thread_comment" as const, threadId: c.threadId, author: c.author, body: c.body, submittedAt: c.submittedAt! })),
+      ]);
+      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
     },
     async closePr(repo, n, comment) {
       const p = pr(repo, n);

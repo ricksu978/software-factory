@@ -40,7 +40,8 @@ const MAX_REVIEWS = 15; // a safety stop, so an engine that never ends the stage
 type Finding = { path: string; line: number; body: string };
 type Verdict = { settled: boolean; reason: string };
 type ReviewSpec = { findings: Finding[]; verdicts: Map<string, Verdict>; clean: boolean };
-type Action = { kind: "fix" } | { kind: "reply"; body: string };
+/** `reported`: the addresser also writes a `fixed` line for the thread to the reply file, as the address prompt asks (PBI 258). */
+type Action = { kind: "fix"; reported?: boolean } | { kind: "reply"; body: string };
 type AddressSpec = { actions: Map<string, Action> };
 type Host = ReturnType<typeof fakeRepoHost>;
 type ThreadState = { threadId: string; resolved: boolean; bodies: string[] };
@@ -277,10 +278,15 @@ function addresser(c: Ctx, rec: AgentRecord, cwd: string): string {
     else if (replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: t.threadId, body: action.body }) + "\n");
   }
   // A person's thread in the brief, as the address stage hands it over (PBI 130), is fixed when the scenario says so.
-  // PBI 258: or answered with a reply, which goes to the reply file as for the factory's own threads.
+  // PBI 258: or answered with a reply, which goes to the reply file as for the factory's own threads. A fix the
+  // scenario says the addresser reported gets a `fixed` line there too, so the factory resolves the thread. An
+  // unreported fix leaves the thread to the person, as PBI 130's scenarios expect.
   for (const p of c.personThreads.filter((x) => rec.prompt.includes(x.threadId))) {
     const action = spec?.actions.get(p.body);
-    if (action?.kind === "fix" || c.fixPersonEachTime.has(p.body)) fixed.push(p.body);
+    if (action?.kind === "fix" || c.fixPersonEachTime.has(p.body)) {
+      fixed.push(p.body);
+      if (action?.kind === "fix" && action.reported && replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: p.threadId, fixed: true }) + "\n");
+    }
     else if (action?.kind === "reply" && replyFile) appendFileSync(replyFile, JSON.stringify({ threadId: p.threadId, body: action.body }) + "\n");
   }
   if (fixed.length) {

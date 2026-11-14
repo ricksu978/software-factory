@@ -193,6 +193,13 @@ describe("handleWebhook", dbTest, () => {
       assert.equal(await state(item), "InReview");
     });
 
+    test("the changes_requested event names the review that was delivered and when it was submitted (PBI 258)", async () => {
+      const { item, pr } = await inReview(null);
+      await send(review(pr, "reviewer", "2026-11-06T11:00:00Z"));
+      const ev = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'changes_requested'", [item])).rows;
+      assert.deepEqual(ev.map((r) => r.payload.cause), [{ kind: "review", author: "reviewer", body: "Fix it.", submittedAt: "2026-11-06T11:00:00Z" }]);
+    });
+
     test("only an allowlisted reviewer's review newer than reviews_seen_at sends the item to address", async () => {
       const { item, pr } = await inReview("2026-11-06T10:00:00Z");
       await send(review(pr, "stranger", "2026-11-06T11:00:00Z"));

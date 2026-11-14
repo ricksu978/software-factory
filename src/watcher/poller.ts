@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
+import { loginKey, type BacklogAdapter, type ChangeCause, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
@@ -69,9 +69,9 @@ export function readinessItemHash(fi: FactoryItem, openDeps: string[]): string {
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
 
-async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: pg.PoolClient) => Promise<unknown>): Promise<void> {
+async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: pg.PoolClient) => Promise<unknown>, detail?: Record<string, unknown>): Promise<void> {
   await withTx(pool, async (c) => {
-    await transitionItem(c, itemId, event, system);
+    await transitionItem(c, itemId, event, system, detail);
     await also?.(c);
   });
 }
@@ -230,7 +230,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
-      await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+      // The move names its cause: the newest trusted review or comment in a thread unresolved as it was read, or else
+      // GitHub reporting the PR not mergeable (PBI 258).
+      const cause: ChangeCause | null = newer(pr.lastChangesRequestedAt, row.reviews_seen_at) ? pr.lastChangesRequested ?? null : { kind: "not_mergeable" };
+      await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]), cause ? { cause } : undefined);
     } else if (row.state === "InReview" && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
       // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
