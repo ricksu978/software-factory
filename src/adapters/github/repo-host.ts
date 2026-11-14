@@ -20,6 +20,18 @@ export type AppLike = {
 // the token every permission the App holds.
 export const CELL_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write" } as const;
 
+const LEVEL = { read: 1, write: 2, admin: 3 } as Record<string, number>;
+
+/**
+ * Each of CELL_PERMISSIONS the installation holds below the level asked, as "name: level" (PBI 264). The readiness
+ * gate needs the same set: it comments on and edits issues, and the cell it hands an item to pushes and opens a PR.
+ */
+export function permissionsMissing(granted: Record<string, string> | undefined): string[] {
+  return Object.entries(CELL_PERMISSIONS)
+    .filter(([name, level]) => (LEVEL[granted?.[name] ?? ""] ?? 0) < LEVEL[level])
+    .map(([name, level]) => `${name}: ${level}`);
+}
+
 const COMPARE_PAGE = 100;
 type CompareCommit = { sha: string; parents?: { sha: string }[] };
 
@@ -296,6 +308,11 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         installation_id: installationId, repositories: [split(repo).repo], permissions: { ...CELL_PERMISSIONS },
       });
       return { token: data.token, expiresAt: data.expires_at };
+    },
+
+    async missingPermissions(repo) {
+      const { data } = await app.octokit.request("GET /repos/{owner}/{repo}/installation", split(repo));
+      return permissionsMissing(data.permissions);
     },
 
     async checksOnSha(repo, sha) {
