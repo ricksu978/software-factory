@@ -8,7 +8,7 @@ import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../
 import type { ItemState } from "../core/states.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
-import { nextUp } from "../store/items.ts";
+import { LEASE_RAN_OUT, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
@@ -101,14 +101,16 @@ async function floor(pool: pg.Pool) {
   )).rows;
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
-  // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
+  // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
+  // factory's own note on an attempt it closed (PBI 239) isn't an agent message, so Floor skips it; Run detail shows it.
   const active = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
-       (select message from stage_run s where s.run_id = r.id and message <> '' order by ended_at desc nulls last, started_at desc limit 1) as message
+       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
+    [LEASE_RAN_OUT],
   )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
   const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
   // A restart being prepared (PBI 140) counts down its wrap-up while any cell still holds a live lease.

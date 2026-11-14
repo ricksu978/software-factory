@@ -155,13 +155,36 @@ export async function renewLease(c: pg.PoolClient, itemId: string, generation: n
   return r.rowCount === 1 ? "ok" : "lost";
 }
 
-/** Sends every InProgress item whose lease ran out before `now` back to Queued through lease_expired. run.next_stage is left alone. */
+/** The message on an attempt whose cell's claim ended before it reported the attempt (PBI 239). Migration 012 writes the same text. */
+export const LEASE_RAN_OUT = "The cell's lease ran out before it reported this attempt.";
+
+/**
+ * Closes every attempt of the item's open run that is still started: it gets the status stopped, ends at `now` and
+ * carries LEASE_RAN_OUT (PBI 239). The factory calls it whenever an InProgress item goes back to Queued because its
+ * lease ran out or a restart ended its cell's claim, so no attempt is left started for a cell that's gone. Like any
+ * stopped attempt, it uses up none of the stage's retries.
+ */
+export async function closeStartedAttempts(c: pg.PoolClient, itemId: string, now: Date): Promise<void> {
+  await c.query(
+    `update stage_run s set status = 'stopped', ended_at = $2, message = $3
+     from run r where r.id = s.run_id and r.item_id = $1 and r.ended_at is null and s.status = 'started'`,
+    [itemId, now, LEASE_RAN_OUT],
+  );
+}
+
+/**
+ * Sends every InProgress item whose lease ran out before `now` back to Queued through lease_expired, closing its run's
+ * started attempts as stopped (PBI 239). run.next_stage is left alone.
+ */
 export async function expireLeases(c: pg.PoolClient, now: Date): Promise<string[]> {
   const r = await c.query<{ id: string }>(
     "select id from item where state = 'InProgress' and lease_expires < $1 order by lease_expires for update skip locked",
     [now],
   );
-  for (const { id } of r.rows) await transitionItem(c, id, "lease_expired", system("lease-expiry"));
+  for (const { id } of r.rows) {
+    await closeStartedAttempts(c, id, now);
+    await transitionItem(c, id, "lease_expired", system("lease-expiry"));
+  }
   return r.rows.map((row) => row.id);
 }
 

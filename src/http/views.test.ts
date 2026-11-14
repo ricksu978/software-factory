@@ -289,6 +289,13 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(row, /Needed a second ask of the PR reviewer in round 2: its last line is neither APPROVED nor OPEN: &lt;n&gt;: &lt;b&gt;fine&lt;\/b&gt;/);
   });
 
+  test("Run detail's stage row shows the attempt's message in its notes, before any restate (PBI 239)", () => {
+    const d = detail([]);
+    d.stages = [{ ...d.stages[0], status: "stopped", message: "The cell's <lease> ran out", restates: [{ round: 1, reason: "unread" }] }];
+    const row = /<tbody>([\s\S]*?)<\/tbody>/.exec(runDetailPage(d, null).split("<h2>Stages</h2>")[1])![1];
+    assert.match(row, /<td>The cell&#39;s &lt;lease&gt; ran out<br>Needed a second ask of the PR reviewer in round 1: unread<\/td><\/tr>/);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });
