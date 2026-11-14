@@ -32,6 +32,12 @@ export type GateContext = {
    * with the children it started with.
    */
   splits?: { get: (item: FactoryItem) => Promise<SplitChild[] | null>; keep: (item: FactoryItem, children: SplitChild[]) => Promise<SplitChild[]> };
+  /**
+   * Each permission the factory's App needs on the item's repo and hasn't been granted, by GitHub's name, such as
+   * "issues: write" (PBI 264). Only the owner can grant one, so each is an engine rule failure the factory never
+   * rewrites, and the readiness comment says what the owner has to do.
+   */
+  missingPermissions?: string[];
   /** Where a readiness check that couldn't be recorded is reported. Defaults to console.error. */
   log?: (line: string) => void;
 };

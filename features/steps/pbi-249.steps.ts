@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { splitPrompt } from "../../src/gate/split.ts";
 import { loadPolicy } from "../../src/policy/policy.ts";
 import { ctx as ctx144 } from "./pbi-144.steps.ts";
+import { rewrittenLead } from "./pbi-264.steps.ts";
 
 /** The heading PBI 144's harness files and reads each child's criteria under. */
 const HARNESS_HEADING = "Acceptance criteria";
@@ -123,6 +124,9 @@ Then("{string} holds a new issue titled {string}", function (repo: string, title
 
 Then("the body of child {string} has exactly one section under the heading {string}", async function (title: string, heading: string) {
   const body = await bodyOf(this, title);
+  // PBI 264: when the scenario rewrote this child, the body read is the rewritten one, not the one first filed.
+  const lead = rewrittenLead(this, title);
+  if (lead) assert.ok(body.startsWith(lead), `child "${title}" wasn't rewritten: its body doesn't start with "${lead}":\n${body}`);
   const found = headings(body, heading);
   assert.equal(found.length, 1, `child "${title}"'s body has ${found.length} sections under "${heading}":\n${body}`);
 });
