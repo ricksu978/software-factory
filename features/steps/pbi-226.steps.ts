@@ -104,9 +104,14 @@ async function parentClosed(c: Ctx144): Promise<boolean> {
 Given("a second parent issue {string} in {string} on that board, carrying the label {string}", async function (title: string, repo: string, label: string) {
   const c = ctx144(this);
   const s = ctx(this);
+  assert.equal(repo, c.repo, `the second parent issue is in "${repo}", not the repo on that board, "${c.repo}"`);
   s.secondTitle = title;
   s.secondId = await c.fake.seed({ title, body: "Let a shopper earn and spend loyalty points.", acceptanceCriteria: [], labels: [label], repo, status: c.backlogStatus });
   c.board.set(s.secondId, c.backlogStatus);
+  const fi = await c.fake.adapter.getItem(s.secondId);
+  assert.ok(fi, "the second parent issue wasn't seeded");
+  assert.equal(fi.repo, repo, `the second parent issue reads back in "${fi.repo}"`);
+  assert.ok(fi.labels.includes(label), `the second parent issue doesn't carry "${label}"`);
 });
 
 Given("the readiness judge finds the second parent issue oversized", async function () {
