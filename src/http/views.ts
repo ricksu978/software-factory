@@ -124,6 +124,20 @@ function restartStatus(r: Restart): string {
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
 }
 
+/** The cell image the worker keeps current with main (PBI 210): the commit it was built from, and main's commit a restart would pick up. */
+export type CellImage = { built: string | null; restart: string | null };
+
+const shortSha = (sha: string) => escapeHtml(sha.slice(0, 7));
+
+/** Floor's lines for the cell image: the commit it was built from, then a restart's commit when main's changes need one. */
+function cellImageStatus(c: CellImage): string {
+  const built = `<p class="muted">The cell image was built from commit ${c.built ? `<code>${shortSha(c.built)}</code>` : "not known: it carries no commit label, as an image built from a checkout with uncommitted edits doesn't"}.</p>`;
+  const restart = c.restart
+    ? `<p class="banner" role="status">A restart is needed to pick up main's commit <code>${shortSha(c.restart)}</code>. It changes code the control plane or the worker runs, so the cell image isn't rebuilt until the factory restarts.</p>`
+    : "";
+  return built + restart;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
@@ -131,10 +145,10 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 }
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
-    + (f.restart ? restartStatus(f.restart) : "")
+    + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
