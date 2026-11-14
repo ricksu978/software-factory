@@ -60,6 +60,10 @@ export type Ctx = {
    * that set it. Unset, a poll is the in-memory pass below.
    */
   driver?: () => Promise<void>;
+  /** PBI 226: other parents, by external id, the judge also finds oversized. */
+  alsoOversized?: Set<string>;
+  /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
+  replies?: { title: string; reply: string }[];
 };
 
 export function ctx(world: object): Ctx {
@@ -154,7 +158,8 @@ export function scriptedBoard(c: Ctx): SplitBoard {
 export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
-    return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+    const text = c.replies?.find((r) => a.prompt.includes(JSON.stringify(r.title)))?.reply ?? c.reply;
+    return { ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
 }
 
@@ -162,7 +167,7 @@ export function agent(c: Ctx) {
 export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
-    JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
+    JSON.stringify({ flags: [], oversized: (c.oversized && item.externalId === c.parentId) || (c.alsoOversized?.has(item.externalId) ?? false) }),
   ].join("\n");
 }
 
