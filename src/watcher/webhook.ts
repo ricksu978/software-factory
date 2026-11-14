@@ -6,6 +6,7 @@ import { botKey, loginKey, type FactoryWebhookEvent } from "../adapters/types.ts
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
+import { CONSUMER, writeOutboxRows } from "../store/outbox.ts";
 import { logAttemptedMerge } from "./merge.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
@@ -27,7 +28,8 @@ export type WebhookDeps = {
 
 /**
  * 401 for a bad signature, with nothing written. 400 for a signed body with no delivery id or no JSON. Otherwise the
- * delivery id and one `webhook` event go in together: 204 the first time, 200 with no event for a redelivery.
+ * delivery id, one `webhook` event and, for a comment, its outbox rows go in together: 204 the first time, 200 with no
+ * event for a redelivery.
  */
 export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<string, string | undefined>; rawBody: Buffer }): Promise<{ status: 200 | 204 | 400 | 401 }> {
   const headers = Object.fromEntries(Object.entries(req.headers).filter((e): e is [string, string] => typeof e[1] === "string").map(([k, v]) => [k.toLowerCase(), v]));
@@ -50,10 +52,16 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
       return { status: 200 };
     }
     event = deps.parse(headers, body);
-    await appendEvent(c, {
+    const eventId = await appendEvent(c, {
       actor: "system", actorId: "github", itemId: null, kind: "webhook",
       payload: { deliveryId, githubEvent: headers["x-github-event"] ?? null, event },
     });
+    // A comment names items by issue number, and the same number can be an item on each of several boards, so it gets
+    // one comment command row per item with that number, and none when no board has one (2026-11-07 design, §07).
+    if (event.kind === "comment") {
+      const items = await c.query<{ id: string }>("select id from item where external_id = $1 order by id", [event.externalId]);
+      await writeOutboxRows(c, CONSUMER.commentCommands, eventId, items.rows.map((r) => r.id));
+    }
     await c.query("commit");
   } catch (e) {
     await c.query("rollback");

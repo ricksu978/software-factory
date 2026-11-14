@@ -440,6 +440,9 @@ When("today's control plane starts and has run for longer than one board poll", 
 });
 
 When("today's control plane starts", long, async function () {
+  // PBI 222's scenarios start src/main.ts itself from the environment they set, through `todaysControlStart`.
+  const own = (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart;
+  if (own) return own();
   await startControl(this);
 });
 
