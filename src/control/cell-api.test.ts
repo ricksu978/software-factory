@@ -5,7 +5,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { startServer } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
-import { claimNext, expireLeases, transitionItem } from "../store/items.ts";
+import { claimNext, expireLeases, LEASE_RAN_OUT, transitionItem } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { mirrorBoard } from "./board.ts";
 import { cellApi, runToken } from "./cell-api.ts";
@@ -411,6 +411,50 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
   });
 
+  test("context offers no resume for an attempt closed because its cell's lease ran out, so the next cell starts the stage fresh (PBI 239)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query(
+      "insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'red', 1, 'passed', null), ($1, 'green', 1, 'stopped', $2)",
+      [cell.runId, LEASE_RAN_OUT],
+    );
+    const body = (await send(cell.runId, cell.token, "GET", "/context")).body;
+    assert.equal(body.resume, null);
+    assert.equal(body.stageAttempts.green, 1);
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 2, 'stopped', 'work in progress')", [cell.runId]);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 2 });
+  });
+
+  test("context still resumes a lease-message attempt whose cell a restart's wrap-up stopped (PBI 140, PBI 239)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 1, 'stopped', $2)", [cell.runId, LEASE_RAN_OUT]);
+    const item = (await runRow(cell.runId)).item_id;
+    const expired = (reason?: string) => db.pool.query(
+      "insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'scheduler', $1, 'transition', $2)",
+      [item, JSON.stringify({ ...(reason ? { reason } : {}), from: "InProgress", to: "Queued", event: "lease_expired" })],
+    );
+    await expired("restart");
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+    // A later claim's cell died before it opened a green attempt: the restart still ended this attempt's claim.
+    await expired();
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+  });
+
+  test("context offers no resume for a dead cell's attempt when a later claim's restart sent the item back (PBI 239)", async () => {
+    const cell = await claimed("green");
+    const item = (await runRow(cell.runId)).item_id;
+    const expired = (reason?: string) => db.pool.query(
+      "insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'scheduler', $1, 'transition', $2)",
+      [item, JSON.stringify({ ...(reason ? { reason } : {}), from: "InProgress", to: "Queued", event: "lease_expired" })],
+    );
+    // A restart before the attempt started belongs to an earlier claim and says nothing about it.
+    await expired("restart");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 1, 'stopped', $2)", [cell.runId, LEASE_RAN_OUT]);
+    // The attempt's cell died, then the next claim opened only a merge attempt and a restart stopped it.
+    await expired();
+    await expired("restart");
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
+  });
+
   test("lease says stop while the kill switch's env flag is on", async () => {
     const cell = await claimed();
     killed = true;
@@ -508,6 +552,21 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0ff0ff0")).status, 400);
     assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0a0a0a0")).status, 400);
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
+  });
+
+  test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    const ci = [{ name: "ci", conclusion: "success" as const, url: "https://github.com/o/r/actions/runs/1" }];
+    host.ciChecks.set(`${repo}@def5678`, ci);
+    host.ciChecks.set(`${repo}@0a0a0a0`, ci);
+    host.ciChecks.set(`${repo}@0ff0ff0`, ci);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=main")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=def5678")).body, { checks: ci });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=abc1234")).body, { checks: null });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=0a0a0a0")).body, { checks: null });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=0ff0ff0")).body, { checks: null });
   });
 
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {

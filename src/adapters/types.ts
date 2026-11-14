@@ -93,6 +93,12 @@ export type LineComment = { path: string; line: number; body: string };
 /** The review thread one of a posted review's line comments opened, by the id resolveThread and replyToThread take. */
 export type OpenedThread = { threadId: string; path: string; line: number; body: string };
 
+/**
+ * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
+ * has reported nothing yet.
+ */
+export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
+
 /** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */
 export type MergeState = "clean" | "blocked" | "behind" | "unstable" | "unknown" | "dirty" | "draft" | "has_hooks";
 
@@ -118,6 +124,8 @@ export interface RepoHost {
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
   /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
   pendingChecksOnSha(repo: string, sha: string): Promise<string[]>;
+  /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
+  ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */

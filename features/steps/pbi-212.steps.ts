@@ -239,6 +239,8 @@ Then("that attempt's message says the commit isn't on the run's branch", functio
   assert.ok(message.includes(BRANCH) || /run's branch/.test(message), `the message doesn't name the run's branch: ${message}`);
 });
 
+// "the item doesn't move to Failed" is pbi-215.steps.ts's, shared by both features.
+
 Then("the item is still InProgress when the cell ends", function () {
   const run = cell(this);
   assert.equal(run.error, null, `the cell failed: ${String(run.error)}`);

@@ -1,6 +1,7 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
 import type { ItemEvent } from "../core/states.ts";
+import type { CiCheck } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
 
@@ -36,6 +37,11 @@ export type CellApi = {
   checks(sha: string): Promise<CheckStatus>;
   /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
   pendingChecks?(sha: string): Promise<string[]>;
+  /**
+   * The checks CI named on one of the run's own commits, or null when none has reported there (PBI 229). A cell API
+   * without it judges every dod.md line by its command or the judge, as before.
+   */
+  ciChecks?(sha: string): Promise<CiCheck[] | null>;
   /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
@@ -72,6 +78,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     moveSop: async (b) => void (await call("POST", "/sop-move", b)),
     checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
+    ciChecks: async (sha) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
       const res = await fetch(url, { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body });
