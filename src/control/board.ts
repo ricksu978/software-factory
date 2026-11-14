@@ -20,6 +20,15 @@ type Row = {
   run_number: number | null; branch: string | null; pr_number: number | null; pr_url: string | null; repo_url: string | null; question: string | null;
 };
 
+/**
+ * The board status a Split parent mirrors to: the one the field map names for Split, or none when it names none, so
+ * the parent's board status stays as it was (PBI 227).
+ */
+export function splitStatus(_fieldMap: Row["field_map"]): string | null {
+  // Stub: no behaviour yet (PBI 227, Red).
+  return null;
+}
+
 /** Mirrors one committed transition onto the item's board, and closes its open PR when the item is withdrawn. */
 export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, event: ItemEvent | "override"): Promise<void> {
   const r = await deps.pool.query<Row>(
@@ -45,7 +54,7 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
       console.error(`board mirroring: ${what} failed for item ${itemId}:`, e);
     }
   };
-  const status = row.field_map?.statusFor?.[to];
+  const status = to === "Split" ? splitStatus(row.field_map) : row.field_map?.statusFor?.[to];
   if (status) await attempt("setStatus", () => board.setStatus(id, status));
   if (to === "InProgress") await attempt("claim", () => board.claim(id));
   if (event === "pr_opened" && row.pr_url) await attempt("linkPr", () => board.linkPr(id, row.pr_url!));

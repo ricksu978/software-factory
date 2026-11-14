@@ -59,6 +59,8 @@ type Ctx = {
   close?: () => Promise<void>;
   origin?: string;
   heads: number;
+  /** How many statuses the factory had set when the owner moved the parent's board status, once the owner has. */
+  ownerMovedAt?: number;
 };
 
 function ctx(world: object): Ctx {
@@ -301,6 +303,7 @@ When("the factory polls the backlog until both parent issues are Split", long, a
 
 Given("the owner has moved the parent issue's board status to {string}", async function (status: string) {
   const c = main(this).c;
+  ctx(this).ownerMovedAt = ctx(this).sets.length;
   await c.fake.adapter.setStatus(c.parentId!, status);
   c.board.set(c.parentId!, status);
 });
@@ -349,8 +352,18 @@ const setsOf = (k: Ctx, b: Board, id: string) => k.sets.filter((s) => s.sourceId
 const showSets = (ss: SetStatus[]) => ss.map((s) => `"${s.status}" for ${s.state}`).join(", ") || "none";
 
 Then("the parent issue's board status is {string}", long, async function (status: string) {
+  const k = ctx(this);
   const b = main(this);
-  assert.equal(await boardStatus(b.c, b.c.parentId!), status, `statuses the factory set: ${showSets(setsOf(ctx(this), b, b.c.parentId!))}`);
+  const all = setsOf(k, b, b.c.parentId!);
+  assert.equal(await boardStatus(b.c, b.c.parentId!), status, `statuses the factory set: ${showSets(all)}`);
+  // After the owner moved it, the status stands only because the factory set the Split status once, before that move,
+  // and never again: the scenario's "set once, not again on every later poll".
+  if (k.ownerMovedAt !== undefined) {
+    const before = setsOf({ ...k, sets: k.sets.slice(0, k.ownerMovedAt) }, b, b.c.parentId!).filter((s) => s.state === "Split");
+    const after = setsOf({ ...k, sets: k.sets.slice(k.ownerMovedAt) }, b, b.c.parentId!);
+    assert.equal(before.length, 1, `the factory didn't set the parent's Split status once before the owner moved it; statuses it set: ${showSets(all)}`);
+    assert.deepEqual(after, [], `the factory set the parent's status again after the owner moved it: ${showSets(after)}`);
+  }
 });
 
 Then("the parent issue's board status was never set to {string}", function (status: string) {
