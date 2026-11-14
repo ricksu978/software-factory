@@ -120,7 +120,7 @@ function review(c: Ctx, n: number): ReviewSpec {
   return r;
 }
 
-function raise(c: Ctx, n: number, f: Finding) {
+export function raise(c: Ctx, n: number, f: Finding) {
   review(c, n).findings.push(f);
   if (!c.raisedAt.has(f.body)) c.raisedAt.set(f.body, n);
   c.last = f.body;

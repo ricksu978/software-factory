@@ -16,7 +16,7 @@ const repo = process.cwd();
 const BRANCH = "factory/pbi-482-r1";
 const FEATURE = "features/pbi-482.feature";
 
-type Call = { route: string; body: Record<string, any> };
+type Call = { route: string; body: Record<string, any>; /** When the call came, by the run's clock. */ at?: number };
 type AgentCall = { stage: string; prompt: string; agent?: string; mode: string; webTools?: string[] };
 type Scenario = { name: string; tags: string[] };
 
@@ -40,6 +40,11 @@ export type Ctx = {
   wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
   /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
+  /** A fake clock for the engine, as PBI 234's steps use so an hour of CI polling passes at once. */
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  /** Extra cell API methods, as PBI 234's steps add to name the checks still pending. */
+  apiExtra?: Record<string, unknown>;
 };
 
 function ctx(world: object): Ctx {
@@ -236,7 +241,7 @@ function agent(c: Ctx) {
 }
 
 function cellApi(c: Ctx) {
-  const record = (route: string, body: Record<string, any> = {}) => c.calls.push({ route, body });
+  const record = (route: string, body: Record<string, any> = {}) => c.calls.push({ route, body, at: (c.now ?? (() => new Date()))().getTime() });
   return {
     async lease() { record("/lease"); return { stop: false }; },
     async stage(b: Record<string, any>) { record("/stage", b); if (b.status === "started") c.stage = b.stageId; },
@@ -250,6 +255,7 @@ function cellApi(c: Ctx) {
       return "success";
     },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
+    ...c.apiExtra,
   };
 }
 
@@ -307,8 +313,8 @@ export async function runTheCell(world: object): Promise<void> {
         bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
         risk: policy("risk", "Low by default.\n"), dod: policy("dod", c.dod) },
-      now: () => new Date(),
-      sleep: async () => {},
+      now: c.now ?? (() => new Date()),
+      sleep: c.sleep ?? (async () => {}),
     });
   } catch (e) {
     c.error = e;

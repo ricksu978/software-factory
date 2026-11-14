@@ -33,6 +33,8 @@ export type CellApi = {
   policyResults(b: PolicyResults): Promise<void>;
   pr(b: { prNumber: number; prUrl: string }): Promise<void>;
   checks(sha: string): Promise<CheckStatus>;
+  /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
+  pendingChecks?(sha: string): Promise<string[]>;
   /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
