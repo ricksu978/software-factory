@@ -208,6 +208,7 @@ async function runCell(c: Ctx, nextStage: "red" | "specify", decision: { kind: s
   const agent = async (a: { prompt: string; cwd: string; model: string }) => {
     stage = [...c.calls].reverse().find((x) => x.route === "/stage" && x.body.status === "started")?.body.stageId ?? "";
     let text = "done";
+    if (stage === "open-pr") text = "## Problem\n\nThe item asked for it."; // PBI 216: the PR body starts with it
     if (stage === "understand") text = Array.from({ length: c.criteria }, (_, i) => `@ac-${i + 1}: criterion ${i + 1}`).join("\n");
     if (stage === "specify") {
       mkdirSync(join(a.cwd, "features"), { recursive: true });

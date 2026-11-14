@@ -441,7 +441,7 @@ async function messages(c: Ctx) {
 Then("the open-pr stage's message is the PR summary its own agent wrote", async function () {
   const c = ctx(this);
   const openPr = (await messages(c)).filter((m) => m.stage_id === "open-pr");
-  assert.deepEqual(openPr.map((m) => m.message), [`Builds item ${c.ext}.`]);
+  assert.deepEqual(openPr.map((m) => m.message), [`## Problem\n\nBuilds item ${c.ext}.`]);
 });
 
 Then("no stage's message is a risk tier", async function () {

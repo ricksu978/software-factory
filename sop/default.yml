@@ -56,6 +56,7 @@ stages:
   - id: open-pr
     model: coding
     prompt: sop/prompts/open-pr.md
+    retries: 1             # PBI 216: a reply that doesn't start with "## Problem" gets one retry
     on_fail: needs_input
   - id: pr-review          # PBI 128: the factory reviews its own PR before people do
     agent: factory-pr-reviewer
