@@ -126,6 +126,11 @@ export interface RepoHost {
   ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
+  /**
+   * The commits on `branch` after `sha`, oldest first, so the last is the branch head (PBI 260). Empty when `sha` is the
+   * head, or isn't on the branch at all.
+   */
+  commitsAfter(repo: string, branch: string, sha: string): Promise<string[]>;
   /** CODEOWNERS first, then `fallback`. */
   requestReviewers(repo: string, prNumber: number, fallback: string[]): Promise<string[]>;
   /**

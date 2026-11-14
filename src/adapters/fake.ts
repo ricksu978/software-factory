@@ -195,6 +195,11 @@ export function fakeRepoHost(): RepoHost & {
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;
     },
+    async commitsAfter(repo, branch, sha) {
+      const list = branches.get(`${repo}@${branch}`) ?? [];
+      const at = list.indexOf(sha);
+      return at < 0 ? [] : list.slice(at + 1);
+    },
     async requestReviewers(repo, n, fallback) {
       pr(repo, n).reviewers = [...fallback];
       return [...fallback];

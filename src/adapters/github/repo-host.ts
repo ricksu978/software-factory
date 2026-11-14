@@ -272,6 +272,17 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       }
     },
 
+    async commitsAfter(repo, branch, sha) {
+      // ponytail: compare lists up to 250 commits, oldest first, so a branch further ahead than that loses its newest.
+      try {
+        const { status, commits } = (await (await client()).request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...split(repo), basehead: `${sha}...${branch}` })).data;
+        return status === "ahead" ? (commits as { sha: string }[]).map((c) => c.sha) : [];
+      } catch (e) {
+        if (notFound(e)) return [];
+        throw e;
+      }
+    },
+
     async closePr(repo, prNumber, comment) {
       const gh = await client();
       const r = split(repo);

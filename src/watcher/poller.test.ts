@@ -771,4 +771,77 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
     });
   });
+
+  describe("re-queuing an item stopped by a red base once CI passes on it (PBI 260)", () => {
+    /** A NeedsInput item whose open question says the base failed at `sha`, or asks something else with `sha` null. */
+    async function waiting(sha: string | null, base?: string) {
+      const h = await held("NeedsInput");
+      const failure = sha === null ? null : { sha, tests: ["parses the config"], ...(base ? { base } : {}) };
+      const q = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, base_failure) values ($1, 'needs_input', 'The base fails in the cell.', $2) returning id",
+        [h.id, failure === null ? null : JSON.stringify(failure)],
+      )).rows[0].id;
+      return { ...h, question: q };
+    }
+    const question = async (id: string) =>
+      (await db.pool.query("select answer, answered_by, decision from question where id = $1", [id])).rows[0];
+    const requeues = async (itemId: string) =>
+      (await db.pool.query("select actor, actor_id, payload from event where item_id = $1 and kind = 'requeued_after_base_passed'", [itemId])).rows;
+
+    test("CI passing on a newer base commit answers the question as the factory and logs one system event", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b3`, "pending");
+      host.checks.set(`${REPO}@b2`, "success");
+      const w = await waiting("b1", "main");
+      await poll();
+      await poll();
+      const q = await question(w.question);
+      assert.equal(q.answered_by, null);
+      assert.match(q.answer, /CI passed on .*b2/);
+      const events = await requeues(w.id);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].actor, "system");
+      assert.equal(events[0].payload.sha, "b2");
+      assert.equal(events[0].payload.base, "main");
+    });
+
+    test("CI on the failing commit, an older one, or still pending or failing on a newer one leaves the question open", async () => {
+      host.branches.set(`${REPO}@main`, ["b0", "b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b0`, "success");
+      host.checks.set(`${REPO}@b1`, "success");
+      host.checks.set(`${REPO}@b2`, "pending");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
+    test("a question with no base failure, or a held item, isn't answered, and a released one is", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const other = await waiting(null);
+      const hold = await waiting("b1", "main");
+      await db.pool.query("update item set held = true where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.equal((await question(hold.question)).answer, null);
+      await db.pool.query("update item set held = false where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.notEqual((await question(hold.question)).answer, null);
+      assert.deepEqual(await requeues(other.id), []);
+    });
+
+    test("an item waits on its own base branch's CI, and a question without a branch waits on main", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.branches.set(`${REPO}@release`, ["r1"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const onRelease = await waiting("r1", "release");
+      const onMain = await waiting("b1");
+      await poll();
+      assert.equal((await question(onRelease.question)).answer, null);
+      assert.notEqual((await question(onMain.question)).answer, null);
+    });
+  });
 });

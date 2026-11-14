@@ -70,14 +70,14 @@ class Stop extends Error {}
 class Blocked extends Error {}
 /** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
 class BaseFails extends Blocked {
-  readonly baseFailure: { sha: string; tests: string[] };
+  readonly baseFailure: { sha: string; tests: string[]; base: string };
   readonly base: string;
   readonly lines: { criterion: string; tests: string[] }[];
   constructor(base: string, sha: string, lines: { criterion: string; tests: string[] }[]) {
     super(baseQuestion(base, sha, lines, false));
     this.base = base;
     this.lines = lines;
-    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))] };
+    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))], base };
   }
   /** The question to ask, which says the work is on the branch only when the cell pushed it. */
   question(pushed: boolean): string {

@@ -143,9 +143,13 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
 }
 
 /** A needs_input question's base failure (PBI 215): the base commit and the tests that fail on it, or null. */
-function baseFailure(v: unknown): { sha: string; tests: string[] } | null {
-  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown } | undefined | null;
-  return optional(f, () => ({ sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests") }));
+/** A blocked question's base failure: the base commit, its failing tests, and the base branch, which PBI 260 re-queues on. */
+function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string } | null {
+  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown; base?: unknown } | undefined | null;
+  return optional(f, () => {
+    const base = optional(f!.base, (b) => str(b, "question.baseFailure.base"));
+    return { sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests"), ...(base === null ? {} : { base }) };
+  });
 }
 
 /** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */

@@ -349,6 +349,25 @@ describe("githubRepoHost", () => {
     }
     assert.equal(await stubGitHub({}).host.onBranch("o/r", "main", "abc"), false);
   });
+
+  test("commitsAfter lists the branch's commits after the sha when it's ahead, and none when it's at, behind or off the sha", async () => {
+    const ahead = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", commits: [{ sha: "c2" }, { sha: "c3" }] }) });
+    assert.deepEqual(await ahead.host.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.equal(ahead.calls[0].params.basehead, "c1...main");
+    for (const status of ["identical", "diverged", "behind"]) {
+      const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status, commits: [{ sha: "x" }] }) });
+      assert.deepEqual(await host.commitsAfter("o/r", "main", "c1"), []);
+    }
+    assert.deepEqual(await stubGitHub({}).host.commitsAfter("o/r", "main", "c1"), []);
+  });
+
+  test("fakeRepoHost's commitsAfter lists the commits after the sha on its branch, and none for a sha off it", async () => {
+    const fake = fakeRepoHost();
+    fake.branches.set("o/r@main", ["c1", "c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c3"), []);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "zz"), []);
+  });
 });
 
 describe("ownersOf", () => {
