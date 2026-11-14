@@ -44,12 +44,37 @@ export function splitMarker(key: string, n: number): string {
   return `factory-split-${key}-${n}`;
 }
 
-/** A child's body: the proposal's body, its criteria word for word under the heading, then where it came from. */
+const isHeading = (line: string) => /^#{1,6}\s/.test(line);
+
+/**
+ * `body` without any section under `heading`, at any level and in any letter case, each up to the next heading, as the
+ * GitHub adapter reads the criteria (PBI 249). The rest of the body is kept in order, and a body with no such section
+ * is returned as it is.
+ */
+export function withoutSection(body: string, heading: string): string {
+  const want = heading.trim().toLowerCase();
+  const kept: string[] = [];
+  let dropping = false;
+  let dropped = false;
+  for (const line of body.split(/\r?\n/)) {
+    if (isHeading(line)) dropping = line.replace(/^#+\s*/, "").trim().toLowerCase() === want;
+    if (dropping) dropped = true;
+    else kept.push(line);
+  }
+  return !dropped ? body : kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * A child's body: the proposal's body without any criteria section of its own, then the parent's criteria for that
+ * child word for word under the heading, then where it came from. A body with no such section is kept whole.
+ */
 export function childBody(parent: FactoryItem, child: SplitChild, n: number, heading: string): string {
+  const own = withoutSection(child.body, heading);
   const criteria = child.criteria.map((c) => `- ${parent.acceptanceCriteria[c - 1]}`).join("\n");
   const from = `Filed by the factory from #${parent.externalId} as child ${n} of its proposed split (${splitMarker(splitKey(parent), n)}).`;
-  return `${child.body}\n\n## ${heading}\n\n${criteria}\n\n---\n\n${from}\n`;
+  return `${own ? `${own}\n\n` : ""}## ${heading}\n\n${criteria}\n\n---\n\n${from}\n`;
 }
+
 
 /** The parent's one comment once every child is filed: a link to each child, and how a child enters the factory. */
 export function filedComment(filed: ChildIssue[], optInLabel: string): string {
