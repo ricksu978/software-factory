@@ -42,6 +42,8 @@ export type Ctx = {
   wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
   /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
+  /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
+  editSop?: (sop: any) => void;
 };
 
 function ctx(world: object): Ctx {
@@ -310,7 +312,7 @@ export async function runTheCell(world: object): Promise<void> {
         // The run's PR is still open, so address has something to address (PBI 194).
         async prState() { return { open: true, merged: false, mergeSha: null, mergeable: true, lastChangesRequestedAt: null }; },
       },
-      sop: loadSop(readFileSync(sopFile, "utf8")),
+      sop: ((sop) => { c.editSop?.(sop); return sop; })(loadSop(readFileSync(sopFile, "utf8"))),
       config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
         bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),

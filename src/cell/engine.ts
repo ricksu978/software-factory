@@ -98,6 +98,11 @@ class RenewalFailed extends Error {}
  * webhook moves the item (PBI 142, PBI 194).
  */
 class AlreadyMerged extends Error {}
+/**
+ * The run's PR closed without a merge while a stage waited for CI on it, and its branch went with it. The stage stops
+ * as it does for a merged PR, and the poller withdraws the item (PBI 212).
+ */
+class ClosedUnmerged extends Error {}
 
 /**
  * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
@@ -544,9 +549,25 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return head === dodSha ? [] : [`the Definition of Done check committed to the branch: ${dodSha} became ${head}`];
   };
 
+  // A person may merge or close the PR while a stage waits for CI on its push. `GET checks` then refuses the commit,
+  // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
+  // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
     for (;;) {
-      const s = await api.checks(sha);
+      const s = await api.checks(sha).catch(async (e: unknown) => {
+        // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
+        if (e instanceof LeaseLost) throw e;
+        const n = opened?.number ?? ctx.prNumber;
+        if (n === null) throw e;
+        // A PR state that can't be read leaves the refusal itself as the attempt's message.
+        const state = await Promise.resolve().then(() => d.repoHost.prState(ctx.repo, n, [])).catch(() => null);
+        if (!state) throw e;
+        if (state.merged) {
+          throw new AlreadyMerged(`PR #${n} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""} while the factory waited for CI on ${sha}, so the stage stops here.`);
+        }
+        if (!state.open) throw new ClosedUnmerged(`PR #${n} for \`${ctx.branch}\` was closed without a merge while the factory waited for CI on ${sha}, so the stage stops here.`);
+        throw e;
+      });
       if (s !== "pending") return s;
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
@@ -1125,9 +1146,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "failed";
     }
     // Any other error ends the open attempt failed with its message, so no attempt is left looking as if it still
-    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted.
+    // runs (PBI 142). A merged PR needs no transition: the poller or the webhook moves the item to Accepted. Nor does
+    // one closed without a merge: the poller withdraws the item (PBI 212).
     if (current) current.message = e instanceof Error ? e.message : String(e);
-    if (e instanceof AlreadyMerged) {
+    if (e instanceof AlreadyMerged || e instanceof ClosedUnmerged) {
       await end("failed");
       return "failed";
     }
