@@ -70,6 +70,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     release: async () => void (await call("POST", "/release", {})),
     moveSop: async (b) => void (await call("POST", "/sop-move", b)),
     checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
+    pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
       const res = await fetch(url, { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body });

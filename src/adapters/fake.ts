@@ -136,6 +136,8 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
+  /** The names of the checks still pending, by `repo@sha`. A sha with none set has none pending. */
+  pendingChecks: Map<string, string[]>;
   files: Map<string, string>;
   heads: Map<string, string>;
   branches: Map<string, string[]>;
@@ -150,6 +152,7 @@ export function fakeRepoHost(): RepoHost & {
   let openedThreads = 0;
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
+  const pendingChecks = new Map<string, string[]>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
@@ -162,7 +165,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
+    prs, checks, pendingChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -185,6 +188,9 @@ export function fakeRepoHost(): RepoHost & {
     },
     async checksOnSha(repo, sha) {
       return checks.get(`${repo}@${sha}`) ?? "none";
+    },
+    async pendingChecksOnSha(repo, sha) {
+      return [...(pendingChecks.get(`${repo}@${sha}`) ?? [])];
     },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;

@@ -305,6 +305,21 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("pendingChecksOnSha names each check run not yet completed and each pending commit status, and none that finished", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { name: "lint", status: "completed", conclusion: "success" },
+        { name: "ci", status: "in_progress", conclusion: null },
+        { name: "e2e", status: "queued", conclusion: null },
+      ] }),
+      "GET /repos/{owner}/{repo}/commits/{ref}/status": () => ({ total_count: 2, statuses: [
+        { context: "deploy/preview", state: "pending" },
+        { context: "license", state: "success" },
+      ] }),
+    });
+    assert.deepEqual(await host.pendingChecksOnSha("o/r", "abc"), ["ci", "e2e", "deploy/preview"]);
+  });
+
   test("checksOnHead reads a head with no checks at all as pending", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,

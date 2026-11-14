@@ -486,6 +486,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
   });
 
+  test("pending-checks: names the checks still pending on one of the run's own commits, and a sha off the branch or on main gets 400", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.pendingChecks.set(`${repo}@abc1234`, ["ci", "e2e"]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0ff0ff0")).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0a0a0a0")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
+  });
+
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {
     const cell = await claimed();
     const results = (file: string, status: string) => ({ file, source: "repo", stageId: "green", attempt: 1, checkedSha: "abc1234", verdicts: [{ index: 1, criterion: "Tests pass", status, reason: "r" }] });
