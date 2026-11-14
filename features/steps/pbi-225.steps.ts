@@ -26,11 +26,13 @@ type Ctx = {
   /** The judge's asks about the parent when the setup ended, so "again" counts only what came after. */
   askedBefore?: number;
   heads: number;
+  /** The real poller's passes that returned a result for the source. */
+  passes: number;
 };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi225?: Ctx };
-  w.pbi225 ??= { host: fakeRepoHost(), asked: new Map(), heads: 0 };
+  w.pbi225 ??= { host: fakeRepoHost(), asked: new Map(), heads: 0, passes: 0 };
   return w.pbi225;
 }
 
@@ -63,7 +65,7 @@ async function realPoll(world: object): Promise<void> {
     return scripted(item, dor);
   };
   const logic = ctx12(world).logic;
-  await pollOnce({
+  const out = await pollOnce({
     pool: need().pool, adapter, repoHost: k.host, judge, sourceId: k.sourceId,
     split: {
       sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen,
@@ -71,6 +73,8 @@ async function realPoll(world: object): Promise<void> {
     },
     ...(logic ? { logic } : {}),
   });
+  assert.ok(out && typeof out.seen === "number", "pollOnce returned no result for the source");
+  k.passes++;
 }
 
 Before({ tags: "@pbi-225 and @db", ...long }, async function () {
@@ -148,16 +152,27 @@ Given("the factory has polled the backlog twice, filing every child and taking t
   k.askedBefore = k.asked.get(c.parentId!) ?? 0;
 });
 
+/** Polls `n` more times and checks that `n` passes ran, each of the real poller's returning a result for the source. */
+async function pollMore(world: object, n: number): Promise<void> {
+  const c = ctx144(world);
+  const k = ctx(world);
+  const polls = c.polls;
+  const passes = k.passes;
+  await pollTimes(world, n);
+  assert.equal(c.polls - polls, n, `the factory polled ${c.polls - polls} times, not ${n}`);
+  assert.equal(k.passes - passes, n, `the real poller returned a result ${k.passes - passes} times, not ${n}`);
+}
+
 When("the factory polls the backlog once more", long, async function () {
-  await pollTimes(this, 1);
+  await pollMore(this, 1);
 });
 
 When("the factory polls the backlog twice more", long, async function () {
-  await pollTimes(this, 2);
+  await pollMore(this, 2);
 });
 
 When("the factory polls the backlog three more times", long, async function () {
-  await pollTimes(this, 3);
+  await pollMore(this, 3);
 });
 
 Given("the repo's Definition of Ready changes", function () {
