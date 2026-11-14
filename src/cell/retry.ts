@@ -21,24 +21,51 @@ export class NetworkError extends Error {
 }
 
 /**
+ * What stops a retry loop early. `signal` ends it, mid-try or mid-wait, with its reason. `beforeRetry` runs before
+ * every try after the first, and its throw ends the loop: a git push checks the lease there, so a cell that lost its
+ * lease while it waited pushes nothing (PBI 259).
+ */
+export type RetryFence = { signal?: AbortSignal; beforeRetry?: () => Promise<void> };
+
+const reasonOf = (s: AbortSignal) => (s.reason instanceof Error ? s.reason : new Error("aborted"));
+
+/**
  * Runs `once` until it succeeds or fails on something `transient` doesn't accept, waiting `waits` between tries.
  * After the last wait a transient failure throws NetworkError, naming `what` and the number of tries.
+ * `once` gets the signal, so it can kill what it started when the loop is aborted.
  */
 export async function withRetries<T>(
   what: string,
-  once: () => Promise<T>,
-  opts: { transient: (e: unknown) => boolean; sleep: (ms: number) => Promise<void>; waits?: number[] },
+  once: (signal?: AbortSignal) => Promise<T>,
+  opts: { transient: (e: unknown) => boolean; sleep: (ms: number) => Promise<void>; waits?: number[] } & RetryFence,
 ): Promise<T> {
   const waits = opts.waits ?? RETRY_WAITS_MS;
+  const { signal } = opts;
   for (let n = 0; ; n++) {
+    if (signal?.aborted) throw reasonOf(signal);
+    if (n > 0 && opts.beforeRetry) await opts.beforeRetry();
+    if (signal?.aborted) throw reasonOf(signal);
     try {
-      return await once();
+      return await once(signal);
     } catch (e) {
+      // A try killed by the abort isn't a network fault, whatever it looks like.
+      if (signal?.aborted) throw reasonOf(signal);
       if (!opts.transient(e)) throw e;
       if (n >= waits.length) throw new NetworkError(what, n + 1, e);
-      await opts.sleep(waits[n]);
+      await abortable(opts.sleep(waits[n]), signal);
     }
   }
+}
+
+/** Waits for `p`, or rejects with the signal's reason as soon as it aborts. */
+function abortable(p: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(reasonOf(signal));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(reasonOf(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 export const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

@@ -64,3 +64,39 @@ test("a push rejected after a network failure isn't tried again", async () => {
   await assert.rejects(s.git.push(), (e: unknown) => !(e instanceof NetworkError) && /rejected/.test(String(e)));
   assert.equal(s.runs.filter((a) => a[0] === "push").length, 2);
 });
+
+test("a push whose fence aborts while it waits to retry stops there and pushes no more", async () => {
+  const fence = new AbortController();
+  const runs: string[][] = [];
+  const exec: GitExec = async (args) => { runs.push(args); throw failed(NETWORK[2]); };
+  const lost = new Error("lease lost");
+  const git = shellGit("/nowhere", "b", { exec, sleep: async () => { fence.abort(lost); } });
+  await assert.rejects(git.push({ signal: fence.signal }), (e: unknown) => e === lost);
+  assert.equal(runs.length, 1);
+});
+
+test("a push in flight gets the fence's signal, and a try it kills isn't retried", async () => {
+  const fence = new AbortController();
+  const lost = new Error("lease lost");
+  let n = 0;
+  const exec: GitExec = (_args, opts) => new Promise((_r, reject) => {
+    n++;
+    assert.equal(opts.signal, fence.signal);
+    opts.signal!.addEventListener("abort", () => reject(failed("", null, true)), { once: true });
+    fence.abort(lost);
+  });
+  const git = shellGit("/nowhere", "b", { exec, sleep: async () => {} });
+  await assert.rejects(git.push({ signal: fence.signal }), (e: unknown) => e === lost);
+  assert.equal(n, 1);
+});
+
+test("a push checks the lease before each retry, and a lease check that fails pushes no more", async () => {
+  const runs: string[][] = [];
+  const exec: GitExec = async (args) => { runs.push(args); throw failed(NETWORK[2]); };
+  const lost = new Error("409 lease lost");
+  let checks = 0;
+  const git = shellGit("/nowhere", "b", { exec, sleep: async () => {} });
+  await assert.rejects(git.push({ beforeRetry: async () => { if (++checks === 2) throw lost; } }), (e: unknown) => e === lost);
+  assert.equal(runs.length, 2);
+  assert.equal(checks, 2);
+});

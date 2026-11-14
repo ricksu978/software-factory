@@ -2,21 +2,28 @@
 // configures a credential helper that asks the cell API for a fresh token on demand.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { realSleep, withRetries } from "./retry.ts";
+import { realSleep, type RetryFence, withRetries } from "./retry.ts";
 
 const run = promisify(execFile);
 
 export type Git = {
-  /** Merges the base into the branch. Returns the paths still in conflict, empty when the merge is clean. */
-  mergeBase(base: string): Promise<string[]>;
+  /**
+   * Merges the base into the branch. Returns the paths still in conflict, empty when the merge is clean.
+   * `fence` stops the fetch's retries, as for push.
+   */
+  mergeBase(base: string, fence?: RetryFence): Promise<string[]>;
   /** Commits every change, deletions included. Returns HEAD, unchanged when there's nothing to commit. */
   commitAll(msg: string): Promise<string>;
-  push(): Promise<void>;
+  /**
+   * Pushes HEAD to the run's branch, retrying a network fault. `fence.signal` ends the retries and kills a push in
+   * flight. `fence.beforeRetry` runs before each retry, so a lease check there keeps a fenced-off cell from pushing.
+   */
+  push(fence?: RetryFence): Promise<void>;
   head(): Promise<string>;
 };
 
 /** Runs one git command in `cwd`. It rejects as execFile does, with the exit code, signal and stderr on the error. */
-export type GitExec = (args: string[], opts: { cwd: string; timeout?: number }) => Promise<{ stdout: string; stderr: string }>;
+export type GitExec = (args: string[], opts: { cwd: string; timeout?: number; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string }>;
 
 /** How long one git push or fetch may run before it's killed and counts as a timeout (PBI 259). */
 export const REMOTE_TIMEOUT_MS = 10 * 60_000;
@@ -50,22 +57,24 @@ export type GitDeps = {
   now?: () => Date;
 };
 
-const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, timeout: opts.timeout, maxBuffer: 64 * 1024 * 1024 });
+const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, timeout: opts.timeout, signal: opts.signal, maxBuffer: 64 * 1024 * 1024 });
 
 export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
   const exec = deps.exec ?? execGit;
   const sleep = deps.sleep ?? realSleep;
   const git = async (...args: string[]) => (await exec(args, { cwd: dir })).stdout.trim();
-  // A push or fetch talks to GitHub, so a network fault is retried, and it has a time limit (PBI 259).
-  const remote = (...args: string[]) => withRetries(`git ${args[0]}`, () => exec(args, { cwd: dir, timeout: REMOTE_TIMEOUT_MS }),
-    { transient: gitNetworkFault, sleep });
+  // A push or fetch talks to GitHub, so a network fault is retried, and it has a time limit (PBI 259). The fence's
+  // signal kills the git child and ends the retries.
+  const remote = (fence: RetryFence, ...args: string[]) =>
+    withRetries(`git ${args[0]}`, (signal) => exec(args, { cwd: dir, timeout: REMOTE_TIMEOUT_MS, signal }),
+      { transient: gitNetworkFault, sleep, ...fence });
   const unmerged = async () => (await git("diff", "--name-only", "--diff-filter=U")).split("\n").filter(Boolean);
   return {
-    async mergeBase(base) {
+    async mergeBase(base, fence = {}) {
       // A merge an agent left half done is still a conflict, whatever the base holds now.
       const left = await unmerged();
       if (left.length) return left;
-      await remote("fetch", "-q", "origin", base);
+      await remote(fence, "fetch", "-q", "origin", base);
       try {
         await git("merge", "-q", "--no-edit", `origin/${base}`);
         return [];
@@ -84,8 +93,8 @@ export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
       }
       return git("rev-parse", "HEAD");
     },
-    async push() {
-      await remote("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    async push(fence = {}) {
+      await remote(fence, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
     },
     head: () => git("rev-parse", "HEAD"),
   };
