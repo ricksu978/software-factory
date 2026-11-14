@@ -327,14 +327,14 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 
 /** The kind of the event that logs a re-queue after CI passed on the base (PBI 260). */
 export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
-/** How many of a base branch's newest commits the poller reads CI on, newest first, to find one that passed. */
+/** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
 const DEFAULT_BASE = "main";
 
 /**
  * PBI 260: answers each open question that blames a red base, on an item that isn't held, once CI has passed on a
- * commit of that base after the one the cell failed on. The answer names that commit and leaves `answered_by` null,
+ * commit of that base after the one the cell failed on and no newer commit's CI has failed. The answer names that commit and leaves `answered_by` null,
  * since no person gave it, and the re-queue is a system event. The item stays in NeedsInput at its stage, where the
  * scheduler claims an answered item. A held item is skipped, so the first poll after its release answers it. The
  * answer re-reads the item and question under a lock, so a person's answer, a Hold or a second poll that came first
@@ -363,8 +363,11 @@ async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: s
     const base = w.base ?? DEFAULT_BASE;
     const after = (await host.commitsAfter(w.repo, base, w.sha)).slice(-BASE_COMMITS_READ).reverse();
     let green: string | null = null;
+    // The newest commit with a verdict decides: a failure there means the base is red again, so the question stays open.
     for (const sha of after) {
-      if ((await passed(w.repo, sha)) === "success") {
+      const status = await passed(w.repo, sha);
+      if (status === "failure") break;
+      if (status === "success") {
         green = sha;
         break;
       }

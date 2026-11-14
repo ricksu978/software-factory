@@ -142,7 +142,6 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   return str(q?.body, "question.body");
 }
 
-/** A needs_input question's base failure (PBI 215): the base commit and the tests that fail on it, or null. */
 /** A blocked question's base failure: the base commit, its failing tests, and the base branch, which PBI 260 re-queues on. */
 function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string } | null {
   const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown; base?: unknown } | undefined | null;

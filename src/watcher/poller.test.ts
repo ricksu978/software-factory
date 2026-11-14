@@ -863,6 +863,16 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual(await requeues(w.id), []);
     });
 
+    test("a pass behind a newer failing commit leaves the question open, since the base is red again", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1", "main");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
     test("a question with no base failure, or a held item, isn't answered, and a released one is", async () => {
       host.branches.set(`${REPO}@main`, ["b1", "b2"]);
       host.checks.set(`${REPO}@b2`, "success");
