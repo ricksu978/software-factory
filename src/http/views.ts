@@ -62,7 +62,7 @@ export type BaseFailRow = Issue & { id: string; title: string; sha: string; test
  * from, and its bug item, which is null until the factory has filed it, with the factory's own row once it holds one.
  */
 export type MainBreakRow = { branch: string; sha: string; repo: string; pr_number: number | null; charged: string | null;
-  bug_external_id: string | null; bug_id: string | null; bug_title: string | null };
+  bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state?: string | null };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -169,7 +169,7 @@ function mainRedNotice(rows: MainBreakRow[]): string {
     const from = [r.pr_number !== null ? `PR #${r.pr_number}` : null, r.charged !== null ? `item ${issueRef(r.charged, r.repo)}` : null].filter(Boolean).join(" for ");
     const bug = r.bug_external_id === null
       ? "The factory is filing its bug item."
-      : `Its bug item ${r.bug_id && r.bug_title ? named({ id: r.bug_id, title: r.bug_title, external_id: r.bug_external_id, repo: r.repo }) : issueRef(r.bug_external_id, r.repo)} is claimed first.`;
+      : `Its bug item ${r.bug_id && r.bug_title ? named({ id: r.bug_id, title: r.bug_title, external_id: r.bug_external_id, repo: r.repo }) : issueRef(r.bug_external_id, r.repo)} ${r.bug_state === "Failed" ? `failed to make ${escapeHtml(r.branch)} pass, so ${escapeHtml(r.branch)} stays red until it's re-queued or someone fixes it` : "is claimed first"}.`;
     return `<li>Commit <code>${escapeHtml(r.sha.slice(0, 7))}</code> broke <code>${escapeHtml(r.branch)}</code>${from ? `, the merge of ${from}` : ""}. ${bug}</li>`;
   });
   return `<section id="main-red" class="banner" role="status"><p>${branches} is red. The factory fixes it before it builds anything else, and an item merged onto it meanwhile waits for it to pass again.</p><ul>${items.join("")}</ul></section>`;

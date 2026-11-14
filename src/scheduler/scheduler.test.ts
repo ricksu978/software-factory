@@ -253,6 +253,18 @@ describe("scheduler", dbTest, () => {
     assert.equal((await state(bug)).state, "Queued");
   });
 
+  test("a bug item whose merge leaves main red with the same checks is charged, not set to wait (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    await run();
+    const bug = await redMerge(backlog.filed[0], "m2", "m1", [check("test", "failure")], [check("test", "failure")]);
+    await db.pool.query("update main_break set bug_item_id = $1", [bug]);
+    await run();
+    assert.equal((await state(bug)).state, "Failed");
+    assert.equal((await db.pool.query("select waits_on_branch from run where item_id = $1", [bug])).rows[0].waits_on_branch, null);
+    assert.equal(backlog.filed.length, 1);
+    assert.equal((await db.pool.query("select count(*)::int as n from main_break where cleared_at is null")).rows[0].n, 1);
+  });
+
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {
     const id = await item("1", "Abandoned", "held = true");
     await openRun(id, "next_stage = 'sign-off'");

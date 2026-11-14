@@ -106,8 +106,8 @@ async function floor(pool: pg.Pool) {
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
   // PBI 255: each break on main that still stands, with the item it charged and its bug item, for Floor's notice.
-  const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null }>(
-    `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title
+  const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state: string | null }>(
+    `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title, bug.state as bug_state
      from main_break b join repo on repo.id = b.repo_id left join item charged on charged.id = b.item_id left join item bug on bug.id = b.bug_item_id
      where b.cleared_at is null order by b.at`,
   )).rows.map(({ repo_url, ...b }): MainBreakRow => ({ ...b, repo: repoName(repo_url) }));

@@ -289,7 +289,8 @@ type MergedCiDeps = Pick<TickDeps, "pool" | "repoHost" | "backlogFor" | "now">;
  * merge commit is compared with its first parent (PBI 255). When a check failed that the first parent passed, the
  * merge broke main: the item is Failed, the break is recorded and the factory files one bug item for it. When the first
  * parent failed the same checks, main was already red: the item stays Accepted and waits on main, and is Done once CI
- * passes on a later main commit, which also clears every break before it. Exported for PBI 255's steps, which run it
+ * passes on a later main commit, which also clears every break before it. The exception is the bug item of a standing
+ * break: its merge is the fix for main, so main still red after it fails the item. Exported for PBI 255's steps, which run it
  * after each poll.
  */
 export async function pollMergedCi(d: MergedCiDeps) {
@@ -341,6 +342,15 @@ async function settleMerges(d: MergedCiDeps, status: Status) {
       // A failed check still running on the first parent can't be compared yet. After an hour it counts as passed there.
       if (cmp.verdict === "undecided" && !late) return;
       if (cmp.verdict === "already red") {
+        // The bug item of a standing break is the fix for main. Its merge leaving main red fails it, rather than parking
+        // the one item that can make main green behind itself. No new break is recorded, so no second bug item is filed.
+        const fixes = await d.pool.query(
+          "select 1 from main_break where repo_id = $1 and branch = $2 and bug_item_id = $3 and cleared_at is null limit 1",
+          [row.repo_id, BASE, row.item_id],
+        );
+        if (fixes.rowCount) {
+          return charge(d, row, `CI failed on ${BASE} for the merge commit ${row.merge_sha}, the fix for ${BASE} being red, and ${BASE} is still red, so the item failed its Definition of Done. The failed run: https://github.com/${repo}/commit/${row.merge_sha}/checks`);
+        }
         await d.pool.query("update run set waits_on_branch = $2 where id = $1", [row.run_id, BASE]);
         const body = `CI failed on ${BASE} for the merge commit ${row.merge_sha}, but its first parent ${parent} failed the same checks, so ${BASE} was already red. The item stays Accepted and waits on ${BASE}, and it's Done once CI passes on a later ${BASE} commit.`;
         await isolated(`commenting the wait on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci-wait:${row.merge_sha}`));
