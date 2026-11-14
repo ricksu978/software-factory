@@ -96,6 +96,13 @@ async function floor(pool: pg.Pool) {
   const blocked = (await pool.query<{ id: string; external_id: string; title: string; blocked_by: string[] }>(
     "select id, external_id, title, blocked_by from item where state = 'Queued' and cardinality(blocked_by) > 0 order by title",
   )).rows;
+  // PBI 215: items waiting on a question that says the base fails in the cell, for Floor's notice.
+  const baseFails = (await pool.query<{ id: string; external_id: string; title: string; sha: string; tests: string[] }>(
+    `select i.id, i.external_id, i.title, q.base_failure->>'sha' as sha,
+       coalesce((select array_agg(t) from jsonb_array_elements_text(q.base_failure->'tests') t), '{}') as tests
+     from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
+     where i.state = 'NeedsInput' order by q.asked_at`,
+  )).rows;
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500).
@@ -119,10 +126,11 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next].map((r) => r.id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
+    baseFails: withRepo(baseFails),
     restart,
   };
 }

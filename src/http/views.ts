@@ -55,6 +55,8 @@ export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: st
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
 /** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
 export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
+/** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
+export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -134,11 +136,18 @@ export function blockedReason(deps: string[]): string {
   return `Waits on ${names}, ${refs.length === 1 ? "which is" : "which are"} still open. It starts once ${refs.length === 1 ? "it closes" : "they close"}.`;
 }
 
+/** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
+function baseFailsNotice(rows: BaseFailRow[]): string {
+  const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
+  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
+}
+
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
-    + (f.restart ? restartStatus(f.restart) : "");
+    + (f.restart ? restartStatus(f.restart) : "")
+    + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
     : "";
@@ -248,6 +257,9 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   const live = (s: RunDetail["stages"][number]) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
   const took = (s: RunDetail["stages"][number]) =>
     !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live(s) ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
+  // PBI 209: an attempt with no end says it's running while it's live, and stopped once its cell is gone, so a stage
+  // whose cell died reads as stopped beside the transcript it last uploaded.
+  const status = (s: RunDetail["stages"][number]) => (s.status !== "started" || s.ended_at ? s.status : live(s) ? "running" : "stopped");
   // Each Tokens and Cost cell keeps the exact figures in its title, so hovering shows them in full.
   const exactTokens = (tokensIn: number | null, tokensOut: number | null) => `<td title="${escapeHtml(`${tokensIn ?? 0} in, ${tokensOut ?? 0} out`)}">`;
   const exactCost = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">`;
@@ -258,7 +270,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length

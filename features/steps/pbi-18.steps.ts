@@ -27,7 +27,9 @@ export type Ctx = {
   criteria: number; nextStage: string; decision: { kind: string; text: string } | null;
   lockSha: string | null; lockedFiles: string[]; prNumber: number | null; startHead: string;
   scenarios: Scenario[]; skipCriterion: number | null; greenAtRed: boolean; editLockAtRed: boolean;
-  dod: string; dodJudged: Map<string, string>; trusted: { author: string; body: string }[]; stranger: { author: string; body: string }[];
+  dod: string; dodJudged: Map<string, string>;
+  /** The rows of the last "has these lines:" table, as PBI 215's steps read them. */
+  dodRows?: Record<string, string>[]; trusted: { author: string; body: string }[]; stranger: { author: string; body: string }[];
   ciOldOnly: boolean; secrets: Record<string, string | undefined> | null;
   calls: Call[]; agentCalls: AgentCall[]; stage: string; prBodies: string[]; result: string | null; error: unknown;
   /** Replaces the default repo host, as PBI 142's steps do to hold a merged PR or to fail a call. */
@@ -40,6 +42,8 @@ export type Ctx = {
   wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
   /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
+  /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
+  editSop?: (sop: any) => void;
 };
 
 function ctx(world: object): Ctx {
@@ -170,7 +174,13 @@ Given("the repo's Definition of Done has the line {string}", function (line: str
 Given("the repo's Definition of Done has these lines:", function (table: DataTable) {
   const c = ctx(this);
   c.dod = table.hashes().map((r) => `- [ ] ${r.line}`).join("\n") + "\n";
-  for (const r of table.hashes()) c.dodJudged.set(r.line, r["judged as"]);
+  // PBI 215's tables say what each line does "on the item's branch": a judged line reads "judged <status>", and its
+  // steps read a run: line's outcome from dodRows.
+  for (const r of table.hashes()) {
+    const judged = r["judged as"] ?? /^judged (\w+)/.exec(r["on the item's branch"] ?? "")?.[1];
+    if (judged !== undefined) c.dodJudged.set(r.line, judged);
+  }
+  c.dodRows = table.hashes();
 });
 
 Given("the cell itself holds a Claude token and a run token", function () {
@@ -302,7 +312,7 @@ export async function runTheCell(world: object): Promise<void> {
         // The run's PR is still open, so address has something to address (PBI 194).
         async prState() { return { open: true, merged: false, mergeSha: null, mergeable: true, lastChangesRequestedAt: null }; },
       },
-      sop: loadSop(readFileSync(sopFile, "utf8")),
+      sop: ((sop) => { c.editSop?.(sop); return sop; })(loadSop(readFileSync(sopFile, "utf8"))),
       config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
         bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
