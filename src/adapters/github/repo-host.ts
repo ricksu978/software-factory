@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -272,6 +272,41 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       const r = split(repo);
       const branch = (await gh.request("GET /repos/{owner}/{repo}", r)).data.default_branch;
       return (await gh.request("GET /repos/{owner}/{repo}/branches/{branch}", { ...r, branch })).data.commit.sha;
+    },
+
+    // PBI 181: what decides the factory's merge. GitHub computes mergeable_state lazily, so a first read can say
+    // `unknown`, which holds the merge until a later poll.
+    async mergeView(repo, prNumber) {
+      const gh = await client();
+      const r = split(repo);
+      const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data;
+      // ponytail: one page of 100 reviews, oldest first, as in prState; a PR with more would miss the newest ones.
+      const reviews = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...r, pull_number: prNumber, per_page: 100 })).data as { state: string; user: { login: string } | null }[];
+      // A reviewer's latest review that isn't a plain comment is the one that stands, as on GitHub.
+      const latest = new Map<string, { login: string; state: string }>();
+      for (const v of reviews) {
+        if (!v.user || v.state === "COMMENTED" || v.state === "PENDING") continue;
+        latest.set(v.user.login.toLowerCase(), { login: v.user.login, state: v.state });
+      }
+      return {
+        mergeState: (pr.mergeable_state ?? "unknown") as MergeState, headSha: pr.head?.sha ?? null, body: pr.body ?? "",
+        approvedBy: [...latest.values()].filter((v) => v.state === "APPROVED").map((v) => v.login),
+      };
+    },
+
+    // GitHub answers a merge it refuses with 405 (not mergeable), 409 (the head moved) or 422, and its message says why.
+    async mergePr(repo, prNumber, { method, headSha }) {
+      const gh = await client();
+      try {
+        const res = (await gh.request("PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge", {
+          ...split(repo), pull_number: prNumber, merge_method: method, ...(headSha ? { sha: headSha } : {}),
+        })).data as { merged: boolean; sha: string; message?: string };
+        return res.merged ? { merged: true, sha: res.sha } : { merged: false, reason: res.message ?? "GitHub didn't merge the PR" };
+      } catch (e) {
+        const err = e as { status?: number; message?: string; response?: { data?: { message?: string } } };
+        if (err.status !== 405 && err.status !== 409 && err.status !== 422) throw e;
+        return { merged: false, reason: err.response?.data?.message ?? err.message ?? `GitHub answered ${err.status}` };
+      }
     },
 
   };
