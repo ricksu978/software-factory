@@ -257,7 +257,14 @@ const routes: Record<string, Route> = {
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
     if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending", failedChecks: [] };
     // PBI 232: why CI failed, read here on the control plane's token, so the cell needs no GitHub access to learn it.
-    return { status, failedChecks: status === "failure" ? await deps.repoHost.failedChecksOnSha(repo, sha) : [] };
+    // The detail is extra: an error reading it still answers the failure, and the finding falls back to "CI failed on <sha>".
+    if (status !== "failure") return { status, failedChecks: [] };
+    try {
+      return { status, failedChecks: await deps.repoHost.failedChecksOnSha(repo, sha) };
+    } catch (e) {
+      console.error(`checks: reading why CI failed on ${sha} in ${repo} failed:`, e);
+      return { status, failedChecks: [] };
+    }
   },
 
   "POST stage": async (deps, { c, run, body, now }) => {

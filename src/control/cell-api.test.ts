@@ -495,6 +495,24 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "failure", failedChecks: failed });
   });
 
+  test("checks: CI that failed still answers failure, with no detail, when reading the failed checks errors (PBI 232)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    host.checks.set(`${repo}@abc1234`, "failure");
+    const original = host.failedChecksOnSha;
+    const originalError = console.error;
+    host.failedChecksOnSha = async () => { throw new Error("502 Bad Gateway"); };
+    console.error = () => {};
+    try {
+      const res = await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234");
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { status: "failure", failedChecks: [] });
+    } finally {
+      host.failedChecksOnSha = original;
+      console.error = originalError;
+    }
+  });
+
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {
     const cell = await claimed();
     const results = (file: string, status: string) => ({ file, source: "repo", stageId: "green", attempt: 1, checkedSha: "abc1234", verdicts: [{ index: 1, criterion: "Tests pass", status, reason: "r" }] });
