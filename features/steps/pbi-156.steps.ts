@@ -148,7 +148,17 @@ export async function board(world: object, name = "the board"): Promise<Board> {
 /** PBI 17 gives each item a backlog source of its own. Here they all sit on the scenario's one board. */
 export async function rehome(world: object): Promise<void> {
   const b = await board(world);
-  await pool().query("update item set source_id = $1 where source_id in (select id from backlog_source where url like 'test:%')", [b.id]);
+  const tests = "select id from backlog_source where url like 'test:%'";
+  // PBI 17 inserts an item and then seeds the board with it, so a worker polling in between ingests a copy of its own.
+  // The step's item is the one the scenario names, so the poller's copy moves to a source of its own, out of the way.
+  const copies = (await pool().query<{ id: string }>(
+    `select id from item where source_id = $1 and external_id in (select external_id from item where source_id in (${tests}))`, [b.id])).rows;
+  if (copies.length) {
+    const stray = (await pool().query<{ id: string }>(
+      "insert into backlog_source (adapter, url) values ('fake', 'stray:' || gen_random_uuid()) returning id")).rows[0].id;
+    await pool().query("update item set source_id = $1 where id = any($2)", [stray, copies.map((r) => r.id)]);
+  }
+  await pool().query(`update item set source_id = $1 where source_id in (${tests})`, [b.id]);
 }
 
 /** Maps each board item the factory now holds to its id, so PBI 17's state steps can name it. */
