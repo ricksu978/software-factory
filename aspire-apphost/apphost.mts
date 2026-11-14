@@ -55,7 +55,8 @@ const migrate = await builder.addNodeApp('migrate', repo, 'src/store/migrate-cli
   .waitFor(db);
 
 // Every app shares the repo root, so only migrate installs packages. Two installers in one node_modules collide on Windows (EBUSY).
-// The control plane (plan Task 15). Its console shows this start's dashboard sign-in link.
+// The control plane (plan Task 15): the webhook and the dashboard. Its console shows this start's dashboard sign-in
+// link, built from PORT.
 const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withNpm({ install: false })
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7400, env: 'PORT' })
@@ -73,13 +74,30 @@ const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   // Nothing reads it until the API takes it over in redesign step 6.
   .withEnvironment('API_AUDIENCE', apiAudience)
   .waitForCompletion(migrate, { exitCode: 0 });
-// From control's own endpoint, so it follows the port whether pinned or picked by Aspire.
-const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
-const cellControlUrl = refExpr`http://host.docker.internal:${controlPort}`;
+
+// The cell API (redesign step 4a, src/cell-api/main.ts): the cell routes and the model gateway, which control no longer
+// serves. It is pinned to 7401 beside control's 7400, and floats with it under FACTORY_FLOAT_PORTS.
+const cellApi = await builder.addNodeApp('cell-api', repo, 'src/cell-api/main.ts')
+  .withNpm({ install: false })
+  .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7401, env: 'PORT' })
+  .withEnvironment('FACTORY_DB_URI', dbUri)
+  .withEnvironment('FACTORY_BLOB', blobs)
+  .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
+  .withEnvironment('GITHUB_APP_KEY', appKey)
+  .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
+  .withEnvironment('CELL_SECRET', cellSecret)
+  .withEnvironment('GITHUB_APP_ID', appId)
+  .withEnvironment('CELL_BLOB_HOST', 'host.docker.internal')
+  .waitForCompletion(migrate, { exitCode: 0 });
+// Cells reach the cell API, not control. Built from the cell API's own endpoint, so it follows the port whether pinned
+// or picked by Aspire. The worker hands it to each cell and lets its port through the egress proxy.
+const cellApiPort = await cellApi.getEndpoint('http').property(EndpointProperty.Port);
+const cellControlUrl = refExpr`http://host.docker.internal:${cellApiPort}`;
+// Control listens on PORT, so it only shows this on its Configuration page.
 await control.withEnvironment('CELL_CONTROL_URL', cellControlUrl);
 
 // The worker (redesign step 2): the egress proxy, the scheduler's tick, and the board poller with its judge. It has no
-// endpoint. It hands cells control's address and lets that port through the egress proxy.
+// endpoint. It hands cells the cell API's address and lets that port through the egress proxy.
 const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withNpm({ install: false })
   .withEnvironment('FACTORY_DB_URI', dbUri)
