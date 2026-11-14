@@ -145,8 +145,11 @@ export function fakeRepoHost(): RepoHost & {
   postedReviews: PostedReview[];
   resolvedThreads: { repo: string; threadId: string }[];
   mergeCalls: MergeCall[];
+  /** The permissions the App lacks, by repo (PBI 264). A repo not here lacks none. */
+  permissionsMissing: Map<string, string[]>;
 } {
   const mergeCalls: MergeCall[] = [];
+  const permissionsMissing = new Map<string, string[]>();
   const postedReviews: PostedReview[] = [];
   const resolvedThreads: { repo: string; threadId: string }[] = [];
   let openedThreads = 0;
@@ -165,9 +168,12 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
+    prs, checks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls, permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+    async missingPermissions(repo) {
+      return [...(permissionsMissing.get(repo) ?? [])];
     },
     async openOrUpdatePr({ repo, branch, base, title, body }) {
       const open = prs.find((p) => p.repo === repo && p.branch === branch && p.open);

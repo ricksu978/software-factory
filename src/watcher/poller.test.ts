@@ -80,6 +80,21 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(results, [{ file: "dor", source: "repo", criterion_index: 1, criterion: "Has a title", status: "passed", checked_sha: "c1" }]);
   });
 
+  test("a permission the App lacks on the repo fails the gate, and granting it gates the item again (PBI 264)", async () => {
+    host.permissionsMissing.set(REPO, ["issues: write"]);
+    const ext = await seed();
+    await poll();
+    const r = await row(ext);
+    assert.equal(r.state, "NotReady");
+    assert.deepEqual(judged, [], "an engine rule failure never asks the judge");
+    const results = (await db.pool.query("select criterion, status from policy_result where item_id = $1", [r.id])).rows;
+    assert.ok(results.some((v) => v.criterion === "app permission" && v.status === "failed"));
+    assert.match((await fake.comments(ext)).join("\n"), /issues: write/);
+    host.permissionsMissing.delete(REPO);
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+  });
+
   test("each judge call's spend is stored for the item, a call that failed on a usage limit included (PBI 132)", async () => {
     const spent = { model: "claude-haiku-4-5", tokensIn: 900, tokensOut: 0, costUsd: 0.0012 };
     const limited = async (_item: FactoryItem, _dor: Policy, report?: (s: typeof spent) => void): Promise<string> => {

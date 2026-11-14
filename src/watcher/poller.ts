@@ -51,6 +51,8 @@ type Row = {
 
 type Readiness = {
   sha: string; head: string; dor: Policy | null; policyErrors: string[]; dodExists: boolean; configValid: boolean; repoKnown: boolean;
+  /** Each permission the App lacks on the repo (PBI 264). */
+  missingPermissions: string[];
 };
 
 const system = { actor: "system", actorId: "poller" } as const;
@@ -128,7 +130,7 @@ async function readiness(
   if (!repo || !known) {
     // The logic still counts, so a change to it re-checks these items too (PBI 149).
     const none = { dor: null, scenarios: null, "pr-review": null, risk: null, dod: null, config: null };
-    return { sha: `unknown repo:${readinessSha(none, logic)}`, head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false };
+    return { sha: `unknown repo:${readinessSha(none, logic)}`, head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false, missingPermissions: [] };
   }
   const head = await host.defaultBranchSha(repo);
   const raw = new Map<string, string | null>();
@@ -159,9 +161,13 @@ async function readiness(
   } catch {
     configValid = false;
   }
+  // A permission the owner grants later changes the sha, so a NotReady item it failed is gated again (PBI 264). A
+  // repo missing none keeps the sha over its files and the logic alone.
+  const missingPermissions = [...((await host.missingPermissions?.(repo)) ?? [])].sort();
+  const sha = readinessSha(texts, logic);
   return {
-    sha: readinessSha(texts, logic), head, dor: loaded.get("dor") ?? null, policyErrors,
-    dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true,
+    sha: missingPermissions.length > 0 ? `${sha}:missing:${missingPermissions.join(",")}` : sha, head, dor: loaded.get("dor") ?? null, policyErrors,
+    dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true, missingPermissions,
   };
 }
 
@@ -328,6 +334,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const r = await readinessOf(fi);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
+      missingPermissions: r.missingPermissions,
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
