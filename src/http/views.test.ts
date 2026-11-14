@@ -440,3 +440,16 @@ describe("Run detail's Time section (PBI 187)", () => {
     assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Time<\/h2>/);
   });
 });
+
+describe("Floor's Cost column (PBI 263)", () => {
+  const floor = (cost: string) => floorPage({
+    active: [{ id: "i1", title: "Export a month", external_id: "263", repo: "acme/widgets", state: "InProgress", stage: "build", since: null, cost, badges: [], message: null }],
+    waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false,
+  }, null);
+
+  test("shows each item's cost to the cent through cost(), with the exact figure on hover", () => {
+    assert.match(floor("13.5412"), /<td title="\$13\.5412">\$13\.54<\/td>/);
+    assert.match(floor("0.0031"), /<td title="\$0\.0031">&lt;\$0\.01<\/td>/);
+    assert.match(floor("0"), /<td title="\$0">\$0\.00<\/td>/);
+  });
+});
