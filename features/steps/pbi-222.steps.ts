@@ -19,6 +19,7 @@ import { ctx as p16ctx, mods as p16mods, routeCall, snapshot, stageBody } from "
 const SECRET = "cell-secret";
 const REPO = "ricksu978/software-factory";
 const DEV_LOGIN = "owner";
+const CONFIG = "bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n";
 const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;";
 
 type Serving = { server: Server; stop(): Promise<void> };
@@ -31,6 +32,8 @@ type Seen = { headers: IncomingHttpHeaders; body: string };
 
 type Ctx = {
   board?: ReturnType<typeof fakeBacklog>;
+  /** One repo host per scenario, so the claimed run's repo config is there when the model gateway reads it. */
+  repoHost?: ReturnType<typeof fakeRepoHost>;
   sourceId?: string;
   upstream?: Server;
   upstreamUrl?: string;
@@ -108,7 +111,7 @@ function deps(world: object) {
   return {
     pool: pool(),
     sources: c.sourceId ? [{ id: c.sourceId, adapter: c.board!.adapter }] : [],
-    repoHost: fakeRepoHost(),
+    repoHost: c.repoHost ??= fakeRepoHost(),
     secret: SECRET,
     claudeToken: c.ownerToken ?? "unused",
     modelUpstream: c.upstreamUrl ?? "http://127.0.0.1:9/no-model-upstream",
@@ -246,6 +249,8 @@ Given("a fresh factory database where item {string} was claimed, so its run is i
   assert.ok(claim, "the claim returned nothing");
   assert.equal(claim.generation, generation);
   await pool().query("update run set repo_id = (select id from repo where url = $2), sop_version = 'default@1', config_sha = 'cfg1234' where id = $1", [claim.runId, `https://github.com/${REPO}`]);
+  // The model gateway reads the run's pinned .factory/config.yml for its web tools, as it does for a real repo.
+  (c.repoHost ??= fakeRepoHost()).files.set(`${REPO}@cfg1234:.factory/config.yml`, CONFIG);
   p16.first = { runId: claim.runId, generation: claim.generation, token: runToken(SECRET, claim.runId, claim.generation) };
   p16.before = await snapshot();
 });
