@@ -33,20 +33,31 @@ describe("pendingCiQuestion", () => {
     assert.deepEqual(a.asked, [SHA]);
   });
 
-  test("still asks a person when the cell API can't name the checks, or names none", async () => {
-    for (const a of [api(), api([])]) {
-      const q = await pendingCiQuestion(a.api, SHA, PENDING_CI_CAP_MS + 1);
-      assert.ok(q);
-      assert.match(q, /abc1234/);
-    }
-  });
-
-  test("still asks a person when the cell API's pendingChecks call fails", async () => {
-    const failing = { pendingChecks: async () => { throw new Error("GET pending-checks 409"); } } as unknown as CellApi;
-    const q = await pendingCiQuestion(failing, SHA, PENDING_CI_CAP_MS);
+  test("still asks a person when the cell API names no pending check, and says so", async () => {
+    const q = await pendingCiQuestion(api([]).api, SHA, PENDING_CI_CAP_MS + 1);
     assert.ok(q);
     assert.match(q, /abc1234/);
     assert.match(q, /No check named itself as pending/);
+  });
+
+  test("still asks a person when the cell API has no pendingChecks, saying it couldn't read the checks", async () => {
+    const q = await pendingCiQuestion(api().api, SHA, PENDING_CI_CAP_MS + 1);
+    assert.ok(q);
+    assert.match(q, /abc1234/);
+    assert.match(q, /couldn't read which checks are pending/);
+  });
+
+  test("still asks a person when pendingChecks fails, saying the factory couldn't read the checks, and logs the error", async (t) => {
+    const logged = t.mock.method(console, "error", () => {});
+    const failing = { pendingChecks: async () => { throw new Error("GET pending-checks 500"); } } as unknown as CellApi;
+    const q = await pendingCiQuestion(failing, SHA, PENDING_CI_CAP_MS);
+    assert.ok(q);
+    assert.match(q, /abc1234/);
+    assert.match(q, /The factory couldn't read which checks are pending/);
+    assert.doesNotMatch(q, /No check named itself as pending/);
+    assert.doesNotMatch(q, /500/);
+    assert.equal(logged.mock.callCount(), 1);
+    assert.ok(logged.mock.calls[0].arguments.some((a) => a instanceof Error && a.message === "GET pending-checks 500"));
   });
 
   test("lets LeaseLost through, so a fenced cell ends its run", async () => {
