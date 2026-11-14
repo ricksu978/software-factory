@@ -7,10 +7,9 @@
 // recorder, so no model, no container and no network is needed.
 //
 // A step that both features word the same way, such as "the factory holds child X as an item" or "child X carries the
-// label", is a precondition in a Given and an outcome in a Then. Cucumber ignores the keyword, so a BeforeStep hook
-// records the step's type. In a Given it checks only that the child was filed; the outcome it sets up is checked by the
-// scenario's Thens.
-import { Before, BeforeStep, DataTable, Given, Then, When } from "@cucumber/cucumber";
+// label", is a precondition in a Given and an outcome in a Then. Every such Given runs after a poll, so it checks the
+// same thing the Then does: a scenario can't pass on a precondition that never held.
+import { Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
@@ -51,8 +50,6 @@ type Ctx = {
   replies: Map<string, string>;
   /** The item whose link comment "that comment" means. Unset, the parent's. */
   subject?: string;
-  /** The type of the step running now: "Context" for a Given, "Outcome" for a Then. */
-  stepType?: string;
   looked: boolean;
 };
 
@@ -86,12 +83,6 @@ Before({ tags: "@pbi-237", ...long }, async function () {
   (this as { pbi237?: Ctx }).pbi237 = k;
   ctx144(this).driver = (c) => realPoll(k, c);
 });
-
-BeforeStep({ tags: "@pbi-237" }, function ({ pickleStep }) {
-  ctx(this).stepType = pickleStep.type;
-});
-
-const given = (k: Ctx) => k.stepType === "Context";
 
 // --- The real poller over PBI 144's board --------------------------------------------------------------------------
 
@@ -339,10 +330,7 @@ Given("the owner has removed the label {string} from child {string}", async func
 // --- Items the factory holds ---------------------------------------------------------------------------------------
 
 Then("the factory holds child {string} as an item", long, async function (title: string) {
-  if (given(ctx(this))) {
-    child(this, title);
-    return;
-  }
+  // Run as a Given too, after a poll, so a scenario that builds on the item fails if the factory never took it in.
   await held(this, title);
 });
 
@@ -406,10 +394,7 @@ Then("the factory has started no run for child {string}", function (title: strin
 // --- Labels --------------------------------------------------------------------------------------------------------
 
 Then("child {string} carries the label {string}", async function (title: string, label: string) {
-  if (given(ctx(this))) {
-    child(this, title);
-    return;
-  }
+  // Run as a Given too, so the @ac-5 scenarios fail if the label was never on before the owner removed it.
   assert.ok(await labelled(this, title, label), `child "${title}" doesn't carry "${label}"`);
 });
 
