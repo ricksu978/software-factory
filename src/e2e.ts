@@ -175,7 +175,7 @@ export async function startFactory(pool: pg.Pool) {
       writeRun();
       writeFileSync(join(a.cwd, `item-${ext}.txt`), "built\n");
     } else if (cell.stage === "address") writeFileSync(join(a.cwd, `item-${ext}.txt`), "built, review addressed\n");
-    else if (cell.stage === "open-pr") text = `Builds item ${ext}.`;
+    else if (cell.stage === "open-pr") text = `## Problem\n\nBuilds item ${ext}.`; // PBI 216: the PR body starts with it
     return { ok: true, text, costUsd: 0.25, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" };
   };
 
