@@ -127,6 +127,8 @@ export interface RepoHost {
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
+  pendingChecksOnSha(repo: string, sha: string): Promise<string[]>;
   /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
   ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */

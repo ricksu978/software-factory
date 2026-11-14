@@ -228,6 +228,14 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
   return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
+/** PBI 234: each check run not yet completed, by name, and each commit status still pending, by context. */
+async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<string[]> {
+  // ponytail: one page of 100 check runs and the combined status's statuses, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string }[];
+  const statuses = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.statuses ?? []) as { context: string; state: string }[];
+  return [...runs.filter((c) => c.status !== "completed").map((c) => c.name), ...statuses.filter((s) => s.state === "pending").map((s) => s.context)];
+}
+
 /** Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, and any other end fails. */
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
@@ -283,6 +291,9 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return checksOn(await client(), split(repo), sha);
     },
 
+    async pendingChecksOnSha(repo, sha) {
+      return pendingChecksOn(await client(), split(repo), sha);
+    },
     async ciChecksOnSha(repo, sha) {
       return namedChecksOn(await client(), split(repo), sha);
     },

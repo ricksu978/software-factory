@@ -125,6 +125,14 @@ async function notOwnCommit(deps: CellApiDeps, run: Run, sha: string): Promise<s
   return null;
 }
 
+/** The `sha` a cell asks about, which must be one of its branch's own commits, with the run's repo. */
+async function ownCommit(deps: CellApiDeps, run: Run, query: URLSearchParams): Promise<{ repo: string; sha: string }> {
+  const sha = shaOf(query);
+  const notOwn = await notOwnCommit(deps, run, sha);
+  if (notOwn) throw new BadRequest(notOwn);
+  return { repo: repoOf(run), sha };
+}
+
 /**
  * The PR's URL, built from the run's repo, never taken from the cell, because the board links it from a public item.
  * A `prUrl` the cell sends must be that same URL.
@@ -282,10 +290,7 @@ const routes: Record<string, Route> = {
   },
 
   "GET checks": async (deps, { c, run, query, now }) => {
-    const sha = shaOf(query);
-    const repo = repoOf(run);
-    const notOwn = await notOwnCommit(deps, run, sha);
-    if (notOwn) throw new BadRequest(notOwn);
+    const { repo, sha } = await ownCommit(deps, run, query);
     const watch = await c.query<{ first_asked_at: Date }>(
       `insert into check_watch (run_id, sha, first_asked_at) values ($1, $2, $3)
        on conflict (run_id, sha) do update set sha = excluded.sha returning first_asked_at`,
@@ -295,6 +300,13 @@ const routes: Record<string, Route> = {
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
     if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending" };
     return { status };
+  },
+
+  // PBI 234: the names of the checks still pending on one of the run's own commits, for the question a cell asks when
+  // CI stays pending for 60 minutes.
+  "GET pending-checks": async (deps, { run, query }) => {
+    const { repo, sha } = await ownCommit(deps, run, query);
+    return { checks: await deps.repoHost.pendingChecksOnSha(repo, sha) };
   },
 
   // PBI 229: the checks CI named on one of the run's own commits, for a dod.md line's `ci:` check. A commit the cell

@@ -38,6 +38,11 @@ export function mergeBlocker(view: MergeView): string | null {
   return null;
 }
 
+/** The note on a question the factory's merge closed unanswered (PBI 262). */
+export function mergedNote(prNumber: number, mergeSha: string | null): string {
+  return mergeSha ? `The factory merged PR #${prNumber} as commit ${mergeSha}.` : `The factory merged PR #${prNumber}.`;
+}
+
 /**
  * Logs `factory_merged` for a merge the factory asked for but never saw answered (PBI 181). The poller records each
  * merge attempt as `factory_merge_attempt` in its own committed write before it calls GitHub, so a merge that went
@@ -47,7 +52,7 @@ export function mergeBlocker(view: MergeView): string | null {
  * the transaction that moves the item through `merged`. Returns whether it logged the merge.
  */
 export async function logAttemptedMerge(c: pg.ClientBase, itemId: string, prNumber: number, mergeSha: string | null, actor: Actor): Promise<boolean> {
-  const attempt = (await c.query<{ payload: { repo: string; prNumber: number; approvers: string[] } }>(
+  const attempt = (await c.query<{ payload: { repo: string; prNumber: number; approvers: string[]; waitingIn?: string; question?: string | null; questionId?: string | null } }>(
     `select a.payload from event a
      where a.item_id = $1 and a.kind = 'factory_merge_attempt' and (a.payload->>'prNumber')::int = $2
        and not exists (
@@ -58,7 +63,13 @@ export async function logAttemptedMerge(c: pg.ClientBase, itemId: string, prNumb
     [itemId, prNumber],
   )).rows[0];
   if (!attempt) return false;
-  const { repo, approvers } = attempt.payload;
-  await appendEvent(c, { ...actor, itemId, kind: "factory_merged", payload: { repo, prNumber, mergeSha, approvers } });
+  const { repo, approvers, waitingIn, question, questionId } = attempt.payload;
+  // An attempt made while the item waited in NeedsInput names its question. The move through `merged` has closed it
+  // unanswered by now, so it gets the note the direct merge gives it, and the event names it (PBI 262).
+  if (questionId) {
+    await c.query("update question set closed_note = $2 where id = $1 and answer is null", [questionId, mergedNote(prNumber, mergeSha)]);
+  }
+  const waiting = waitingIn ? { waitingIn, question: question ?? null } : {};
+  await appendEvent(c, { ...actor, itemId, kind: "factory_merged", payload: { repo, prNumber, mergeSha, approvers, ...waiting } });
   return true;
 }
