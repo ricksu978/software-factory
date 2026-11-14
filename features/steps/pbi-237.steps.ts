@@ -243,15 +243,36 @@ Given("the owner filed the parent issue by hand", async function () {
 
 // --- The judge and the coding model --------------------------------------------------------------------------------
 
+/** The titles of every child a split the coding model is scripted to propose names: the parent's and any child's. */
+function proposed(world: object): string[] {
+  const k = ctx(world);
+  const c = ctx144(world);
+  const titles = (reply: string) => (JSON.parse(reply) as { children: { title: string }[] }).children.map((ch) => ch.title);
+  return [...(c.reply ? titles(c.reply) : []), ...[...k.replies.values()].flatMap(titles)];
+}
+
+function proposedChild(world: object, title: string): void {
+  const all = proposed(world);
+  assert.ok(all.includes(title), `"${title}" isn't a child of any split the coding model proposes: ${all.join(", ") || "none"}`);
+}
+
 Given("the readiness judge passes every line for child {string}", function (title: string) {
-  ctx(this).fails.delete(title);
+  proposedChild(this, title);
+  const k = ctx(this);
+  k.fails.delete(title);
+  assert.ok(!k.fails.has(title), `the judge still fails child "${title}"`);
 });
 
 Given("the readiness judge passes every line for every child", function () {
-  ctx(this).fails.clear();
+  const k = ctx(this);
+  const all = proposed(this);
+  assert.ok(all.length > 0, "the coding model proposes no split, so there are no children");
+  k.fails.clear();
+  for (const title of all) assert.ok(!k.fails.has(title), `the judge still fails child "${title}"`);
 });
 
 Given("the readiness judge fails child {string} on the line {string}", function (title: string, line: string) {
+  proposedChild(this, title);
   const k = ctx(this);
   assert.equal(ctx144(this).polls, 0, "the dor.md changed after a poll");
   if (!k.dor.includes(line)) {
@@ -262,18 +283,43 @@ Given("the readiness judge fails child {string} on the line {string}", function 
 });
 
 Given("the readiness judge finds child {string} oversized", function (title: string) {
-  ctx(this).oversized.add(title);
+  proposedChild(this, title);
+  const k = ctx(this);
+  k.oversized.add(title);
+  assert.ok(k.oversized.has(title), `the judge doesn't find child "${title}" oversized`);
 });
 
 Given("the coding model proposes this split of child {string}:", function (title: string, table: DataTable) {
-  ctx(this).replies.set(title, splitReply(table));
+  proposedChild(this, title);
+  const k = ctx(this);
+  assert.ok(!k.replies.has(title), `the coding model already proposes a split of child "${title}"`);
+  const reply = splitReply(table);
+  // The reply the model gives must carry every row of the table, in order, with the indices the table names.
+  const rows = table.hashes().sort((a, b) => Number(a.child) - Number(b.child));
+  assert.ok(rows.length > 0, `the split of child "${title}" has no rows`);
+  const parsed = (JSON.parse(reply) as { children: { title: string; criteria: number[]; needs: number[] }[] }).children;
+  assert.deepEqual(
+    parsed.map((ch) => ({ title: ch.title, criteria: ch.criteria, needs: ch.needs })),
+    rows.map((r) => ({ title: r.title, criteria: indices(r.criteria), needs: indices(r.needs) })),
+    `the split of child "${title}" doesn't parse as its table`,
+  );
+  for (const ch of parsed) {
+    for (const n of [...ch.criteria, ...ch.needs]) assert.ok(Number.isInteger(n) && n > 0, `child "${ch.title}" names index ${n}`);
+  }
+  k.replies.set(title, reply);
 });
 
 // --- Polls, the board and the scheduler ----------------------------------------------------------------------------
 
+/** Polls n times, and fails if a poll didn't run or raised an error, since realPoll catches every error. */
 const pollN = async (world: object, n: number) => {
   const c = ctx144(world);
-  for (let i = 0; i < n; i++) await c.driver!(c);
+  assert.ok(c.driver, "the PBI 237 poll driver isn't set");
+  const polls = c.polls;
+  const errors = c.errors.length;
+  for (let i = 0; i < n; i++) await c.driver(c);
+  assert.equal(c.polls - polls, n, `the factory polled ${c.polls - polls} times, not ${n}`);
+  assert.deepEqual(c.errors.slice(errors), [], "a poll raised an error");
 };
 
 Given("the factory has polled the backlog twice", long, async function () {
@@ -298,8 +344,10 @@ When("the scheduler looks for work", long, async function () {
     secret: "scenario-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
   });
   for (const env of started) {
+    assert.ok(env.ITEM_ID, `the scheduler started a cell with no ITEM_ID: ${JSON.stringify(env)}`);
     const r = await pool().query<{ external_id: string }>("select external_id from item where id = $1", [env.ITEM_ID]);
-    if (r.rows[0]) c.runs.add(r.rows[0].external_id);
+    assert.ok(r.rows[0], `the scheduler started a cell for item ${env.ITEM_ID}, which the factory doesn't hold`);
+    c.runs.add(r.rows[0].external_id);
   }
   k.looked = true;
 });
