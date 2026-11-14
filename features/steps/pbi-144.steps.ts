@@ -55,6 +55,11 @@ export type Ctx = {
   /** A step's setting that waits for its child to exist, such as the owner labelling a child that wasn't filed. */
   errors: unknown[];
   polls: number;
+  /**
+   * PBI 237: what a poll runs instead of this file's in-memory pass. Its scenarios poll with the real poller, store and
+   * scheduler, on this file's board, repo and refusals, so the steps the two features share read the same context.
+   */
+  driver?: (c: Ctx) => Promise<void>;
 };
 
 export function ctx(world: object): Ctx {
@@ -77,7 +82,7 @@ function splitReply(table: DataTable): string {
 const titleOf = (c: Ctx, id: string) => c.filed.find((i) => i.externalId === id)?.title ?? `#${id}`;
 
 /** Throws once for the first matching refusal, then forgets it. */
-function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
+export function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): void {
   const at = c.refusals.findIndex((r) => r.kind === kind && r.title === title && (r.blocker === undefined || r.blocker === blocker));
   if (at === -1) return;
   c.refusals.splice(at, 1);
@@ -90,7 +95,7 @@ async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Part
   await c.fake.seed({ ...fi, ...change(fi), externalId: id });
 }
 
-function scriptedBoard(c: Ctx): SplitBoard {
+export function scriptedBoard(c: Ctx): SplitBoard {
   const issue = (id: string): ChildIssue => {
     const found = c.filed.find((i) => i.externalId === id);
     assert.ok(found, `no filed issue ${id}`);
@@ -108,10 +113,10 @@ function scriptedBoard(c: Ctx): SplitBoard {
       }
       return out;
     },
-    async createIssue(repo, title, body) {
+    async createIssue(repo, title, body, labels = []) {
       refuse(c, "file", title);
       const externalId = await c.fake.seed({
-        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [], repo, status: "", fields: {},
+        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
       c.filed.push({ externalId, title, url, repo });
@@ -167,6 +172,7 @@ function judge(c: Ctx) {
  * gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each` does.
  */
 export async function poll(c: Ctx): Promise<void> {
+  if (c.driver) return c.driver(c);
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? c.dor : null), "dor");
   const listed = (await c.fake.adapter.listEligible(null)).items.filter((fi) => !fi.closed && fi.labels.includes(c.label));
   const ids = new Set(listed.map((fi) => fi.externalId));
@@ -191,13 +197,14 @@ export async function poll(c: Ctx): Promise<void> {
       const openDeps: string[] = [];
       for (const b of c.blocks.get(fi.externalId) ?? []) if (!(await c.fake.adapter.getItem(b))?.closed) openDeps.push(b);
       const out = await gate(fi, {
-        readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true, openDeps,
+        readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true,
         judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, file },
         ...(c.kept ? { splits: keptStore(c.kept) } : {}),
       });
       st.state = out.ready ? "Queued" : "NotReady";
       st.hash = itemTextHash(fi);
-      if (out.ready) c.runs.add(fi.externalId);
+      // The scheduler takes up a Queued item only once nothing blocks it (PBI 237: the gate no longer judges blockers).
+      if (out.ready && openDeps.length === 0) c.runs.add(fi.externalId);
     } catch (e) {
       c.errors.push(e);
     }
@@ -418,21 +425,6 @@ Then("child {string} is blocked by {string} and {string} only", async function (
 });
 
 // --- Labels and runs -----------------------------------------------------------------------------------------------
-
-Then("none of the parent's sub-issues carries the label {string}", async function (label: string) {
-  const c = ctx(this);
-  polled(c);
-  for (const id of c.subIssues.get(c.parentId!) ?? []) {
-    assert.ok(!(await item(c, id)).labels.includes(label), `child "${titleOf(c, id)}" carries "${label}"`);
-  }
-});
-
-Then("the factory has started no run for any of the parent's sub-issues", function () {
-  const c = ctx(this);
-  polled(c);
-  const started = (c.subIssues.get(c.parentId!) ?? []).filter((id) => c.runs.has(id));
-  assert.deepEqual(started.map((id) => titleOf(c, id)), []);
-});
 
 Then("the factory takes up child {string}", function (title: string) {
   const c = ctx(this);

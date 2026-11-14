@@ -91,7 +91,8 @@ export type ReadinessTexts = Record<"dor" | "scenarios" | "pr-review" | "risk" |
 export type ReadinessLogic = { judgePrompt: string; version: number; splitPrompt: string };
 
 /** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
-export const READINESS_VERSION = 1;
+// 2 (PBI 237): an open dependency no longer fails the gate. The scheduler holds a blocked item back instead.
+export const READINESS_VERSION = 2;
 
 /**
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its

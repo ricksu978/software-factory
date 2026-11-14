@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeBacklog } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
-import { childBody, fileSplit, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
+import { childBody, factoryFiled, fileSplit, filedComment, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
 import type { SplitChild } from "./split.ts";
 
 const parent: FactoryItem = {
@@ -15,13 +15,13 @@ const children: SplitChild[] = [
   { title: "Receipt", body: "Receipt for Checkout", criteria: [3], needs: [1, 2] },
 ];
 
-type Store = { issues: (ChildIssue & { body: string })[]; subs: string[]; board: Map<string, string>; blocks: Map<string, string[]>; labels: string[]; fail: Set<string> };
+type Store = { issues: (ChildIssue & { body: string; labels: string[] })[]; subs: string[]; board: Map<string, string>; blocks: Map<string, string[]>; labels: string[]; fail: Set<string> };
 
 function memoryBoard(s: Store): SplitBoard {
   const once = (k: string) => {
     if (s.fail.delete(k)) throw new Error(`refused ${k}`);
   };
-  const strip = ({ body: _, ...i }: ChildIssue & { body: string }) => i;
+  const strip = ({ body: _, labels: _l, ...i }: ChildIssue & { body: string; labels?: string[] }) => i;
   return {
     async subIssues() {
       return s.subs.map((id) => strip(s.issues.find((i) => i.externalId === id) ?? { externalId: id, title: "by hand", url: "", body: "" }));
@@ -29,9 +29,9 @@ function memoryBoard(s: Store): SplitBoard {
     async findIssues(_repo, text) {
       return s.issues.filter((i) => i.body.includes(text) || i.title.includes(text)).map(strip);
     },
-    async createIssue(_repo, title, body) {
+    async createIssue(_repo, title, body, labels = []) {
       once(`create:${title}`);
-      const i = { externalId: String(100 + s.issues.length), title, url: `https://x/${100 + s.issues.length}`, body };
+      const i = { externalId: String(100 + s.issues.length), title, url: `https://x/${100 + s.issues.length}`, body, labels: [...labels] };
       s.issues.push(i);
       return strip(i);
     },
@@ -59,12 +59,12 @@ function memoryBoard(s: Store): SplitBoard {
   };
 }
 
-async function setup(fail: string[] = []) {
+async function setup(fail: string[] = [], p: FactoryItem = parent) {
   const s: Store = { issues: [], subs: [], board: new Map(), blocks: new Map(), labels: ["factory"], fail: new Set(fail) };
   const fake = fakeBacklog();
-  await fake.seed({ ...parent });
+  await fake.seed({ ...p });
   const deps = { board: memoryBoard(s), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
-  const run = () => fileSplit(parent, children, fake.adapter, deps);
+  const run = () => fileSplit(p, children, fake.adapter, deps);
   return { s, fake, run };
 }
 
@@ -131,6 +131,43 @@ describe("fileSplit", () => {
     const deps = { board: memoryBoard(s), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
     assert.equal(await fileSplit(changed, children, fake.adapter, deps), false);
     assert.equal(s.issues.length, 3);
+  });
+
+  test("each child of an owner-filed parent carries the opt-in label as it's filed (PBI 237)", async () => {
+    const { s, fake, run } = await setup();
+    await run();
+    assert.deepEqual(s.issues.map((i) => i.labels), [["factory"], ["factory"], ["factory"]]);
+    const comment = (await fake.comments("12"))[0];
+    assert.match(comment, /carries the `factory` label and has entered the factory/);
+    assert.match(comment, /Removing the `factory` label from a child withdraws that child/);
+    assert.doesNotMatch(comment, /Add it/);
+  });
+
+  test("finishing a filing doesn't label a child it finds already filed, so an owner's removal stands", async () => {
+    const { s, run } = await setup(["create:Bank"]);
+    await assert.rejects(run());
+    s.issues[0].labels = [];
+    await run();
+    assert.deepEqual(s.issues.map((i) => i.labels), [[], ["factory"], ["factory"]]);
+  });
+
+  test("the children of a factory-filed child carry no label, and its comment says they wait for the owner", async () => {
+    const filedChild = { ...parent, body: childBody(parent, children[0], 1, "Acceptance criteria") };
+    const { s, fake, run } = await setup([], filedChild);
+    await run();
+    assert.deepEqual(s.issues.map((i) => i.labels), [[], [], []]);
+    assert.match((await fake.comments("12"))[0], /None of them carries the `factory` label/);
+  });
+
+  test("an item is factory-filed when its body carries a split marker", () => {
+    assert.equal(factoryFiled(parent), false);
+    assert.equal(factoryFiled({ ...parent, body: childBody(parent, children[0], 1, "Acceptance criteria") }), true);
+  });
+
+  test("the link comment says whether the children are opted in", () => {
+    const filed = [{ externalId: "1", title: "A", url: "u1" }];
+    assert.match(filedComment(filed, "factory", true), /entered the factory/);
+    assert.match(filedComment(filed, "factory", false), /None of them carries/);
   });
 
   test("a child's body opens with the proposal's body and lists its criteria under the heading, with the marker", () => {

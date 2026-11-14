@@ -1,7 +1,9 @@
 // Filing a proposed split as child PBIs (PBI 144). Once the gate has posted a valid split on an oversized parent, it
-// files each child as an issue in the parent's repo, for the owner to approve: a sub-issue of the parent, on the
-// parent's board in the backlog status, blocked by the earlier children it needs, and without the opt-in label. Then
-// the parent loses its opt-in label and gets one comment linking to each child.
+// files each child as an issue in the parent's repo: a sub-issue of the parent, on the parent's board in the backlog
+// status, and blocked by the earlier children it needs. Each child carries the opt-in label as it's filed, so it
+// enters the factory like any item (PBI 237), unless the parent is itself a child the factory filed: then its children
+// carry no label and wait for the owner, so a split can't keep splitting without a person looking. Then the parent
+// loses its opt-in label and gets one comment linking to each child.
 import { createHash } from "node:crypto";
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import { itemTextHash, type SplitChild } from "./split.ts";
@@ -15,8 +17,8 @@ export interface SplitBoard {
   subIssues(parentId: string): Promise<ChildIssue[]>;
   /** The issues in `repo` whose title or body holds `text`, so a child filed but not yet linked is found again. */
   findIssues(repo: string, text: string): Promise<ChildIssue[]>;
-  /** Files a new issue in `repo`, with no label. */
-  createIssue(repo: string, title: string, body: string): Promise<ChildIssue>;
+  /** Files a new issue in `repo`, carrying `labels` as it's filed (PBI 237), or no label when none is given. */
+  createIssue(repo: string, title: string, body: string, labels?: string[]): Promise<ChildIssue>;
   /** Makes `childId` the parent's last sub-issue. */
   addSubIssue(parentId: string, childId: string): Promise<void>;
   /** The issue's status on the parent's board, or null when it isn't on that board. */
@@ -42,6 +44,11 @@ export function splitKey(parent: FactoryItem): string {
 /** The token a filed child's body carries, so a child filed but not yet linked is found again instead of filed twice. */
 export function splitMarker(key: string, n: number): string {
   return `factory-split-${key}-${n}`;
+}
+
+/** Whether the factory filed this item as a child of a split: its body carries a split marker. */
+export function factoryFiled(item: FactoryItem): boolean {
+  return /factory-split-[0-9a-f]{16}-\d+/.test(item.body);
 }
 
 const isHeading = (line: string) => /^#{1,6}\s/.test(line);
@@ -75,11 +82,16 @@ export function childBody(parent: FactoryItem, child: SplitChild, n: number, hea
   return `${own ? `${own}\n\n` : ""}## ${heading}\n\n${criteria}\n\n---\n\n${from}\n`;
 }
 
-/** The parent's one comment once every child is filed: a link to each child, and how a child enters the factory. */
-export function filedComment(filed: ChildIssue[], optInLabel: string): string {
+/**
+ * The parent's one comment once every child is filed: a link to each child, and whether the children have entered the
+ * factory (`optedIn`) or wait for the owner to add the label.
+ */
+export function filedComment(filed: ChildIssue[], optInLabel: string, optedIn: boolean): string {
   const list = filed.map((c, i) => `${i + 1}. [${c.title}](${c.url})`).join("\n");
-  return `The factory filed this item's split as ${filed.length} child items:\n\n${list}\n\n`
-    + `None of them carries the \`${optInLabel}\` label. Add it to a child when it should enter the factory. This item has left the factory.\n`;
+  const how = optedIn
+    ? `Each of them carries the \`${optInLabel}\` label and has entered the factory. Removing the \`${optInLabel}\` label from a child withdraws that child.`
+    : `None of them carries the \`${optInLabel}\` label, because the factory filed this item from a split of its own. Add it to a child when it should enter the factory.`;
+  return `The factory filed this item's split as ${filed.length} child items:\n\n${list}\n\n${how} This item has left the factory.\n`;
 }
 
 /** What an earlier filing of this split left: the parent's sub-issues, and each child already filed, by position. */
@@ -105,7 +117,8 @@ export async function priorFiling(parent: FactoryItem, children: SplitChild[], b
  * second set, and a filing that stopped partway is finished without filing any child twice. Only once every child is
  * filed, linked, placed and blocked does the parent get its one link comment, through `adapter.comment`, and lose its
  * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
- * poll. Returns true when the split is filed, false when the parent was already split another way. `known` is a
+ * poll. A child is labelled only as it's filed, never when found already filed, so a label the owner removed stays off.
+ * Returns true when the split is filed, false when the parent was already split another way. `known` is a
  * `priorFiling` the caller already read, so the gate can word its proposal comment without reading twice.
  */
 export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps,
@@ -116,9 +129,11 @@ export async function fileSplit(parent: FactoryItem, children: SplitChild[], ada
   const repo = parent.repo!;
   const key = splitKey(parent);
   const { subs, found } = prior;
+  const optedIn = !factoryFiled(parent);
+  const labels = optedIn ? [deps.optInLabel] : [];
   const filed: ChildIssue[] = [];
   for (const [i, child] of children.entries()) {
-    const issue = found[i] ?? (await board.createIssue(repo, child.title, childBody(parent, child, i + 1, deps.criteriaHeading)));
+    const issue = found[i] ?? (await board.createIssue(repo, child.title, childBody(parent, child, i + 1, deps.criteriaHeading), labels));
     filed.push(issue);
     if (!subs.includes(issue.externalId)) {
       await board.addSubIssue(parent.externalId, issue.externalId);
@@ -133,7 +148,7 @@ export async function fileSplit(parent: FactoryItem, children: SplitChild[], ada
     }
   }
   // The comment goes before the label comes off: a parent without its label is never gated again to post it.
-  await adapter.comment(parent.externalId, filedComment(filed, deps.optInLabel), `split-filed:${key}`);
+  await adapter.comment(parent.externalId, filedComment(filed, deps.optInLabel, optedIn), `split-filed:${key}`);
   await board.removeLabel(parent.externalId, deps.optInLabel);
   return true;
 }

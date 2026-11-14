@@ -129,6 +129,20 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!view.includes("engine rule"), view);
   });
 
+  test("Blocked lists a Queued item with open dependencies and names them, and Next up leaves it out (PBI 237)", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("Queued", "second child");
+    await db.pool.query("update item set blocked_by = '{40}' where id = $1", [id]);
+    await item("Queued", "free item");
+    const { html } = await get("/", "octo");
+    const view = html.slice(html.indexOf(">Blocked<"), html.indexOf("<h2", html.indexOf(">Blocked<")));
+    assert.ok(view.includes("second child<"), view);
+    assert.ok(view.includes("Waits on #40, which is still open."), view);
+    assert.ok(!view.includes("free item<"), view);
+    const next = html.slice(html.indexOf(">Next up<"), html.indexOf("<h2", html.indexOf(">Next up<")));
+    assert.ok(!next.includes("second child<"), next);
+  });
+
   test("an item with two open questions counts and lists once", async () => {
     await person("octo", "viewer");
     const { id } = await item("NeedsInput", "two questions");

@@ -60,11 +60,11 @@ export function criteriaHash(criteria: string[]): string {
 }
 
 /**
- * SHA-256 of what the readiness check judges about the item itself, open dependencies included. A NotReady item is
- * re-gated when this changes, whether a person edited it or a dependency closed.
+ * SHA-256 of what the readiness check judges about the item itself. A NotReady item is re-gated when a person edits
+ * it. Its open dependencies aren't judged (PBI 237): the scheduler skips a Queued item whose `blocked_by` isn't empty.
  */
-export function readinessItemHash(fi: FactoryItem, openDeps: string[]): string {
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo, openDeps: [...openDeps].sort() });
+export function readinessItemHash(fi: FactoryItem): string {
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo });
 }
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
@@ -264,8 +264,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   });
 
   w.step("checking readiness");
-  // 4. Readiness. A NotReady item is re-gated when the item itself changed, open dependencies included, or when a
-  //    readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
+  // 4. Readiness. A NotReady item is re-gated when the item itself changed, or when a readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: step 3 withdrew it, or failed to read it and retries next poll.
   const logic = deps.logic ?? readinessLogic();
   const byRepo = new Map<string, Promise<Readiness>>();
@@ -279,7 +278,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
-    if (readinessItemHash(fi, await depsOf(fi)) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
+    if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
   // Most often a failure here is the judge, or the coding model asked for a split, on a usage limit. The item stays
@@ -288,10 +287,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
     const r = await readinessOf(fi);
-    const openDeps = await depsOf(fi);
     const out = await gate(fi, {
-      readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown,
-      openDeps, judge, adapter, policyErrors: r.policyErrors, split,
+      readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
@@ -300,8 +297,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.
     if (splitUnanswered(out.split)) throw new Error("the coding model gave no answer for the item's split proposal");
+    // A queued item goes in blocked by its open dependencies, so no claim takes it before step 3 reads them next poll.
+    const blockedBy = out.ready ? await depsOf(fi) : [];
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3 where id = $1", [row.id, r.sha, readinessItemHash(fi, openDeps)]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(fi), blockedBy]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)

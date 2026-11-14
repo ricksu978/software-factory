@@ -231,15 +231,24 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await row(ext)).state, "Abandoned");
   });
 
-  test("an item NotReady only on an open dependency is re-gated once the dependency closes", async () => {
+  test("an item with an open dependency is queued blocked by it in the same poll, so no claim takes it early (PBI 237)", async () => {
     const ext = await seed();
-    fake.setDependencies(ext, ["#7"]);
+    fake.setDependencies(ext, ["7"]);
+    await poll();
+    const r = await row(ext);
+    assert.equal(r.state, "Queued");
+    assert.deepEqual(r.blocked_by, ["7"]);
+  });
+
+  test("a NotReady item isn't re-gated when only its dependencies change, since they no longer touch the verdict", async () => {
+    verdict = "failed";
+    const ext = await seed();
+    await poll();
+    fake.setDependencies(ext, ["7"]);
+    judged = [];
     await poll();
     assert.equal((await row(ext)).state, "NotReady");
-    assert.match((await fake.comments(ext))[0], /depends on #7/);
-    fake.setDependencies(ext, []);
-    await poll();
-    assert.equal((await row(ext)).state, "Queued");
+    assert.deepEqual(judged, []);
   });
 
   test("a listed item that fails to go in keeps the cursor, so the next poll lists it again", async () => {

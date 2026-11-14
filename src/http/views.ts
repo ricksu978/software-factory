@@ -53,6 +53,8 @@ export type OpenPr = { pr_number?: number | null; pr_url?: string | null };
 export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
 export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null };
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
+/** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
+export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
 /** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
 export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
 
@@ -124,6 +126,16 @@ function restartStatus(r: Restart): string {
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
 }
 
+/**
+ * Why a blocked item waits. A blocker shows as plain "#N", not a link: GitHub may list a blocker from another repo, and
+ * a link to the wrong issue is worse than none.
+ */
+export function blockedReason(deps: string[]): string {
+  const refs = deps.map((d) => `#${d}`);
+  const names = refs.length === 1 ? refs[0] : `${refs.slice(0, -1).join(", ")} and ${refs[refs.length - 1]}`;
+  return `Waits on ${names}, ${refs.length === 1 ? "which is" : "which are"} still open. It starts once ${refs.length === 1 ? "it closes" : "they close"}.`;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
@@ -131,7 +143,7 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 }
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "")
@@ -147,6 +159,8 @@ ${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${e
 ${list(f.next.map((n) => `<li>${named(n)}</li>`), "Nothing is ready to start.")}
 <h2>Not ready</h2>
 ${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+<h2>Blocked</h2>
+${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span></li>`), "No ready item waits on another.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}

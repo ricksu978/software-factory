@@ -124,6 +124,12 @@ describe("githubBacklog: the split board (PBI 144)", () => {
     assert.deepEqual(calls.at(-1), { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", params: { owner: "o", repo: "r", issue_number: 5, issue_id: 300 } });
   });
 
+  test("a child filed with labels carries them from the moment it's filed (PBI 237)", async () => {
+    const { board, calls } = splitClient();
+    await board.createIssue("o/r", "Bank", "body", ["factory"]);
+    assert.deepEqual(calls.at(-1)!.params, { owner: "o", repo: "r", title: "Bank", body: "body", labels: ["factory"] });
+  });
+
   test("taking off a label the parent lacks succeeds", async () => {
     const { board } = splitClient();
     await board.removeLabel("7", "factory");
