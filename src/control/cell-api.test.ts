@@ -182,6 +182,20 @@ describe("cell API", dbTest, () => {
     assert.equal((await board.adapter.getItem("7"))?.fields.pr, `https://github.com/${repo}/pull/9`);
   });
 
+  test("a blocked question that blames the base keeps its base commit and tests, and a malformed one gets 400 (PBI 215)", async () => {
+    const cell = await claimed();
+    const bad = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "blocked", question: { kind: "needs_input", body: "The base fails in the cell.", baseFailure: { sha: "b4se001", tests: [3] } },
+    });
+    assert.equal(bad.status, 400);
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "blocked", question: { kind: "needs_input", body: "The base fails in the cell.", baseFailure: { sha: "b4se001", tests: ["parses the config"] } },
+    });
+    assert.equal(r.status, 200);
+    const q = await db.pool.query("select kind, body, base_failure from question where item_id = $1", [cell.itemId]);
+    assert.deepEqual(q.rows, [{ kind: "needs_input", body: "The base fails in the cell.", base_failure: { sha: "b4se001", tests: ["parses the config"] } }]);
+  });
+
   test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
     const cell = await claimed();
     const r = await send(cell.runId, cell.token, "POST", "/transition", {

@@ -14,6 +14,7 @@ import { startServer } from "../../src/http/server.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { lastAttempt } from "./pbi-142.steps.ts";
+import { cellPr } from "./pbi-212.steps.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 
 type Host = ReturnType<typeof fakeRepoHost>;
@@ -78,6 +79,8 @@ Given("the item waits on an open question {string}", long, async function (body:
 });
 
 Given("PR {int} is still open", long, async function (n: number) {
+  // PBI 212's cell scenarios say it of the cell's repo host, with no poller set up.
+  if ((this as { pbi18?: unknown }).pbi18 && !(this as { pbi12?: unknown }).pbi12) return void cellPr(this, n);
   Object.assign(prOf(this, n), { open: true, merged: false, mergeSha: null, mergeable: true });
   await waitingAfterPrOpened(this);
 });

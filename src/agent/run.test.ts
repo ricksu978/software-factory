@@ -111,6 +111,19 @@ test("the transcript is the JSONL of every message", async () => {
   assert.deepEqual(r.transcript.trimEnd().split("\n").map((l) => JSON.parse(l)), msgs);
 });
 
+test("onMessage hears each message's transcript line as it arrives, before the call ends (PBI 209)", async () => {
+  const msgs = [rateLimit({ status: "allowed" }), { type: "assistant", n: 1 }, result("success", false, {})];
+  const heard: string[] = [];
+  let heardBeforeEnd = 0;
+  async function* slow() {
+    for (const m of msgs) yield m;
+    heardBeforeEnd = heard.length;
+  }
+  const r = await foldMessages(slow() as never, (l) => heard.push(l));
+  assert.equal(heardBeforeEnd, 3);
+  assert.equal(heard.map((l) => l + "\n").join(""), r.transcript);
+});
+
 const base = { prompt: "p", model: "claude-haiku-5-5", cwd: ".", signal: new AbortController().signal };
 
 test("judge options carry none of the cell's settings", () => {

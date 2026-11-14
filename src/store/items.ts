@@ -2,6 +2,7 @@ import type pg from "pg";
 import { next, overrideTo, type ItemEvent, type ItemState } from "../core/states.ts";
 import { inTx, runAfterCommit, txPool } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
+import { CONSUMER, writeOutboxRows } from "./outbox.ts";
 
 export class IllegalTransition extends Error {
   override name = "IllegalTransition";
@@ -34,8 +35,8 @@ function runHooks(c: pg.PoolClient, ...args: Parameters<Hook>): void {
 }
 
 /**
- * Moves an item along one state-machine edge. It writes the state and its event on the caller's withTx
- * transaction, so both commit or neither does, and leaving InProgress fences the old cell (Run contract 2).
+ * Moves an item along one state-machine edge. It writes the state, its event and the event's board mirror outbox row
+ * on the caller's withTx transaction, so all commit or none does, and leaving InProgress fences the old cell (Run contract 2).
  * Outside withTx it refuses before any write: the row lock, the atomicity and the hooks all depend on it.
  * `detail` adds fields to the event's payload, such as the attempts behind retries_exhausted.
  */
@@ -55,15 +56,16 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   if (from === "NeedsInput" && to === "Accepted") {
     await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [itemId]);
   }
-  await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
+  const eventId = await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
+  await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
   runHooks(c, itemId, from, to, event);
   return to;
 }
 
 /**
  * An operator's move to any state, such as a stopped run going to Failed (overrideTo, plan Task 3). It writes like
- * transitionItem, fences the old cell when leaving InProgress, logs an override event with the reason, and runs the
- * same hooks, so the board mirrors it.
+ * transitionItem, fences the old cell when leaving InProgress, logs an override event with the reason and its board
+ * mirror outbox row, and runs the same hooks, so the board mirrors it.
  */
 export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemState, actor: Actor, reason: string): Promise<ItemState> {
   if (!inTx(c)) throw new Error("overrideItem needs a client inside withTx");
@@ -76,7 +78,8 @@ export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemSta
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, target]);
   }
-  await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
   runHooks(c, itemId, from, target, "override");
   return target;
 }

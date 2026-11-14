@@ -7,6 +7,7 @@ import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // The cell API runs on a real port over PBI 4's shared database, with the fake backlog and repo host behind it.
 // Modules load lazily, so while one doesn't exist the server never starts and every scenario fails on its Then.
+// PBI 222's steps run the cell API service through this file's context and reuse its Thens.
 // The gateway scenario reuses PBI 33's "gateway answers" and "upstream receives no request" steps through its context.
 const secret = "cell-secret";
 const repoName = "ricksu978/software-factory";
@@ -15,7 +16,7 @@ const marker = "factory:in-progress";
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 type Adapter = { getItem(id: string): Promise<{ status: string; labels: string[]; fields: Record<string, string> } | null> };
 type Target = { adapter: Adapter; seed(item: { externalId: string; status?: string }): Promise<string>; comments(id: string): Promise<string[]> };
-type Mods = {
+export type Mods = {
   cellApi: {
     runToken: (secret: string, runId: string, generation: number) => string;
     cellApi: (deps: object) => Handler;
@@ -30,19 +31,19 @@ type Mods = {
   };
   db: { withTx: <T>(pool: pg.Pool, fn: (c: pg.PoolClient) => Promise<T>) => Promise<T> };
 };
-type Cell = { runId: string; generation: number; token: string };
-type Ctx = {
+export type Cell = { runId: string; generation: number; token: string };
+export type Ctx = {
   mods?: Mods; server?: Server; upstream?: Server; seen: { headers: IncomingHttpHeaders; body: string }[]; off?: () => void;
   board?: Target; sourceId?: string; items: Map<string, string>; first?: Cell; statuses: number[]; before?: string; at: Date;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi16?: Ctx };
   w.pbi16 ??= { seen: [], items: new Map(), statuses: [], at: new Date("2026-11-06T10:00:00Z") };
   return w.pbi16;
 }
 
-async function mods(): Promise<Mods | null> {
+export async function mods(): Promise<Mods | null> {
   const [cellApi, server, board, fake, items, db] = await Promise.all([
     load<Mods["cellApi"]>("src/control/cell-api.ts"), load<Mods["server"]>("src/http/server.ts"), load<Mods["board"]>("src/control/board.ts"),
     load<Mods["fake"]>("src/adapters/fake.ts"), load<Mods["items"]>("src/store/items.ts"), load<Mods["db"]>("src/store/db.ts"),
@@ -55,12 +56,12 @@ function listen(server: Server): Promise<number> {
 }
 
 function base(c: Ctx): string {
-  assert.ok(c.server, "the cell API didn't start: src/control/cell-api.ts, src/http/server.ts or src/control/board.ts is missing");
+  assert.ok(c.server, "the cell API didn't start: a module it needs is missing, or (PBI 222) src/cell-api/main.ts didn't serve it");
   return `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
 }
 
 // Every table the cell API writes, so "nothing changed" means no route wrote anything at all.
-async function snapshot(): Promise<string> {
+export async function snapshot(): Promise<string> {
   const pool = need().pool;
   const rows = async (sql: string) => (await pool.query(sql)).rows;
   return JSON.stringify([
@@ -99,12 +100,12 @@ function transitionBody(event: string, extra: Record<string, unknown> = {}): Rec
   return { event, ...byEvent[event], ...extra };
 }
 
-const stageBody = (stageId: string, attempt: number, status: string) => ({
+export const stageBody = (stageId: string, attempt: number, status: string) => ({
   stageId, attempt, status, model: "claude-opus-5-5", tokensIn: 10, tokensOut: 20, costUsd: 0.01,
 });
 
 // One request per route, each with a body that would be accepted from the current generation.
-function routeCall(route: string): [string, string, unknown?] {
+export function routeCall(route: string): [string, string, unknown?] {
   const calls: Record<string, [string, string, unknown?]> = {
     "POST /lease": ["POST", "/lease", { generation: 1 }],
     "POST /github-token": ["POST", "/github-token", {}],

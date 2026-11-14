@@ -141,6 +141,24 @@ describe("fileSplit", () => {
     assert.ok(body.includes("#12"));
   });
 
+  test("a child's body drops every section the model wrote under the criteria heading, and keeps the rest (PBI 249)", () => {
+    const own = "Card for Checkout\n\n### ACCEPTANCE CRITERIA\n\n- Card works\n\n## Scope\n\nCards only.\n\n## Acceptance criteria\n\n- Errors shown\n";
+    const body = childBody(parent, { ...children[0], body: own }, 1, "Acceptance criteria");
+    assert.ok(body.startsWith("Card for Checkout\n\n## Scope\n\nCards only.\n\n## Acceptance criteria\n\n- card\n"), body);
+    assert.ok(!body.includes("Card works") && !body.includes("Errors shown"), body);
+    assert.equal(body.match(/^#+\s*acceptance criteria\s*$/gim)?.length, 1, body);
+  });
+
+  test("a child's body that is only a criteria section is filed with the parent's criteria alone (PBI 249)", () => {
+    const body = childBody(parent, { ...children[0], body: "## Acceptance criteria\n\n- Card works" }, 1, "Acceptance criteria");
+    assert.ok(body.startsWith("## Acceptance criteria\n\n- card\n"), body);
+  });
+
+  test("a child's body with only a near-match heading is kept whole (PBI 249)", () => {
+    const own = "Card for Checkout\n\n## Acceptance criteria notes\n\nAsk first.";
+    assert.ok(childBody(parent, { ...children[0], body: own }, 1, "Acceptance criteria").startsWith(`${own}\n\n## Acceptance criteria\n`));
+  });
+
   test("the split key depends on the parent and its text", () => {
     assert.notEqual(splitKey(parent), splitKey({ ...parent, externalId: "13" }));
     assert.notEqual(splitKey(parent), splitKey({ ...parent, title: "other" }));

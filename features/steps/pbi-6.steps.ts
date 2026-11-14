@@ -111,8 +111,9 @@ When("I start {string} and wait until the control resource answers", long, async
   await startAspire(ctx(this));
 });
 
-// CELL_CONTROL_URL is what the launcher hands each cell, so it must name the port control really answers on, pinned or
-// floated. Read from `aspire describe`, which shows the resource's environment values.
+// CELL_CONTROL_URL is what the launcher hands each cell, so it must name the port cells really reach, pinned or floated.
+// Since PBI 222 the cell routes live on the cell API, so that is the cell-api resource's port, not control's. Read from
+// `aspire describe`, which shows the resource's environment values and URLs.
 Then("the control resource tells cells the port it answers on", function () {
   assert.ok(ctx(this).up, "the AppHost never came up");
   const res = describe("control").doc?.resources[0];
@@ -120,7 +121,9 @@ Then("the control resource tells cells the port it answers on", function () {
   // Names only: describe shows values, and FACTORY_DB_URI carries the database password.
   assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL among ${JSON.stringify(Object.keys(res?.environment ?? {}))}`);
   assert.equal(new URL(told).hostname, "host.docker.internal");
-  assert.equal(new URL(told).port, new URL(control).port, `CELL_CONTROL_URL ${told} doesn't name control's port, ${control}`);
+  const cellApi = describe("cell-api").doc?.resources[0]?.urls?.[0]?.url;
+  assert.ok(typeof cellApi === "string", "aspire describe gave no URL for the cell-api resource");
+  assert.equal(new URL(told).port, new URL(cellApi).port, `CELL_CONTROL_URL ${told} doesn't name the cell API's port, ${cellApi}`);
 });
 
 // Asks Aspire which container and named volume belong to this AppHost's resource, then checks that exact

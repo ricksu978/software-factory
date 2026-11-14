@@ -133,6 +133,15 @@ test("the split prompt carries the dor.md the judge reads and asks for child bod
   assert.ok(!splitPrompt(item).includes("Definition of Ready"), "no dor.md given, none in the prompt");
 });
 
+test("the split prompt asks for child bodies without acceptance criteria, which the factory adds (PBI 249)", () => {
+  for (const p of [splitPrompt(item), splitPrompt(item, dor)]) {
+    const line = p.split("\n").find((l) => /leave acceptance criteria out/i.test(l));
+    assert.ok(line, p);
+    assert.match(line, /\bbody\b/);
+    assert.match(line, /factory adds/);
+  }
+});
+
 test("the split prompt asks each child to cite its own spec sections and plan tasks, not only the parent's (PBI 202)", () => {
   for (const p of [splitPrompt(item), splitPrompt(item, dor)]) {
     const line = p.split("\n").find((l) => /implements or changes/.test(l));

@@ -110,6 +110,18 @@ describe("floorPage", () => {
     assert.match(html, /<a href="\/activity">/);
     assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
+
+  // PBI 215: while an item waits on a question that blames the base, Floor says the base fails in cells.
+  test("says the base fails in cells, with each blocked item, its base commit and failing tests, only while one waits", () => {
+    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const html = floorPage({ ...empty, baseFails: [{ id: "i1", external_id: "482", repo: null, title: "Board", sha: "b4se001ffff", tests: ["parses <the> config"] }] }, null);
+    const notice = /<section id="base-fails"[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
+    assert.match(notice, /base fails in cells/i);
+    assert.match(notice, /482/);
+    assert.match(notice, /b4se001/);
+    assert.ok(notice.includes("parses &lt;the&gt; config"));
+    assert.doesNotMatch(floorPage(empty, null), /base-fails|base fails in cells/i);
+  });
 });
 
 describe("issueRef", () => {
@@ -325,6 +337,17 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
     assert.match(rows[0], /<td>didn&#39;t finish<\/td>|<td>didn't finish<\/td>/);
     assert.doesNotMatch(rows[0], /so far/);
     assert.match(rows[1], /<td>5m 0s so far<\/td>/);
+  });
+
+  test("an attempt left open by a cell that died shows as stopped, and a live one as running (PBI 209)", () => {
+    const deadRow = { ...stage, ended_at: null, status: "started", started_at: new Date("2026-11-09T15:30:00Z") };
+    const liveRow = { ...stage, attempt: 2, ended_at: null, status: "started", started_at: new Date("2026-11-10T17:30:00Z") };
+    const html = runDetailPage(detail({ stages: [deadRow, liveRow], run: openRun, now: new Date("2026-11-10T17:35:00Z") }), null);
+    const rows = html.split("<h2>Stages</h2>")[1].split("</tbody>")[0].split("<tr>").slice(2);
+    assert.match(rows[0], /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
+    assert.match(rows[1], /<td>build<\/td><td>2<\/td><td>running<\/td>/);
+    const queued = rowOf(runDetailPage(detail({ stages: [deadRow], run: openRun, item: { ...detail({}).item, state: "Queued" } }), null), "Stages");
+    assert.match(queued, /<td>build<\/td><td>1<\/td><td>stopped<\/td>/);
   });
 
   test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
