@@ -54,7 +54,7 @@ export function baseQuestion(base: string, sha: string, lines: { criterion: stri
   return [
     `The base fails in the cell. The base commit ${sha.slice(0, 7)}, \`origin/${base}\`, fails the same tests this item's branch fails, so the item isn't at fault and the factory stopped instead of retrying.`,
     ...each,
-    `Fix the base, then answer this question, and the item carries on from where it stopped.`,
+    `The item's work so far is pushed to its branch. Fix the base, then answer this question, and the stage runs again on that work.`,
   ].join("\n\n");
 }
 

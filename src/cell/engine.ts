@@ -1070,14 +1070,20 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
     // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
     // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
-    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
-    if (locked) console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
-    // A push that fails leaves the branch at the last commit pushed, which is where the next cell carries on.
-    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
+    await pushWorkInProgress("work in progress, stopped");
     // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
     if (current) await end("stopped");
     else await api.release();
     return "stopped";
+  }
+
+  // Commits what the agent left and pushes it, unless a commit changed a locked feature file. A push that fails leaves
+  // the branch at the last commit pushed, which is where the next cell carries on.
+  async function pushWorkInProgress(msg: string): Promise<void> {
+    await git.commitAll(msg).catch(() => {});
+    const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
+    if (locked) console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
+    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
   }
 
   async function finish(e: unknown): Promise<Outcome> {
@@ -1091,6 +1097,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return "limited";
     }
     if (e instanceof Blocked) {
+      // PBI 215: the base blocks an attempt whose work may be committed but not pushed yet, as Green's is when its DoD
+      // check finds the base at fault. Pushed, it's on the branch the next cell clones once the owner answers, so the
+      // stage runs again on that work instead of from scratch. A commit that changed a locked feature file isn't pushed.
+      if (e instanceof BaseFails) await pushWorkInProgress("work in progress, the base fails");
       await end("failed");
       await transition({ event: "blocked", question: { kind: "needs_input", body: e.message, ...(e instanceof BaseFails ? { baseFailure: e.baseFailure } : {}) } });
       return "waiting";

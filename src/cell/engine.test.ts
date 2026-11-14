@@ -604,6 +604,9 @@ describe("runCell", () => {
     const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
     assert.match(dod.body.verdicts[0].reason, /fails the same tests/);
     assert.equal(git(h.dir, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH);
+    // Green's work is pushed before the block, so the cell that runs after the owner's answer starts from it.
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), git(h.dir, "rev-parse", "HEAD"));
+    assert.match(t.question.body, /work so far is pushed to its branch/);
   });
 
   test("a Definition of Done line that fails only on the item's branch is retried, runs on the base once, and exhausts green", async () => {
