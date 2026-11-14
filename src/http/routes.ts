@@ -12,6 +12,7 @@ import { LEASE_RAN_OUT, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
+import { splitChildren } from "../store/splits.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -100,6 +101,15 @@ async function floor(pool: pg.Pool) {
      from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
+  // PBI 227: Split parents with a child still to follow, one the factory doesn't hold or holds short of an end state.
+  const splitParents = (await pool.query<{ id: string; external_id: string; title: string }>(
+    `select p.id, p.external_id, p.title from item p where p.state = 'Split' and exists (
+       select 1 from split_child sc left join item ci on ci.source_id = p.source_id and ci.external_id = sc.external_id
+       where sc.parent_id = p.id and (ci.state is null or ci.state not in ('Done', 'Abandoned', 'Split')))
+     order by p.title`,
+  )).rows;
+  const children = await splitChildren(pool, splitParents.map((p) => p.id));
+  const split = splitParents.map((p) => ({ ...p, children: children.get(p.id) ?? [] }));
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
@@ -125,11 +135,11 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...active, ...next, ...baseFails].map((r) => r.id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...active, ...next, ...baseFails, ...split].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), factory,
-    baseFails: withRepo(baseFails),
+    baseFails: withRepo(baseFails), split: withRepo(split),
     restart, cellImage: await readCellImage(pool),
   };
 }
@@ -259,7 +269,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
-    durations,
+    durations, splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
   };
 }
 

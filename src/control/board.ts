@@ -24,9 +24,8 @@ type Row = {
  * The board status a Split parent mirrors to: the one the field map names for Split, or none when it names none, so
  * the parent's board status stays as it was (PBI 227).
  */
-export function splitStatus(_fieldMap: Row["field_map"]): string | null {
-  // Stub: no behaviour yet (PBI 227, Red).
-  return null;
+export function splitStatus(fieldMap: Row["field_map"]): string | null {
+  return fieldMap?.statusFor?.Split || null;
 }
 
 /** Mirrors one committed transition onto the item's board, and closes its open PR when the item is withdrawn. */

@@ -1,6 +1,7 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import type { SplitChildView } from "../store/splits.ts";
 import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
@@ -138,6 +139,19 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
+/** A Split parent on Floor (PBI 227): the item, and the children its split filed, in order. */
+export type SplitRow = Issue & { id: string; title: string; children: SplitChildView[] };
+
+/**
+ * A Split parent's children (PBI 227), in the order of the split: each child's "#N" linking to its issue, its title, and
+ * the state the factory holds it in, or "Not in the factory" while nobody has put the opt-in label on it. A URL that
+ * isn't a web address makes no link.
+ */
+function splitInto(children: SplitChildView[]): string {
+  const ref = (k: SplitChildView) => (/^https?:\/\//.test(k.url) ? `<a href="${escapeHtml(k.url)}">#${escapeHtml(k.externalId)}</a>` : `#${escapeHtml(k.externalId)}`);
+  return `<ol class="split-into">${children.map((k) => `<li>${ref(k)} ${escapeHtml(k.title)} <span class="muted">${escapeHtml(k.state ?? "Not in the factory")}</span></li>`).join("")}</ol>`;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
@@ -145,7 +159,8 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 }
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[];
+  split?: SplitRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
@@ -161,6 +176,8 @@ ${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${e
 ${list(f.next.map((n) => `<li>${named(n)}</li>`), "Nothing is ready to start.")}
 <h2>Not ready</h2>
 ${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+<h2>Split</h2>
+${list((f.split ?? []).map((p) => `<li>${named(p)} <span class="muted">Split into</span>${splitInto(p.children)}</li>`), "No item is split into children that are still open.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td><td>$${escapeHtml(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
@@ -213,6 +230,8 @@ export type RunDetail = {
   now?: Date;
   /** Where the item's time went (PBI 187). Without it, the Time section is left out. */
   durations?: ItemDurations;
+  /** The children a Split parent's split filed, in order (PBI 227). Without any, no "Split into" shows. */
+  splitInto?: SplitChildView[];
 };
 
 /**
@@ -315,6 +334,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
+${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
 <dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>

@@ -8,7 +8,7 @@ import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
-import { keepSplit, keptSplit } from "../store/splits.ts";
+import { keepSplit, keepSplitChildren, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -310,8 +310,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
         );
       }
       // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
-      // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
-      if (out.filed) await transitionItem(c, row.id, "split_filed", system);
+      // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225). The
+      // children it filed are kept in that commit too, for its "Split into" on Floor and Run detail (PBI 227).
+      if (out.filed) {
+        await keepSplitChildren(c, row.id, out.children ?? []);
+        await transitionItem(c, row.id, "split_filed", system);
+      }
     });
   });
 

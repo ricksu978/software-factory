@@ -440,3 +440,56 @@ describe("Run detail's Time section (PBI 187)", () => {
     assert.doesNotMatch(runDetailPage(detail(), null), /<h2>Time<\/h2>/);
   });
 });
+
+// PBI 227: a Split parent shows as "Split into", with a link to each child and the child's state.
+describe("a Split parent's children", () => {
+  const kids = [
+    { externalId: "41", title: "Card <b>payments</b>", url: "https://github.com/acme/shop/issues/41", state: "Queued" as const },
+    { externalId: "42", title: "Bank transfers", url: "https://github.com/acme/shop/issues/42", state: null },
+  ];
+  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000040", external_id: "40", repo: "acme/shop", title: "Checkout redesign", state: "Split" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+  const items = (html: string) => [.../<ol class="split-into">([\s\S]*?)<\/ol>/.exec(html)![1].matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
+
+  test("Run detail lists each child under \"Split into\", in order, linked to its issue, with its state or that it isn't in the factory", () => {
+    const html = runDetailPage(detail({ splitInto: kids }), null);
+    assert.match(html, /<h2>Split into<\/h2><ol class="split-into">/);
+    const [a, b] = items(html);
+    assert.ok(a.includes(`<a href="https://github.com/acme/shop/issues/41">#41</a> Card &lt;b&gt;payments&lt;/b&gt;`), a);
+    assert.match(a, /Queued/);
+    assert.ok(b.includes(`<a href="https://github.com/acme/shop/issues/42">#42</a> Bank transfers`), b);
+    assert.match(b, /Not in the factory/);
+    assert.doesNotMatch(html, /<b>payments/);
+  });
+
+  test("Run detail of an item with no children shows no \"Split into\"", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /Split into/);
+    assert.doesNotMatch(runDetailPage(detail({ splitInto: [] }), null), /Split into/);
+  });
+
+  test("Floor shows each Split parent, linked as any item is, then \"Split into\" and its own children", () => {
+    const html = floorPage({ ...empty, split: [
+      { id: "p1", external_id: "40", repo: "acme/shop", title: "Checkout redesign", children: kids },
+      { id: "p2", external_id: "50", repo: "acme/shop", title: "Search revamp", children: [{ externalId: "51", title: "Search filters", url: "https://github.com/acme/shop/issues/51", state: "Done" }] },
+    ] }, null);
+    const section = /<h2>Split<\/h2>([\s\S]*?)<h2>/.exec(html)![1];
+    const first = section.indexOf("Checkout redesign");
+    const second = section.indexOf("Search revamp");
+    assert.ok(first >= 0 && second > first);
+    assert.ok(section.includes(`<a href="https://github.com/acme/shop/issues/40">#40</a> <a href="/items/p1">Checkout redesign</a>`));
+    const own = section.slice(first, second);
+    assert.match(own, /Split into/);
+    assert.match(own, /#41[\s\S]*#42/);
+    assert.doesNotMatch(own, /#51/);
+    assert.match(section.slice(second), /#51<\/a> Search filters <span class="muted">Done<\/span>/);
+    assert.doesNotMatch(html, /<b>payments/);
+  });
+
+  test("Floor says when no Split parent is left to show", () => {
+    assert.match(floorPage(empty, null), /<h2>Split<\/h2>\s*<p class="muted">No item is split into children that are still open\.<\/p>/);
+  });
+});

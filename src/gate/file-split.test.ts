@@ -71,7 +71,10 @@ async function setup(fail: string[] = []) {
 describe("fileSplit", () => {
   test("files each child, links it, places it, blocks it, then comments on the parent and takes its label off", async () => {
     const { s, fake, run } = await setup();
-    assert.equal(await run(), true);
+    const filed = await run();
+    // The filed children, in the order of the split, for the parent's "Split into" (PBI 227).
+    assert.deepEqual(filed?.map((i) => [i.externalId, i.title]), [["100", "Card"], ["101", "Bank"], ["102", "Receipt"]]);
+    assert.deepEqual(filed?.map((i) => i.url), s.issues.map((i) => i.url));
     assert.deepEqual(s.issues.map((i) => i.title), ["Card", "Bank", "Receipt"]);
     assert.deepEqual(s.subs, ["100", "101", "102"]);
     assert.deepEqual([...s.board.values()], ["Backlog", "Backlog", "Backlog"]);
@@ -87,7 +90,7 @@ describe("fileSplit", () => {
   test("a second run files nothing more and posts no second comment", async () => {
     const { s, fake, run } = await setup();
     await run();
-    assert.equal(await run(), true);
+    assert.deepEqual((await run())?.map((i) => i.externalId), ["100", "101", "102"]);
     assert.equal(s.issues.length, 3);
     assert.equal(s.subs.length, 3);
     assert.equal((await fake.comments("12")).length, 1);
@@ -118,7 +121,7 @@ describe("fileSplit", () => {
   test("a parent with a sub-issue the factory didn't file for this split is never split", async () => {
     const { s, fake, run } = await setup();
     s.subs.push("7");
-    assert.equal(await run(), false);
+    assert.equal(await run(), null);
     assert.equal(s.issues.length, 0);
     assert.deepEqual(s.labels, ["factory"]);
     assert.deepEqual(await fake.comments("12"), []);
@@ -129,7 +132,7 @@ describe("fileSplit", () => {
     await run();
     const changed = { ...parent, body: "new text" };
     const deps = { board: memoryBoard(s), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
-    assert.equal(await fileSplit(changed, children, fake.adapter, deps), false);
+    assert.equal(await fileSplit(changed, children, fake.adapter, deps), null);
     assert.equal(s.issues.length, 3);
   });
 

@@ -155,6 +155,33 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(moves, [{ from: "Eligible", event: "readiness_failed", to: "NotReady" }, { from: "NotReady", event: "split_filed", to: "Split" }]);
   });
 
+  test("a parent that moves to Split keeps the children its split filed, in order, for its \"Split into\" (PBI 227)", async () => {
+    const big = async (_item: FactoryItem, dor: Policy) =>
+      [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "failed", reason: "because" })), JSON.stringify({ flags: [], oversized: true })].join("\n");
+    const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
+    const agent = async () => ({ ok: true, text: JSON.stringify({ children }) }) as never;
+    const subs: string[] = [];
+    let n = 200;
+    const board = {
+      subIssues: async () => subs.map((id) => ({ externalId: id, title: id, url: `u/${id}` })),
+      findIssues: async () => [],
+      createIssue: async (_repo: string, title: string) => ({ externalId: String(++n), title, url: `u/${n}` }),
+      addSubIssue: async (_p: string, c: string) => void subs.push(c),
+      boardStatus: async () => "Backlog",
+      addToBoard: async () => {},
+      blockedBy: async () => [],
+      addBlockedBy: async () => {},
+      removeLabel: async (id: string) => void (await fake.seed({ externalId: id, labels: [], repo: REPO, acceptanceCriteria: ["one", "two"] })),
+    };
+    const split = { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "AC" } };
+    const ext = await seed({ acceptanceCriteria: ["one", "two"] });
+    await pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
+    const id = (await row(ext)).id;
+    assert.equal((await row(ext)).state, "Split");
+    const kept = (await db.pool.query("select position, external_id, title, url from split_child where parent_id = $1 order by position", [id])).rows;
+    assert.deepEqual(kept, [{ position: 1, external_id: "201", title: "A", url: "u/201" }, { position: 2, external_id: "202", title: "B", url: "u/202" }]);
+  });
+
   test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
     const a = await seed();
     const b = await seed({ repo: "other/tools" });
