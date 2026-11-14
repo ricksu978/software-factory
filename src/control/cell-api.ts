@@ -142,6 +142,12 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   return str(q?.body, "question.body");
 }
 
+/** A needs_input question's base failure (PBI 215): the base commit and the tests that fail on it, or null. */
+function baseFailure(v: unknown): { sha: string; tests: string[] } | null {
+  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown } | undefined | null;
+  return optional(f, () => ({ sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests") }));
+}
+
 /** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
 async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
   const restart = await c.query(
@@ -360,7 +366,8 @@ const routes: Record<string, Route> = {
       await c.query("update run set scenarios_sha = $2, locked_files = $3 where id = $1", [run.run_id, str(body.scenariosSha, "scenariosSha"), files]);
       await c.query("insert into question (item_id, kind, body) values ($1, 'sign_off', $2)", [run.item_id, q]);
     } else if (event === "blocked") {
-      await c.query("insert into question (item_id, kind, body) values ($1, 'needs_input', $2)", [run.item_id, question(body.question, "needs_input")]);
+      await c.query("insert into question (item_id, kind, body, base_failure) values ($1, 'needs_input', $2, $3)",
+        [run.item_id, question(body.question, "needs_input"), baseFailure(body.question)]);
     } else if (event === "pr_opened") {
       const prNumber = optional(body.prNumber, (v) => int(v, "prNumber")) ?? run.pr_number;
       if (prNumber === null) throw new BadRequest("pr_opened needs a PR: send /pr first, or prNumber and prUrl");

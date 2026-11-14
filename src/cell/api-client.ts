@@ -22,7 +22,8 @@ export type StageReport = {
 };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
-  question?: { kind: "needs_input" | "sign_off"; body: string }; scenariosSha?: string; lockedFiles?: string[];
+  /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215). */
+  question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[] } }; scenariosSha?: string; lockedFiles?: string[];
   prNumber?: number; prUrl?: string; resumeAt?: string; tier?: "Low" | "Medium" | "High"; tierReasons?: string[];
 };
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
