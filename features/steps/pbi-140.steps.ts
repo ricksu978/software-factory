@@ -722,7 +722,9 @@ async function runEngine(world: object): Promise<void> {
         await flush();
       }
     }
-    return { ok: true, text: "done", costUsd: 0.5, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" };
+    // Open-pr's summary starts with "## Problem", as the PR body must (PBI 216).
+    const text = e.stage === "open-pr" ? "## Problem\n\nThe item asked for it." : "done";
+    return { ok: true, text, costUsd: 0.5, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" };
   };
   const sop = loadSop(SOP_TEXT);
   const greenRetries = ctx(world).greenRetries;

@@ -196,6 +196,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(q.rows, [{ kind: "needs_input", body: "The base fails in the cell.", base_failure: { sha: "b4se001", tests: ["parses the config"] } }]);
   });
 
+  test("a blocked question's base failure keeps the base branch the cell names (PBI 260)", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "blocked", question: { kind: "needs_input", body: "b", baseFailure: { sha: "b4se001", tests: ["t"], base: "main" } },
+    });
+    assert.equal(r.status, 200);
+    const q = await db.pool.query("select base_failure from question where item_id = $1", [cell.itemId]);
+    assert.deepEqual(q.rows[0].base_failure, { sha: "b4se001", tests: ["t"], base: "main" });
+  });
+
   test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
     const cell = await claimed();
     const r = await send(cell.runId, cell.token, "POST", "/transition", {
