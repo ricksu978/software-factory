@@ -131,6 +131,16 @@ describe("handleWebhook", dbTest, () => {
       assert.equal((await db.pool.query("select merge_sha from run where item_id = $1", [item])).rows[0].merge_sha, "abc1234");
     });
 
+    test("a merge after the factory's unanswered merge attempt logs factory_merged with the attempt's approvers (PBI 181)", async () => {
+      const { item, pr } = await inReview(null);
+      const attempt = { repo: "o/r", prNumber: pr, headSha: "h1", approvers: ["Reviewer"] };
+      await db.pool.query("insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'poller', $1, 'factory_merge_attempt', $2)", [item, attempt]);
+      await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc1234" });
+      assert.equal(await state(item), "Accepted");
+      const logged = (await db.pool.query("select payload from event where item_id = $1 and kind = 'factory_merged'", [item])).rows.map((r) => r.payload);
+      assert.deepEqual(logged, [{ repo: "o/r", prNumber: pr, mergeSha: "abc1234", approvers: ["Reviewer"] }]);
+    });
+
     test("a person closing the PR unmerged withdraws the item", async () => {
       const { item, pr } = await inReview(null);
       await send({ kind: "pr_closed", prNumber: pr, repo: "o/r", by: "dev" });
