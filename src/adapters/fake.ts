@@ -196,6 +196,7 @@ export function fakeRepoHost(): RepoHost & {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;
     },
     async commitsAfter(repo, branch, sha) {
+      // `branches` holds a branch's first-parent line, so there are no merged-in PR commits to leave out.
       const list = branches.get(`${repo}@${branch}`) ?? [];
       const at = list.indexOf(sha);
       return at < 0 ? [] : list.slice(at + 1);
