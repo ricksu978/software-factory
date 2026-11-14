@@ -71,9 +71,17 @@ class Blocked extends Error {}
 /** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
 class BaseFails extends Blocked {
   readonly baseFailure: { sha: string; tests: string[] };
-  constructor(message: string, baseFailure: { sha: string; tests: string[] }) {
-    super(message);
-    this.baseFailure = baseFailure;
+  readonly base: string;
+  readonly lines: { criterion: string; tests: string[] }[];
+  constructor(base: string, sha: string, lines: { criterion: string; tests: string[] }[]) {
+    super(baseQuestion(base, sha, lines, false));
+    this.base = base;
+    this.lines = lines;
+    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))] };
+  }
+  /** The question to ask, which says the work is on the branch only when the cell pushed it. */
+  question(pushed: boolean): string {
+    return baseQuestion(this.base, this.baseFailure.sha, this.lines, pushed);
   }
 }
 class Exhausted extends Error {}
@@ -520,7 +528,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // on the branch, names no test, or was judged failed stays the item's, so the stage retries as before.
     const failed = verdicts.filter((v) => v.status === "failed");
     if (shared.length && failed.every((v) => sharedIdx.has(v.index))) {
-      throw new BaseFails(baseQuestion(ctx.base, baseSha, shared), { sha: baseSha, tests: [...new Set(shared.flatMap((l) => l.tests))] });
+      throw new BaseFails(ctx.base, baseSha, shared);
     }
     return verdicts;
   };
@@ -1064,7 +1072,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   async function wrapUp(): Promise<Outcome> {
     // From red on, a commit that changed a locked feature file is never pushed, as at every gate. The stopped report
     // still goes out, so the claim ends and the next cell carries on from the last commit that held the lock.
-    if (!(await pushWorkInProgress("work in progress, stopped"))) return "stopped";
+    if (!(await pushWorkInProgress("work in progress, stopped")).leased) return "stopped";
     // A stop the guard found after a stage ended, before its transition, leaves no attempt open. The claim still ends.
     if (current) await end("stopped");
     else await api.release();
@@ -1072,20 +1080,23 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   }
 
   // Commits what the agent left, checks the lease once more and pushes it, unless a commit changed a locked feature
-  // file. A lease that's lost, or that can't be checked, pushes nothing and returns false: another cell may own the
-  // branch now, and the renewal timer may not have seen it yet. A push that fails leaves the branch at the last commit
-  // pushed, which is where the next cell carries on.
-  async function pushWorkInProgress(msg: string): Promise<boolean> {
+  // file. A lease that's lost, or that can't be checked, pushes nothing and reports `leased: false`: another cell may
+  // own the branch now, and the renewal timer may not have seen it yet. A push that fails leaves the branch at the last
+  // commit pushed, which is where the next cell carries on. `pushed` is true only when the push went through.
+  async function pushWorkInProgress(msg: string): Promise<{ leased: boolean; pushed: boolean }> {
     await git.commitAll(msg).catch(() => {});
     try {
       await api.lease();
     } catch {
-      return false;
+      return { leased: false, pushed: false };
     }
     const locked = ctx.lockSha ? !(await matchesLock(dir, ctx.lockSha, ctx.lockedFiles).catch(() => false)) : false;
-    if (locked) console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
-    else await git.push().catch((e) => console.error("pushing the work in progress failed:", e));
-    return true;
+    if (locked) {
+      console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
+      return { leased: true, pushed: false };
+    }
+    const pushed = await git.push().then(() => true, (e) => { console.error("pushing the work in progress failed:", e); return false; });
+    return { leased: true, pushed };
   }
 
   async function finish(e: unknown): Promise<Outcome> {
@@ -1102,9 +1113,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       // PBI 215: the base blocks an attempt whose work may be committed but not pushed yet, as Green's is when its DoD
       // check finds the base at fault. Pushed, it's on the branch the next cell clones once the owner answers, so the
       // stage runs again on that work instead of from scratch. A commit that changed a locked feature file isn't pushed.
-      if (e instanceof BaseFails) await pushWorkInProgress("work in progress, the base fails");
+      // The question says the work is on the branch only when this push put it there.
+      const body = e instanceof BaseFails ? e.question((await pushWorkInProgress("work in progress, the base fails")).pushed) : e.message;
       await end("failed");
-      await transition({ event: "blocked", question: { kind: "needs_input", body: e.message, ...(e instanceof BaseFails ? { baseFailure: e.baseFailure } : {}) } });
+      await transition({ event: "blocked", question: { kind: "needs_input", body, ...(e instanceof BaseFails ? { baseFailure: e.baseFailure } : {}) } });
       return "waiting";
     }
     if (e instanceof Exhausted) {

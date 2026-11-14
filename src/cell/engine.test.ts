@@ -626,6 +626,19 @@ describe("runCell", () => {
     assert.ok(!h.transitions().length);
   });
 
+  test("a base failure whose push fails doesn't say the work is pushed", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => { if (stage === "green") writeFileSync(join(a.cwd, "app.txt"), "half done\n"); } });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n");
+    // The origin refuses every push, so the push before the block fails.
+    writeFileSync(join(h.origin, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "waiting"); } finally { logged.mock.restore(); }
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "blocked");
+    assert.doesNotMatch(t.question.body, /is pushed/);
+    assert.match(t.question.body, /couldn't push/);
+  });
+
   test("a Definition of Done line that fails only on the item's branch is retried, runs on the base once, and exhausts green", async () => {
     const h = harness({ nextStage: "green" });
     const log = join(h.root, "runs.txt");

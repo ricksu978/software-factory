@@ -52,13 +52,20 @@ describe("sharedWithBase", () => {
 
 describe("baseQuestion", () => {
   test("says the base fails in the cell, names the base commit, the lines and their tests, and doesn't blame the item", () => {
-    const q = baseQuestion("main", "b4se001ffffffff", [{ criterion: "Unit tests pass.", tests: ["parses the config", "reads the board"] }]);
+    const q = baseQuestion("main", "b4se001ffffffff", [{ criterion: "Unit tests pass.", tests: ["parses the config", "reads the board"] }], true);
     assert.match(q, /base fails in the cell/i);
     assert.ok(q.includes("b4se001"));
     assert.ok(q.includes("origin/main"));
     assert.ok(q.includes("Unit tests pass."));
     assert.ok(q.includes("- parses the config\n- reads the board"));
     assert.match(q, /isn't at fault/);
+    assert.match(q, /work so far is pushed to its branch/);
+  });
+
+  test("doesn't say the work is pushed when the cell couldn't push it", () => {
+    const q = baseQuestion("main", "b4se001ffffffff", [{ criterion: "Unit tests pass.", tests: ["parses the config"] }], false);
+    assert.doesNotMatch(q, /is pushed/);
+    assert.match(q, /couldn't push/);
   });
 });
 

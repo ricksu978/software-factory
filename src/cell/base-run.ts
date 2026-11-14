@@ -48,13 +48,18 @@ export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
   return onBranch.length > 0 && onBranch.every((t) => base.has(t));
 }
 
-/** The one question a stage asks when the base fails the same tests: it names the base commit, the lines and the tests. */
-export function baseQuestion(base: string, sha: string, lines: { criterion: string; tests: string[] }[]): string {
+/**
+ * The one question a stage asks when the base fails the same tests: it names the base commit, the lines and the tests.
+ * It says the item's work is on its branch only when `pushed` is true, that is, when the cell pushed it before blocking.
+ */
+export function baseQuestion(base: string, sha: string, lines: { criterion: string; tests: string[] }[], pushed: boolean): string {
   const each = lines.map((l) => `The Definition of Done line "${l.criterion}" fails these tests on the base commit as on the item's branch:\n${l.tests.map((t) => `- ${t}`).join("\n")}`);
   return [
     `The base fails in the cell. The base commit ${sha.slice(0, 7)}, \`origin/${base}\`, fails the same tests this item's branch fails, so the item isn't at fault and the factory stopped instead of retrying.`,
     ...each,
-    `The item's work so far is pushed to its branch. Fix the base, then answer this question, and the stage runs again on that work.`,
+    pushed
+      ? `The item's work so far is pushed to its branch. Fix the base, then answer this question, and the stage runs again on that work.`
+      : `The cell couldn't push the item's latest work, so its branch holds only what was pushed before. Fix the base, then answer this question, and the stage runs again from the branch as it is.`,
   ].join("\n\n");
 }
 
