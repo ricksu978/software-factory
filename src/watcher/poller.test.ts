@@ -675,4 +675,137 @@ describe("pollOnce", dbTest, () => {
     assert.equal(moves.filter((m) => m.e === "policy_changed").length, 1);
     assert.equal((await row(ext)).state, "NotReady");
   });
+  describe("the factory's merge (PBI 181)", () => {
+    const dod = "## Definition of Done\n\n- [x] Tests pass\n";
+    const allow = (login: string) => db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', $1, 'owner', $1)`, [login]);
+    async function ready(state = "InReview") {
+      const h = await held(state, { pr: true });
+      const p = host.prs.find((x) => x.number === h.pr)!;
+      Object.assign(p, { headSha: "h1", mergeState: "clean", mergeAs: "m9", body: dod, reviews: [{ state: "approved", submittedAt: new Date(0).toISOString(), author: "octo" }] });
+      return { ...h, p };
+    }
+    const events = async (kind: string) => (await db.pool.query<{ payload: any }>("select payload from event where kind = $1 and actor = 'system'", [kind])).rows.map((r) => r.payload);
+
+    test("a clean, approved InReview PR is squash-merged at its head, the item moves to Accepted and the merge is logged", async () => {
+      await allow("Octo");
+      const { ext, pr, run } = await ready();
+      await poll();
+      assert.deepEqual(host.mergeCalls, [{ repo: REPO, prNumber: pr, method: "squash", headSha: "h1", merged: true }]);
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m9");
+      assert.deepEqual(await events("factory_merged"), [{ repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"] }]);
+    });
+
+    test("an unticked DoD line, no approval, a state other than clean, a hold or an InProgress item leave the PR alone", async () => {
+      await allow("octo");
+      const a = await ready();
+      a.p.body = `${dod}- [ ] No secret *(for the person who merges to check)*\n`;
+      const b = await ready();
+      b.p.reviews = [];
+      const c = await ready();
+      c.p.mergeState = "blocked";
+      const d = await ready();
+      await db.pool.query("update item set held = true where id = $1", [d.id]);
+      const e = await ready("InProgress");
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b, c, d]) assert.equal((await row(h.ext)).state, "InReview");
+      assert.equal((await row(e.ext)).state, "InProgress");
+    });
+
+    test("a merge GitHub refuses leaves the item in InReview, logs GitHub's message, and the next poll merges", async () => {
+      await allow("octo");
+      const { ext, pr, p } = await ready();
+      p.refusals = ["Base branch was modified."];
+      await poll();
+      assert.equal((await row(ext)).state, "InReview");
+      assert.deepEqual(await events("factory_merge_refused"), [{ repo: REPO, prNumber: pr, reason: "Base branch was modified." }]);
+      assert.deepEqual(await events("factory_merged"), []);
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await events("factory_merged")).length, 1);
+    });
+
+    test("a merge that went through while the call failed is still logged as the factory's when the next poll sees it", async () => {
+      await allow("octo");
+      const { ext, pr, run, p } = await ready();
+      const mergePr = host.mergePr.bind(host);
+      host.mergePr = async (...args) => {
+        await mergePr(...args);
+        throw new Error("502 Bad Gateway");
+      };
+      await poll();
+      assert.equal(p.merged, true);
+      assert.equal((await row(ext)).state, "InReview");
+      assert.deepEqual(await events("factory_merged"), []);
+      assert.deepEqual(await events("factory_merge_attempt"), [{ repo: REPO, prNumber: pr, headSha: "h1", approvers: ["octo"] }]);
+      host.mergePr = mergePr;
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m9");
+      assert.deepEqual(await events("factory_merged"), [{ repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"] }]);
+    });
+
+    test("a person's merge after a refused attempt isn't logged as the factory's", async () => {
+      await allow("octo");
+      const { ext, p } = await ready();
+      p.refusals = ["Base branch was modified."];
+      await poll();
+      Object.assign(p, { open: false, merged: true, mergeSha: "m1" });
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
+    test("a hold that lands after the attempt is logged stops the merge and closes the attempt, so a person's merge isn't the factory's", async () => {
+      await allow("octo");
+      const { ext, id, pr, p } = await ready();
+      // The dashboard's Hold, landing as the attempt commits, before the merge's locked re-read.
+      await db.pool.query(`create function hold_on_attempt() returns trigger language plpgsql as $$
+        begin if new.kind = 'factory_merge_attempt' then update item set held = true where id = new.item_id; end if; return new; end $$`);
+      await db.pool.query("create trigger hold_on_attempt after insert on event for each row execute function hold_on_attempt()");
+      try {
+        await poll();
+      } finally {
+        await db.pool.query("drop trigger hold_on_attempt on event; drop function hold_on_attempt()");
+      }
+      assert.deepEqual(host.mergeCalls, []);
+      assert.equal((await row(ext)).state, "InReview");
+      assert.deepEqual(await events("factory_merge_refused"), [{ repo: REPO, prNumber: pr, reason: "the item was held or moved before the merge" }]);
+      Object.assign(p, { open: false, merged: true, mergeSha: "m1" });
+      await db.pool.query("update item set held = false where id = $1", [id]);
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
+    test("a clean, approved PR whose item lost its label, closed or changed criteria is closed unmerged", async () => {
+      await allow("octo");
+      const a = await ready();
+      await fake.seed({ externalId: a.ext, labels: [], repo: REPO });
+      const b = await ready();
+      await fake.adapter.close(b.ext);
+      const c = await ready();
+      await db.pool.query("update item set criteria_hash = $2 where id = $1", [c.id, criteriaHash(["old criterion"])]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b, c]) assert.equal(h.p.open, false);
+      for (const h of [a, b]) assert.equal((await row(h.ext)).state, "Abandoned");
+      assert.equal((await row(c.ext)).state, "Queued");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
+    test("an approval from someone outside the allowlist doesn't merge, and only allowlisted approvers are logged", async () => {
+      await allow("kim");
+      const a = await ready();
+      a.p.reviews = [{ state: "approved", submittedAt: new Date(0).toISOString(), author: "stranger" }];
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      assert.equal((await row(a.ext)).state, "InReview");
+      a.p.reviews.push({ state: "approved", submittedAt: new Date(1).toISOString(), author: "kim" });
+      await poll();
+      assert.equal((await row(a.ext)).state, "Accepted");
+      assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
+    });
+  });
 });

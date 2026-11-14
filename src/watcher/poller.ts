@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts";
+import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
@@ -11,6 +11,8 @@ import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts"
 import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
+import { appendEvent } from "../store/events.ts";
+import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -36,7 +38,7 @@ export type PollDeps = {
 };
 
 type Row = {
-  id: string; external_id: string; state: ItemState; criteria_hash: string | null;
+  id: string; external_id: string; state: ItemState; held: boolean; criteria_hash: string | null;
   readiness_policy_sha: string | null; readiness_item_hash: string | null;
   run_id: string | null; branch: string | null; pr_number: number | null; reviews_seen_at: Date | null; run_repo_url: string | null;
 };
@@ -76,7 +78,7 @@ async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: 
 
 async function items(pool: pg.Pool, sourceId: string, states: ItemState[]): Promise<Row[]> {
   const r = await pool.query<Row>(
-    `select i.id, i.external_id, i.state, i.criteria_hash, i.readiness_policy_sha, i.readiness_item_hash,
+    `select i.id, i.external_id, i.state, i.held, i.criteria_hash, i.readiness_policy_sha, i.readiness_item_hash,
             r.id as run_id, r.branch, r.pr_number, r.reviews_seen_at, rp.url as run_repo_url
      from item i
      left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
@@ -213,17 +215,25 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
-    const repo = (await itemOf(row.external_id))?.repo ?? repoFromUrl(row.run_repo_url);
+    const fi = await itemOf(row.external_id);
+    const repo = fi?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
     // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).
     const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
     const pr = await repoHost.prState(repo, row.pr_number, trusted, bot);
     if (pr.merged) {
-      await move(pool, row.id, "merged", (c) => c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]));
+      // A merge the factory asked for whose answer it never got is still logged as the factory's (PBI 181).
+      await move(pool, row.id, "merged", async (c) => {
+        await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, pr.mergeSha]);
+        await logAttemptedMerge(c, row.id, row.pr_number!, pr.mergeSha, system);
+      });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
       await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+    } else if (row.state === "InReview" && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
+      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181).
+      await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
   });
 
@@ -309,6 +319,51 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   if (unlisted > 0) return { seen: listed.items.length, cursor: src.cursor ?? "" };
   await pool.query("update backlog_source set cursor = $2 where id = $1", [sourceId, listed.cursor]);
   return { seen: listed.items.length, cursor: listed.cursor };
+}
+
+/**
+ * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that an allowlisted
+ * user approved and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at
+ * the head the view was read at. First the attempt, with the PR, the head and the approvers, is logged as
+ * `factory_merge_attempt` in its own committed write, so a merge GitHub made while the call failed is still logged as
+ * the factory's when step 2 or the webhook later sees the PR merged. Then the item row stays locked across the merge,
+ * so a Hold or a claim that lands meanwhile waits, and the re-read under the lock sees the one that came first. A merge
+ * moves the item through `merged`, as a person's would, and logs `factory_merged`. A refusal logs
+ * `factory_merge_refused` with GitHub's message, and the next poll tries again. An item held or moved between the
+ * two writes isn't merged, and `factory_merge_refused` closes its attempt.
+ */
+async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
+  // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
+  const keys = new Set(trusted.map(loginKey));
+  const read = await host.mergeView(repo, prNumber);
+  const view = { ...read, approvedBy: read.approvedBy.filter((a) => keys.has(loginKey(a))) };
+  if (mergeBlocker(view) !== null) return;
+  const mayMerge = async (c: pg.PoolClient) => {
+    const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
+    return !!cur && cur.state === "InReview" && !cur.held;
+  };
+  const attempted = await withTx(pool, async (c) => {
+    if (!(await mayMerge(c))) return false;
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy } });
+    return true;
+  });
+  if (!attempted) return;
+  await withTx(pool, async (c) => {
+    // A Hold or another move that landed since the attempt was logged stops the merge. The attempt is closed, so a
+    // person's later merge of the PR isn't logged as the factory's.
+    if (!(await mayMerge(c))) {
+      await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: "the item was held or moved before the merge" } });
+      return;
+    }
+    const res = await host.mergePr(repo, prNumber, { method: "squash", headSha: view.headSha });
+    if (!res.merged) {
+      await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });
+      return;
+    }
+    await transitionItem(c, row.id, "merged", system);
+    await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, res.sha]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy } });
+  });
 }
 
 /**
