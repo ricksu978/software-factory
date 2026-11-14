@@ -133,8 +133,13 @@ Given(new RegExp(`^these checks report on ${COMMIT}:$`), function (on: string, t
 });
 
 Given("CI passes after Green's fix", function () {
-  // A commit the scenario says nothing about passes, so Green's fix needs no rule. The clock and CI still go on.
-  ctx(this);
+  // A commit the scenario says nothing about passes, so Green's fix needs no rule. The clock and CI still go on,
+  // and no rule may leave a check on Green's fix failing or pending past the cap.
+  const c = ctx(this);
+  for (const [check, r] of c.rules.get("green") ?? []) {
+    assert.equal(r.then, "passed", `the check "${check}" fails on Green's fix`);
+    assert.ok(r.pendingFor < CAP_MS, `the check "${check}" stays pending on Green's fix for the whole cap`);
+  }
 });
 
 Given("the PR reviewer finds {string} on its first review", function (body: string) {
