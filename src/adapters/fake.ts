@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type FailedCheck, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, type FailedCheck, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -137,6 +137,8 @@ export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
   failedChecks: Map<string, FailedCheck[]>;
+  /** The named checks CI reported, by `repo@sha` (PBI 229). */
+  ciChecks: Map<string, CiCheck[]>;
   files: Map<string, string>;
   heads: Map<string, string>;
   branches: Map<string, string[]>;
@@ -152,6 +154,7 @@ export function fakeRepoHost(): RepoHost & {
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
   const failedChecks = new Map<string, FailedCheck[]>();
+  const ciChecks = new Map<string, CiCheck[]>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
@@ -164,7 +167,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, failedChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
+    prs, checks, failedChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -190,6 +193,9 @@ export function fakeRepoHost(): RepoHost & {
     },
     async failedChecksOnSha(repo, sha) {
       return failedChecks.get(`${repo}@${sha}`) ?? [];
+    },
+    async ciChecksOnSha(repo, sha) {
+      return ciChecks.get(`${repo}@${sha}`) ?? null;
     },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;

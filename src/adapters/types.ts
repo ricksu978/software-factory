@@ -104,6 +104,12 @@ export function logTail(log: string): string {
   return log.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").slice(-FAILED_LOG_LINES).join("\n");
 }
 
+/**
+ * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
+ * has reported nothing yet.
+ */
+export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
+
 /** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */
 export type MergeState = "clean" | "blocked" | "behind" | "unstable" | "unknown" | "dirty" | "draft" | "has_hooks";
 
@@ -132,6 +138,8 @@ export interface RepoHost {
    * can't give it (PBI 232). A check that passed, was skipped or ended neutral isn't one of them.
    */
   failedChecksOnSha(repo: string, sha: string): Promise<FailedCheck[]>;
+  /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
+  ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /** CODEOWNERS first, then `fallback`. */
