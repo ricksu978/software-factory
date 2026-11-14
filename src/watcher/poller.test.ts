@@ -742,6 +742,22 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual(await events("factory_merged"), []);
     });
 
+    test("a clean, approved PR whose item lost its label, closed or changed criteria is closed unmerged", async () => {
+      await allow("octo");
+      const a = await ready();
+      await fake.seed({ externalId: a.ext, labels: [], repo: REPO });
+      const b = await ready();
+      await fake.adapter.close(b.ext);
+      const c = await ready();
+      await db.pool.query("update item set criteria_hash = $2 where id = $1", [c.id, criteriaHash(["old criterion"])]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b, c]) assert.equal(h.p.open, false);
+      for (const h of [a, b]) assert.equal((await row(h.ext)).state, "Abandoned");
+      assert.equal((await row(c.ext)).state, "Queued");
+      assert.deepEqual(await events("factory_merged"), []);
+    });
+
     test("an approval from someone outside the allowlist doesn't merge, and only allowlisted approvers are logged", async () => {
       await allow("kim");
       const a = await ready();

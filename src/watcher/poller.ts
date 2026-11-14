@@ -215,7 +215,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
-    const repo = (await itemOf(row.external_id))?.repo ?? repoFromUrl(row.run_repo_url);
+    const fi = await itemOf(row.external_id);
+    const repo = fi?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
     // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).
     const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
@@ -230,7 +231,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await move(pool, row.id, "withdrawn");
     } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
       await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
-    } else if (row.state === "InReview" && !row.held) {
+    } else if (row.state === "InReview" && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
+      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
   });
