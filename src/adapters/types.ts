@@ -99,9 +99,28 @@ export type FailedCheck = { name: string; url: string; log: string | null };
 /** How many lines from the end of a failed check's log the cell API returns. */
 export const FAILED_LOG_LINES = 100;
 
-/** The last FAILED_LOG_LINES lines of `log`, joined by "\n", with a trailing newline and CRLFs dropped. */
+/** How many characters of one line of a failed check's log the cell API keeps, the rest cut and marked with "…". */
+export const FAILED_LOG_LINE_CHARS = 500;
+
+/**
+ * How many characters of a failed check's log tail the cell API returns at most, kept from the end. A line cap alone
+ * still lets 100 lines reach 50k characters; the tail goes into a finding every later Green brief copies, so it must
+ * stay small next to the brief's context.
+ */
+export const FAILED_LOG_CHARS = 20_000;
+
+/**
+ * The last FAILED_LOG_LINES lines of `log`, joined by "\n", with a trailing newline and CRLFs dropped. A line longer
+ * than FAILED_LOG_LINE_CHARS is cut to that many and ends in "…", and when the tail is still longer than
+ * FAILED_LOG_CHARS its oldest characters go, from the start of a line, so a failing test that dumps a large blob can't
+ * swell the finding.
+ */
 export function logTail(log: string): string {
-  return log.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").slice(-FAILED_LOG_LINES).join("\n");
+  const lines = log.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").slice(-FAILED_LOG_LINES)
+    .map((l) => (l.length > FAILED_LOG_LINE_CHARS ? `${l.slice(0, FAILED_LOG_LINE_CHARS)}…` : l));
+  let total = lines.reduce((n, l) => n + l.length + 1, -1);
+  while (total > FAILED_LOG_CHARS && lines.length > 1) total -= lines.shift()!.length + 1;
+  return lines.join("\n");
 }
 
 /**

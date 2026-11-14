@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
+import { botKey, FAILED_LOG_CHARS, FAILED_LOG_LINE_CHARS, logTail, loginKey, standingSummaries, type Review } from "../types.ts";
 import { cellRepoHost, githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -439,5 +439,27 @@ describe("githubRepoHost merges (PBI 181)", () => {
       "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => { throw Object.assign(new Error("boom"), { status: 500 }); },
     });
     await assert.rejects(host.mergePr("o/r", 3, { method: "squash", headSha: null }), /boom/);
+  });
+});
+
+describe("logTail", () => {
+  test("keeps the last 100 lines and a short log whole", () => {
+    const log = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join("\r\n") + "\r\n";
+    assert.equal(logTail(log), Array.from({ length: 100 }, (_, i) => `line ${i + 151}`).join("\n"));
+    assert.equal(logTail("a\nb\n"), "a\nb");
+  });
+
+  test("cuts a long line and marks the cut", () => {
+    const tail = logTail(`ok\n${"x".repeat(5_000_000)}\nend`);
+    assert.deepEqual(tail.split("\n"), ["ok", `${"x".repeat(FAILED_LOG_LINE_CHARS)}…`, "end"]);
+  });
+
+  test("drops the oldest lines when 100 long lines outgrow the whole-tail cap", () => {
+    const log = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"y".repeat(1000)}`).join("\n");
+    const tail = logTail(log);
+    assert.ok(tail.length <= FAILED_LOG_CHARS);
+    const lines = tail.split("\n");
+    assert.ok(lines.at(-1)!.startsWith("100 "));
+    assert.ok(lines.length < 100 && lines.length > 1);
   });
 });

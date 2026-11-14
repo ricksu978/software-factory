@@ -11,6 +11,7 @@ import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
 import { changedFiles, ciFailed, commandEnv, loadInputs, readReview, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { FAILED_LOG_CHARS } from "../adapters/types.ts";
 import { shellGit } from "./git.ts";
 
 const BRANCH = "factory/pbi-482-r1";
@@ -1598,4 +1599,11 @@ describe("the PR review stage", () => {
     // The second pass checks the thread the first one left, and resolves it.
     assert.equal(h.calls.filter((c) => c.route === "/repo/resolveThread").length, 1);
   });
+});
+
+test("ciFailed fences at most FAILED_LOG_CHARS of a log, from its end", () => {
+  const log = `${"a".repeat(FAILED_LOG_CHARS)}END`;
+  const finding = ciFailed("CI failed on abc", { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/u", log }] });
+  assert.ok(finding.includes("END"));
+  assert.ok(!finding.includes("a".repeat(FAILED_LOG_CHARS)));
 });
