@@ -5,7 +5,8 @@
 // plane, the worker and any running cell carry on, and the next cell started runs the new image. When they also change
 // code the control plane or the worker runs, it builds nothing, and Floor says a restart is needed and names the commit a
 // restart would pick up. It builds from the fetched commit, never from the operator's checkout's working tree, branch or
-// local commits. Each image records its commit in REVISION_LABEL. A rebuild logs REBUILT_EVENT, naming the old and the
+// local commits. Each image records its commit in REVISION_LABEL, and whenever the worker builds nothing or a build fails,
+// the row records the label of the image the tag names, so Floor never shows a commit from an earlier run. A rebuild logs REBUILT_EVENT, naming the old and the
 // new commit. A failed build keeps the current image, logs BUILD_FAILED_EVENT and is tried again on a later poll.
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -27,8 +28,14 @@ export const REBUILT_EVENT = "cell_image_rebuilt";
 /** Logged on each failed build, with `{ commit, error }`: the commit it tried to build and the build's error. */
 export const BUILD_FAILED_EVENT = "cell_image_build_failed";
 
-/** Builds an image tagged `tag` from the files in `context`, a directory holding one commit's files, with `labels`. */
-export type ImageBuilder = { build(b: { tag: string; context: string; labels: Record<string, string> }): Promise<void> };
+/**
+ * Builds an image tagged `tag` from the files in `context`, a directory holding one commit's files, with `labels`, and
+ * reads back the REVISION_LABEL of the image `tag` names now: null when there is no such image or it has no label.
+ */
+export type ImageBuilder = {
+  build(b: { tag: string; context: string; labels: Record<string, string> }): Promise<void>;
+  revision(tag: string): Promise<string | null>;
+};
 
 export type CellImageDeps = {
   pool: pg.Pool;
@@ -113,6 +120,7 @@ async function build(d: CellImageDeps, from: string | null, commit: string, anno
     const error = e instanceof Error ? e.message : String(e);
     log.error(`Building the cell image from ${commit} failed, so cells keep the image built from ${from ?? "an unknown commit"}. A later poll tries again:`, error);
     await inTransaction(d.pool, (c) => appendEvent(c, { ...worker, kind: BUILD_FAILED_EVENT, payload: { commit, error } }));
+    await recordTagged(d);
     return false;
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -123,6 +131,21 @@ async function build(d: CellImageDeps, from: string | null, commit: string, anno
   });
   log.log(`The cell image was built from ${commit}${from && from !== commit ? `, replacing the one built from ${from}` : ""}.`);
   return true;
+}
+
+/**
+ * Records the commit the image the tag names now was built from, read from its label, so Floor never names a commit
+ * from an earlier run. scripts/factory.ps1 builds the tag from the checkout before the worker starts, and labels it only
+ * when the working tree is clean, so an image with uncommitted edits records no commit (null).
+ */
+async function recordTagged(d: CellImageDeps): Promise<void> {
+  let built: string | null = null;
+  try {
+    built = await d.builder.revision(d.tag ?? CELL_IMAGE);
+  } catch (e) {
+    (d.log ?? console).error("Reading the cell image's commit failed, so Floor shows none:", e instanceof Error ? e.message : String(e));
+  }
+  await writeCellImage(d.pool, { built });
 }
 
 /**
@@ -151,7 +174,10 @@ export async function startCellImage(d: CellImageDeps): Promise<void> {
   const head = await fetchMain(d);
   const held = await heldChanges(d, running, head);
   await writeCellImage(d.pool, { started: running, restart: held.length ? head : null });
-  if (held.length) return askRestart(d, head, held);
+  if (held.length) {
+    await recordTagged(d);
+    return askRestart(d, head, held);
+  }
   await build(d, (await readCellImage(d.pool))?.built ?? null, head, false);
 }
 
@@ -186,6 +212,15 @@ export function dockerBuilder(): ImageBuilder {
         const stderr = (e as { stderr?: string }).stderr?.trim();
         throw new Error(stderr ? stderr.split("\n").slice(-20).join("\n") : e instanceof Error ? e.message : String(e), { cause: e });
       }
+    },
+    async revision(tag) {
+      const r = await run("docker", ["image", "inspect", "--format", "{{json .Config.Labels}}", tag]).catch((e: { stderr?: string }) => {
+        if (/no such image/i.test(e.stderr ?? "")) return null;
+        throw e;
+      });
+      if (!r) return null;
+      const labels = JSON.parse(r.stdout.trim() || "null") as Record<string, string> | null;
+      return labels?.[REVISION_LABEL] || null;
     },
   };
 }

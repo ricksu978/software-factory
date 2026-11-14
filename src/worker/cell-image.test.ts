@@ -32,6 +32,8 @@ describe("keeping the cell image current with main", dbTest, () => {
   let checkout: string;
   let built: { context: string; labels: Record<string, string>; sop: string }[];
   let fail: string | null;
+  /** The label of the image the tag names, as `docker image inspect` would read it. */
+  let tagged: string | null;
   before(async () => {
     db = await startTestDb();
   });
@@ -51,6 +53,7 @@ describe("keeping the cell image current with main", dbTest, () => {
     git(root, "clone", "-q", join(root, "origin.git"), checkout);
     built = [];
     fail = null;
+    tagged = null;
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -73,6 +76,10 @@ describe("keeping the cell image current with main", dbTest, () => {
       async build({ context, labels }) {
         if (fail) throw new Error(fail);
         built.push({ context, labels, sop: readFileSync(join(context, "sop/sop.yml"), "utf8") });
+        tagged = labels[REVISION_LABEL] ?? null;
+      },
+      async revision() {
+        return tagged;
       },
     },
   });
@@ -161,6 +168,32 @@ describe("keeping the cell image current with main", dbTest, () => {
     await pollCellImage(deps());
     assert.equal((await readCellImage(db.pool))?.built, start);
     assert.deepEqual(await events(BUILD_FAILED_EVENT), [{ commit: next, error: "npm ci exited 1" }]);
+    fail = null;
+    await pollCellImage(deps());
+    assert.equal((await readCellImage(db.pool))?.built, next);
+  });
+
+  test("a start that builds nothing records the commit the tagged image carries, not an earlier run's", async () => {
+    const running = git(seed, "rev-parse", "HEAD");
+    await startCellImage(deps());
+    // A later run starts on a branch that changes worker code, and factory.ps1 builds the tag from its edited tree, unlabelled.
+    push(["src/worker/main.ts"]);
+    tagged = null;
+    await startCellImage(deps());
+    assert.equal(built.length, 1);
+    assert.equal((await readCellImage(db.pool))?.built, null);
+    tagged = running;
+    await startCellImage(deps());
+    assert.equal((await readCellImage(db.pool))?.built, running);
+  });
+
+  test("a failed start-up build records the commit the tagged image carries", async () => {
+    await startCellImage(deps());
+    const next = push(["sop/sop.yml"]);
+    tagged = "abc123";
+    fail = "npm ci exited 1";
+    await startCellImage(deps());
+    assert.equal((await readCellImage(db.pool))?.built, "abc123");
     fail = null;
     await pollCellImage(deps());
     assert.equal((await readCellImage(db.pool))?.built, next);

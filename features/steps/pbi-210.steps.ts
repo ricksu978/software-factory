@@ -121,6 +121,9 @@ function deps(c: Ctx): CellImageDeps {
         c.images.set(image.id, image);
         c.tags.set(tag, image.id);
       },
+      async revision(tag) {
+        return current(c, tag)?.labels[REVISION_LABEL] ?? null;
+      },
     },
     tag: CELL_IMAGE,
     log: { log: () => {}, error: () => {} },

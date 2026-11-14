@@ -129,7 +129,7 @@ const shortSha = (sha: string) => escapeHtml(sha.slice(0, 7));
 
 /** Floor's lines for the cell image: the commit it was built from, then a restart's commit when main's changes need one. */
 function cellImageStatus(c: CellImage): string {
-  const built = `<p class="muted">The cell image was built from commit ${c.built ? `<code>${shortSha(c.built)}</code>` : "not known yet"}.</p>`;
+  const built = `<p class="muted">The cell image was built from commit ${c.built ? `<code>${shortSha(c.built)}</code>` : "not known: it carries no commit label, as an image built from a checkout with uncommitted edits doesn't"}.</p>`;
   const restart = c.restart
     ? `<p class="banner" role="status">A restart is needed to pick up main's commit <code>${shortSha(c.restart)}</code>. It changes code the control plane or the worker runs, so the cell image isn't rebuilt until the factory restarts.</p>`
     : "";

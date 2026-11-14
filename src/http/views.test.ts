@@ -119,7 +119,7 @@ describe("floorPage", () => {
     const built = floor({ built: "aaa1111222233334444", restart: null });
     assert.match(built, /cell image was built from commit <code>aaa1111<\/code>/);
     assert.doesNotMatch(built, /restart is needed/);
-    assert.match(floor({ built: null, restart: null }), /built from commit not known yet/);
+    assert.match(floor({ built: null, restart: null }), /built from commit not known: it carries no commit label/);
     assert.match(floor({ built: "aaa1111", restart: "bbb2222333" }), /A restart is needed to pick up main's commit <code>bbb2222<\/code>/);
   });
 });
