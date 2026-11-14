@@ -109,11 +109,11 @@ When("I read {string}", function (path: string) {
   ctx(this).doc = read(this, path);
 });
 
-Then("it runs on {string} and {string}", function (a: string, b: string) {
+Then("it runs on {string} alone", function (event: string) {
   const on = at(ctx(this).doc, "on");
   assert.ok(on, "the workflow is missing or has no triggers");
   const events = Array.isArray(on) ? on : typeof on === "object" ? Object.keys(on) : [on];
-  assert.ok(events.includes(a) && events.includes(b), `triggers are ${JSON.stringify(events)}`);
+  assert.deepEqual(events, [event], `triggers are ${JSON.stringify(events)}`);
 });
 
 Then("one of its jobs runs {string}, {string} and {string}", function (a: string, b: string, c: string) {

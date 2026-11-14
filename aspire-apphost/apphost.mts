@@ -31,13 +31,14 @@ const storage = await builder.addAzureStorage('storage').runAsEmulator({
 const blobs = await storage.addBlobs('blobs');
 
 // Keycloak is the local sign-in provider (redesign step 5a). It is pinned to 7430 even under FACTORY_FLOAT_PORTS,
-// because the issuer URL contains the port and users are keyed on the issuer. It has no data volume, so every start
+// because the issuer URL contains the port and users are keyed on the issuer. Under FACTORY_FLOAT_PORTS=1 migrate still
+// asks the running Keycloak for its issuer rather than assume 7430 (step 5c). It has no data volume, so every start
 // imports the realm afresh from keycloak/: the `dashboard` client, the audience mapper, the test owner and the e2e
 // client. API_AUDIENCE is the `aud` the realm's audience mapper puts in access tokens. The two must agree.
 // The realm is a dev identity (a committed test owner password, a direct-grant client, no TLS), so like the dev login
 // it starts only under `aspire run`. Anything published uses whatever IdP is configured there (design §04).
 const apiAudience = 'factory-api';
-if (runMode) await builder.addKeycloak('keycloak', { port: 7430 }).withRealmImport('./keycloak');
+const keycloak = runMode ? await builder.addKeycloak('keycloak', { port: 7430 }).withRealmImport('./keycloak') : null;
 
 const secret = (name: string) => builder.addParameter(name, { secret: true });
 const claudeToken = await secret('claude-oauth-token');
@@ -98,6 +99,13 @@ const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
 if (runMode) {
   for (const app of [migrate, control]) {
     await app.withEnvironment('FACTORY_ENV', 'local').withEnvironment('FACTORY_DEV_LOGIN', devLogin);
+  }
+  // Migrate seeds the realm's test owner, keyed on the realm's issuer. Under floating ports it reads that issuer from
+  // the running Keycloak, which withReference() points it at through services__keycloak__http__0. With pinned ports
+  // migrate never asks Keycloak, so it doesn't wait for it, and control and the worker don't wait on it through migrate.
+  if (keycloak) {
+    await migrate.withEnvironment('FACTORY_FLOAT_PORTS', floatPorts ? '1' : '0');
+    if (floatPorts) await migrate.withReference(keycloak).waitFor(keycloak);
   }
   // The worker signs no one in, so it needs local mode but no dev login.
   await worker.withEnvironment('FACTORY_ENV', 'local');
