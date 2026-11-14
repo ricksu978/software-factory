@@ -782,7 +782,7 @@ describe("runCell", () => {
     assert.equal(t.event, "blocked");
     assert.match(t.question.body, /base fails in the cell/);
     assert.ok(t.question.body.includes(base.slice(0, 7)));
-    assert.deepEqual(t.question.baseFailure, { sha: base, tests: ["parses the config"] });
+    assert.deepEqual(t.question.baseFailure, { sha: base, tests: ["parses the config"], base: "main" });
     const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
     assert.match(dod.body.verdicts[0].reason, /fails the same tests/);
     assert.equal(git(h.dir, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH);
