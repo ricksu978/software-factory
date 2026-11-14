@@ -8,7 +8,8 @@ import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
-import { keepSplit, keptSplit } from "../store/splits.ts";
+import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
+import { doneChildren, filedChildren, keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -160,7 +161,7 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
 /**
  * One pass over a backlog source. In order: new and edited items; the PRs of InReview, InProgress and NeedsInput items;
  * withdrawals, criteria changes and dependencies of the other items the factory holds; re-gates after a readiness
- * input changed; and the gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or
+ * input changed; the gate on every Eligible item; and Split parents whose children are all Done. Each item's failure is its own, so a judge on a usage limit or
  * one unreachable PR never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
@@ -311,8 +312,22 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       }
       // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
       // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
-      if (out.filed) await transitionItem(c, row.id, "split_filed", system);
+      // The move keeps the children filed, so step 5 knows which of the parent's sub-issues are the split's (PBI 226).
+      if (out.filed) await transitionItem(c, row.id, "split_filed", system, { children: out.children ?? [] });
     });
+  });
+
+  w.step("closing split parents");
+  // 5. A Split parent whose filed children are all Done moves to Done (PBI 226). A sub-issue added by hand isn't one
+  //    of them. The comment, keyed on the parent, and the close as completed both go before the move, so the next
+  //    poll retries a failed one, and the move is last, so a Done parent is never read again.
+  await each(await items(pool, sourceId, ["Split"]), (row) => `closing split parent ${row.external_id}`, async (row) => {
+    const filed = await filedChildren(pool, row.id);
+    const done = filed && (await doneChildren(pool, sourceId, filed));
+    if (!done) return;
+    await adapter.comment(row.external_id, splitDoneComment(done), splitDoneKey(row.external_id));
+    await adapter.close(row.external_id);
+    await move(pool, row.id, "children_done");
   });
 
   w.step("saving the cursor");

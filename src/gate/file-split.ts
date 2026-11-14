@@ -105,14 +105,15 @@ export async function priorFiling(parent: FactoryItem, children: SplitChild[], b
  * second set, and a filing that stopped partway is finished without filing any child twice. Only once every child is
  * filed, linked, placed and blocked does the parent get its one link comment, through `adapter.comment`, and lose its
  * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
- * poll. Returns true when the split is filed, false when the parent was already split another way. `known` is a
+ * poll. Returns the filed children, in order, when the split is filed, and null when the parent was already split
+ * another way. The poller keeps them on the parent's move to Split, to know when they're all Done (PBI 226). `known` is a
  * `priorFiling` the caller already read, so the gate can word its proposal comment without reading twice.
  */
 export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps,
-  known?: PriorFiling | null): Promise<boolean> {
+  known?: PriorFiling | null): Promise<ChildIssue[] | null> {
   const { board } = deps;
   const prior = known === undefined ? await priorFiling(parent, children, board) : known;
-  if (!prior) return false;
+  if (!prior) return null;
   const repo = parent.repo!;
   const key = splitKey(parent);
   const { subs, found } = prior;
@@ -135,5 +136,5 @@ export async function fileSplit(parent: FactoryItem, children: SplitChild[], ada
   // The comment goes before the label comes off: a parent without its label is never gated again to post it.
   await adapter.comment(parent.externalId, filedComment(filed, deps.optInLabel), `split-filed:${key}`);
   await board.removeLabel(parent.externalId, deps.optInLabel);
-  return true;
+  return filed;
 }

@@ -71,7 +71,8 @@ async function setup(fail: string[] = []) {
 describe("fileSplit", () => {
   test("files each child, links it, places it, blocks it, then comments on the parent and takes its label off", async () => {
     const { s, fake, run } = await setup();
-    assert.equal(await run(), true);
+    const filed = await run();
+    assert.deepEqual(filed, s.issues.map(({ body: _, ...i }) => i));
     assert.deepEqual(s.issues.map((i) => i.title), ["Card", "Bank", "Receipt"]);
     assert.deepEqual(s.subs, ["100", "101", "102"]);
     assert.deepEqual([...s.board.values()], ["Backlog", "Backlog", "Backlog"]);
@@ -86,8 +87,9 @@ describe("fileSplit", () => {
 
   test("a second run files nothing more and posts no second comment", async () => {
     const { s, fake, run } = await setup();
-    await run();
-    assert.equal(await run(), true);
+    const first = await run();
+    // The second run returns the same children, in order, so the parent's record of them is the same (PBI 226).
+    assert.deepEqual(await run(), first);
     assert.equal(s.issues.length, 3);
     assert.equal(s.subs.length, 3);
     assert.equal((await fake.comments("12")).length, 1);
@@ -118,7 +120,7 @@ describe("fileSplit", () => {
   test("a parent with a sub-issue the factory didn't file for this split is never split", async () => {
     const { s, fake, run } = await setup();
     s.subs.push("7");
-    assert.equal(await run(), false);
+    assert.equal(await run(), null);
     assert.equal(s.issues.length, 0);
     assert.deepEqual(s.labels, ["factory"]);
     assert.deepEqual(await fake.comments("12"), []);
@@ -129,7 +131,7 @@ describe("fileSplit", () => {
     await run();
     const changed = { ...parent, body: "new text" };
     const deps = { board: memoryBoard(s), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
-    assert.equal(await fileSplit(changed, children, fake.adapter, deps), false);
+    assert.equal(await fileSplit(changed, children, fake.adapter, deps), null);
     assert.equal(s.issues.length, 3);
   });
 
