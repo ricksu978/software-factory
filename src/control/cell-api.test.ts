@@ -434,7 +434,24 @@ describe("cell API", dbTest, () => {
     );
     await expired("restart");
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+    // A later claim's cell died before it opened a green attempt: the restart still ended this attempt's claim.
     await expired();
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.resume, { stageId: "green", attempt: 1 });
+  });
+
+  test("context offers no resume for a dead cell's attempt when a later claim's restart sent the item back (PBI 239)", async () => {
+    const cell = await claimed("green");
+    const item = (await runRow(cell.runId)).item_id;
+    const expired = (reason?: string) => db.pool.query(
+      "insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'scheduler', $1, 'transition', $2)",
+      [item, JSON.stringify({ ...(reason ? { reason } : {}), from: "InProgress", to: "Queued", event: "lease_expired" })],
+    );
+    // A restart before the attempt started belongs to an earlier claim and says nothing about it.
+    await expired("restart");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, message) values ($1, 'green', 1, 'stopped', $2)", [cell.runId, LEASE_RAN_OUT]);
+    // The attempt's cell died, then the next claim opened only a merge attempt and a restart stopped it.
+    await expired();
+    await expired("restart");
     assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.resume, null);
   });
 

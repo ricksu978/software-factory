@@ -185,13 +185,16 @@ const routes: Record<string, Route> = {
     // it from the work in progress on the branch instead of starting the stage over. The factory also closes as stopped,
     // with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may have pushed nothing,
     // or a broken half-commit, so the next cell starts that stage fresh, as it did when such an attempt stayed started.
-    // A lease-message attempt resumes only when the item's newest lease_expired, the one that sent it back to Queued before
-    // this claim, was a restart's: the launcher stopped that cell, as stopForRestart does once the wrap-up runs out.
+    // A lease-message attempt resumes only when the lease_expired that ended its own claim, the first one at or after the
+    // attempt started, was a restart's: the launcher stopped that cell, as stopForRestart does once the wrap-up runs out.
+    // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
+    // event.at and stage_run.started_at both come from the database's clock, so they compare.
     const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean }>(
       `select s.attempt, s.status, s.message,
          coalesce((select e.payload->>'reason' = 'restart' from event e
                    where e.item_id = $3 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired'
-                   order by e.at desc limit 1), false) as restarted
+                     and e.at >= s.started_at
+                   order by e.at limit 1), false) as restarted
        from stage_run s where s.run_id = $1 and s.stage_id = $2 order by s.attempt desc limit 1`,
       [run.run_id, run.next_stage, run.item_id],
     );
