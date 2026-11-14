@@ -7,7 +7,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { criteriaHash, pollOnce } from "./poller.ts";
+import { criteriaHash, pollOnce, readinessFingerprint } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -669,6 +669,54 @@ describe("pollOnce", dbTest, () => {
     }
   });
 
+  test("given a defaults reader, the gate and the fingerprint read the defaults from it, not the policy directory (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const held: Record<string, string> = { dor: "- [ ] Names the user it serves\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" };
+    const defaults = async (name: string) => held[name];
+    const asked: string[] = [];
+    const recording = async (item: FactoryItem, dor: Policy) => {
+      asked.push(...dor.criteria.map((c) => c.text));
+      return judge(item, dor);
+    };
+    const pollWith = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: recording, sourceId, defaults });
+    verdict = "failed";
+    const ext = await seed();
+    await pollWith();
+    assert.deepEqual(asked, ["Names the user it serves"]);
+    const before = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal((await row(ext)).readiness_policy_sha, before);
+    await pollWith();
+    assert.deepEqual(judged, [ext], "the same defaults don't re-gate");
+    held.risk = "r changed\n";
+    assert.notEqual(await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults }), before);
+    verdict = "passed";
+    await pollWith();
+    assert.equal((await row(ext)).state, "Queued");
+  });
+
+  test("a pinnable defaults reader is pinned once per poll, so a move mid-poll can't mix two commits (PBI 261)", async () => {
+    commit("c2", { ".factory/config.yml": files[".factory/config.yml"], ".factory/dod.md": files[".factory/dod.md"] });
+    const commits: Record<string, string>[] = [{ dor: "- [ ] Old\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r\n" }];
+    let pins = 0;
+    // Each pin fixes the latest commit; a fresh read of the moving ref follows the latest, and moves it after the dor read.
+    const moving = async (name: string) => {
+      const text = commits[commits.length - 1][name];
+      if (name === "dor") commits.push({ dor: "- [ ] New\n", scenarios: "s\n", "pr-review": "- [ ] p\n", risk: "r new\n" });
+      return text;
+    };
+    const defaults = Object.assign(moving, {
+      pin: async () => {
+        pins++;
+        const at = commits[commits.length - 1];
+        return async (name: string) => at[name];
+      },
+    });
+    const sha = await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults });
+    assert.equal(pins, 1, "one pin for the whole poll");
+    const pinnedFirst = { ...commits[0] };
+    assert.equal(sha, await readinessFingerprint({ pool: db.pool, repoHost: host, repo: REPO, defaults: async (n: string) => pinnedFirst[n] }));
+  });
+
   test("a new readiness logic re-gates a NotReady item once, as a policy change, and the same logic never again", async () => {
     verdict = "failed";
     const ext = await seed();
@@ -755,6 +803,35 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual(await events("factory_merged"), [{ repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"] }]);
     });
 
+    test("a NeedsInput merge that went through while the call failed gets the question's note and names the question when the next poll sees it (PBI 262)", async () => {
+      await allow("octo");
+      const { ext, id, pr, p } = await ready("NeedsInput");
+      const qid = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'Address failed', now()) returning id", [id],
+      )).rows[0].id;
+      const mergePr = host.mergePr.bind(host);
+      host.mergePr = async (...args) => {
+        await mergePr(...args);
+        throw new Error("502 Bad Gateway");
+      };
+      await poll();
+      assert.equal(p.merged, true);
+      assert.equal((await row(ext)).state, "NeedsInput");
+      assert.deepEqual(await events("factory_merge_attempt"), [
+        { repo: REPO, prNumber: pr, headSha: "h1", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed", questionId: qid },
+      ]);
+      host.mergePr = mergePr;
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      const q = (await db.pool.query("select closed_at, answer, closed_note from question where id = $1", [qid])).rows[0];
+      assert.ok(q.closed_at);
+      assert.equal(q.answer, null);
+      assert.equal(q.closed_note, `The factory merged PR #${pr} as commit m9.`);
+      assert.deepEqual(await events("factory_merged"), [
+        { repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed" },
+      ]);
+    });
+
     test("a person's merge after a refused attempt isn't logged as the factory's", async () => {
       await allow("octo");
       const { ext, p } = await ready();
@@ -815,6 +892,145 @@ describe("pollOnce", dbTest, () => {
       await poll();
       assert.equal((await row(a.ext)).state, "Accepted");
       assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
+    });
+
+    test("a clean, approved NeedsInput PR merges, its question closes with a note naming the merge, and the event names the question (PBI 262)", async () => {
+      await allow("octo");
+      const { ext, id, pr, run } = await ready("NeedsInput");
+      await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'Address failed', now())", [id]);
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m9");
+      const q = (await db.pool.query("select closed_at, answer, closed_note from question where item_id = $1", [id])).rows[0];
+      assert.ok(q.closed_at);
+      assert.equal(q.answer, null);
+      assert.equal(q.closed_note, `The factory merged PR #${pr} as commit m9.`);
+      assert.deepEqual(await events("factory_merged"), [
+        { repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed" },
+      ]);
+      const moves = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition'", [id])).rows.map((r) => r.payload);
+      assert.deepEqual(moves, [{ from: "NeedsInput", to: "Accepted", event: "merged" }]);
+    });
+
+    test("a held NeedsInput item, or one whose PR isn't clean, isn't merged and keeps its question open with no note (PBI 262)", async () => {
+      await allow("octo");
+      const a = await ready("NeedsInput");
+      await db.pool.query("update item set held = true where id = $1", [a.id]);
+      const b = await ready("NeedsInput");
+      b.p.mergeState = "blocked";
+      for (const h of [a, b]) await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [h.id]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b]) {
+        assert.equal((await row(h.ext)).state, "NeedsInput");
+        const q = (await db.pool.query("select closed_at, closed_note from question where item_id = $1", [h.id])).rows[0];
+        assert.deepEqual(q, { closed_at: null, closed_note: null });
+      }
+    });
+
+    test("a NeedsInput PR with unaddressed trusted changes, an open trusted thread or a conflict isn't merged, and the item stays on its question (PBI 262)", async () => {
+      await allow("octo");
+      await allow("kim");
+      const seen = "2026-11-06T10:00:00Z";
+      const a = await ready("NeedsInput");
+      const b = await ready("NeedsInput");
+      const c = await ready("NeedsInput");
+      for (const h of [a, b, c]) await db.pool.query("update run set reviews_seen_at = $2 where id = $1", [h.run, seen]);
+      a.p.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:30:00Z", author: "kim", body: "Fix it." });
+      b.p.reviews.push({ state: "commented", submittedAt: "2026-11-06T10:30:00Z", author: "kim" });
+      host.reviewComments.set(`${b.p.repo}#${b.pr}`, [{ threadId: "t1", path: "a.ts", line: 1, author: "kim", body: "Cite the probe.", submittedAt: "2026-11-06T10:30:00Z" }]);
+      c.p.mergeable = false;
+      for (const h of [a, b, c]) await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [h.id]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b, c]) {
+        assert.equal((await row(h.ext)).state, "NeedsInput");
+        const q = (await db.pool.query("select closed_at, closed_note from question where item_id = $1", [h.id])).rows[0];
+        assert.deepEqual(q, { closed_at: null, closed_note: null });
+      }
+    });
+  });
+
+  describe("re-queuing an item stopped by a red base once CI passes on it (PBI 260)", () => {
+    /** A NeedsInput item whose open question says the base failed at `sha`, or asks something else with `sha` null. */
+    async function waiting(sha: string | null, base?: string) {
+      const h = await held("NeedsInput");
+      const failure = sha === null ? null : { sha, tests: ["parses the config"], ...(base ? { base } : {}) };
+      const q = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, base_failure) values ($1, 'needs_input', 'The base fails in the cell.', $2) returning id",
+        [h.id, failure === null ? null : JSON.stringify(failure)],
+      )).rows[0].id;
+      return { ...h, question: q };
+    }
+    const question = async (id: string) =>
+      (await db.pool.query("select answer, answered_by, decision from question where id = $1", [id])).rows[0];
+    const requeues = async (itemId: string) =>
+      (await db.pool.query("select actor, actor_id, payload from event where item_id = $1 and kind = 'requeued_after_base_passed'", [itemId])).rows;
+
+    test("CI passing on a newer base commit answers the question as the factory and logs one system event", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b3`, "pending");
+      host.checks.set(`${REPO}@b2`, "success");
+      const w = await waiting("b1", "main");
+      await poll();
+      await poll();
+      const q = await question(w.question);
+      assert.equal(q.answered_by, null);
+      assert.match(q.answer, /CI passed on .*b2/);
+      const events = await requeues(w.id);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].actor, "system");
+      assert.equal(events[0].payload.sha, "b2");
+      assert.equal(events[0].payload.base, "main");
+    });
+
+    test("CI on the failing commit, an older one, or still pending or failing on a newer one leaves the question open", async () => {
+      host.branches.set(`${REPO}@main`, ["b0", "b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b0`, "success");
+      host.checks.set(`${REPO}@b1`, "success");
+      host.checks.set(`${REPO}@b2`, "pending");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
+    test("a pass behind a newer failing commit leaves the question open, since the base is red again", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2", "b3"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      host.checks.set(`${REPO}@b3`, "failure");
+      const w = await waiting("b1", "main");
+      await poll();
+      assert.equal((await question(w.question)).answer, null);
+      assert.deepEqual(await requeues(w.id), []);
+    });
+
+    test("a question with no base failure, or a held item, isn't answered, and a released one is", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const other = await waiting(null);
+      const hold = await waiting("b1", "main");
+      await db.pool.query("update item set held = true where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.equal((await question(hold.question)).answer, null);
+      await db.pool.query("update item set held = false where id = $1", [hold.id]);
+      await poll();
+      assert.equal((await question(other.question)).answer, null);
+      assert.notEqual((await question(hold.question)).answer, null);
+      assert.deepEqual(await requeues(other.id), []);
+    });
+
+    test("an item waits on its own base branch's CI, and a question without a branch waits on main", async () => {
+      host.branches.set(`${REPO}@main`, ["b1", "b2"]);
+      host.branches.set(`${REPO}@release`, ["r1"]);
+      host.checks.set(`${REPO}@b2`, "success");
+      const onRelease = await waiting("r1", "release");
+      const onMain = await waiting("b1");
+      await poll();
+      assert.equal((await question(onRelease.question)).answer, null);
+      assert.notEqual((await question(onMain.question)).answer, null);
     });
   });
 });

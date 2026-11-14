@@ -23,10 +23,10 @@ import { open, startControlPlane, ctx as p89 } from "./pbi-89.steps.ts";
 import { ctx as p17, freshDb } from "./pbi-17.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
-type Image = { id: string; labels: Record<string, string>; files: Map<string, string> };
+export type Image = { id: string; labels: Record<string, string>; files: Map<string, string> };
 type Cell = { name: string; itemId: string; image: Image | null };
 
-type Ctx = {
+export type Ctx = {
   root: string;
   origin: string;
   /** Pushes new commits to `main`, as a merged PR does. */
@@ -53,14 +53,14 @@ type Ctx = {
   local?: { merged: string; before: string; imageBefore: string };
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const c = (world as { pbi210?: Ctx }).pbi210;
   assert.ok(c, "the Background hasn't set up the fake main");
   return c;
 }
 
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "pbi-210", GIT_AUTHOR_EMAIL: "pbi-210@test", GIT_COMMITTER_NAME: "pbi-210", GIT_COMMITTER_EMAIL: "pbi-210@test" };
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
+export const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
 
 // Cell-side files, control plane and worker files, and code both sides share.
 const FILES = [
@@ -68,13 +68,13 @@ const FILES = [
   "src/scheduler/scheduler.ts", "src/worker/main.ts", "src/control/cell-api.ts", "src/core/states.ts",
 ];
 
-function write(dir: string, path: string, text: string) {
+export function write(dir: string, path: string, text: string) {
   mkdirSync(dirname(join(dir, path)), { recursive: true });
   writeFileSync(join(dir, path), text);
 }
 
 /** Commits a change to each of `paths` in `dir`, named `name`, and records its sha. */
-function commit(c: Ctx, dir: string, name: string, paths: string[]): string {
+export function commit(c: Ctx, dir: string, name: string, paths: string[]): string {
   for (const p of paths) write(dir, p, `${readOr(join(dir, p))}${name} changed ${p}\n`);
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", name);
@@ -83,7 +83,7 @@ function commit(c: Ctx, dir: string, name: string, paths: string[]): string {
   return sha;
 }
 
-function readOr(file: string): string {
+export function readOr(file: string): string {
   try {
     return readFileSync(file, "utf8");
   } catch {
@@ -91,7 +91,7 @@ function readOr(file: string): string {
   }
 }
 
-const sha = (c: Ctx, name: string) => {
+export const sha = (c: Ctx, name: string) => {
   const s = c.shas.get(name);
   assert.ok(s, `no commit is named ${name}`);
   return s;
@@ -108,7 +108,7 @@ function snapshot(dir: string, under = dir, files = new Map<string, string>()): 
   return files;
 }
 
-function deps(c: Ctx): CellImageDeps {
+export function deps(c: Ctx): CellImageDeps {
   return {
     pool: need().pool,
     checkout: c.checkout,
@@ -130,7 +130,7 @@ function deps(c: Ctx): CellImageDeps {
   };
 }
 
-const current = (c: Ctx, tag = CELL_IMAGE): Image | null => {
+export const current = (c: Ctx, tag = CELL_IMAGE): Image | null => {
   const id = c.tags.get(tag);
   return id ? c.images.get(id) ?? null : null;
 };
@@ -149,10 +149,15 @@ function builtFrom(c: Ctx, image: Image | null, name: string) {
 }
 
 After({ tags: "@pbi-210", ...long }, async function () {
-  const w = this as { pbi210?: Ctx; pbi89?: unknown };
+  await endFactory(this);
+});
+
+/** Closes the control plane Floor was read through, if any, and removes the fake `main` and the checkout. */
+export async function endFactory(world: object) {
+  const w = world as { pbi210?: Ctx; pbi89?: unknown };
   const c = w.pbi210;
   if (w.pbi89) {
-    const control = p89(this);
+    const control = p89(world);
     await control.close?.();
     if (control.server) {
       control.server.closeAllConnections();
@@ -160,7 +165,7 @@ After({ tags: "@pbi-210", ...long }, async function () {
     }
   }
   if (c?.root) rmSync(c.root, { recursive: true, force: true });
-});
+}
 
 // ---- the Background ----
 
@@ -180,6 +185,14 @@ Given("the cell image {string} was built from commit {string}", long, async func
 async function startFactory(world: object, name: string) {
   // Two cells can run at once, so PBI 210's side-by-side scenario can start one beside the one already running.
   await freshDb(world, 2);
+  await startMain(world, name);
+}
+
+/**
+ * `main` at commit `name`, holding FILES and then `files`, the operator's checkout cloned from it, and the factory's
+ * start-up build, on the database as it is. PBI 261's Background starts the factory this way.
+ */
+export async function startMain(world: object, name: string, files: Record<string, string> = {}) {
   const since = (await need().pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0].now;
   const root = mkdtempSync(join(tmpdir(), "pbi210-"));
   const c: Ctx = {
@@ -190,6 +203,7 @@ async function startFactory(world: object, name: string) {
   git(root, "init", "-q", "--bare", "-b", "main", c.origin);
   git(root, "init", "-q", "-b", "main", c.seed);
   for (const p of FILES) write(c.seed, p, `${p}\n`);
+  for (const [p, text] of Object.entries(files)) write(c.seed, p, text);
   commit(c, c.seed, name, []);
   git(c.seed, "remote", "add", "origin", c.origin);
   git(c.seed, "push", "-q", "origin", "main");
@@ -278,8 +292,13 @@ function launcher(c: Ctx) {
 }
 
 Given("item {string} is running in cell {string} on the cell image built from commit {string}", long, async function (item: string, cell: string, _name: string) {
-  const c = ctx(this);
-  const s = p17(this);
+  await runningIn(this, item, cell);
+});
+
+/** Item `item` InProgress in cell `cell`, which started on the image the tag pointed at then: the start-up build's. */
+export async function runningIn(world: object, item: string, cell: string) {
+  const c = ctx(world);
+  const s = p17(world);
   const source = await need().pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:' || gen_random_uuid()) returning id");
   const r = await need().pool.query<{ id: string }>(
     `insert into item (source_id, external_id, title, state, backlog_rank, lease_generation, lease_owner, lease_expires)
@@ -291,7 +310,7 @@ Given("item {string} is running in cell {string} on the cell image built from co
   await need().pool.query("insert into run (item_id, next_stage, execution_name, branch) values ($1, 'green', $2, 'factory/pbi-x-r1')", [r.rows[0].id, cell]);
   // The cell started on whatever image the tag pointed at then: the one the start-up build made.
   c.cells.set(cell, { name: cell, itemId: r.rows[0].id, image: current(c) });
-});
+}
 
 When("the scheduler starts a cell for item {string}", long, async function (_item: string) {
   const c = ctx(this);
@@ -304,7 +323,7 @@ When("the scheduler starts a cell for item {string}", long, async function (_ite
   });
 });
 
-function cellFor(world: object, item: string): Cell {
+export function cellFor(world: object, item: string): Cell {
   const c = ctx(world);
   const id = p17(world).items[item];
   const cell = [...c.cells.values()].find((x) => x.itemId === id);
@@ -331,7 +350,8 @@ Then("cell {string} still runs the cell image built from commit {string}", funct
 
 // ---- polling ----
 
-async function poll(world: object) {
+/** One poll of `main` by the worker, as its cell image loop makes, with any exit recorded rather than taken. */
+export async function poll(world: object) {
   const c = ctx(world);
   c.polled = true;
   if (c.local) return waitForLocalRebuild(c);
@@ -357,8 +377,10 @@ When("the factory polls again", long, async function () {
 
 // ---- the image ----
 
-Then("the cell image {string} has been rebuilt from commit {string}", function (tag: string, name: string) {
+// Both a Given and a Then. Before the factory has polled, as in PBI 261, the Given has the worker poll `main` first.
+Then("the cell image {string} has been rebuilt from commit {string}", long, async function (tag: string, name: string) {
   const c = ctx(this);
+  if (!c.polled) await poll(this);
   assert.ok(c.builds > 0, "the cell image hasn't been rebuilt");
   builtFrom(c, current(c, tag), name);
 });

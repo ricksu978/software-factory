@@ -12,9 +12,11 @@ import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
+import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
+import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
 import type { Git } from "./git.ts";
@@ -70,14 +72,14 @@ class Stop extends Error {}
 class Blocked extends Error {}
 /** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
 class BaseFails extends Blocked {
-  readonly baseFailure: { sha: string; tests: string[] };
+  readonly baseFailure: { sha: string; tests: string[]; base: string };
   readonly base: string;
   readonly lines: { criterion: string; tests: string[] }[];
   constructor(base: string, sha: string, lines: { criterion: string; tests: string[] }[]) {
     super(baseQuestion(base, sha, lines, false));
     this.base = base;
     this.lines = lines;
-    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))] };
+    this.baseFailure = { sha, tests: [...new Set(lines.flatMap((l) => l.tests))], base };
   }
   /** The question to ask, which says the work is on the branch only when the cell pushed it. */
   question(pushed: boolean): string {
@@ -680,6 +682,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
   // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
+    const began = d.now().getTime();
     for (;;) {
       const s = await api.checks(sha).catch(async (e: unknown) => {
         // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
@@ -696,6 +699,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         throw e;
       });
       if (s !== "pending") return s;
+      const question = await pendingCiQuestion(api, sha, d.now().getTime() - began);
+      if (question) throw new Blocked(question);
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
     }
@@ -918,7 +923,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Returns findings that send the item back to green, or null once the PR is open and CI passed. The item stays
   // InProgress: the PR review moves it to InReview once it passes (PBI 128), or open-pr does when there's no review.
   const openPr = async (): Promise<string[] | null> => {
-    const attempt = await begin("open-pr");
+    let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
     if (ctx.prNumber !== null) {
@@ -927,8 +932,21 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         throw new AlreadyMerged(`PR #${ctx.prNumber} for \`${ctx.branch}\` has already merged${state.mergeSha ? ` as ${state.mergeSha}` : ""}, so the factory opens no new PR for it.`);
       }
     }
-    const summary = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`, lockedNote()));
-    await keepLock("open-pr", `open-pr(${tag}): summary`);
+    // PBI 216: the reply is cleaned of chatter before it reaches the PR body. One that still doesn't start with a
+    // `## Problem` heading fails the attempt, and the next one is told to reply with the body alone.
+    const tries = retriesOf("open-pr") + 1;
+    let text = "";
+    for (let tried = 1, last: string[] = []; ; tried++) {
+      const reply = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`, lockedNote(), retryNote(last)));
+      await keepLock("open-pr", `open-pr(${tag}): summary`);
+      const clean = summaryOf(reply);
+      if ("body" in clean) { text = clean.body; break; }
+      if (current) current.message = clean.finding;
+      if (tried >= tries) throw new Blocked(`Open-pr failed after ${tries} attempt${tries === 1 ? "" : "s"}:\n- ${clean.finding}`);
+      last = [clean.finding];
+      await end("failed");
+      attempt = await begin("open-pr");
+    }
     // After the summary's commit, so the checklist always names the head the PR is opened at.
     const stale = await freshDod("open-pr", attempt);
     const moved = stale.length ? stale : await dodHeadHeld();
@@ -941,7 +959,6 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await push();
     const head = await git.head();
     const risk = await shadowTier();
-    const text = summary.ok ? summary.text : "";
     const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(text, risk) });
     await api.pr({ prNumber: pr.number, prUrl: pr.url });
     opened = { number: pr.number, url: pr.url, summary: text, risk };

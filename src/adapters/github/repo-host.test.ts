@@ -20,6 +20,7 @@ function stubGitHub(routes: Record<string, (p: Record<string, any>) => unknown>,
   return { calls, host: githubRepoHost(app, 7) };
 }
 
+const commit = (sha: string, ...parents: string[]) => ({ sha, parents: parents.map((p) => ({ sha: p })) });
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
 describe("githubRepoHost", () => {
@@ -305,6 +306,21 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("pendingChecksOnSha names each check run not yet completed and each pending commit status, and none that finished", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { name: "lint", status: "completed", conclusion: "success" },
+        { name: "ci", status: "in_progress", conclusion: null },
+        { name: "e2e", status: "queued", conclusion: null },
+      ] }),
+      "GET /repos/{owner}/{repo}/commits/{ref}/status": () => ({ total_count: 2, statuses: [
+        { context: "deploy/preview", state: "pending" },
+        { context: "license", state: "success" },
+      ] }),
+    });
+    assert.deepEqual(await host.pendingChecksOnSha("o/r", "abc"), ["ci", "e2e", "deploy/preview"]);
+  });
+
   test("ciChecksOnSha names each check run with its verdict and URL, and gives null when none reported (PBI 229)", async () => {
     const run = (name: string, status: string, conclusion: string | null) => ({ name, status, conclusion, html_url: `https://github.com/o/r/runs/${name}` });
     const { host, calls } = stubGitHub({
@@ -390,30 +406,46 @@ describe("githubRepoHost", () => {
     assert.equal(await host.firstParent("o/r", "root"), null);
   });
 
-  test("commitsAfter follows first parents from the branch head back to the sha, oldest first, and skips a merged-in side branch (PBI 255)", async () => {
-    const commit = (sha: string, ...parents: string[]) => ({ sha, parents: parents.map((p) => ({ sha: p })) });
-    const { calls, host } = stubGitHub({
-      "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", commits: [commit("s1", "a"), commit("b", "a"), commit("c", "b", "s1"), commit("d", "c")] }),
-      "GET /repos/{owner}/{repo}/branches/{branch}": () => ({ commit: { sha: "d" } }),
-    });
-    assert.deepEqual(await host.commitsAfter("o/r", "main", "a"), ["b", "c", "d"]);
-    assert.equal(calls[0].params.basehead, "a...main");
-    for (const status of ["diverged", "behind"]) {
-      const other = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status, commits: [commit("x", "y")] }) });
-      assert.deepEqual(await other.host.commitsAfter("o/r", "main", "a"), []);
+  test("commitsAfter lists the branch's commits after the sha when it's ahead, and none when it's at, behind or off the sha", async () => {
+    const ahead = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 2, commits: [commit("c2", "c1"), commit("c3", "c2")] }) });
+    assert.deepEqual(await ahead.host.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.equal(ahead.calls[0].params.basehead, "c1...main");
+    for (const status of ["identical", "diverged", "behind"]) {
+      const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status, commits: [{ sha: "x" }] }) });
+      assert.deepEqual(await host.commitsAfter("o/r", "main", "c1"), []);
     }
-    assert.deepEqual(await stubGitHub({}).host.commitsAfter("o/r", "main", "a"), []);
+    assert.deepEqual(await stubGitHub({}).host.commitsAfter("o/r", "main", "c1"), []);
   });
 
-  test("commitsAfter reads a compare past its first page, so a stretch longer than one page still reaches the head (PBI 255)", async () => {
-    const shas = Array.from({ length: 230 }, (_, i) => `c${i}`);
-    const all = shas.map((sha, i) => ({ sha, parents: [{ sha: i === 0 ? "a" : shas[i - 1] }] }));
+  test("commitsAfter follows the branch's first parents, leaving out a PR's commits that came in through a merge commit", async () => {
+    // main: c1 -> m (merge of p2), p1 -> p2 branched from c1 and passed its own PR CI.
+    const commits = [commit("p1", "c1"), commit("p2", "p1"), commit("m", "c1", "p2")];
+    const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 3, commits }) });
+    assert.deepEqual(await host.commitsAfter("o/r", "main", "c1"), ["m"]);
+    // c2 landed on main while p1 was open: the line is c2, the merge, then c3, and p1 stays out.
+    const later = [commit("c2", "c1"), commit("p1", "c1"), commit("m", "c2", "p1"), commit("c3", "m")];
+    const { host: host2 } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 4, commits: later }) });
+    assert.deepEqual(await host2.commitsAfter("o/r", "main", "c1"), ["c2", "m", "c3"]);
+  });
+
+  test("commitsAfter reads the last pages when the branch is further ahead than one compare lists", async () => {
+    const all = Array.from({ length: 300 }, (_, i) => commit(`c${i + 1}`, `c${i}`));
     const { calls, host } = stubGitHub({
-      "GET /repos/{owner}/{repo}/compare/{basehead}": (p) => ({ status: "ahead", total_commits: all.length, commits: all.slice((p.page - 1) * p.per_page, p.page * p.per_page) }),
-      "GET /repos/{owner}/{repo}/branches/{branch}": () => ({ commit: { sha: "c229" } }),
+      "GET /repos/{owner}/{repo}/compare/{basehead}": (p) =>
+        p.page ? { status: "ahead", total_commits: 300, commits: all.slice((p.page - 1) * p.per_page, p.page * p.per_page) } : { status: "ahead", total_commits: 300, commits: all.slice(0, 250) },
     });
-    assert.deepEqual(await host.commitsAfter("o/r", "main", "a"), shas);
-    assert.deepEqual(calls.filter((c) => c.route.endsWith("/compare/{basehead}")).map((c) => c.params.page), [1, 2, 3]);
+    const got = await host.commitsAfter("o/r", "main", "c0");
+    assert.equal(got.length, 200);
+    assert.equal(got.at(-1), "c300");
+    assert.deepEqual(calls.map((c) => c.params.page).filter(Boolean).sort(), [2, 3]);
+  });
+
+  test("fakeRepoHost's commitsAfter lists the commits after the sha on its branch, and none for a sha off it", async () => {
+    const fake = fakeRepoHost();
+    fake.branches.set("o/r@main", ["c1", "c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c3"), []);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "zz"), []);
   });
 });
 

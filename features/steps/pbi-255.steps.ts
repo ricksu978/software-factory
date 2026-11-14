@@ -334,9 +334,7 @@ When("the poller runs {int} times", long, async function (times: number) {
   for (let i = 0; i < times; i++) await poll(c);
 });
 
-Given("the poller has run once", long, async function () {
-  await poll(pollCtx(this));
-});
+// "the poller has run once" is PBI 260's step, which polls through the same harness and checks the poll didn't fail.
 
 Given("the poller has run again", long, async function () {
   await poll(pollCtx(this));

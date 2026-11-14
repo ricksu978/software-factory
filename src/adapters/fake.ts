@@ -149,12 +149,13 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
  * `factory[bot]` in `reviewComments`, which postReview returns.
  * PBI 255: each commit's check runs by `repo@sha` in `runs`, a check's log by `repo@sha:check` in `logs`, and each
- * commit's first parent by `repo@sha` in `parents`. A branch's commits in `branches` are oldest first, so commitsAfter
- * answers the ones after a commit.
+ * commit's first parent by `repo@sha` in `parents`.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
+  /** The names of the checks still pending, by `repo@sha`. A sha with none set has none pending. */
+  pendingChecks: Map<string, string[]>;
   /** The named checks CI reported, by `repo@sha` (PBI 229). */
   ciChecks: Map<string, CiCheck[]>;
   files: Map<string, string>;
@@ -174,6 +175,7 @@ export function fakeRepoHost(): RepoHost & {
   let openedThreads = 0;
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
+  const pendingChecks = new Map<string, string[]>();
   const ciChecks = new Map<string, CiCheck[]>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
@@ -190,7 +192,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls, runs, logs, parents,
+    prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls, runs, logs, parents,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -214,11 +216,20 @@ export function fakeRepoHost(): RepoHost & {
     async checksOnSha(repo, sha) {
       return checks.get(`${repo}@${sha}`) ?? "none";
     },
+    async pendingChecksOnSha(repo, sha) {
+      return [...(pendingChecks.get(`${repo}@${sha}`) ?? [])];
+    },
     async ciChecksOnSha(repo, sha) {
       return ciChecks.get(`${repo}@${sha}`) ?? null;
     },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;
+    },
+    async commitsAfter(repo, branch, sha) {
+      // `branches` holds a branch's first-parent line, so there are no merged-in PR commits to leave out.
+      const list = branches.get(`${repo}@${branch}`) ?? [];
+      const at = list.indexOf(sha);
+      return at < 0 ? [] : list.slice(at + 1);
     },
     async requestReviewers(repo, n, fallback) {
       pr(repo, n).reviewers = [...fallback];
@@ -307,11 +318,6 @@ export function fakeRepoHost(): RepoHost & {
     },
     async firstParent(repo, sha) {
       return parents.get(`${repo}@${sha}`) ?? null;
-    },
-    async commitsAfter(repo, branch, sha) {
-      const list = branches.get(`${repo}@${branch}`) ?? [];
-      const at = list.indexOf(sha);
-      return at < 0 ? [] : list.slice(at + 1);
     },
   };
 }
