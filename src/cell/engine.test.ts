@@ -406,6 +406,23 @@ describe("runCell", () => {
     assert.equal(stages.at(-1).message, boom.message);
   });
 
+  test("a base merge whose fetch retries outlast the lease renewal opens no attempt and ends on the renewal (PBI 259)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = harness({ lease: async () => { throw new Error("control plane unreachable"); } });
+    // The fetch keeps retrying until the fence fires, as withRetries does, then rejects with the fence's reason.
+    h.deps.git = { ...h.deps.git, mergeBase: async (_base, fence) => {
+      for (let i = 0; i < 3 && !fence?.signal?.aborted; i++) {
+        mock.timers.tick(60_000);
+        await new Promise((r) => setImmediate(r));
+      }
+      assert.ok(fence?.signal?.aborted, "the fence didn't fire after 3 failed renewals");
+      throw fence!.signal!.reason;
+    } };
+    await assert.rejects(h.run(), /lease renewal failed/);
+    assert.ok(!h.calls.some((c) => c.route === "/stage"), "a fenced cell opened an attempt");
+    assert.ok(!h.calls.some((c) => c.route === "/transition" || c.route === "/upload-url"), "a fenced cell made further calls");
+  });
+
   test("a run resumed at red never calls the agent for understand or specify", async () => {
     const h = harness();
     await h.run();

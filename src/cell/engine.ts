@@ -1162,8 +1162,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
     // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
     // A merge that fails, not on a conflict, such as a fetch still failing on the network after its retries, ends an
-    // attempt of the stage the run resumes at, so the attempt's message says why (PBI 259).
+    // attempt of the stage the run resumes at, so the attempt's message says why (PBI 259). A fenced cell opens no
+    // attempt: the lease is lost or can't be renewed, so it rethrows the fence's reason for finish to act on.
     const conflict = await git.mergeBase(ctx.base, { signal: fence.signal }).catch(async (e: unknown) => {
+      if (fence.signal.aborted) throw fence.signal.reason ?? e;
       if ((STAGE_IDS as readonly string[]).includes(ctx.nextStage)) await begin(ctx.nextStage as StageId);
       throw e;
     });
