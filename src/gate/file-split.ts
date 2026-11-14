@@ -15,8 +15,8 @@ export interface SplitBoard {
   subIssues(parentId: string): Promise<ChildIssue[]>;
   /** The issues in `repo` whose title or body holds `text`, so a child filed but not yet linked is found again. */
   findIssues(repo: string, text: string): Promise<ChildIssue[]>;
-  /** Files a new issue in `repo`, with no label. */
-  createIssue(repo: string, title: string, body: string): Promise<ChildIssue>;
+  /** Files a new issue in `repo`, carrying `labels` as it's filed (PBI 237), or no label when none is given. */
+  createIssue(repo: string, title: string, body: string, labels?: string[]): Promise<ChildIssue>;
   /** Makes `childId` the parent's last sub-issue. */
   addSubIssue(parentId: string, childId: string): Promise<void>;
   /** The issue's status on the parent's board, or null when it isn't on that board. */
