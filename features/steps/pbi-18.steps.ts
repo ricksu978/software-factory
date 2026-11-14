@@ -232,6 +232,9 @@ function agent(c: Ctx) {
     } else if (c.stage === "green") {
       writeFileSync(join(c.fixtures, "run.ndjson"), report(c.scenarios, () => "green"));
       writeFileSync(join(a.cwd, "app.txt"), "bar\n");
+    } else if (c.stage === "open-pr") {
+      // Open-pr's summary starts with "## Problem", as the PR body must (PBI 216).
+      text = "## Problem\n\nItem 482 asked for it.";
     } else if (c.stage === "address") {
       writeFileSync(join(a.cwd, "app.txt"), `fix ${c.agentCalls.length}\n`);
     }
