@@ -96,6 +96,10 @@ const cellApiPort = await cellApi.getEndpoint('http').property(EndpointProperty.
 const cellControlUrl = refExpr`http://host.docker.internal:${cellApiPort}`;
 // Control listens on PORT, so it only shows this on its Configuration page.
 await control.withEnvironment('CELL_CONTROL_URL', cellControlUrl);
+// The browser reaches control through Aspire's proxy, on the endpoint's port, while PORT is the port behind the proxy.
+// Control checks every dashboard POST's Origin against this, so it must be the address the browser uses.
+const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
+await control.withEnvironment('DASHBOARD_ORIGIN', refExpr`http://localhost:${controlPort}`);
 
 // The worker (redesign step 2): the egress proxy, the scheduler's tick, and the board poller with its judge. It has no
 // endpoint. It hands cells the cell API's address and lets that port through the egress proxy.
