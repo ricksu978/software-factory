@@ -167,9 +167,10 @@ export interface RepoHost {
   postReview(p: { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[] }): Promise<{ threads: OpenedThread[] }>;
   /**
    * The new-side line ranges of the PR's diff at `commitSha`, against the PR's base, which a line comment in a review
-   * at that commit must fall in (PBI 266).
+   * at that commit must fall in (PBI 266). Null when the host can't give the whole diff, as GitHub can't past 300
+   * files, so the caller can't tell which lines it covers.
    */
-  diffLines(repo: string, prNumber: number, commitSha: string): Promise<DiffRange[]>;
+  diffLines(repo: string, prNumber: number, commitSha: string): Promise<DiffRange[] | null>;
   /** Resolves one review thread by its id. Resolving a thread that's already resolved succeeds and changes nothing. */
   resolveThread(repo: string, threadId: string): Promise<void>;
   /** What decides a factory merge: GitHub's merge state, the head, the body and the approvers (PBI 181). */

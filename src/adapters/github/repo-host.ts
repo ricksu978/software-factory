@@ -2,7 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type DiffRange, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -35,6 +35,23 @@ export function firstParentLine(commits: CompareCommit[], sha: string): string[]
   for (let c = head; c && c.sha !== sha; c = bySha.get(c.parents?.[0]?.sha ?? "")) line.push(c.sha);
   return line.reverse();
 }
+
+/**
+ * The new-side line ranges of one file's unified-diff patch, one per hunk, context lines included, since GitHub places
+ * a line comment on any line a hunk shows (PBI 266). A hunk that only deletes shows no new-side line.
+ */
+export function hunkRanges(path: string, patch: string): DiffRange[] {
+  const out: DiffRange[] = [];
+  for (const m of patch.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const from = Number(m[1]);
+    const count = m[2] === undefined ? 1 : Number(m[2]);
+    if (count > 0) out.push({ path, from, to: from + count - 1 });
+  }
+  return out;
+}
+
+/** GitHub's compare lists at most this many files, so a diff that reaches it may be cut short. */
+const COMPARE_FILES = 300;
 
 const split = (repo: string) => {
   const [owner, name] = repo.split("/");
@@ -89,8 +106,17 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
         .map((t) => ({ threadId: t.id, path: t.path, line: t.line ?? 0, body: t.comments.nodes[0].body })) };
     },
 
-    async diffLines(_repo, _prNumber, _commitSha) {
-      throw new Error("diffLines is not built yet (PBI 266)");
+    async diffLines(repo, prNumber, commitSha) {
+      const gh = await client();
+      const r = split(repo);
+      const base = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data.base.ref as string;
+      // Three dots diff from the merge base, as the PR's own diff does. Files come only on the first page, so one
+      // commit per page keeps the answer small.
+      const files = ((await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${base}...${commitSha}`, per_page: 1 }))
+        .data.files ?? []) as { filename: string; patch?: string; changes?: number }[];
+      // A list cut at the cap, or a changed file GitHub gave no patch for, leaves lines the factory can't tell about.
+      if (files.length >= COMPARE_FILES || files.some((f) => f.patch === undefined && (f.changes ?? 0) > 0)) return null;
+      return files.flatMap((f) => hunkRanges(f.filename, f.patch ?? ""));
     },
 
     async resolveThread(_repo, threadId) {
