@@ -349,6 +349,14 @@ describe("githubRepoHost", () => {
     assert.equal(await host.checkLog("o/r", "abc", "nope"), null);
   });
 
+  test("checkLog throws a 403, an App without Actions: read, instead of reading it as no log (PBI 255)", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [{ id: 31, name: "test" }] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": () => { throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 }); },
+    });
+    await assert.rejects(host.checkLog("o/r", "abc", "test"), (e: { status?: number }) => e.status === 403);
+  });
+
   test("firstParent is the commit's first parent, and null for a root commit (PBI 255)", async () => {
     const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}": (p) => ({ parents: p.ref === "m" ? [{ sha: "p1" }, { sha: "p2" }] : [] }) });
     assert.equal(await host.firstParent("o/r", "m"), "p1");

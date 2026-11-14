@@ -323,7 +323,8 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async checkLog(repo, sha, check) {
       // A GitHub Actions check run's id is its job's id, so the job's log is the check's. A check run another App
-      // reports has no such log, and GitHub expires old logs, so either one reads as no log.
+      // reports has no such log, and GitHub expires old logs, so either one reads as no log. A 403 isn't one of those: it
+      // means the App lacks Actions: read, so it's thrown for the caller to log rather than read as a log that's gone.
       const gh = await client();
       const r = split(repo);
       const run = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, check_name: check, per_page: 1 })).data.check_runs as { id: number; name: string }[])
@@ -333,7 +334,7 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: run.id })).data;
         return typeof data === "string" ? data : data instanceof ArrayBuffer ? Buffer.from(data).toString("utf8") : null;
       } catch (e) {
-        if ([403, 404, 410].includes((e as { status?: number }).status ?? 0)) return null;
+        if ([404, 410].includes((e as { status?: number }).status ?? 0)) return null;
         throw e;
       }
     },
