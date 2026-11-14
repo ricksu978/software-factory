@@ -13,7 +13,6 @@ export type GateContext = {
   dodExists: boolean;
   configValid: boolean;
   repoKnown: boolean;
-  openDeps: string[];
   /** `spent` hears what the call cost, whether it answers or throws (PBI 132). */
   judge: (item: FactoryItem, dor: Policy, spent?: (s: JudgeSpend) => void) => Promise<string>;
   /** Records each judge or split call's spend for the item, even when the call failed (PBI 132). */
@@ -58,7 +57,6 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
   if (!ctx.dodExists) failed.push(engine("No .factory/dod.md in this repo"));
   if (!ctx.configValid) failed.push(engine("No valid .factory/config.yml in this repo"));
   if (item.acceptanceCriteria.length === 0) failed.push(engine("The item has no acceptance criteria"));
-  for (const dep of ctx.openDeps) failed.push(engine(`The item depends on ${dep}, which is still open`));
   return failed;
 }
 
