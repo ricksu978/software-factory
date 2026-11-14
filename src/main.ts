@@ -42,6 +42,8 @@ export type ControlDeps = {
   webhookSecret: string;
   /** The owner's Claude token, which only the model gateway sends upstream. */
   claudeToken: string;
+  /** Where the model gateway sends a cell's model request. https://api.anthropic.com unless a test says otherwise. */
+  modelUpstream?: string;
   uploadUrl: (path: string) => Promise<string>;
   readBlob: (path: string) => Promise<string | null>;
 };
@@ -66,7 +68,7 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     pool: d.pool, secret: d.secret, repoHost: d.repoHost, backlogFor,
     stageAfter: (_version, stageId) => stageAfter(sop, stageId),
     uploadUrl: d.uploadUrl,
-    gateway: { upstream: "https://api.anthropic.com", ownerToken: () => d.claudeToken },
+    gateway: { upstream: d.modelUpstream ?? "https://api.anthropic.com", ownerToken: () => d.claudeToken },
     webToolsOf: (text) => parseRepoConfig(text).webTools,
   });
 
