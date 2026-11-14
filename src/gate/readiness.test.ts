@@ -5,7 +5,7 @@ import type { FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { loadPolicy, type Policy } from "../policy/policy.ts";
-import type { SplitBoard } from "./file-split.ts";
+import { childBody, type SplitBoard } from "./file-split.ts";
 import { gate, type GateContext } from "./readiness.ts";
 import type { SplitChild, SplitDeps } from "./split.ts";
 
@@ -14,11 +14,12 @@ async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
   const id = await fake.seed(item);
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? dorText : null), "dor");
   const judged: string[] = [];
+  // A proposed child, judged before it's filed (PBI 264), carries a split marker and passes every line.
   const ctx = (judgeReply: string, extra: Partial<GateContext> = {}): GateContext => ({
     readinessSha: "sha", dor, dodExists: true, configValid: true, repoKnown: true, adapter: fake.adapter,
-    judge: async (i: FactoryItem, _d: Policy) => {
+    judge: async (i: FactoryItem, d: Policy) => {
       judged.push(i.externalId);
-      return judgeReply;
+      return i.body.includes("factory-split-") ? passAll(d.criteria.length) : judgeReply;
     },
     ...extra,
   });
@@ -372,5 +373,99 @@ describe("gate's readiness checks (PBI 132)", () => {
     await assert.rejects(failed, /usage limit/);
     assert.equal(lines.length, 2);
     for (const l of lines) assert.match(l, /couldn't record the judge call's cost .*database unavailable/);
+  });
+});
+
+describe("gate: split children against dor.md (PBI 264)", () => {
+  const answer = (text: string) => ({ ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: "c", limit: null, usage: null, transcript: "" });
+  const two = JSON.stringify({ children: [{ title: "A", body: "a", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
+  const verdicts = (d: Policy, fail: boolean, oversized = false, flags: string[] = []) =>
+    [...d.criteria.map((c) => JSON.stringify({ index: c.index, status: fail ? "failed" : "passed", reason: fail ? "No title" : "ok" })), JSON.stringify({ flags, oversized })].join("\n");
+  function board(bodies: Map<string, string>, authorship = { openedByApp: true, editedByOthers: false, editedByApp: false }) {
+    const created: string[] = [];
+    const b: SplitBoard = {
+      subIssues: async () => [], findIssues: async () => [],
+      createIssue: async (_r, title) => { created.push(title); return { externalId: String(100 + created.length), title, url: "u" }; },
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {}, authorship: async () => authorship,
+      editBody: async (id, body) => { bodies.set(id, body); },
+    };
+    return { created, file: { board: b, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } };
+  }
+
+  test("a proposed child that fails is rewritten once; one still failing files nothing, and the proposal names it", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    const prompts: string[] = [];
+    const agent = async (a: AgentArgs) => { prompts.push(a.prompt); return answer(a.prompt.startsWith("Rewrite") ? '{"body":"b again"}' : two); };
+    const b = board(new Map());
+    const out = await gate(s.item, s.ctx("", {
+      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      judge: async (i, d) => verdicts(d, i.title === "B", i.title !== "A" && i.title !== "B"),
+    }));
+    assert.equal(prompts.filter((p) => p.startsWith("Rewrite")).length, 1);
+    assert.match(prompts.find((p) => p.startsWith("Rewrite"))!, /"title": "B"[\s\S]*No title/);
+    assert.deepEqual(b.created, []);
+    assert.equal(out.filed, undefined);
+    const proposal = (await s.fake.comments(s.id)).find((c) => c.startsWith("The factory proposes splitting"))!;
+    assert.match(proposal, /### 2\. B[\s\S]*fails the team's Definition of Ready[\s\S]*- Has a title\n  No title/);
+    assert.doesNotMatch(proposal.split("### 2.")[0], /Has a title/);
+  });
+
+  test("a proposed child flagged for something only the owner can do isn't rewritten, and the proposal says what to do", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let rewrites = 0;
+    const agent = async (a: AgentArgs) => { if (a.prompt.startsWith("Rewrite")) rewrites++; return answer(two); };
+    const b = board(new Map());
+    await gate(s.item, s.ctx("", {
+      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      judge: async (i, d) => verdicts(d, false, i.title !== "A" && i.title !== "B", i.title === "B" ? ["asks for a live API key"] : []),
+    }));
+    assert.equal(rewrites, 0);
+    assert.deepEqual(b.created, []);
+    assert.match((await s.fake.comments(s.id)).find((c) => c.startsWith("The factory proposes splitting"))!, /### 2\. B[\s\S]*The owner has to grant/);
+  });
+
+  test("a filed child that fails a line is rewritten once, keeping its criteria section, and gated again", async () => {
+    const parent = { sourceId: "s", externalId: "9", title: "P", body: "", acceptanceCriteria: ["one"], labels: [], status: "", rank: 1, repo: "o/r", fields: {}, closed: false, updatedAt: "t" };
+    const body = childBody(parent, { title: "A", body: "a", criteria: [1], needs: [] }, 1, "Acceptance criteria");
+    const s = await setup("- [ ] Has a title\n", { title: "A", body, acceptanceCriteria: ["one"], repo: "o/r" });
+    const bodies = new Map<string, string>();
+    const b = board(bodies);
+    const agent = async () => answer('{"body":"a, now titled\\n\\n## Acceptance criteria\\n\\n- reworded"}');
+    const out = await gate(s.item, s.ctx("", {
+      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      judge: async (i, d) => verdicts(d, !i.body.startsWith("a, now titled")),
+    }));
+    const edited = bodies.get(s.id)!;
+    assert.ok(edited.startsWith("a, now titled\n\n## Acceptance criteria\n\n- one\n"));
+    assert.ok(edited.endsWith(body.slice(body.indexOf("## Acceptance criteria"))));
+    assert.equal(out.ready, true);
+    assert.equal(out.item?.body, edited);
+  });
+
+  test("a filed child the board says someone else edited, or that has a flag, is only commented on", async () => {
+    const parent = { sourceId: "s", externalId: "9", title: "P", body: "", acceptanceCriteria: ["one"], labels: [], status: "", rank: 1, repo: "o/r", fields: {}, closed: false, updatedAt: "t" };
+    const body = childBody(parent, { title: "A", body: "a", criteria: [1], needs: [] }, 1, "Acceptance criteria");
+    for (const [who, flags] of [[{ openedByApp: true, editedByOthers: true, editedByApp: false }, []], [undefined, ["asks for a key"]]] as const) {
+      const s = await setup("- [ ] Has a title\n", { title: "A", body, acceptanceCriteria: ["one"], repo: "o/r" });
+      const bodies = new Map<string, string>();
+      let asked = 0;
+      const out = await gate(s.item, s.ctx("", {
+        split: { sop: { models: { coding: "c" } }, agent: async () => { asked++; return answer('{"body":"x"}'); }, file: board(bodies, who).file },
+        judge: async (_i, d) => verdicts(d, true, false, [...flags]),
+      }));
+      assert.equal(asked, 0);
+      assert.equal(bodies.size, 0);
+      assert.equal(out.ready, false);
+      assert.match((await s.fake.comments(s.id))[0], /No title/);
+    }
+  });
+
+  test("a permission the App lacks fails the item as an engine rule, and the comment says what the owner has to do", async () => {
+    const s = await setup("- [ ] Has a title\n");
+    const out = await gate(s.item, s.ctx(passAll(1), { missingPermissions: ["issues: write"] }));
+    assert.equal(out.ready, false);
+    assert.deepEqual(s.judged, []);
+    assert.match((await s.fake.comments(s.id))[0], /The owner has to grant the factory's App the "issues: write" permission/);
   });
 });

@@ -34,6 +34,21 @@ describe("githubRepoHost", () => {
     assert.ok(!("statuses" in p.permissions) && !("checks" in p.permissions));
   });
 
+  test("missingPermissions names each permission the installation holds below what the factory needs (PBI 264)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "admin", pull_requests: "read", metadata: "read" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), ["pull_requests: write", "issues: write"]);
+    assert.deepEqual([calls[0].params.owner, calls[0].params.repo], ["o", "r"]);
+  });
+
+  test("missingPermissions is empty when the installation holds every permission the factory needs", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "write", pull_requests: "write", issues: "write" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), []);
+  });
+
   const pr = { base: { ref: "main" }, user: { login: "author" }, head: { sha: "abc" } };
 
   test("requestReviewers asks the CODEOWNERS owners of the changed files when the repo has CODEOWNERS", async () => {
