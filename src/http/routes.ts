@@ -11,6 +11,7 @@ import { issueRepos } from "../store/issues.ts";
 import { nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { readCellImage } from "../store/cell-image.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -127,7 +128,7 @@ async function floor(pool: pg.Pool) {
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), factory,
     baseFails: withRepo(baseFails),
-    restart,
+    restart, cellImage: await readCellImage(pool),
   };
 }
 
