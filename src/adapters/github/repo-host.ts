@@ -190,6 +190,8 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
 
 /** The conclusions of a completed check run that pass. */
 const PASSING = ["success", "neutral", "skipped"];
+/** Commits per page of a compare, GitHub's most. */
+const COMPARE_PAGE = 100;
 
 async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
@@ -347,18 +349,26 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
     async commitsAfter(repo, branch, sha) {
       const gh = await client();
       const r = split(repo);
-      let compare: { status: string; commits: { sha: string; parents: { sha: string }[] }[] };
+      type Compare = { status: string; total_commits: number; commits: { sha: string; parents: { sha: string }[] }[] };
+      // Unpaged, compare lists only the oldest 250 commits, so a long stretch is read a page at a time, oldest first.
+      const page = async (n: number) => (await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${sha}...${branch}`, per_page: COMPARE_PAGE, page: n })).data as Compare;
+      let compare: Compare;
       try {
-        compare = (await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${sha}...${branch}` })).data;
+        compare = await page(1);
       } catch (e) {
         if (notFound(e)) return []; // a sha or branch GitHub doesn't know
         throw e;
       }
       if (compare.status !== "ahead") return [];
+      const commits = [...compare.commits];
+      for (let n = 2; commits.length < compare.total_commits; n++) {
+        const more = (await page(n)).commits;
+        if (more.length === 0) break;
+        commits.push(...more);
+      }
       // Compare lists every commit the branch has that `sha` lacks, a merged-in side branch's included, so the branch's
       // own commits are found by walking first parents back from its head.
-      // ponytail: compare lists at most 250 commits; past that the walk stops at the oldest it was given.
-      const parent = new Map(compare.commits.map((c) => [c.sha, c.parents[0]?.sha ?? null]));
+      const parent = new Map(commits.map((c) => [c.sha, c.parents[0]?.sha ?? null]));
       const head = (await gh.request("GET /repos/{owner}/{repo}/branches/{branch}", { ...r, branch })).data.commit.sha as string;
       const out: string[] = [];
       for (let at: string | null = head; at && at !== sha && parent.has(at); at = parent.get(at)!) out.push(at);

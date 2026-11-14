@@ -204,6 +204,16 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from main_break")).rows[0].n, 0);
   });
 
+  test("a bug item names no label of its own, so the board adds only its own opt-in label (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const fileItem = backlog.adapter.fileItem;
+    const asked: string[][] = [];
+    backlog.adapter.fileItem = async (p, key) => { asked.push(p.labels); return fileItem(p, key); };
+    await run();
+    backlog.adapter.fileItem = fileItem;
+    assert.deepEqual(asked, [[]]);
+  });
+
   test("a bug item whose filing fails is filed on a later tick, and once (PBI 255)", async () => {
     const id = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
     const fileItem = backlog.adapter.fileItem;

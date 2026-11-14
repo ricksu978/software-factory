@@ -30,7 +30,8 @@ export interface BacklogAdapter {
   linkPr(externalId: string, prUrl: string): Promise<void>;
   close(externalId: string): Promise<void>;
   /**
-   * PBI 255: files a new item on the board, in `repo`, with these labels, and answers its external id. A second call
+   * PBI 255: files a new item on the board, in `repo`, with these labels and the board's own opt-in label, and answers
+   * its external id, so a caller never names the opt-in label itself. A second call
    * with the same `dedupeKey` files nothing and answers the first item's id, as `comment` dedupes.
    */
   fileItem(p: { title: string; body: string; labels: string[]; repo: string | null }, dedupeKey: string): Promise<string>;

@@ -4,7 +4,6 @@
 // one stopped and never starts a second cell for an item with a live lease (Review Focus 5).
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
-import { OPT_IN_LABEL } from "../adapters/contract.ts";
 import { BASE, runToken } from "../control/cell-api.ts";
 import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent } from "../core/states.ts";
@@ -387,7 +386,7 @@ async function fileBugItems(d: MergedCiDeps) {
   for (const b of r.rows) {
     await isolated(`filing the bug item for ${b.merge_sha}`, async () => {
       const { title, body } = bugItem({ sha: b.merge_sha, branch: b.branch, prNumber: b.pr_number, prUrl: b.pr_url, itemExternalId: b.external_id, checks: b.failed_checks });
-      const externalId = await d.backlogFor(b.source_id).fileItem({ title, body, labels: [OPT_IN_LABEL], repo: repoName(b.repo_url) }, `main-break:${b.merge_sha}`);
+      const externalId = await d.backlogFor(b.source_id).fileItem({ title, body, labels: [], repo: repoName(b.repo_url) }, `main-break:${b.merge_sha}`);
       await d.pool.query("update main_break set bug_external_id = $2 where id = $1", [b.id, externalId]);
     });
   }

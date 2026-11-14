@@ -377,6 +377,17 @@ describe("githubRepoHost", () => {
     }
     assert.deepEqual(await stubGitHub({}).host.commitsAfter("o/r", "main", "a"), []);
   });
+
+  test("commitsAfter reads a compare past its first page, so a stretch longer than one page still reaches the head (PBI 255)", async () => {
+    const shas = Array.from({ length: 230 }, (_, i) => `c${i}`);
+    const all = shas.map((sha, i) => ({ sha, parents: [{ sha: i === 0 ? "a" : shas[i - 1] }] }));
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/compare/{basehead}": (p) => ({ status: "ahead", total_commits: all.length, commits: all.slice((p.page - 1) * p.per_page, p.page * p.per_page) }),
+      "GET /repos/{owner}/{repo}/branches/{branch}": () => ({ commit: { sha: "c229" } }),
+    });
+    assert.deepEqual(await host.commitsAfter("o/r", "main", "a"), shas);
+    assert.deepEqual(calls.filter((c) => c.route.endsWith("/compare/{basehead}")).map((c) => c.params.page), [1, 2, 3]);
+  });
 });
 
 describe("ownersOf", () => {

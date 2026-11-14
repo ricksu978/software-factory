@@ -89,7 +89,7 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
         if (known) return known;
         const externalId = autoId();
         items.set(externalId, {
-          sourceId: "fake", externalId, title, body, acceptanceCriteria: [], labels: [...labels], status: "Backlog", rank: items.size + 1,
+          sourceId: "fake", externalId, title, body, acceptanceCriteria: [], labels: [...new Set([...labels, OPT_IN_LABEL])], status: "Backlog", rank: items.size + 1,
           repo, fields: {}, closed: false, updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(), seq: ++seq,
         });
         filedByKey.set(key, externalId);
