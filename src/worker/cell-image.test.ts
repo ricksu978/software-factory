@@ -126,6 +126,23 @@ describe("keeping the cell image current with main", dbTest, () => {
     assert.deepEqual(await readCellImage(db.pool), { started: newest, built: newest, restart: null });
   });
 
+  test("a start whose fetch fails still records this run's commit, so a later poll measures main against it", async () => {
+    const earlier = git(seed, "rev-parse", "HEAD");
+    await startCellImage(deps());
+    // This run's checkout holds a commit that changes worker code, and factory.ps1 retagged the image from it.
+    git(checkout, "pull", "-q", "--ff-only");
+    const running = push(["src/worker/main.ts"]);
+    git(checkout, "pull", "-q", "--ff-only");
+    tagged = running;
+    git(checkout, "remote", "set-url", "origin", join(root, "missing.git"));
+    await assert.rejects(startCellImage(deps()));
+    assert.deepEqual(await readCellImage(db.pool), { started: running, built: running, restart: null });
+    git(checkout, "remote", "set-url", "origin", join(root, "origin.git"));
+    const next = push(["sop/sop.yml"]);
+    await pollCellImage(deps());
+    assert.deepEqual(await readCellImage(db.pool), { started: running, built: next, restart: null });
+  });
+
   test("a worker that starts behind main records the commit it runs, and builds main when main changes only cell-side files", async () => {
     const running = git(seed, "rev-parse", "HEAD");
     const next = push(["sop/sop.yml"]);

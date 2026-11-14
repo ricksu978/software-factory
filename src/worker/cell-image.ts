@@ -139,13 +139,17 @@ async function build(d: CellImageDeps, from: string | null, commit: string, anno
  * when the working tree is clean, so an image with uncommitted edits records no commit (null).
  */
 async function recordTagged(d: CellImageDeps): Promise<void> {
-  let built: string | null = null;
+  await writeCellImage(d.pool, { built: await taggedRevision(d) });
+}
+
+/** The REVISION_LABEL of the image the tag names now, or null when there is none or it can't be read. */
+async function taggedRevision(d: CellImageDeps): Promise<string | null> {
   try {
-    built = await d.builder.revision(d.tag ?? CELL_IMAGE);
+    return await d.builder.revision(d.tag ?? CELL_IMAGE);
   } catch (e) {
     (d.log ?? console).error("Reading the cell image's commit failed, so Floor shows none:", e instanceof Error ? e.message : String(e));
+    return null;
   }
-  await writeCellImage(d.pool, { built });
 }
 
 /**
@@ -168,17 +172,21 @@ function askRestart(d: CellImageDeps, head: string, held: string[]): void {
  * lost its lock without a pull) or hold local commits. That commit is recorded as the start commit. When `main` changes
  * nothing the control plane or the worker runs compared with it, the image is built from `main`'s commit and no restart
  * is asked for. Otherwise nothing is built, the image there was stays, and Floor asks for a restart that picks up `main`.
+ * The start commit and the tagged image's commit are recorded before `main` is fetched, so when the fetch fails the
+ * row still describes this run, and each later poll measures `main` against the commit this worker runs rather than an
+ * earlier run's.
  */
 export async function startCellImage(d: CellImageDeps): Promise<void> {
   const running = await git(d.checkout, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const tagged = await taggedRevision(d);
+  await writeCellImage(d.pool, { started: running, built: tagged, restart: null });
   const head = await fetchMain(d);
   const held = await heldChanges(d, running, head);
-  await writeCellImage(d.pool, { started: running, restart: held.length ? head : null });
   if (held.length) {
-    await recordTagged(d);
+    await writeCellImage(d.pool, { restart: head });
     return askRestart(d, head, held);
   }
-  await build(d, (await readCellImage(d.pool))?.built ?? null, head, false);
+  await build(d, tagged, head, false);
 }
 
 /** One poll: fetches `main`, then rebuilds the cell image, or holds the rebuild for a restart, as the header says. */
