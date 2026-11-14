@@ -5,7 +5,11 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type PolicyName = "dor" | "scenarios" | "pr-review" | "risk" | "dod";
-export type Criterion = { index: number; text: string; run: string | null };
+export type Criterion = {
+  index: number; text: string; run: string | null;
+  /** The CI check a dod.md line names with `ci: <name>`, which stands in for its command when it reported (PBI 229). */
+  ci?: string | null;
+};
 export type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string };
 export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] };
 
@@ -15,10 +19,14 @@ export class PolicyError extends Error {
 
 const withCriteria = new Set<PolicyName>(["dor", "pr-review", "dod"]);
 const runInLine = /`run:\s*([^`]*)`/;
+const ciInLine = /`ci:\s*([^`]*)`/;
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const policyDir = () => process.env.FACTORY_POLICY_DIR ?? join(import.meta.dirname, "..", "..", "policy");
 
-/** One criterion per top-level `- [ ]` line, numbered from 1 in file order. Nested lines and prose are guidance. */
+/**
+ * One criterion per top-level `- [ ]` line, numbered from 1 in file order. Nested lines and prose are guidance. A
+ * `run:` in backticks is the line's command, and a `ci:` in backticks names the CI check that stands in for it (PBI 229).
+ */
 export function parseCriteria(markdown: string): Criterion[] {
   const criteria: Criterion[] = [];
   // A file saved with a UTF-8 byte-order mark would otherwise lose a criterion on its first line.
@@ -26,7 +34,8 @@ export function parseCriteria(markdown: string): Criterion[] {
     if (!line.startsWith("- [ ] ")) continue;
     const text = line.slice(6).trim();
     const run = runInLine.exec(text)?.[1].trim();
-    criteria.push({ index: criteria.length + 1, text, run: run ? run : null });
+    const ci = ciInLine.exec(text)?.[1].trim();
+    criteria.push({ index: criteria.length + 1, text, run: run ? run : null, ...(ci ? { ci } : {}) });
   }
   return criteria;
 }
@@ -34,7 +43,7 @@ export function parseCriteria(markdown: string): Criterion[] {
 /**
  * Loads `.factory/<name>.md` through `read`, or the factory's default when the repo has none. `read` returns null
  * only on a 404, and any error it throws propagates, so a failed read never falls back to the default. A missing
- * dod.md has no default and returns null. A `run:` line outside dod.md throws PolicyError.
+ * dod.md has no default and returns null. A `run:` or `ci:` line outside dod.md throws PolicyError.
  */
 export async function loadPolicy(read: (path: string) => Promise<string | null>, name: PolicyName): Promise<Policy | null> {
   let text = await read(`.factory/${name}.md`);
@@ -45,6 +54,7 @@ export async function loadPolicy(read: (path: string) => Promise<string | null>,
     source = "default";
   }
   if (name !== "dod" && /`run:[^`]*`/.test(text)) throw new PolicyError(`${name}.md: run: lines are allowed only in dod.md`);
+  if (name !== "dod" && /`ci:[^`]*`/.test(text)) throw new PolicyError(`${name}.md: ci: lines are allowed only in dod.md`);
   return { name, source, sha: sha256(text), text, criteria: withCriteria.has(name) ? parseCriteria(text) : [] };
 }
 

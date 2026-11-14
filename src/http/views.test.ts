@@ -111,6 +111,18 @@ describe("floorPage", () => {
     assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
 
+  // PBI 210: the commit the cell image was built from, and a restart's commit when main changed the control plane's code.
+  test("shows the cell image's commit, and asks for a restart only when main needs one", () => {
+    const floor = (cellImage: { built: string | null; restart: string | null } | null) =>
+      floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false, cellImage }, null);
+    assert.doesNotMatch(floor(null), /cell image/);
+    const built = floor({ built: "aaa1111222233334444", restart: null });
+    assert.match(built, /cell image was built from commit <code>aaa1111<\/code>/);
+    assert.doesNotMatch(built, /restart is needed/);
+    assert.match(floor({ built: null, restart: null }), /built from commit not known: it carries no commit label/);
+    assert.match(floor({ built: "aaa1111", restart: "bbb2222333" }), /A restart is needed to pick up main's commit <code>bbb2222<\/code>/);
+  });
+
   // PBI 215: while an item waits on a question that blames the base, Floor says the base fails in cells.
   test("says the base fails in cells, with each blocked item, its base commit and failing tests, only while one waits", () => {
     const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
@@ -304,6 +316,13 @@ describe("readiness spend (PBI 132)", () => {
     d.stages = [{ ...d.stages[0], stage_id: "pr-review", restates: [{ round: 2, reason: "its last line is neither APPROVED nor OPEN: <n>: <b>fine</b>" }] }];
     const row = /<tbody>([\s\S]*?)<\/tbody>/.exec(runDetailPage(d, null).split("<h2>Stages</h2>")[1])![1];
     assert.match(row, /Needed a second ask of the PR reviewer in round 2: its last line is neither APPROVED nor OPEN: &lt;n&gt;: &lt;b&gt;fine&lt;\/b&gt;/);
+  });
+
+  test("Run detail's stage row shows the attempt's message in its notes, before any restate (PBI 239)", () => {
+    const d = detail([]);
+    d.stages = [{ ...d.stages[0], status: "stopped", message: "The cell's <lease> ran out", restates: [{ round: 1, reason: "unread" }] }];
+    const row = /<tbody>([\s\S]*?)<\/tbody>/.exec(runDetailPage(d, null).split("<h2>Stages</h2>")[1])![1];
+    assert.match(row, /<td>The cell&#39;s &lt;lease&gt; ran out<br>Needed a second ask of the PR reviewer in round 1: unread<\/td><\/tr>/);
   });
 
   test("Run detail says so when no readiness check has run", () => {

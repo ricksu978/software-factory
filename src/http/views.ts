@@ -136,6 +136,20 @@ export function blockedReason(deps: string[]): string {
   return `Waits on ${names}, ${refs.length === 1 ? "which is" : "which are"} still open. It starts once ${refs.length === 1 ? "it closes" : "they close"}.`;
 }
 
+/** The cell image the worker keeps current with main (PBI 210): the commit it was built from, and main's commit a restart would pick up. */
+export type CellImage = { built: string | null; restart: string | null };
+
+const shortSha = (sha: string) => escapeHtml(sha.slice(0, 7));
+
+/** Floor's lines for the cell image: the commit it was built from, then a restart's commit when main's changes need one. */
+function cellImageStatus(c: CellImage): string {
+  const built = `<p class="muted">The cell image was built from commit ${c.built ? `<code>${shortSha(c.built)}</code>` : "not known: it carries no commit label, as an image built from a checkout with uncommitted edits doesn't"}.</p>`;
+  const restart = c.restart
+    ? `<p class="banner" role="status">A restart is needed to pick up main's commit <code>${shortSha(c.restart)}</code>. It changes code the control plane or the worker runs, so the cell image isn't rebuilt until the factory restarts.</p>`
+    : "";
+  return built + restart;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
@@ -143,10 +157,10 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 }
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
-    + (f.restart ? restartStatus(f.restart) : "")
+    + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
@@ -188,7 +202,9 @@ export type RunDetail = {
     /** When the attempt started and ended, null while it still runs (PBI 189). */
     started_at?: Date; ended_at?: Date | null;
     /** PBI 190: the PR reviewer's restates in the attempt. */
-    restates?: { round: number; reason: string }[] }[];
+    restates?: { round: number; reason: string }[];
+    /** What the attempt's cell, or the factory closing it, said about it, such as that the cell's lease ran out (PBI 239). */
+    message?: string | null }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
   readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
   question: { kind: string; body: string } | null;
@@ -250,13 +266,18 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   const now = d.now ?? new Date();
   const started = (s: RunDetail["stages"][number]) => (s.started_at ? local(s.started_at, zone) : "");
   // An attempt with no end is running only while the item is In progress on an open run, and only if it's the run's
-  // newest attempt: a cell that died mid-stage leaves its row open for good, and a new claim on the same run numbers
-  // its attempts after it, so counting that dead row against now would climb for ever.
+  // newest attempt: a cell that died mid-stage leaves its row open until its lease runs out and the factory closes it
+  // (PBI 239), and a row left open anyway must never count against now, or its time would climb for ever.
   const newest = d.stages.reduce<RunDetail["stages"][number] | null>(
     (a, s) => (s.started_at && (!a?.started_at || s.started_at.getTime() >= a.started_at.getTime()) ? s : a), null);
   const live = (s: RunDetail["stages"][number]) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
   const took = (s: RunDetail["stages"][number]) =>
     !s.started_at ? "" : s.ended_at ? timeSpent(s.started_at, s.ended_at) : live(s) ? `${timeSpent(s.started_at, now)} so far` : "didn't finish";
+  // An attempt's notes: its message, then each time the PR reviewer needed a second ask (PBI 190, PBI 239).
+  const notes = (s: RunDetail["stages"][number]) => [
+    ...(s.message ? [escapeHtml(s.message)] : []),
+    ...(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`),
+  ].join("<br>");
   // PBI 209: an attempt with no end says it's running while it's live, and stopped once its cell is gone, so a stage
   // whose cell died reads as stopped beside the transcript it last uploaded.
   const status = (s: RunDetail["stages"][number]) => (s.status !== "started" || s.ended_at ? s.status : live(s) ? "running" : "stopped");
@@ -270,7 +291,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${(s.restates ?? []).map((x) => `Needed a second ask of the PR reviewer in round ${escapeHtml(x.round)}: ${escapeHtml(x.reason)}`).join("<br>")}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${exactCost(s.cost_usd)}${escapeHtml(cost(s.cost_usd))}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
