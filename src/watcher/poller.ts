@@ -12,7 +12,7 @@ import { keepSplit, keptSplit } from "../store/splits.ts";
 import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
+import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -351,7 +351,11 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
   };
   const attempted = await withTx(pool, async (c) => {
     if (!(await mayMerge(c))) return false;
-    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy } });
+    // A NeedsInput item's attempt names the question it waits on, so a merge recovered from it is logged as this one
+    // would be (PBI 262).
+    const asked = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
+    const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: asked?.body ?? null, questionId: asked?.id ?? null } : {};
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy, ...waiting } });
     return true;
   });
   if (!attempted) return;
@@ -368,19 +372,22 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
       return;
     }
     // The question a NeedsInput item waited on, which the move to Accepted closes unanswered (PBI 194).
-    const question = row.state === "NeedsInput"
-      ? (await c.query<{ id: string; body: string }>(
-        "select id, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [row.id],
-      )).rows[0] ?? null
-      : null;
+    const question = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
     await transitionItem(c, row.id, "merged", system);
     await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, res.sha]);
     if (question) {
-      await c.query("update question set closed_note = $2 where id = $1", [question.id, `The factory merged PR #${prNumber} as commit ${res.sha}.`]);
+      await c.query("update question set closed_note = $2 where id = $1", [question.id, mergedNote(prNumber, res.sha)]);
     }
     const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: question?.body ?? null } : {};
     await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy, ...waiting } });
   });
+}
+
+/** The newest question the item waits on, still unanswered and open. */
+async function openQuestion(c: pg.ClientBase, itemId: string): Promise<{ id: string; body: string } | null> {
+  return (await c.query<{ id: string; body: string }>(
+    "select id, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [itemId],
+  )).rows[0] ?? null;
 }
 
 /**

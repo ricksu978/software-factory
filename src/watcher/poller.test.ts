@@ -746,6 +746,35 @@ describe("pollOnce", dbTest, () => {
       assert.deepEqual(await events("factory_merged"), [{ repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"] }]);
     });
 
+    test("a NeedsInput merge that went through while the call failed gets the question's note and names the question when the next poll sees it (PBI 262)", async () => {
+      await allow("octo");
+      const { ext, id, pr, p } = await ready("NeedsInput");
+      const qid = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'Address failed', now()) returning id", [id],
+      )).rows[0].id;
+      const mergePr = host.mergePr.bind(host);
+      host.mergePr = async (...args) => {
+        await mergePr(...args);
+        throw new Error("502 Bad Gateway");
+      };
+      await poll();
+      assert.equal(p.merged, true);
+      assert.equal((await row(ext)).state, "NeedsInput");
+      assert.deepEqual(await events("factory_merge_attempt"), [
+        { repo: REPO, prNumber: pr, headSha: "h1", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed", questionId: qid },
+      ]);
+      host.mergePr = mergePr;
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      const q = (await db.pool.query("select closed_at, answer, closed_note from question where id = $1", [qid])).rows[0];
+      assert.ok(q.closed_at);
+      assert.equal(q.answer, null);
+      assert.equal(q.closed_note, `The factory merged PR #${pr} as commit m9.`);
+      assert.deepEqual(await events("factory_merged"), [
+        { repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed" },
+      ]);
+    });
+
     test("a person's merge after a refused attempt isn't logged as the factory's", async () => {
       await allow("octo");
       const { ext, p } = await ready();
