@@ -589,6 +589,99 @@ describe("runCell", () => {
     assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
   });
 
+  // PBI 215: the base commit, origin/main, lacks the branch's features/ folder, so a command can tell the two apart.
+  test("a Definition of Done line that fails the same tests on the base commit blocks green once, with the base's question", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n");
+    const base = git(h.dir, "rev-parse", "origin/main");
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "blocked");
+    assert.match(t.question.body, /base fails in the cell/);
+    assert.ok(t.question.body.includes(base.slice(0, 7)));
+    assert.deepEqual(t.question.baseFailure, { sha: base, tests: ["parses the config"] });
+    const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
+    assert.match(dod.body.verdicts[0].reason, /fails the same tests/);
+    assert.equal(git(h.dir, "rev-parse", "--abbrev-ref", "HEAD"), BRANCH);
+    // Green's work is pushed before the block, so the cell that runs after the owner's answer starts from it.
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), git(h.dir, "rev-parse", "HEAD"));
+    assert.match(t.question.body, /work so far is pushed to its branch/);
+  });
+
+  test("a base failure whose lease check before the push finds the lease lost pushes nothing", async () => {
+    const marks = mkdtempSync(join(tmpdir(), "engine-lease-"));
+    roots.push(marks);
+    const ran = join(marks, "ran.txt");
+    const h = harness({ nextStage: "green", script: (a, stage) => { if (stage === "green") writeFileSync(join(a.cwd, "app.txt"), "half done\n"); },
+      lease: async () => {
+      if (existsSync(ran)) throw new LeaseLost("fenced");
+      return { stop: false };
+    } });
+    h.deps.policies.dod = policy("dod", `- [ ] Unit tests pass. \`run: echo x > "${fwd(ran)}"; echo 'not ok 1 - parses the config'; exit 1\`\n`);
+    const before = git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH);
+    assert.equal(await h.run(), "stopped");
+    assert.notEqual(git(h.dir, "rev-parse", "HEAD"), before);
+    assert.equal(git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH), before);
+    assert.ok(!h.transitions().length);
+  });
+
+  test("a base failure whose push fails doesn't say the work is pushed", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => { if (stage === "green") writeFileSync(join(a.cwd, "app.txt"), "half done\n"); } });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n");
+    // The origin refuses every push, so the push before the block fails.
+    writeFileSync(join(h.origin, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const logged = mock.method(console, "error", () => {});
+    try { assert.equal(await h.run(), "waiting"); } finally { logged.mock.restore(); }
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "blocked");
+    assert.doesNotMatch(t.question.body, /is pushed/);
+    assert.match(t.question.body, /couldn't push/);
+  });
+
+  test("a Definition of Done line that fails only on the item's branch is retried, runs on the base once, and exhausts green", async () => {
+    const h = harness({ nextStage: "green" });
+    const log = join(h.root, "runs.txt");
+    h.deps.policies.dod = policy("dod", `- [ ] Unit tests pass. \`run: git rev-parse HEAD >> "${fwd(log)}"; [ -d features ] && echo 'not ok 1 - parses the config' && exit 1; exit 0\`\n`);
+    const base = git(h.dir, "rev-parse", "origin/main");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.equal(readFileSync(log, "utf8").split("\n").filter((l) => l === base).length, 1);
+  });
+
+  test("a line the base shares alongside a line that fails only on the item's branch is retried, not blamed on the base", async () => {
+    const h = harness({ nextStage: "green" });
+    h.deps.policies.dod = policy("dod", [
+      "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`",
+      "- [ ] Types check. `run: [ -d features ] && echo 'error TS2322' && exit 1; exit 0`",
+      "",
+    ].join("\n"));
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(h.transitions().every((t) => !t.question?.baseFailure));
+    assert.ok(h.started().filter((s) => s === "green").length > 1);
+  });
+
+  test("a line the base shares alongside a judged line that failed is retried, not blamed on the base", async () => {
+    const h = harness({ nextStage: "green", script: (a) => {
+      if (a.prompt.startsWith("# Definition of Done")) return { text: '{"index":2,"status":"failed","reason":"unclear"}' };
+    } });
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo 'not ok 1 - parses the config'; exit 1`\n- [ ] Docs are clear.\n");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(h.transitions().every((t) => !t.question?.baseFailure));
+  });
+
+  test("a base run that can't run leaves a failed Definition of Done line the item's, retried as before", async () => {
+    const h = harness({ nextStage: "green" });
+    // The line drops origin/main after the claim's merge, so the base run's rev-parse throws.
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: git update-ref -d refs/remotes/origin/main; echo 'not ok 1 - parses the config'; exit 1`\n");
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    const dod = h.calls.filter((c) => c.route === "/policy-results" && c.body.file === "dod").at(-1)!;
+    assert.doesNotMatch(dod.body.verdicts[0].reason, /fails the same tests/);
+  });
+
   test("a Definition of Done judge that commits fails the green attempt before its push", async () => {
     const h = harness({ nextStage: "green", script: committingJudge() });
     h.deps.policies.dod = policy("dod", "- [ ] Docs are clear.\n");

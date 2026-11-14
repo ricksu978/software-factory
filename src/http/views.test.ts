@@ -110,6 +110,18 @@ describe("floorPage", () => {
     assert.match(html, /<a href="\/activity">/);
     assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
+
+  // PBI 215: while an item waits on a question that blames the base, Floor says the base fails in cells.
+  test("says the base fails in cells, with each blocked item, its base commit and failing tests, only while one waits", () => {
+    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const html = floorPage({ ...empty, baseFails: [{ id: "i1", external_id: "482", repo: null, title: "Board", sha: "b4se001ffff", tests: ["parses <the> config"] }] }, null);
+    const notice = /<section id="base-fails"[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
+    assert.match(notice, /base fails in cells/i);
+    assert.match(notice, /482/);
+    assert.match(notice, /b4se001/);
+    assert.ok(notice.includes("parses &lt;the&gt; config"));
+    assert.doesNotMatch(floorPage(empty, null), /base-fails|base fails in cells/i);
+  });
 });
 
 describe("issueRef", () => {

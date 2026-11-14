@@ -53,6 +53,8 @@ export type OpenPr = { pr_number?: number | null; pr_url?: string | null };
 export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
 export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null };
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
+/** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
+export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -122,11 +124,18 @@ function restartStatus(r: Restart): string {
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
 }
 
+/** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
+function baseFailsNotice(rows: BaseFailRow[]): string {
+  const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
+  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
+}
+
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null }, banner: string | null): string {
+  notReady: NotReadyRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
-    + (f.restart ? restartStatus(f.restart) : "");
+    + (f.restart ? restartStatus(f.restart) : "")
+    + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
     : "";
