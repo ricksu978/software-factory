@@ -30,7 +30,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
-import { tick } from "../../src/scheduler/scheduler.ts";
+import { tick, type TickResult } from "../../src/scheduler/scheduler.ts";
 import { nextUp } from "../../src/store/items.ts";
 import { setOverride } from "../../src/store/overrides.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
@@ -295,20 +295,37 @@ Given("the poller has run once", long, async function () {
 
 // ---- the scheduler and the operator ----
 
-async function schedulerTick(world: object): Promise<void> {
+/**
+ * Runs one tick and returns what it did, with the errors its steps logged. `tick` runs each step through `isolated`,
+ * which logs a failure instead of throwing, so the errors are caught off `console.error` while the tick runs.
+ */
+async function schedulerTick(world: object): Promise<{ result: TickResult; errors: string[] }> {
   const c = pollCtx(world);
   const m = ctx(world);
   m.started = [];
   const adapter = c.fake!.adapter;
-  await tick({
-    pool: pool(), now: new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
-    secret: "pbi-260-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
-    launcher: { start: async (env) => (m.started.push(env), `exec-${m.started.length}`), stop: async () => {} },
-  });
+  const errors: string[] = [];
+  const logError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map((a) => (a instanceof Error ? a.stack ?? a.message : String(a))).join(" "));
+    logError(...args);
+  };
+  try {
+    const result = await tick({
+      pool: pool(), now: new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
+      secret: "pbi-260-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
+      launcher: { start: async (env) => (m.started.push(env), `exec-${m.started.length}`), stop: async () => {} },
+    });
+    return { result, errors };
+  } finally {
+    console.error = logError;
+  }
 }
 
 When("the scheduler runs once", long, async function () {
-  await schedulerTick(this);
+  const { result, errors } = await schedulerTick(this);
+  assert.deepEqual(errors, [], `the scheduler tick logged errors:\n${errors.join("\n")}`);
+  assert.deepEqual(result.started, ctx(this).started.map((_, i) => `exec-${i + 1}`), "the tick's result doesn't match the cells it started");
 });
 
 async function operator(world: object): Promise<string> {
@@ -460,6 +477,8 @@ Then("item {int} has no system event recording a re-queue after the base passed"
 
 When("{string} opens the dashboard", long, async function (login: string) {
   await get(this, "/", login);
+  const c = dashCtx(this);
+  assert.equal(c.status, 200, `the dashboard answered ${c.status}: ${String(c.page).slice(0, 300)}`);
 });
 
 const namesItem = (t: string, n: number) => new RegExp(`(?<![\\w.])#?${n}(?!\\d)`).test(t);
