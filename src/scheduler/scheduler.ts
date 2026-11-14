@@ -278,8 +278,11 @@ async function chaseQuestions(d: TickDeps) {
   }
 }
 
-/** An Accepted item is Done once CI on its merge commit passes, and Failed when it fails or never reports within an hour. */
-async function pollMergedCi(d: TickDeps) {
+/**
+ * An Accepted item is Done once CI on its merge commit passes, and Failed when it fails or never reports within an hour.
+ * Exported for PBI 255's steps, which run it after each poll.
+ */
+export async function pollMergedCi(d: Pick<TickDeps, "pool" | "repoHost" | "backlogFor" | "now">) {
   const r = await d.pool.query<{ item_id: string; merge_sha: string; repo_url: string; source_id: string; external_id: string; merged_at: Date | null }>(
     `select i.id as item_id, r.merge_sha, repo.url as repo_url, i.source_id, i.external_id,
        (select max(e.at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'Accepted') as merged_at

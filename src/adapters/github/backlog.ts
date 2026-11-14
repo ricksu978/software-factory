@@ -337,6 +337,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await issue(externalId)), state: "closed", state_reason: "completed" });
     },
 
+    async fileItem() {
+      throw new Error("not implemented: filing an item (PBI 255)");
+    },
+
     parseWebhook: parseGitHubWebhook,
   };
 }

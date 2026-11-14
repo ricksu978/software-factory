@@ -309,6 +309,21 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       }
     },
 
+    async checkRuns() {
+      throw new Error("not implemented: reading check runs (PBI 255)");
+    },
+
+    async checkLog() {
+      throw new Error("not implemented: reading a check's log (PBI 255)");
+    },
+
+    async firstParent() {
+      throw new Error("not implemented: reading a commit's first parent (PBI 255)");
+    },
+
+    async commitsAfter() {
+      throw new Error("not implemented: listing a branch's later commits (PBI 255)");
+    },
   };
 }
 
