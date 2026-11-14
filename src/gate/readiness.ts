@@ -4,7 +4,7 @@ import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { tmpdir } from "node:os";
-import { childBody, fileSplit, priorFiling } from "./file-split.ts";
+import { childBody, factoryFiled, fileSplit, priorFiling } from "./file-split.ts";
 import { keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, rewritePrompt } from "./repair.ts";
 import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
@@ -209,6 +209,8 @@ async function repairChild(item: FactoryItem, failed: Verdict[], ctx: GateContex
   const deps = ctx.split;
   const board = deps?.file?.board;
   if (!deps || !board?.authorship || !board.editBody || !ctx.dor || !rewritable(failed)) return null;
+  // The marker is read first, so an item a person filed costs no board lookup.
+  if (!factoryFiled(item)) return null;
   if (!mayRewrite(item, await board.authorship(item.externalId))) return null;
   const heading = deps.file!.criteriaHeading;
   const text = await rewrite({ ...item, body: leadOf(item.body, heading) }, item, failed, ctx.dor, ctx, deps);
@@ -223,7 +225,8 @@ async function repairChild(item: FactoryItem, failed: Verdict[], ctx: GateContex
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
  * after any readiness input changes posts a fresh one. The gate never edits the item, except that filing a split takes
- * the parent's opt-in label off once its children are filed (PBI 144).
+ * the parent's opt-in label off once its children are filed (PBI 144), and a filed child that fails dor.md lines has
+ * its body rewritten once (PBI 264).
  */
 export function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
   return gateOnce(item, ctx, true);

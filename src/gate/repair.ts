@@ -9,7 +9,7 @@
 import type { FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
 import { jsonLines, type Policy, type Verdict } from "../policy/policy.ts";
-import { withoutSection, type IssueAuthorship } from "./file-split.ts";
+import { factoryFiled, withoutSection, type IssueAuthorship } from "./file-split.ts";
 
 /**
  * Every rewrite request opens with this line, so it never reads as a split request. The request carries the child
@@ -25,9 +25,6 @@ export const APP_PERMISSION = "app permission";
 export function missingPermission(permission: string): Verdict {
   return { index: 0, criterion: APP_PERMISSION, status: "failed", reason: `The factory's App lacks the ${JSON.stringify(permission)} permission on this repo` };
 }
-
-/** A split marker as `splitMarker` in file-split.ts writes it. */
-const SPLIT_MARKER = /factory-split-[0-9a-f]{16}-\d+/;
 
 /** The rewrite request for `child`, which failed `failed` against `dor`. */
 export function rewritePrompt(child: FactoryItem, dor: Policy, failed: Verdict[]): string {
@@ -81,7 +78,7 @@ export function ownerAction(verdict: Verdict): string {
 
 /** True when the factory may edit this issue's body: its App opened it, its body carries a split marker, and nobody else edited it. */
 export function mayRewrite(item: FactoryItem, authorship: IssueAuthorship): boolean {
-  return authorship.openedByApp && !authorship.editedByOthers && !authorship.editedByApp && SPLIT_MARKER.test(item.body);
+  return authorship.openedByApp && !authorship.editedByOthers && !authorship.editedByApp && factoryFiled(item);
 }
 
 /** The index of the first line of `body` that opens a section under `heading`, at any level and in any letter case. */
