@@ -21,6 +21,7 @@
 //   match this feature's steps too. The first sets up the item here, through `itemIs`, and the other two read these
 //   items' states from PBI 17's context, which these steps fill in.
 // - An open blocker is the board's open dependency, which the poller copies into `item.blocked_by`.
+// - An item that reaches Done, Failed, Abandoned or Split keeps the WIP slot it ran in until "a WIP slot frees up".
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -504,9 +505,14 @@ When(re(`the item's author fixes item "([^"]+)" and the readiness gate passes it
   await moves(this, name, s === "NotReady" ? ["item_edited", "ready"] : ["ready"]);
 });
 
+// An item reaches Done, Failed, Abandoned or Split by running in the scenario's free WIP slot, and the slot it ran in
+// doesn't free up for another item until a scenario says "a WIP slot frees up", as the readiness rule's scenarios do.
+// So the tick after it only ends the item's overrides, and an item re-queued afterwards is seen in Next up beside the
+// items it was queued with.
 When(re(`item "([^"]+)" reaches (Done|Failed|Abandoned|Split)`), async function (name: string, state: ItemState) {
   const it = itemOf(this, name);
   await withTx(pool(), (c) => overrideItem(c, it.id, state, { actor: "system", actorId: "pbi-265" }, `the scenario moves it to ${state}`));
+  await pool().query("update wip_policy set current_wip = greatest(current_wip - 1, 0)");
 });
 
 // ---- states ----
