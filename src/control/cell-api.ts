@@ -10,7 +10,7 @@ import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { renewLease, transitionItem } from "../store/items.ts";
+import { closeStartedAttempts, LEASE_RAN_OUT, renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
@@ -137,7 +137,10 @@ async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise
     "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
     [now],
   );
-  if (restart.rowCount) await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
+  if (!restart.rowCount) return;
+  // Any attempt still started belongs to a cell that died before this one (PBI 239). The cell's own attempt is reported by now.
+  await closeStartedAttempts(c, run.item_id, now);
+  await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
 }
 
 const routes: Record<string, Route> = {
@@ -179,12 +182,25 @@ const routes: Record<string, Route> = {
       [run.run_id],
     );
     // PBI 140: when the next stage's last attempt was stopped, by a restart's wrap-up or the launcher, the cell resumes
-    // it from the work in progress on the branch instead of starting the stage over.
-    const last = await c.query<{ attempt: number; status: string }>(
-      "select attempt, status from stage_run where run_id = $1 and stage_id = $2 order by attempt desc limit 1",
-      [run.run_id, run.next_stage],
+    // it from the work in progress on the branch instead of starting the stage over. The factory also closes as stopped,
+    // with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may have pushed nothing,
+    // or a broken half-commit, so the next cell starts that stage fresh, as it did when such an attempt stayed started.
+    // A lease-message attempt resumes only when the lease_expired that ended its own claim, the first one at or after the
+    // attempt started, was a restart's: the launcher stopped that cell, as stopForRestart does once the wrap-up runs out.
+    // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
+    // event.at and stage_run.started_at both come from the database's clock, so they compare.
+    const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean }>(
+      `select s.attempt, s.status, s.message,
+         coalesce((select e.payload->>'reason' = 'restart' from event e
+                   where e.item_id = $3 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired'
+                     and e.at >= s.started_at
+                   order by e.at limit 1), false) as restarted
+       from stage_run s where s.run_id = $1 and s.stage_id = $2 order by s.attempt desc limit 1`,
+      [run.run_id, run.next_stage, run.item_id],
     );
-    const resume = last.rows[0]?.status === "stopped" ? { stageId: run.next_stage, attempt: last.rows[0].attempt } : null;
+    const l = last.rows[0];
+    const stopped = l?.status === "stopped" && (l.message !== LEASE_RAN_OUT || l.restarted);
+    const resume = stopped ? { stageId: run.next_stage, attempt: l.attempt } : null;
     let trustedComments: ReviewComment[] = [];
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief. A thread the
     // factory's own review opened belongs to the PR review stage, so none of it does, a person's reply included (PBI 130).
