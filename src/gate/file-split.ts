@@ -75,7 +75,6 @@ export function childBody(parent: FactoryItem, child: SplitChild, n: number, hea
   return `${own ? `${own}\n\n` : ""}## ${heading}\n\n${criteria}\n\n---\n\n${from}\n`;
 }
 
-
 /** The parent's one comment once every child is filed: a link to each child, and how a child enters the factory. */
 export function filedComment(filed: ChildIssue[], optInLabel: string): string {
   const list = filed.map((c, i) => `${i + 1}. [${c.title}](${c.url})`).join("\n");
