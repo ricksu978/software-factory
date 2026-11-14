@@ -58,7 +58,7 @@ type Ctx = {
   failure?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi222?: Ctx };
   w.pbi222 ??= { seen: [], statuses: [], stdout: "", stderr: "" };
   return w.pbi222;
@@ -106,7 +106,7 @@ async function source(c: Ctx): Promise<string> {
 }
 
 /** Everything the two services could be handed. Each takes the settings it needs. */
-function deps(world: object) {
+export function deps(world: object) {
   const c = ctx(world);
   return {
     pool: pool(),

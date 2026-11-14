@@ -52,7 +52,18 @@ export type HttpCellApi = CellApi & {
   moveSop(b: { from: string; to: string }): Promise<void>;
 };
 
-export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: string; generation: number }): HttpCellApi {
+/**
+ * What the HTTP client runs on, for tests: the fetch it calls and the clock it waits on between tries (PBI 259).
+ * Each defaults to the real one.
+ */
+export type HttpDeps = {
+  fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+};
+
+export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: string; generation: number }, deps: HttpDeps = {}): HttpCellApi {
+  const fetch = deps.fetch ?? globalThis.fetch;
   const base = `${cfg.controlUrl.replace(/\/$/, "")}/internal/cells/${encodeURIComponent(cfg.runId)}`;
   const call = async (method: "GET" | "POST", path: string, body?: unknown): Promise<any> => {
     const res = await fetch(base + path, {

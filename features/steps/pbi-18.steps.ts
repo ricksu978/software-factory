@@ -44,6 +44,15 @@ export type Ctx = {
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
   /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
   editSop?: (sop: any) => void;
+  /**
+   * PBI 259: the cell's own HTTP client against a fake cell API, its git's command runner and the clock both wait on.
+   * `prelude` runs first, as src/cell/main.ts asks for its context and its git asks for a token before the engine runs.
+   */
+  api?: object;
+  gitDeps?: object;
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  prelude?: () => Promise<void>;
 };
 
 function ctx(world: object): Ctx {
@@ -290,8 +299,9 @@ export async function runTheCell(world: object): Promise<void> {
     const { shellGit } = await import(pathToFileURL(gitFile).href);
     const { loadSop } = await import(pathToFileURL(join(repo, "src/config/sop.ts")).href);
     const comments = [...c.trusted, ...c.stranger].map((x, i) => ({ threadId: `t${i}`, path: "app.txt", line: 1, ...x }));
+    await c.prelude?.();
     c.result = await engine.runCell({
-      api: cellApi(c),
+      api: c.api ?? cellApi(c),
       ctx: {
         externalId: "482", title: "Item 482", acceptanceCriteria: Array.from({ length: c.criteria }, (_, i) => `Criterion ${i + 1} holds`),
         nextStage: c.nextStage, decision: c.decision, lockSha: c.lockSha, lockedFiles: c.lockedFiles, prNumber: c.prNumber,
@@ -303,7 +313,7 @@ export async function runTheCell(world: object): Promise<void> {
         ...c.context,
       },
       agent: ((base) => c.agent ? (a: any) => c.agent!(a, base) : base)(c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c)),
-      git: shellGit(c.dir, BRANCH),
+      git: shellGit(c.dir, BRANCH, c.gitDeps),
       dir: c.dir,
       repoHost: c.repoHost ?? {
         async openOrUpdatePr(p: { body: string }) { c.prBodies.push(p.body); return { number: 7, url: "https://github.com/acme/app/pull/7" }; },
@@ -317,8 +327,8 @@ export async function runTheCell(world: object): Promise<void> {
         bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
         risk: policy("risk", "Low by default.\n"), dod: policy("dod", c.dod) },
-      now: () => new Date(),
-      sleep: async () => {},
+      now: c.now ?? (() => new Date()),
+      sleep: c.sleep ?? (async () => {}),
     });
   } catch (e) {
     c.error = e;

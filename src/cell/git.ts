@@ -14,8 +14,24 @@ export type Git = {
   head(): Promise<string>;
 };
 
-export function shellGit(dir: string, branch: string): Git {
-  const git = async (...args: string[]) => (await run("git", args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout.trim();
+/** Runs one git command in `cwd`. It rejects as execFile does, with the exit code, signal and stderr on the error. */
+export type GitExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * What the cell's git runs on, for tests: the command runner and the clock it waits on between tries (PBI 259).
+ * Each defaults to the real one.
+ */
+export type GitDeps = {
+  exec?: GitExec;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+};
+
+const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, maxBuffer: 64 * 1024 * 1024 });
+
+export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
+  const exec = deps.exec ?? execGit;
+  const git = async (...args: string[]) => (await exec(args, { cwd: dir })).stdout.trim();
   const unmerged = async () => (await git("diff", "--name-only", "--diff-filter=U")).split("\n").filter(Boolean);
   return {
     async mergeBase(base) {
