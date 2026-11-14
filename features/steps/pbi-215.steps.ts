@@ -310,12 +310,13 @@ Then("the question names the base commit {string}", function (label: string) {
   assert.ok(q.includes(s.slice(0, 7)), `the question doesn't name the base commit ${s.slice(0, 7)}: ${q}`);
 });
 
+// Shared with PBI 212's feature. A PBI 215 cell moves the item to NeedsInput and a PBI 212 cell sends no transition
+// at all, so the step passes when the cell ended cleanly and none of its transitions leads to Failed.
 Then("the item doesn't move to Failed", function () {
   const c = cell(this);
   settled(c);
-  const t = c.calls.filter((x) => x.route === "/transition").at(-1);
-  assert.ok(t, "the cell sent no transition");
-  assert.notEqual(next("InProgress", t.body.event as ItemEvent), "Failed");
+  const sent = c.calls.filter((x) => x.route === "/transition");
+  assert.ok(sent.every((t) => next("InProgress", t.body.event as ItemEvent) !== "Failed"), "the item moved to Failed");
 });
 
 Then("the question doesn't say Green failed after its attempts", function () {
