@@ -16,7 +16,7 @@ type Verdict = { index: number; criterion: string; status: string; reason: strin
 type PolicyModule = { loadPolicy?: (read: (path: string) => Promise<string | null>, name: string) => Promise<Policy | null> };
 type GateModule = {
   gate?: (item: FactoryItem, ctx: {
-    readinessSha: string; dor: Policy | null; dodExists: boolean; configValid: boolean; repoKnown: boolean; openDeps: string[];
+    readinessSha: string; dor: Policy | null; dodExists: boolean; configValid: boolean; repoKnown: boolean;
     judge: Judge; adapter: BacklogAdapter; recordCheck?: RecordCheck; now?: () => Date;
   }) => Promise<{ ready: boolean; results: Verdict[] }>;
 };
@@ -123,7 +123,7 @@ export async function checkItem(world: object): Promise<void> {
     const found = await c.fake.adapter.getItem(c.itemId);
     assert.ok(found);
     c.outcome = await gate.gate(found, {
-      readinessSha: "scenario", dor, dodExists: true, configValid: true, repoKnown: true, openDeps: [], judge: c.judge, adapter: c.fake.adapter,
+      readinessSha: "scenario", dor, dodExists: true, configValid: true, repoKnown: true, judge: c.judge, adapter: c.fake.adapter,
       ...(c.recordCheck ? { recordCheck: c.recordCheck } : {}), ...(c.now ? { now: c.now } : {}),
     });
   } catch (e) {

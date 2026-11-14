@@ -82,9 +82,9 @@ const rewriteRequests = (c: Ctx144, title?: string) =>
 function install(world: object, k: Ctx): void {
   k.installed = true;
   const c = ctx144(world);
-  // These scenarios gate a child that needs an earlier, still open child on its own dor.md lines, so the scripted
-  // board reports no open dependency. The engine rule for one is out of scope here.
-  c.gateExtras = { openDeps: [], ...c.gateExtras };
+  // These scenarios gate a child that needs an earlier, still open child on its own dor.md lines, so the in-memory
+  // scheduler takes it up whatever blocks it. Holding a blocked item back is PBI 237's, and out of scope here.
+  c.ignoreBlockers = true;
   c.judgeOverride = async (item: FactoryItem, dor: Policy) => {
     const titles = proposedTitles(c);
     const isFiled = c.filed.some((i) => i.externalId === item.externalId);
@@ -410,11 +410,6 @@ Then("the parent issue has no sub-issues", function () {
   const c = ctx144(this);
   polled(c);
   assert.deepEqual(c.subIssues.get(c.parentId!) ?? [], []);
-});
-
-Then("the factory has started no run for child {string}", function (title: string) {
-  const c = ctx144(this);
-  assert.ok(!c.runs.has(filedChild(c, title).externalId), `the factory took up child "${title}"`);
 });
 
 // --- Comments ------------------------------------------------------------------------------------------------------
