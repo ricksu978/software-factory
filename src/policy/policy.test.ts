@@ -23,6 +23,32 @@ describe("loadPolicy", () => {
     assert.deepEqual(p?.criteria.map((c) => c.text), ["Has a Size of 5 or less"]);
   });
 
+  // PBI 261: the worker reads each default from the commit of `main` it last fetched.
+  test("a default comes from the defaults reader when one is given, not from the policy directory", async () => {
+    const asked: string[] = [];
+    const defaults = async (name: string) => {
+      asked.push(name);
+      return "- [ ] Names the user it serves\n";
+    };
+    const p = await loadPolicy(repoFiles({}), "dor", defaults);
+    assert.equal(p?.source, "default");
+    assert.deepEqual(p?.criteria.map((c) => c.text), ["Names the user it serves"]);
+    assert.deepEqual(asked, ["dor"]);
+  });
+
+  test("a repo's own file wins over the defaults reader, which isn't asked", async () => {
+    const p = await loadPolicy(repoFiles({ ".factory/risk.md": "Own risk.\n" }), "risk", async () => assert.fail("asked for a default"));
+    assert.equal(p?.source, "repo");
+  });
+
+  test("a missing dod.md never asks the defaults reader", async () => {
+    assert.equal(await loadPolicy(repoFiles({}), "dod", async () => assert.fail("asked for a default")), null);
+  });
+
+  test("a run: line in a default from the reader still throws PolicyError", async () => {
+    await assert.rejects(loadPolicy(repoFiles({}), "risk", async () => "x `run: npm test`\n"), PolicyError);
+  });
+
   test("a repo with no dod.md gets null, since dod.md has no default", async () => {
     assert.equal(await loadPolicy(repoFiles({}), "dod"), null);
   });

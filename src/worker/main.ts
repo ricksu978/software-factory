@@ -24,6 +24,7 @@ import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
+import { mainDefaults } from "./main-defaults.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
 
@@ -59,7 +60,11 @@ export type WorkerDeps = {
   lockRetryMs?: number;
   /** Where the worker's log lines go. The console by default. */
   log?: Pick<Console, "log" | "warn" | "error">;
-  /** Keeps the cell image current with `main` (PBI 210). Without it, the worker leaves the image as it is. */
+  /**
+   * Keeps the cell image current with `main` (PBI 210), and the default policies the poller reads are `main`'s at the
+   * commit last fetched into its checkout (PBI 261). Without it, the worker leaves the image as it is and the poller
+   * reads the defaults beside its code.
+   */
   cellImage?: Omit<CellImageDeps, "pool" | "log">;
 };
 
@@ -275,11 +280,14 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
     if (!ticked) log.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs, log)];
+  // The default policies come from the commit of `main` the cell image loop last fetched into the checkout, so a merged
+  // change to one re-checks NotReady items on the next poll with no restart (PBI 261).
+  const defaults = d.cellImage && mainDefaults(d.cellImage);
   // Each board files its splits as child issues on itself (PBI 144).
   for (const s of d.sources) {
     const split = d.split && { ...d.split, file: s.file };
     loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
-      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split }), runs, log));
+      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, ...(defaults ? { defaults } : {}) }), runs, log));
   }
   if (d.cellImage) {
     const cellImage = { ...d.cellImage, pool: d.pool, log };

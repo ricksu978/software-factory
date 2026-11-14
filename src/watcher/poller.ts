@@ -9,7 +9,7 @@ import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { keepSplit, keptSplit } from "../store/splits.ts";
-import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
+import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
@@ -35,6 +35,12 @@ export type PollDeps = {
    * poller uses the code's own, readinessLogic().
    */
   logic?: ReadinessLogic;
+  /**
+   * Where the default policies come from, for a repo without its own (PBI 261): the worker reads them from the commit
+   * of `main` it last fetched, for both the fingerprint and the gate's criteria. Unset, they come from the policy
+   * directory beside the code.
+   */
+  defaults?: DefaultPolicies;
 };
 
 type Row = {
@@ -115,7 +121,9 @@ async function closeOpenPr(host: RepoHost, repo: string | null, row: Row, why: s
 }
 
 /** Reads every readiness input for one repo at its default branch head, once per poll. */
-async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic): Promise<Readiness> {
+async function readiness(
+  pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic, defaults?: DefaultPolicies,
+): Promise<Readiness> {
   const known = repo !== null && (await pool.query("select 1 from repo where url = $1", [`https://github.com/${repo}`])).rowCount === 1;
   if (!repo || !known) {
     // The logic still counts, so a change to it re-checks these items too (PBI 149).
@@ -131,14 +139,14 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
   const texts = { config: raw.get(".factory/config.yml") ?? null } as Parameters<typeof readinessSha>[0];
   for (const name of POLICIES) {
     const text = raw.get(`.factory/${name}.md`) ?? null;
-    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name))!.text);
+    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name, defaults))!.text);
   }
 
   const policyErrors: string[] = [];
   const loaded = new Map<PolicyName, Policy | null>();
   for (const name of POLICIES) {
     try {
-      loaded.set(name, await loadPolicy(read, name));
+      loaded.set(name, await loadPolicy(read, name, defaults));
     } catch (e) {
       if (!(e instanceof PolicyError)) throw e;
       policyErrors.push(e.message);
@@ -155,6 +163,31 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
     sha: readinessSha(texts, logic), head, dor: loaded.get("dor") ?? null, policyErrors,
     dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true,
   };
+}
+
+/**
+ * Reads each default once per poll, so every repo in the poll sees the same text for it. A source that can be pinned
+ * is pinned to one commit before the first read, so all the defaults in one poll come from that commit, even if a
+ * fetch moves `main` mid-poll. Nothing is read, and nothing pinned, in a poll that needs no default.
+ */
+function oncePerPoll(defaults: DefaultPolicies): DefaultPolicies {
+  let source: Promise<(name: Parameters<DefaultPolicies>[0]) => Promise<string>> | undefined;
+  const read = new Map<string, Promise<string>>();
+  return (name) => {
+    source ??= defaults.pin ? defaults.pin() : Promise.resolve(defaults);
+    if (!read.has(name)) read.set(name, source.then((r) => r(name)));
+    return read.get(name)!;
+  };
+}
+
+/**
+ * The readiness fingerprint the poller takes for `repo` (PBI 261): the sha a NotReady item's stored one is compared
+ * with. Given `defaults`, the defaults come from it, as the worker's come from `main`'s fetched commit.
+ */
+export async function readinessFingerprint(d: {
+  pool: pg.Pool; repoHost: RepoHost; repo: string; logic?: ReadinessLogic; defaults?: DefaultPolicies;
+}): Promise<string> {
+  return (await readiness(d.pool, d.repoHost, d.repo, d.logic ?? readinessLogic(), d.defaults && oncePerPoll(d.defaults))).sha;
 }
 
 /**
@@ -272,10 +305,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, or when a readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: step 3 withdrew it, or failed to read it and retries next poll.
   const logic = deps.logic ?? readinessLogic();
+  const defaults = deps.defaults && oncePerPoll(deps.defaults);
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
     const key = fi.repo ?? "";
-    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic));
+    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
