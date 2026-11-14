@@ -9,7 +9,7 @@ import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "..
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import type { Actor } from "../store/events.ts";
-import { claimNext, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
+import { claimNext, closeStartedAttempts, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { activeOverrides, clearItemOverrides, restartWaitMs } from "../store/overrides.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
@@ -111,8 +111,8 @@ async function liveCells(d: TickDeps) {
 }
 
 /**
- * Stops each cell still running when a restart's wrap-up runs out, records its open attempt stopped and sends its item
- * back to Queued, with run.next_stage where it was. The restarted factory picks the item up at that stage, from the last
+ * Stops each cell still running when a restart's wrap-up runs out, closes its run's started attempts as stopped with the
+ * lease message (PBI 239) and sends its item back to Queued, with run.next_stage where it was. The restarted factory picks the item up at that stage, from the last
  * commit the cell pushed. A stopped attempt uses up none of the stage's retries. A stop that throws is logged and
  * retried next tick, and the other cells are stopped all the same.
  */
@@ -124,7 +124,7 @@ async function stopForRestart(d: TickDeps, result: TickResult) {
       await withTx(d.pool, async (c) => {
         const still = await c.query("select 1 from item where id = $1 and state = 'InProgress' and lease_generation = $2 for update", [cell.item_id, cell.generation]);
         if (!still.rowCount) return;
-        await c.query("update stage_run set status = 'stopped', ended_at = $2 where run_id = $1 and status = 'started'", [cell.run_id, d.now]);
+        await closeStartedAttempts(c, cell.item_id, d.now);
         await transitionItem(c, cell.item_id, "lease_expired", system, { reason: "restart" });
       });
     });

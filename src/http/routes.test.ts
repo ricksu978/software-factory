@@ -5,6 +5,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { fakeLauncher } from "../scheduler/launcher.ts";
 import { tick } from "../scheduler/scheduler.ts";
+import { LEASE_RAN_OUT } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { createAuth } from "./auth.ts";
 import { dashboardRoutes, tokenBanner } from "./routes.ts";
@@ -441,6 +442,22 @@ describe("dashboard routes", dbTest, () => {
     const { html } = await get("/", "octo");
     const row = html.slice(html.indexOf("talking item"), html.indexOf("</tr>", html.indexOf("talking item")));
     assert.ok(row.includes("Wrote the &lt;stubs&gt;"), row);
+  });
+
+  test("Floor's last agent message skips the factory's note on an attempt it closed", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("InProgress", "reclaimed item");
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'green') returning id", [id])).rows[0].id;
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, message, started_at, ended_at) values
+       ($1, 'green', 1, 'failed', 'Fixed the parser', now() - interval '2 hours', now() - interval '1 hour'),
+       ($1, 'green', 2, 'stopped', $2, now() - interval '50 minutes', now() - interval '10 minutes'),
+       ($1, 'green', 3, 'started', null, now() - interval '5 minutes', null)`, [run, LEASE_RAN_OUT],
+    );
+    const { html } = await get("/", "octo");
+    const row = html.slice(html.indexOf("reclaimed item"), html.indexOf("</tr>", html.indexOf("reclaimed item")));
+    assert.ok(row.includes("Fixed the parser"), row);
+    assert.ok(!row.includes("lease ran out"), row);
   });
 
   test("Run detail shows each of the item's scenarios with its red and green verdict, and links each transcript", async () => {
