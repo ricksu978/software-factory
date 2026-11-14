@@ -324,10 +324,12 @@ Then("this repo's CI has a check named {string}", function (name: string) {
   const names: string[] = [];
   for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
     const wf = (parse(readFileSync(join(dir, f), "utf8")) ?? {}) as { on?: unknown; jobs?: Record<string, { name?: string }> };
+    // A push workflow reports a check on a PR's commits as well as a pull_request one does. This repo's ci.yml runs
+    // on push alone (see the comment there), so both count.
     const on = wf.on;
-    const onPr = on === "pull_request" || (Array.isArray(on) && on.includes("pull_request")) || (typeof on === "object" && on !== null && "pull_request" in on);
-    if (!onPr) continue;
+    const has = (t: string) => on === t || (Array.isArray(on) && on.includes(t)) || (typeof on === "object" && on !== null && t in on);
+    if (!has("push") && !has("pull_request")) continue;
     for (const [id, job] of Object.entries(wf.jobs ?? {})) names.push(job?.name ?? id);
   }
-  assert.ok(names.includes(name), `no workflow that runs on pull requests has a job named "${name}": ${names.join(", ")}`);
+  assert.ok(names.includes(name), `no workflow that runs on push or pull requests has a job named "${name}": ${names.join(", ")}`);
 });
