@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { activityPage, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
+import { activityPage, blockedReason, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -145,6 +145,23 @@ describe("issueRef", () => {
 
   test("shows nothing for an event with no item", () => {
     assert.equal(issueRef(null, null), "");
+  });
+});
+
+describe("Floor's Blocked list (PBI 237)", () => {
+  test("names each open blocker", () => {
+    assert.equal(blockedReason(["12"]), "Waits on #12, which is still open. It starts once it closes.");
+    assert.equal(blockedReason(["12", "13", "14"]), "Waits on #12, #13 and #14, which are still open. It starts once they close.");
+  });
+
+  test("lists a blocked item with its reason, and says so when none is", () => {
+    const base = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const html = floorPage({ ...base, blocked: [{ id: "i2", title: "Child two", external_id: "41", repo: "acme/widgets", blocked_by: ["40"] }] }, null);
+    const view = html.slice(html.indexOf(">Blocked<"), html.indexOf("<h2", html.indexOf(">Blocked<")));
+    assert.ok(view.includes('<a href="/items/i2">Child two</a>'), view);
+    assert.ok(view.includes("Waits on #40, which is still open."), view);
+    assert.ok(!view.includes("issues/40"), "a blocker isn't linked, since it may be in another repo");
+    assert.ok(floorPage(base, null).includes("No ready item waits on another."));
   });
 });
 
