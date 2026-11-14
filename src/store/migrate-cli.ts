@@ -5,6 +5,7 @@ import type pg from "pg";
 import { parse } from "yaml";
 import { seedOwner } from "../../scripts/seed-owner.ts";
 import { createPool, migrate } from "./db.ts";
+import { localIssuer, readRealm, realmTestOwner } from "./keycloak-owner.ts";
 
 type Source = { repo: string; installationId: number; owner: { type: "user" | "org"; login: string }; projectNumber: number; fieldMap: unknown; trustedBot?: string };
 
@@ -94,12 +95,22 @@ export async function main(args: string[], env: NodeJS.ProcessEnv): Promise<numb
     const sources = env.FACTORY_SOURCES ?? "config/sources.yml";
     if (existsSync(sources)) await upsertSources(pool, sources);
     if (env.FACTORY_ENV === "local") {
+      // The realm's test owner, keyed by issuer and subject, so someone can sign in through Keycloak as an owner
+      // (redesign step 5). It has no GitHub login. The issuer comes first: under floating ports a Keycloak that doesn't
+      // answer fails migrate before it seeds anyone.
+      const owner = realmTestOwner(readRealm());
+      const issuer = await localIssuer(env, owner.realm);
       if (env.FACTORY_DEV_LOGIN) await upsertDevOwner(pool, env.FACTORY_DEV_LOGIN);
+      await seedOwner(pool, [`issuer=${issuer}`, `subject=${owner.subject}`]);
       // Keeps PBI 2's restart scenario working: each local run adds one probe row.
       await pool.query("create table if not exists probe_runs (id serial primary key, at timestamptz not null default now())");
       await pool.query("insert into probe_runs default values");
     }
     return 0;
+  } catch (e) {
+    // The stack too: this catches every step of migrate, not just the Keycloak lookup.
+    console.error((e as Error).stack ?? String(e));
+    return 1;
   } finally {
     await pool.end();
   }
