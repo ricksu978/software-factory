@@ -4,6 +4,10 @@ import type { ItemEvent } from "../core/states.ts";
 import type { CiCheck } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
+import { realSleep, Transient, withRetries } from "./retry.ts";
+
+/** How long the cell waits for the cell API to answer one try before it counts as a timeout (PBI 259). */
+export const CALL_TIMEOUT_MS = 90_000;
 
 export class LeaseLost extends Error {
   override name = "LeaseLost";
@@ -29,7 +33,11 @@ export type TransitionBody = {
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
 
 export type CellApi = {
-  lease(): Promise<{ stop: boolean }>;
+  /**
+   * Renews the lease. `once` tries it a single time, for the renewal loop, which keeps its own tolerance of 3 minutes
+   * of failed renewals (PBI 259). Every other call is retried on a 5xx, a connection fault or a timeout.
+   */
+  lease(opts?: { once?: boolean }): Promise<{ stop: boolean }>;
   stage(b: StageReport): Promise<void>;
   transition(b: TransitionBody): Promise<void>;
   policyResults(b: PolicyResults): Promise<void>;
@@ -65,18 +73,30 @@ export type HttpDeps = {
 export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: string; generation: number }, deps: HttpDeps = {}): HttpCellApi {
   const fetch = deps.fetch ?? globalThis.fetch;
   const base = `${cfg.controlUrl.replace(/\/$/, "")}/internal/cells/${encodeURIComponent(cfg.runId)}`;
-  const call = async (method: "GET" | "POST", path: string, body?: unknown): Promise<any> => {
-    const res = await fetch(base + path, {
-      method,
-      headers: { authorization: `Bearer ${cfg.runToken}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+  // One try: a 409 is LeaseLost, a 5xx or a fetch that rejects (refused, reset, timed out) is Transient, and any other
+  // answer that isn't ok fails as it is. Each try sends the same request.
+  const once = async (method: "GET" | "POST", path: string, body?: unknown): Promise<any> => {
+    let res: Response;
+    try {
+      res = await fetch(base + path, {
+        method,
+        headers: { authorization: `Bearer ${cfg.runToken}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+    } catch (e) {
+      throw new Transient(`${method} ${path}: ${describe(e)}`, { cause: e });
+    }
     if (res.status === 409) throw new LeaseLost(`${method} ${path}: the lease generation moved on`);
+    if (res.status >= 500) throw new Transient(`${method} ${path}: ${res.status} ${await res.text().catch(() => "")}`);
     if (!res.ok) throw new Error(`${method} ${path}: ${res.status} ${await res.text()}`);
     return res.json();
   };
+  const sleep = deps.sleep ?? realSleep;
+  const call = (method: "GET" | "POST", path: string, body?: unknown, opts: { once?: boolean } = {}): Promise<any> =>
+    opts.once ? once(method, path, body) : withRetries(`${method} ${path.split("?")[0]}`, () => once(method, path, body), { transient: (e) => e instanceof Transient, sleep });
   return {
-    lease: async () => ({ stop: (await call("POST", "/lease", { generation: cfg.generation })).stop === true }),
+    lease: async (opts) => ({ stop: (await call("POST", "/lease", { generation: cfg.generation }, opts)).stop === true }),
     context: () => call("GET", "/context"),
     githubToken: async () => (await call("POST", "/github-token", {})).token,
     stage: async (b) => void (await call("POST", "/stage", b)),
@@ -93,4 +113,11 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
       if (!res.ok) throw new Error(`upload ${kind} ${stageId}-${attempt}: ${res.status}`);
     },
   };
+}
+
+/** A fetch failure's own words: undici's "fetch failed" hides them in its cause. */
+function describe(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const cause = e.cause instanceof Error ? `: ${e.cause.message}` : "";
+  return `${e.name === "TimeoutError" ? "no answer in time" : e.message}${cause}`;
 }

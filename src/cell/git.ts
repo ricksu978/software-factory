@@ -2,6 +2,7 @@
 // configures a credential helper that asks the cell API for a fresh token on demand.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { realSleep, withRetries } from "./retry.ts";
 
 const run = promisify(execFile);
 
@@ -15,7 +16,29 @@ export type Git = {
 };
 
 /** Runs one git command in `cwd`. It rejects as execFile does, with the exit code, signal and stderr on the error. */
-export type GitExec = (args: string[], opts: { cwd: string }) => Promise<{ stdout: string; stderr: string }>;
+export type GitExec = (args: string[], opts: { cwd: string; timeout?: number }) => Promise<{ stdout: string; stderr: string }>;
+
+/** How long one git push or fetch may run before it's killed and counts as a timeout (PBI 259). */
+export const REMOTE_TIMEOUT_MS = 10 * 60_000;
+
+// What git and curl print when the network, a proxy or GitHub's front end failed, rather than GitHub refusing the
+// request: a host that can't be resolved or reached, a dropped connection, a timeout, or a 5xx from GitHub or a proxy.
+const NETWORK_FAULT = new RegExp([
+  "Could not resolve (host|proxy)", "Failed to connect", "Couldn't connect to server", "Connection (reset|refused|timed out)",
+  "Operation timed out", "early EOF", "unexpected disconnect", "CONNECT tunnel failed, response 5\\d\\d", "HTTP 5\\d\\d",
+  "returned error: 5\\d\\d",
+].join("|"), "i");
+
+/**
+ * True when a failed git command failed on the network, a proxy 5xx or its time limit, so trying it again may work.
+ * A push GitHub rejects, a 4xx or a ref that doesn't exist isn't one.
+ */
+export function gitNetworkFault(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const x = e as Error & { killed?: boolean; signal?: string | null; stderr?: string };
+  if (x.killed || x.signal) return true;
+  return NETWORK_FAULT.test(x.stderr ?? "");
+}
 
 /**
  * What the cell's git runs on, for tests: the command runner and the clock it waits on between tries (PBI 259).
@@ -27,18 +50,22 @@ export type GitDeps = {
   now?: () => Date;
 };
 
-const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, maxBuffer: 64 * 1024 * 1024 });
+const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, timeout: opts.timeout, maxBuffer: 64 * 1024 * 1024 });
 
 export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
   const exec = deps.exec ?? execGit;
+  const sleep = deps.sleep ?? realSleep;
   const git = async (...args: string[]) => (await exec(args, { cwd: dir })).stdout.trim();
+  // A push or fetch talks to GitHub, so a network fault is retried, and it has a time limit (PBI 259).
+  const remote = (...args: string[]) => withRetries(`git ${args[0]}`, () => exec(args, { cwd: dir, timeout: REMOTE_TIMEOUT_MS }),
+    { transient: gitNetworkFault, sleep });
   const unmerged = async () => (await git("diff", "--name-only", "--diff-filter=U")).split("\n").filter(Boolean);
   return {
     async mergeBase(base) {
       // A merge an agent left half done is still a conflict, whatever the base holds now.
       const left = await unmerged();
       if (left.length) return left;
-      await git("fetch", "-q", "origin", base);
+      await remote("fetch", "-q", "origin", base);
       try {
         await git("merge", "-q", "--no-edit", `origin/${base}`);
         return [];
@@ -58,7 +85,7 @@ export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
       return git("rev-parse", "HEAD");
     },
     async push() {
-      await git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+      await remote("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
     },
     head: () => git("rev-parse", "HEAD"),
   };

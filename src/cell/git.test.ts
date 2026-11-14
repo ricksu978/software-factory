@@ -1,0 +1,66 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { gitNetworkFault, shellGit, type GitExec } from "./git.ts";
+import { NetworkError } from "./retry.ts";
+
+const failed = (stderr: string, code: number | null = 128, killed = false) =>
+  Object.assign(new Error(`Command failed: git push\n${stderr}`), { code, killed, signal: killed ? "SIGTERM" : null, stderr, stdout: "" });
+
+const NETWORK = [
+  "fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com",
+  "fatal: unable to access 'https://github.com/a/b.git/': Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server",
+  "error: RPC failed; curl 56 Recv failure: Connection reset by peer\nfatal: the remote end hung up unexpectedly",
+  "fatal: unable to access 'https://github.com/a/b.git/': CONNECT tunnel failed, response 502",
+  "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503",
+  "fatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 504",
+  "fatal: unable to access 'https://github.com/a/b.git/': Operation timed out after 300000 milliseconds",
+];
+const NOT = [
+  " ! [rejected]        HEAD -> b (fetch first)\nerror: failed to push some refs",
+  "fatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403",
+  "fatal: couldn't find remote ref nope",
+];
+
+test("git failures on the network, a proxy 5xx or a timeout are network faults", () => {
+  for (const s of NETWORK) assert.ok(gitNetworkFault(failed(s)), s);
+  assert.ok(gitNetworkFault(failed("", null, true)), "killed by its time limit");
+});
+
+test("a rejected push, a 403 or a missing ref isn't", () => {
+  for (const s of NOT) assert.ok(!gitNetworkFault(failed(s, s.includes("rejected") ? 1 : 128)), s);
+  assert.ok(!gitNetworkFault(new Error("boom")));
+});
+
+function scripted(faults: (string | null)[]) {
+  const runs: string[][] = [];
+  const slept: number[] = [];
+  const exec: GitExec = async (args) => {
+    runs.push(args);
+    if (args[0] === "push" || args[0] === "fetch") {
+      const n = runs.filter((a) => a[0] === args[0]).length - 1;
+      const f = faults[Math.min(n, faults.length - 1)];
+      if (f) throw failed(f, f.includes("rejected") ? 1 : 128);
+    }
+    return { stdout: "", stderr: "" };
+  };
+  return { runs, slept, git: shellGit("/nowhere", "b", { exec, sleep: async (ms) => void slept.push(ms) }) };
+}
+
+test("a push that fails on the network is tried again and goes through", async () => {
+  const s = scripted([NETWORK[2], null]);
+  await s.git.push();
+  assert.equal(s.runs.filter((a) => a[0] === "push").length, 2);
+  assert.equal(s.slept.length, 1);
+});
+
+test("a fetch that fails on the network every time ends with NetworkError naming git fetch and the tries", async () => {
+  const s = scripted([NETWORK[4]]);
+  await assert.rejects(s.git.mergeBase("main"), (e: unknown) => e instanceof NetworkError && /^git fetch failed on a network or GitHub error after 5 tries/.test(e.message));
+  assert.ok(s.slept.reduce((a, b) => a + b, 0) >= 120_000);
+});
+
+test("a push rejected after a network failure isn't tried again", async () => {
+  const s = scripted([NETWORK[2], NOT[0]]);
+  await assert.rejects(s.git.push(), (e: unknown) => !(e instanceof NetworkError) && /rejected/.test(String(e)));
+  assert.equal(s.runs.filter((a) => a[0] === "push").length, 2);
+});

@@ -13,7 +13,7 @@ import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/me
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
-import type { Sop, SopStage, StageId } from "../config/sop.ts";
+import { STAGE_IDS, type Sop, type SopStage, type StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
@@ -411,7 +411,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   let failedRenewals = 0;
   let lost = false;
   const renew = setInterval(() => {
-    api.lease().then(
+    api.lease({ once: true }).then(
       (r) => { failedRenewals = 0; if (r.stop) abort.abort(new Stop("stopped by the control plane")); },
       (e) => {
         if (e instanceof LeaseLost) { lost = true; abort.abort(e); }
@@ -1151,7 +1151,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
     // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
-    const conflict = await git.mergeBase(ctx.base);
+    // A merge that fails, not on a conflict, such as a fetch still failing on the network after its retries, ends an
+    // attempt of the stage the run resumes at, so the attempt's message says why (PBI 259).
+    const conflict = await git.mergeBase(ctx.base).catch(async (e: unknown) => {
+      if ((STAGE_IDS as readonly string[]).includes(ctx.nextStage)) await begin(ctx.nextStage as StageId);
+      throw e;
+    });
     if (conflict.length) {
       await begin("merge");
       await say("merge", brief("# Resolve a merge conflict",

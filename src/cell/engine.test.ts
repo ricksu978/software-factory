@@ -109,7 +109,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
   };
   const deps: CellDeps = {
     api: {
-      lease: async () => (rec("/lease"), o.lease ? o.lease() : { stop: false }),
+      lease: async (opts) => (rec("/lease", opts ?? {}), o.lease ? o.lease() : { stop: false }),
       stage: async (b) => { rec("/stage", b); if (b.status === "started") stage = b.stageId; },
       transition: async (b) => rec("/transition", b),
       policyResults: async (b) => rec("/policy-results", b),
@@ -380,6 +380,30 @@ describe("runCell", () => {
     const h = harness({ script: async (a) => (a.mode === "judge" ? { ok: false, text: "", limit: { resetsAt: 1762400000 } } : {}) });
     assert.equal(await h.run(), "limited");
     assert.equal(h.prs.length, 0, "no PR opens without its tier");
+  });
+
+  test("the renewal loop renews the lease once a tick, leaving retries to its own 3-minute tolerance (PBI 259)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    const h = harness({ script: async (_a, stage) => {
+      if (stage === "red") {
+        mock.timers.tick(60_000);
+        await new Promise((r) => setImmediate(r));
+      }
+    } });
+    await h.run();
+    const leases = h.calls.filter((c) => c.route === "/lease").map((c) => c.body);
+    assert.ok(leases.some((b) => b.once === true), "the renewal loop didn't renew");
+    assert.ok(leases.some((b) => b.once === undefined), "the lease check before a push was a single try");
+  });
+
+  test("a base merge that fails, not on a conflict, ends an attempt of the stage the run resumes at with its message (PBI 259)", async () => {
+    const h = harness();
+    const boom = new Error("git fetch failed on a network or GitHub error after 5 tries: HTTP 503");
+    h.deps.git = { ...h.deps.git, mergeBase: async () => { throw boom; } };
+    await assert.rejects(h.run(), (e) => e === boom);
+    const stages = h.calls.filter((c) => c.route === "/stage").map((c) => c.body);
+    assert.deepEqual(stages.map((b) => `${b.stageId} ${b.status}`), ["red started", "red failed"]);
+    assert.equal(stages.at(-1).message, boom.message);
   });
 
   test("a run resumed at red never calls the agent for understand or specify", async () => {
