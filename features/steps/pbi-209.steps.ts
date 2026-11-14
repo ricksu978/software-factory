@@ -65,6 +65,8 @@ type Attempt = {
 };
 type Cell = {
   generation: number; api: HttpCellApi; meter: ReturnType<typeof stageMeter>;
+  /** A client of the same run on a port nothing listens on, which the cell uses while the cell API can't be reached. */
+  down: HttpCellApi;
   /** The stream the next agent call reads. */
   next?: Stream;
   abort: AbortController;
@@ -222,7 +224,7 @@ function makeCell(world: object, generation: number): Cell {
   // The cell API can't be reached: a port nothing listens on.
   const down = httpCellApi({ controlUrl: "http://127.0.0.1:1", runId, runToken: runToken(SECRET, runId, generation), generation });
   const cell: Cell = {
-    generation, api, abort: new AbortController(), dead: false,
+    generation, api, down, abort: new AbortController(), dead: false,
     meter: undefined as never,
   };
   const agent = (a: AgentArgs): Promise<AgentResult> => {
@@ -368,6 +370,38 @@ function uploadedSoFar(world: object, ago = 0): void {
   const put = latestTo(c, `transcripts/${c.runId}/${a.stage}-${a.attempt}.jsonl`, true);
   holds(c, put?.body, a.messages, "the transcript so far");
   assert.equal(put!.at, c.at - ago * 1000, `the transcript so far wasn't uploaded ${ago} seconds ago. Uploads:\n${show(c)}`);
+}
+
+/** Asserts that the open attempt is still running: its cell is alive and its agent's latest call, if any, hasn't ended or failed. */
+function stillRunning(world: object): void {
+  const c = ctx(world);
+  const a = c.open;
+  assert.ok(a, "no stage attempt is running");
+  assert.ok(c.cell && !c.cell.dead, "the cell running the stage has died");
+  assert.ok(!c.cell.abort.signal.aborted, "the stage's agent was aborted");
+  for (const call of a.calls) assert.equal(call.error, undefined, `an agent call of the stage failed: ${String(call.error)}`);
+  const last = a.calls.at(-1);
+  if (last) assert.ok(!last.ended, "the stage's latest agent call has ended");
+}
+
+/** Asserts that a PUT to blob storage is refused now, and that blob storage kept nothing of it. */
+async function refusing(world: object): Promise<void> {
+  const c = ctx(world);
+  const puts = c.puts.length;
+  const r = await fetch(`${c.blobOrigin}/${encodeURIComponent("pbi-209/probe")}`, { method: "PUT", body: "probe" });
+  assert.equal(r.status, 503, `blob storage took a PUT it should have refused: ${r.status}`);
+  assert.equal(c.puts.length, puts, "blob storage kept a PUT it refused");
+  assert.ok(!c.blobs.has("pbi-209/probe"), "blob storage kept a PUT it refused");
+}
+
+/** Lets the run's lease lapse and expires leases, asserting that this item's lease was the one expired. */
+async function expire(world: object): Promise<void> {
+  const c = ctx(world);
+  await pool().query("update item set lease_expires = now() - interval '1 minute' where id = $1", [c.itemId]);
+  const expired = await withTx(pool(), (tx) => expireLeases(tx, new Date()));
+  assert.ok(expired.includes(c.itemId!), `expireLeases didn't expire the item's lease: it expired ${JSON.stringify(expired)}`);
+  const state = (await pool().query<{ state: string }>("select state from item where id = $1", [c.itemId])).rows[0]?.state;
+  assert.notEqual(state, "InProgress", "the item is still InProgress after its lease expired");
 }
 
 // ---- reading what was stored ----
@@ -585,10 +619,12 @@ Given("the item's {string} stage attempt {int} failed, and its transcript is sto
 
 When("{int} seconds pass and the stage is still running", long, async function (s: number) {
   await pass(this, s);
+  stillRunning(this);
 });
 
 When("{int} more seconds pass and the stage is still running", long, async function (s: number) {
   await pass(this, s);
+  stillRunning(this);
 });
 
 When("its agent writes a message every second for {int} seconds while the stage keeps running", long, async function (s: number) {
@@ -596,7 +632,10 @@ When("its agent writes a message every second for {int} seconds while the stage 
 });
 
 When("{int} seconds pass with no new messages and the stage still running", long, async function (s: number) {
+  const before = ctx(this).open?.messages.length;
   await pass(this, s);
+  assert.equal(ctx(this).open?.messages.length, before, "the agent wrote messages while the clock moved");
+  stillRunning(this);
 });
 
 When("its agent writes {int} message and {int} more seconds pass", long, async function (n: number, s: number) {
@@ -628,16 +667,28 @@ When("the stage passes, its agent calls having used {int} tokens in and {int} to
 
 // ---- uploads that fail ----
 
-Given("blob storage refuses the upload", function () {
+Given("blob storage refuses the upload", long, async function () {
   ctx(this).refuse = true;
+  await refusing(this);
 });
 
-Given("the cell API can't be reached when the cell asks where to upload", function () {
-  ctx(this).apiDown = true;
+Given("the cell API can't be reached when the cell asks where to upload", long, async function () {
+  const c = ctx(this);
+  c.apiDown = true;
+  const a = c.open;
+  assert.ok(a, "no stage attempt is running");
+  await assert.rejects(c.cell!.down.upload({ kind: "transcript", stageId: a.stage, attempt: a.attempt, body: "" }),
+    "the unreachable cell API answered when asked where to upload");
+  assert.equal(c.puts.length, 0, "an upload reached blob storage although the cell API can't be reached");
 });
 
 When("the cell tries to upload the transcript so far", long, async function () {
+  const c = ctx(this);
+  const tries = c.tries.length;
   await pass(this, 15);
+  assert.equal(c.tries.length, tries + 1, `the cell didn't try once to upload the transcript so far. Tries: ${JSON.stringify(c.tries)}`);
+  assert.equal(c.tries.at(-1)!.messages, c.open!.messages.length, "the cell's try didn't carry every message so far");
+  stillRunning(this);
 });
 
 Given("the cell's first try at uploading the transcript so far failed", long, async function () {
@@ -648,8 +699,9 @@ Given("the cell's first try at uploading the transcript so far failed", long, as
   assert.ok(c.tries.at(-1)?.ok === false, `the cell's first try didn't fail. Tries: ${JSON.stringify(c.tries)}`);
 });
 
-Given("blob storage refuses every upload while the stage runs", function () {
+Given("blob storage refuses every upload while the stage runs", long, async function () {
   ctx(this).refuse = true;
+  await refusing(this);
 });
 
 Given("its agent writes a message every {int} seconds for {int} seconds", long, async function (every: number, s: number) {
@@ -669,16 +721,12 @@ Given("it wrote {int} more messages before the cell died without ending the stag
 });
 
 When("the run's lease expires", long, async function () {
-  const c = ctx(this);
-  await pool().query("update item set lease_expires = now() - interval '1 minute' where id = $1", [c.itemId]);
-  await withTx(pool(), (tx) => expireLeases(tx, new Date()));
+  await expire(this);
 });
 
 Given("the cell died without ending the stage, and the run's lease expired", long, async function () {
-  const c = ctx(this);
-  c.cell!.dead = true;
-  await pool().query("update item set lease_expires = now() - interval '1 minute' where id = $1", [c.itemId]);
-  await withTx(pool(), (tx) => expireLeases(tx, new Date()));
+  ctx(this).cell!.dead = true;
+  await expire(this);
 });
 
 When("the item is claimed again and its {string} stage attempt {int} runs and uploads its own transcript", long, async function (stage: string, n: number) {
