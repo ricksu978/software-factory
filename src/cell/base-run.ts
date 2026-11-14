@@ -13,7 +13,8 @@ const run = promisify(execFile);
 
 /**
  * The names of the tests a command's output says failed, in the order first seen: TAP's `not ok` lines (TODO and SKIP
- * left out), node's spec reporter's `✖ name (1.2ms)` lines and cucumber-js's "Failing scenarios:" list. Output that
+ * left out), node's spec reporter's `✖ name (1.2ms)` lines and the `N) name # path:line` entries of cucumber-js's
+ * "Failed scenarios:" block, as the pinned 13.3.0 prints it. Output that
  * names no test, such as a type error, gives none.
  */
 export function failingTests(output: string): string[] {
@@ -21,11 +22,14 @@ export function failingTests(output: string): string[] {
   let cucumber = false;
   for (const raw of output.split(/\r?\n/)) {
     const line = raw.trim();
-    if (line === "Failing scenarios:") { cucumber = true; continue; }
+    if (line === "Failed scenarios:") { cucumber = true; continue; }
     if (cucumber) {
-      const m = /^\S+:\d+ # (.+)$/.exec(line);
-      if (m) { out.add(m[1].trim()); continue; }
-      cucumber = false;
+      // Each scenario is `N) <name> # <path>:<line>`; the step, error and stack lines under it are skipped. The block
+      // ends at the summary, `N scenarios (...)`.
+      if (/^\d+ scenarios? \(/.test(line)) { cucumber = false; continue; }
+      const m = /^\d+\) (.+) # \S+:\d+$/.exec(line);
+      if (m) out.add(m[1].trim());
+      continue;
     }
     const tap = /^not ok \d+ - (.+?)(?: # (.*))?$/.exec(line);
     if (tap) {

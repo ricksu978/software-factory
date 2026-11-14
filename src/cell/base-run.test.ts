@@ -17,8 +17,19 @@ describe("failingTests", () => {
     assert.deepEqual(failingTests(out), ["parses the config", "config"]);
   });
 
-  test("reads cucumber-js's failing scenarios", () => {
-    const out = "Failing scenarios:\nfeatures/a.feature:12 # The board loads\nfeatures/b.feature:3 # Sign-off works\n\n2 scenarios (2 failed)";
+  test("reads the scenarios in cucumber-js 13.3.0's Failed scenarios block, skipping the step lines under each", () => {
+    // Captured from the pinned @cucumber/cucumber 13.3.0, run with this repo's `--format message:...` flag.
+    const out = [
+      "F.F", "", "Failed scenarios:",
+      "  1) The board loads # features/a.feature:2",
+      "       Given it fails # features/steps/s.mjs:2",
+      "           Error: boom",
+      "               at World.<anonymous> (file:///tmp/x/features/steps/s.mjs:2:33)",
+      "  2) Sign-off works # features\\b.feature:7",
+      "       When it is signed # features\\steps\\s.mjs:5",
+      "           not ok 1 - not a test",
+      "", "3 scenarios (1 passed, 2 failed)", "3 steps (1 passed, 2 failed)", "0m 0.005s (0m 0.000s executing your code)",
+    ].join("\r\n");
     assert.deepEqual(failingTests(out), ["The board loads", "Sign-off works"]);
   });
 
