@@ -16,11 +16,14 @@ export { baseFiles };
 
 type Fake = ReturnType<typeof fakeBacklog>;
 type Host = ReturnType<typeof fakeRepoHost>;
-type Judge = (item: FactoryItem, dor: { criteria: { index: number }[] }, spent?: Parameters<GateJudge>[2]) => Promise<string>;
+type Judge = (item: FactoryItem, dor: { criteria: { index: number; text: string }[] }, spent?: Parameters<GateJudge>[2]) => Promise<string>;
 export type Logic = { judgePrompt: string; version: number; splitPrompt: string };
 type Poller = {
-  pollOnce?: (deps: { pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic; split?: SplitDeps }) => Promise<unknown>;
+  pollOnce?: (deps: {
+    pool: pg.Pool; adapter: BacklogAdapter; repoHost: RepoHost; judge: Judge; sourceId: string; logic?: Logic; split?: SplitDeps; defaults?: Defaults;
+  }) => Promise<unknown>;
 };
+type Defaults = (name: "dor" | "scenarios" | "pr-review" | "risk") => Promise<string>;
 export type Ctx = {
   fake?: Fake;
   host?: Host;
@@ -32,6 +35,14 @@ export type Ctx = {
   failLine?: { index: number; reason: string };
   /** PBI 149: how often the judge was asked about each item, by external id. */
   asked: Map<string, number>;
+  /** PBI 261: a judge that fails only the line with this text, with this reason. Only read while `judge` is "fail". */
+  failText?: { text: string; reason: string };
+  /** PBI 261: every dor.md line the judge was asked about, by external id. */
+  askedLines?: Map<string, string[]>;
+  /** PBI 261: run before each poll, as the worker's fetch of `main` is. */
+  beforePoll?: () => Promise<void>;
+  /** PBI 261: where the poller reads the default policies from. Unset, the poller reads its own. */
+  defaults?: Defaults;
   /** PBI 149: the readiness logic the factory runs with. Unset, the poller uses its own. */
   logic?: Logic;
   /** PBI 159: what the judge's last line says of the item's size. Unset, the line has no "oversized" key. */
@@ -59,15 +70,16 @@ export function ctx(world: object): Ctx {
 
 const judge = (c: Ctx): Judge => async (item, dor, spent) => {
   c.asked.set(item.externalId, (c.asked.get(item.externalId) ?? 0) + 1);
+  if (c.askedLines) c.askedLines.set(item.externalId, [...(c.askedLines.get(item.externalId) ?? []), ...dor.criteria.map((cr) => cr.text)]);
   if (c.metered) await c.metered(item, dor as never, spent);
   if (c.judge === "throw") throw new Error("usage limit reached");
-  const line = (index: number) => {
-    const failed = c.judge === "fail" && (!c.failLine || c.failLine.index === index);
-    const reason = failed ? (c.failLine?.reason ?? "failed") : "passed";
+  const line = ({ index, text }: { index: number; text: string }) => {
+    const failed = c.judge === "fail" && (c.failText ? c.failText.text === text : !c.failLine || c.failLine.index === index);
+    const reason = failed ? (c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
   const last = c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized };
-  return [...dor.criteria.map((cr) => line(cr.index)), JSON.stringify(last)].join("\n");
+  return [...dor.criteria.map(line), JSON.stringify(last)].join("\n");
 };
 
 const baseFiles: Record<string, string> = {
@@ -98,9 +110,10 @@ export async function setup(c: Ctx): Promise<boolean> {
 export async function poll(c: Ctx): Promise<void> {
   const poller = await load<Poller>("src/watcher/poller.ts");
   if (!poller?.pollOnce || !c.fake || !c.host || !c.sourceId) return;
+  await c.beforePoll?.();
   try {
     await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId,
-      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}) });
+      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}) });
     c.polls++;
   } catch (e) {
     c.error = e;

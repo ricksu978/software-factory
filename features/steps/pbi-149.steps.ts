@@ -76,7 +76,7 @@ export const running = (c: PollCtx): ReadinessLogic => c.logic ?? readinessLogic
  * Gates each item into NotReady with a failing judge, which records the readiness files and logic it was checked
  * against. Then counts the judge's asks and each item's comments from zero, so the Thens see only what came after.
  */
-async function gateIntoNotReady(world: object, c: PollCtx, state: string): Promise<void> {
+export async function gateIntoNotReady(world: object, c: PollCtx, state: string): Promise<void> {
   c.judge = "fail";
   await poll(c);
   if (c.polls === 0) return;
@@ -98,6 +98,8 @@ Given("the factory holds an item in state {string} in repo {string} and another 
   const c = pollCtx(this);
   if (!(await setup(c))) return;
   for (const repo of [a, b]) {
+    // PBI 261's Background serves its repos already, with files of their own.
+    if (c.host!.heads.has(repo)) continue;
     for (const [path, text] of Object.entries(baseFiles)) c.host!.files.set(`${repo}@c1:${path}`, text);
     c.host!.heads.set(repo, "c1");
     await need().pool.query("insert into repo (host_adapter, url) values ('fake', $1)", [`https://github.com/${repo}`]);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { ctx as pollCtx, polled, stateOf } from "./pbi-12.steps.ts";
 
 const repo = process.cwd();
 const featureFile = join(repo, "features/pbi-7-state-machine.feature");
@@ -43,7 +44,15 @@ When("the event {string} happens", async function (event: string) {
   c.result = m ? m.next(c.from ?? "", event) : undefined;
 });
 
-Then("the item is in state {string}", function (to: string) {
+// PBI 261 reuses this wording for the item its poller harness holds, whose state the database records.
+Then("the item is in state {string}", async function (to: string) {
+  if ((this as { pbi261?: unknown }).pbi261) {
+    const p = pollCtx(this);
+    polled(p);
+    assert.equal(p.extIds.length, 1, `the scenario holds ${p.extIds.length} items`);
+    assert.equal(await stateOf(p, p.extIds[0]), to);
+    return;
+  }
   const c = ctx(this);
   assert.ok(c.machine, "src/core/states.ts doesn't exist");
   assert.equal(c.result, to);
