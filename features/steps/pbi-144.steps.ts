@@ -56,8 +56,10 @@ export type Ctx = {
   errors: unknown[];
   polls: number;
   /**
-   * PBI 237: what a poll runs instead of this file's in-memory pass. Its scenarios poll with the real poller, store and
-   * scheduler, on this file's board, repo and refusals, so the steps the two features share read the same context.
+   * What a poll runs instead of this file's in-memory pass, for the scenarios that set it; unset, a poll is the
+   * in-memory pass below. PBI 237's and PBI 225's scenarios poll with the real poller, store and scheduler, on this
+   * file's board, repo and refusals, so the steps the features share read the same context. A driver counts its own
+   * poll in `polls`.
    */
   driver?: (c: Ctx) => Promise<void>;
 };
@@ -89,7 +91,7 @@ export function refuse(c: Ctx, kind: Refusal, title: string, blocker?: string): 
   throw new Error(`the repo refused a ${kind} write for "${title}"`);
 }
 
-async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
+export async function replaceItem(c: Ctx, id: string, change: (fi: FactoryItem) => Partial<FactoryItem>): Promise<void> {
   const fi = await c.fake.adapter.getItem(id);
   assert.ok(fi, `no item ${id}`);
   await c.fake.seed({ ...fi, ...change(fi), externalId: id });
@@ -151,7 +153,7 @@ export function scriptedBoard(c: Ctx): SplitBoard {
   };
 }
 
-function agent(c: Ctx) {
+export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
     return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
@@ -159,7 +161,7 @@ function agent(c: Ctx) {
 }
 
 /** The judge passes every dor.md line and raises no flag; only the parent, once set so, is oversized. */
-function judge(c: Ctx) {
+export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
     JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
