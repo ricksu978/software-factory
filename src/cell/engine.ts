@@ -494,6 +494,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const waitForChecks = async (sha: string): Promise<CheckStatus> => {
     for (;;) {
       const s = await api.checks(sha).catch(async (e: unknown) => {
+        // A fenced cell makes no further calls: the lease moved on, so the refusal isn't about the commit.
+        if (e instanceof LeaseLost) throw e;
         const n = opened?.number ?? ctx.prNumber;
         if (n === null) throw e;
         // A PR state that can't be read leaves the refusal itself as the attempt's message.
