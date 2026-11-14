@@ -89,16 +89,66 @@ export const LEASE_EXPIRY_MS = 300_000;
 
 const system = (actorId: string): Actor => ({ actor: "system", actorId });
 
+// An item's active item overrides of the given kinds, for the claim order below.
+const activeOn = (kinds: string) =>
+  `o.scope = 'item' and o.target_id = i.id and o.kind in (${kinds}) and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())`;
+// Start now (PBI 265, spec §8) puts an item ahead of every other claimable item, answered ones included.
+const START_NOW = `exists (select from override o where ${activeOn("'start_now'")})`;
+// Move up and Move down (PBI 265) give an item a place in the factory queue, its latest move's rank, in place of its
+// board rank. The board's own order is never touched, and a board poll leaves the move as it is.
+const QUEUE_RANK = `coalesce((select (o.value->>'rank')::numeric from override o
+       where ${activeOn("'move_up', 'move_down'")} and o.value ? 'rank' order by o.created_at desc, o.id desc limit 1), i.backlog_rank)`;
+// A SignOff or NeedsInput item whose question was answered, and that has no newer open one.
+const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
+           and exists (select from question q where q.item_id = i.id and q.answer is not null)
+           and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))`;
+const ORDER = `order by ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, i.id`;
+
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
-// `resumeOnly`, the waiting-count brake.
+// `resumeOnly`, the waiting-count brake. None of the overrides above gets an item past a hold, an open blocker or the
+// readiness gate: they only order the items that are claimable anyway.
 const CLAIMABLE = `from item i
      where not i.held and cardinality(i.blocked_by) = 0
        and ((i.state = 'Queued'
            and (not $1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
-         or (i.state in ('SignOff', 'NeedsInput')
-           and exists (select from question q where q.item_id = i.id and q.answer is not null)
-           and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)))
-     order by i.state = 'Queued', i.priority desc, i.backlog_rank asc nulls last, i.id`;
+         or ${ANSWERED})
+     ${ORDER}`;
+
+/**
+ * Moves an item one place up or down the factory queue (PBI 265) and logs it as a move_up or move_down override with
+ * the person and the reason. The queue here is every Queued or answered item in the claim order, held and blocked ones
+ * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
+ * ordered with: those with the same Start now, Queued or answered, and priority. The item's new rank, between its
+ * neighbours', is kept on the override, so it ends when the override does. An item already at that end is logged
+ * all the same and stays put. One that isn't in the queue throws.
+ */
+export async function moveInQueue(
+  c: pg.PoolClient, itemId: string, dir: "up" | "down", o: { reason: string; createdBy: string },
+): Promise<void> {
+  if (!inTx(c)) throw new Error("moveInQueue needs a client inside withTx");
+  if (!o.reason.trim()) throw new Error("an override needs a reason");
+  // Two moves at once would read the same neighbours, so they take turns.
+  await c.query("select pg_advisory_xact_lock(265)");
+  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null }>(
+    `select i.id, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority, ${QUEUE_RANK} as rank
+     from item i where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
+  )).rows;
+  const me = rows.find((r) => r.id === itemId);
+  if (!me) throw new Error(`item ${itemId} isn't in the factory queue`);
+  const group = rows.filter((r) => r.first === me.first && r.queued === me.queued && r.priority === me.priority);
+  // An item with no board rank sorts last, so it counts as one below the item before it.
+  const ranks: number[] = [];
+  for (const r of group) ranks.push(r.rank === null ? (ranks.at(-1) ?? 0) + 1 : Number(r.rank));
+  const at = group.indexOf(me);
+  const last = group.length - 1;
+  const rank = dir === "up"
+    ? at === 0 ? ranks[0] : at === 1 ? ranks[0] - 1 : (ranks[at - 1] + ranks[at - 2]) / 2
+    : at === last ? ranks[last] : at === last - 1 ? ranks[last] + 1 : (ranks[at + 1] + ranks[at + 2]) / 2;
+  await c.query(
+    "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
+    [itemId, dir === "up" ? "move_up" : "move_down", { rank }, o.reason.trim(), o.createdBy],
+  );
+}
 
 /** The first `limit` items claimNext would pick with the same `resumeOnly`, in order, without claiming or locking. */
 export async function nextUp(
@@ -108,8 +158,9 @@ export async function nextUp(
 }
 
 /**
- * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. Answered SignOff and NeedsInput items
- * come before Queued ones, then highest priority, then lowest backlog rank. Held items and items with an open
+ * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. An item marked Start now comes first,
+ * then answered SignOff and NeedsInput items before Queued ones, then highest priority, then lowest queue rank: the
+ * latest Move up or Move down's, or else the backlog rank (PBI 265). Held items and items with an open
  * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
  * With `resumeOnly`, the waiting-count brake is on, so a Queued item counts only when its open run already has a
