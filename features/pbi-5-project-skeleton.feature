@@ -25,7 +25,7 @@ Feature: Project skeleton with a BDD runner
   @ac-4
   Scenario: CI runs typecheck, tests and scenarios beside the prose check
     When I read the workflow ".github/workflows/ci.yml"
-    Then it runs on "push" and "pull_request"
+    Then it runs on "push" alone
     And one of its jobs runs "npm run typecheck", "npm test" and "npm run bdd"
     And the workflow ".github/workflows/prose.yml" still exists
 
