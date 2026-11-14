@@ -70,6 +70,7 @@ describe("githubBacklog", () => {
 describe("githubBacklog: the split board (PBI 144)", () => {
   function splitClient() {
     const calls: { route: string; params: Record<string, any> }[] = [];
+    const edits = new Map<number, ({ __typename: string; login: string } | null)[]>();
     const recent: any[] = [
       { id: 900, node_id: "N9", number: 9, title: "planted", body: "factory-split-k-1", html_url: "u9", user: { type: "User" } },
       { id: 800, node_id: "N8", number: 8, title: "a PR", body: "factory-split-k-1", html_url: "u8", user: { type: "Bot", login: "factory[bot]" }, pull_request: {} },
@@ -82,7 +83,10 @@ describe("githubBacklog: the split board (PBI 144)", () => {
         if (route === "GET /app") return { data: { id: 42, slug: "factory" } };
         if (route === "GET /repos/{owner}/{repo}/issues") return { data: recent };
         if (route === "POST /repos/{owner}/{repo}/issues") return { data: { id: 500, node_id: "N5", number: 5, title: params.title, html_url: "u5" } };
-        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number } };
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") {
+          const user = params.issue_number === 3 ? { type: "Bot", login: "factory[bot]" } : { type: "User", login: "ann" };
+          return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number, user } };
+        }
         if (route.startsWith("DELETE")) throw Object.assign(new Error("Label does not exist"), { status: 404 });
         return { data: [] };
       },
@@ -93,6 +97,7 @@ describe("githubBacklog: the split board (PBI 144)", () => {
         }
         if (query.includes("addProjectV2ItemById")) return { addProjectV2ItemById: { item: { id: "I5" } } };
         if (query.includes("updateProjectV2ItemFieldValue")) return {};
+        if (query.includes("userContentEdits")) return { repository: { issue: { userContentEdits: { nodes: (edits.get(vars.number) ?? []).map((e) => ({ editor: e })) } } } };
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
           id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
           content: { number: 7, title: "parent", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
@@ -100,7 +105,7 @@ describe("githubBacklog: the split board (PBI 144)", () => {
       },
     };
     const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
-    return { board: adapter.splitBoard, calls };
+    return { board: adapter.splitBoard, calls, edits };
   }
 
   test("findIssues counts only the factory App's own issues, never a person's, another bot's or a PR", async () => {
@@ -122,6 +127,27 @@ describe("githubBacklog: the split board (PBI 144)", () => {
     assert.ok(gql.some((v) => v.query.includes("updateProjectV2ItemFieldValue") && v.item === "I5" && v.option === "O1"));
     await board.addBlockedBy(c.externalId, "3");
     assert.deepEqual(calls.at(-1), { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", params: { owner: "o", repo: "r", issue_number: 5, issue_id: 300 } });
+  });
+
+  test("authorship says whether this App opened the issue and who has edited its body since (PBI 264)", async () => {
+    const { board, edits } = splitClient();
+    await board.findIssues("o/r", "factory-split-k-1");
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: false, editedByApp: false });
+    edits.set(3, [{ __typename: "Bot", login: "factory" }]);
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: false, editedByApp: true });
+    edits.set(3, [{ __typename: "Bot", login: "factory" }, { __typename: "User", login: "ann" }, null]);
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: true, editedByApp: true });
+    edits.set(3, [{ __typename: "Bot", login: "github-actions" }]);
+    assert.equal((await board.authorship!("3")).editedByOthers, true);
+  });
+
+  test("an issue a person opened isn't the App's, and editBody writes the body over the issue (PBI 264)", async () => {
+    const { board, calls } = splitClient();
+    await board.findIssues("o/r", "factory-split-k-1");
+    const c = await board.createIssue("o/r", "Bank", "body");
+    assert.equal((await board.authorship!(c.externalId)).openedByApp, false);
+    await board.editBody!("3", "new body");
+    assert.deepEqual(calls.at(-1), { route: "PATCH /repos/{owner}/{repo}/issues/{issue_number}", params: { owner: "o", repo: "r", issue_number: 3, body: "new body" } });
   });
 
   test("a child filed with labels carries them from the moment it's filed (PBI 237)", async () => {
