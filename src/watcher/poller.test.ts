@@ -770,5 +770,39 @@ describe("pollOnce", dbTest, () => {
       assert.equal((await row(a.ext)).state, "Accepted");
       assert.deepEqual((await events("factory_merged")).map((e) => e.approvers), [["kim"]]);
     });
+
+    test("a clean, approved NeedsInput PR merges, its question closes with a note naming the merge, and the event names the question (PBI 262)", async () => {
+      await allow("octo");
+      const { ext, id, pr, run } = await ready("NeedsInput");
+      await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'Address failed', now())", [id]);
+      await poll();
+      assert.equal((await row(ext)).state, "Accepted");
+      assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, "m9");
+      const q = (await db.pool.query("select closed_at, answer, closed_note from question where item_id = $1", [id])).rows[0];
+      assert.ok(q.closed_at);
+      assert.equal(q.answer, null);
+      assert.equal(q.closed_note, `The factory merged PR #${pr} as commit m9.`);
+      assert.deepEqual(await events("factory_merged"), [
+        { repo: REPO, prNumber: pr, mergeSha: "m9", approvers: ["octo"], waitingIn: "NeedsInput", question: "Address failed" },
+      ]);
+      const moves = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition'", [id])).rows.map((r) => r.payload);
+      assert.deepEqual(moves, [{ from: "NeedsInput", to: "Accepted", event: "merged" }]);
+    });
+
+    test("a held NeedsInput item, or one whose PR isn't clean, isn't merged and keeps its question open with no note (PBI 262)", async () => {
+      await allow("octo");
+      const a = await ready("NeedsInput");
+      await db.pool.query("update item set held = true where id = $1", [a.id]);
+      const b = await ready("NeedsInput");
+      b.p.mergeState = "blocked";
+      for (const h of [a, b]) await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [h.id]);
+      await poll();
+      assert.deepEqual(host.mergeCalls, []);
+      for (const h of [a, b]) {
+        assert.equal((await row(h.ext)).state, "NeedsInput");
+        const q = (await db.pool.query("select closed_at, closed_note from question where item_id = $1", [h.id])).rows[0];
+        assert.deepEqual(q, { closed_at: null, closed_note: null });
+      }
+    });
   });
 });
