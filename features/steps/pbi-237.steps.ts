@@ -86,11 +86,12 @@ Before({ tags: "@pbi-237", ...long }, async function () {
 
 // --- The real poller over PBI 144's board --------------------------------------------------------------------------
 
-/** The judge passes every dor.md line but the one a step fails for a child, and finds the items set oversized. */
+/** The judge passes every dor.md line but the one a step fails for a filed child, and finds the items set oversized. */
 function judge(k: Ctx, c: Ctx144) {
   return async (item: FactoryItem, dor: { criteria: { index: number }[] }) => {
     k.asked.set(item.externalId, (k.asked.get(item.externalId) ?? 0) + 1);
-    const fail = k.fails.get(item.title);
+    // A proposed child, judged before it's filed (PBI 264), passes: these scenarios fail a child once it's filed.
+    const fail = item.externalId.includes("/split-") ? undefined : k.fails.get(item.title);
     const lines = (dor as Policy).criteria.map((cr) => {
       const failed = fail === cr.text;
       return JSON.stringify({ index: cr.index, status: failed ? "failed" : "passed", reason: failed ? `The item doesn't: ${cr.text}` : "ok" });
@@ -433,9 +434,11 @@ Then("the dashboard's \"Not ready\" list shows child {string}", long, async func
   assert.ok((await notReadyList(ctx(this))).includes(title), `the "Not ready" list doesn't show child "${title}"`);
 });
 
+// Shared with PBI 264, whose scenarios poll with PBI 144's in-memory pass. Only the real scheduler has to have looked.
 Then("the factory has started no run for child {string}", function (title: string) {
   const c = ctx144(this);
-  assert.ok(ctx(this).looked, "the scheduler never looked for work");
+  const k = (this as { pbi237?: Ctx }).pbi237;
+  if (k) assert.ok(k.looked, "the scheduler never looked for work");
   assert.ok(!c.runs.has(child(this, title).externalId), `the factory took up child "${title}"`);
 });
 

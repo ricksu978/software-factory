@@ -118,6 +118,11 @@ export type MergeResult = { merged: true; sha: string } | { merged: false; reaso
 
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
+  /**
+   * Each permission the factory needs on the repo that its App's installation hasn't been granted, by GitHub's name,
+   * such as "issues: write" (PBI 264). Empty when every one is granted. Only the owner can grant one.
+   */
+  missingPermissions?(repo: string): Promise<string[]>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
   /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */

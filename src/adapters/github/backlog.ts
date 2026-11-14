@@ -51,6 +51,10 @@ const ITEMS = `query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV
 const SET_STATUS = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } } }`;
 
+// PBI 264: who has edited an issue's body. Each node names an editor, the App's own bot included; a deleted
+// account's is null. An issue nobody has edited has none.
+const BODY_EDITS = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) {
+  userContentEdits(first: 100) { nodes { editor { __typename login } } } } } }`;
 const ADD_TO_PROJECT = `mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } } }`;
 
@@ -276,6 +280,20 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       } catch (e) {
         if ((e as { status?: number }).status !== 404) throw e;
       }
+    },
+    async authorship(externalId) {
+      // GraphQL names a bot by its slug, REST by `<slug>[bot]`, so both are compared without the suffix.
+      const own = (await ownLogin()).replace(/\[bot\]$/, "");
+      const ours = (u: { __typename?: string; type?: string; login?: string } | null | undefined) =>
+        !!u && (u.__typename ?? u.type) === "Bot" && (u.login ?? "").replace(/\[bot\]$/, "") === own;
+      const opened = await rest(externalId);
+      const { owner, repo, issue_number } = await ref(externalId);
+      const res: any = await (await app()).graphql(BODY_EDITS, { owner, name: repo, number: issue_number });
+      const editors = ((res.repository?.issue?.userContentEdits?.nodes ?? []) as { editor: { __typename?: string; login?: string } | null }[]).map((n) => n.editor);
+      return { openedByApp: ours(opened.user), editedByOthers: editors.some((e) => !ours(e)), editedByApp: editors.some(ours) };
+    },
+    async editBody(externalId, body) {
+      await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await ref(externalId)), body });
     },
   };
 
