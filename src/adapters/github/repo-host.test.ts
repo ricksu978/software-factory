@@ -445,6 +445,48 @@ describe("githubRepoHost", () => {
     assert.equal(await stubGitHub({}).host.onBranch("o/r", "main", "abc"), false);
   });
 
+  test("checkRuns reads each check run's outcome and page, and a skipped or neutral one passes, and a cancelled one reads as cancelled (PBI 255)", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { name: "test", status: "completed", conclusion: "failure", html_url: "u1" },
+        { name: "lint", status: "completed", conclusion: "skipped", html_url: "u2" },
+        { name: "bdd", status: "in_progress", conclusion: null, html_url: "u3" },
+        { name: "build", status: "completed", conclusion: "timed_out", html_url: "u4" },
+        { name: "e2e", status: "completed", conclusion: "cancelled", html_url: "u5" },
+      ] }),
+    });
+    assert.deepEqual(await host.checkRuns("o/r", "abc"), [
+      { name: "test", status: "failure", url: "u1" }, { name: "lint", status: "success", url: "u2" },
+      { name: "bdd", status: "pending", url: "u3" }, { name: "build", status: "failure", url: "u4" },
+      { name: "e2e", status: "cancelled", url: "u5" },
+    ]);
+  });
+
+  test("checkLog reads the Actions job log of the named check run, and is null for an unknown check or a log that's gone (PBI 255)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [{ id: 31, name: "test" }, { id: 32, name: "bdd" }] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => (p.job_id === 31 ? "not ok 1 - a" : (() => { throw Object.assign(new Error("gone"), { status: 410 }); })()),
+    });
+    assert.equal(await host.checkLog("o/r", "abc", "test"), "not ok 1 - a");
+    assert.equal(calls.find((c) => c.route.endsWith("/check-runs"))!.params.check_name, "test");
+    assert.equal(await host.checkLog("o/r", "abc", "bdd"), null);
+    assert.equal(await host.checkLog("o/r", "abc", "nope"), null);
+  });
+
+  test("checkLog throws a 403, an App without Actions: read, instead of reading it as no log (PBI 255)", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [{ id: 31, name: "test" }] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": () => { throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 }); },
+    });
+    await assert.rejects(host.checkLog("o/r", "abc", "test"), (e: { status?: number }) => e.status === 403);
+  });
+
+  test("firstParent is the commit's first parent, and null for a root commit (PBI 255)", async () => {
+    const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}": (p) => ({ parents: p.ref === "m" ? [{ sha: "p1" }, { sha: "p2" }] : [] }) });
+    assert.equal(await host.firstParent("o/r", "m"), "p1");
+    assert.equal(await host.firstParent("o/r", "root"), null);
+  });
+
   test("commitsAfter lists the branch's commits after the sha when it's ahead, and none when it's at, behind or off the sha", async () => {
     const ahead = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 2, commits: [commit("c2", "c1"), commit("c3", "c2")] }) });
     assert.deepEqual(await ahead.host.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);

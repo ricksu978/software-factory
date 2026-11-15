@@ -60,6 +60,13 @@ export type Ctx = {
   /** PBI 258: webhook deliveries a scenario made, which act in place of a poll. */
   deliveries?: number;
   error?: unknown;
+  /**
+   * PBI 255: what else each poll runs once the poller has, such as the scheduler's CI check on merged items. A throw
+   * counts as the poll's failure.
+   */
+  afterPoll?: () => Promise<void>;
+  /** PBI 255: what ran in place of a poll, such as the scheduler's claim, so a Then on the factory's state needn't follow one. */
+  ranOther?: string;
 };
 
 export function ctx(world: object): Ctx {
@@ -114,6 +121,7 @@ export async function poll(c: Ctx): Promise<void> {
   try {
     await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId,
       ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}) });
+    await c.afterPoll?.();
     c.polls++;
   } catch (e) {
     c.error = e;
@@ -140,7 +148,7 @@ export async function baseline(c: Ctx): Promise<Baseline> {
 
 export function polled(c: Ctx): void {
   assert.equal(c.error, undefined, `the poll failed: ${String(c.error)}`);
-  assert.ok(c.polls > 0 || (c.deliveries ?? 0) > 0, "the poller didn't run");
+  assert.ok(c.polls > 0 || (c.deliveries ?? 0) > 0 || c.ranOther, "the poller didn't run");
 }
 
 export async function stateOf(c: Ctx, extId: string): Promise<string | undefined> {
@@ -211,7 +219,12 @@ Given("the factory holds two items in state {string}, checked against the repo's
 });
 
 When("the poller runs once", long, async function () {
-  await poll(ctx(this));
+  const c = ctx(this);
+  const before = c.polls;
+  await poll(c);
+  // A poll that failed, its afterPoll hook included, fails here, so no Then reads the state a broken poll left.
+  polled(c);
+  assert.equal(c.polls, before + 1, "the poller didn't run");
 });
 
 When("a person removes the item's {string} label on the board", async function (label: string) {
