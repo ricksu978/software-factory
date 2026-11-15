@@ -94,15 +94,21 @@ const activeOn = (kinds: string) =>
   `o.scope = 'item' and o.target_id = i.id and o.kind in (${kinds}) and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())`;
 // Start now (PBI 265, spec §8) puts an item ahead of every other claimable item, answered ones included.
 const START_NOW = `exists (select from override o where ${activeOn("'start_now'")})`;
-// Move up and Move down (PBI 265) give an item a place in the factory queue, its latest move's rank, in place of its
-// board rank. The board's own order is never touched, and a board poll leaves the move as it is.
-const QUEUE_RANK = `coalesce((select (o.value->>'rank')::numeric from override o
-       where ${activeOn("'move_up', 'move_down'")} and o.value ? 'rank' order by o.created_at desc, o.id desc limit 1), i.backlog_rank)`;
+// Move up and Move down (PBI 265) give an item a place in the factory queue, its latest move's key, in place of its
+// board one. The board's own order is never touched, and a board poll leaves the move as it is. A key is a rank and a
+// tie: an unmoved item's rank is its board rank and its tie is its id read as a 128-bit number, so no two items' keys
+// are equal, even when two backlog sources both rank from 1. A move stores a key strictly between the two items it
+// lands between, its rank null when it lands among items with no board rank, which sort last.
+const LATEST_MOVE = `(select o.value from override o where ${activeOn("'move_up', 'move_down'")} order by o.created_at desc, o.id desc limit 1)`;
+const ID_NUM = `((('x' || substr(replace(i.id::text, '-', ''), 1, 16))::bit(64)::bigint::numeric + 9223372036854775808) * 18446744073709551616
+       + (('x' || substr(replace(i.id::text, '-', ''), 17, 16))::bit(64)::bigint::numeric + 9223372036854775808))`;
+const QUEUE_RANK = `(case when ${LATEST_MOVE} is null then i.backlog_rank else (${LATEST_MOVE}->>'rank')::numeric end)`;
+const QUEUE_TIE = `coalesce((${LATEST_MOVE}->>'tie')::numeric, ${ID_NUM})`;
 // A SignOff or NeedsInput item whose question was answered, and that has no newer open one.
 const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
            and exists (select from question q where q.item_id = i.id and q.answer is not null)
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))`;
-const ORDER = `order by ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, i.id`;
+const ORDER = `order by ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
 
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
 // `resumeOnly`, the waiting-count brake. None of the overrides above gets an item past a hold, an open blocker or the
@@ -118,8 +124,9 @@ const CLAIMABLE = `from item i
  * Moves an item one place up or down the factory queue (PBI 265) and logs it as a move_up or move_down override with
  * the person and the reason. The queue here is every Queued or answered item in the claim order, held and blocked ones
  * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
- * ordered with: those with the same Start now, Queued or answered, and priority. The item's new rank, between its
- * neighbours', is kept on the override, so it ends when the override does. An item already at that end is logged
+ * ordered with: those with the same Start now, Queued or answered, and priority. The item's new queue key, strictly
+ * between the two items it lands between even when their board ranks tie, is kept on the override, so it ends when the
+ * override does. An item already at that end is logged
  * all the same and stays put. One that isn't in the queue throws.
  */
 export async function moveInQueue(
@@ -129,26 +136,77 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null }>(
-    `select i.id, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority, ${QUEUE_RANK} as rank
+  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string }>(
+    `select i.id, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority,
+       ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum
      from item i where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
   const me = rows.find((r) => r.id === itemId);
   if (!me) throw new Error(`item ${itemId} isn't in the factory queue`);
   const group = rows.filter((r) => r.first === me.first && r.queued === me.queued && r.priority === me.priority);
-  // An item with no board rank sorts last, so it counts as one below the item before it.
-  const ranks: number[] = [];
-  for (const r of group) ranks.push(r.rank === null ? (ranks.at(-1) ?? 0) + 1 : Number(r.rank));
   const at = group.indexOf(me);
   const last = group.length - 1;
-  const rank = dir === "up"
-    ? at === 0 ? ranks[0] : at === 1 ? ranks[0] - 1 : (ranks[at - 1] + ranks[at - 2]) / 2
-    : at === last ? ranks[last] : at === last - 1 ? ranks[last] + 1 : (ranks[at + 1] + ranks[at + 2]) / 2;
+  // The two items the move lands between, either of them missing at an end of the queue. An item already at the end
+  // it's moved towards keeps its own key.
+  const [before, after] = dir === "up" ? [group[at - 2], group[at - 1]] : [group[at + 1], group[at + 2]];
+  const stays = dir === "up" ? at === 0 : at === last;
+  const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
-    [itemId, dir === "up" ? "move_up" : "move_down", { rank }, o.reason.trim(), o.createdBy],
+    [itemId, dir === "up" ? "move_up" : "move_down", key, o.reason.trim(), o.createdBy],
   );
 }
+
+type QueueKey = { rank: string | null; tie: string };
+
+/**
+ * A queue key strictly after `lo` and strictly before `hi`, in the order rank (nulls last) then tie. Either may be
+ * missing, for an end of the queue. Where the ranks differ the new rank goes between them and the tie is the moved
+ * item's own id number, so it can't equal another item's; where they're equal the tie goes between the two ties.
+ */
+export function keyBetween(lo: QueueKey | undefined, hi: QueueKey | undefined, ownTie: string): QueueKey {
+  if (!lo && !hi) throw new Error("a move needs an item to pass");
+  if (!lo) return { rank: hi!.rank === null ? "0" : decAdd(hi!.rank, "-1"), tie: ownTie };
+  if (!hi) return lo.rank === null ? { rank: null, tie: decAdd(lo.tie, "1") } : { rank: decAdd(lo.rank, "1"), tie: ownTie };
+  if (lo.rank === hi.rank || (lo.rank !== null && hi.rank !== null && decCmp(lo.rank, hi.rank) === 0)) {
+    return { rank: lo.rank, tie: decMid(lo.tie, hi.tie) };
+  }
+  if (lo.rank === null) throw new Error("queue keys out of order");
+  return { rank: hi.rank === null ? decAdd(lo.rank, "1") : decMid(lo.rank, hi.rank), tie: ownTie };
+}
+
+// Exact decimal arithmetic on Postgres numeric text, so halving a gap never runs out of precision as a float would.
+function decParse(s: string): { m: bigint; e: number } {
+  const neg = s.startsWith("-");
+  const [int, frac = ""] = (neg ? s.slice(1) : s).split(".");
+  const m = BigInt(int + frac);
+  return { m: neg ? -m : m, e: frac.length };
+}
+function decAlign(a: string, b: string): [bigint, bigint, number] {
+  const x = decParse(a), y = decParse(b);
+  const e = Math.max(x.e, y.e);
+  return [x.m * 10n ** BigInt(e - x.e), y.m * 10n ** BigInt(e - y.e), e];
+}
+function decFormat(m: bigint, e: number): string {
+  const neg = m < 0n;
+  let digits = (neg ? -m : m).toString().padStart(e + 1, "0");
+  if (e > 0) digits = `${digits.slice(0, -e)}.${digits.slice(-e)}`.replace(/\.?0+$/, "");
+  return (neg ? "-" : "") + digits;
+}
+function decCmp(a: string, b: string): number {
+  const [x, y] = decAlign(a, b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+function decAdd(a: string, b: string): string {
+  const [x, y, e] = decAlign(a, b);
+  return decFormat(x + y, e);
+}
+function decMid(a: string, b: string): string {
+  const [x, y, e] = decAlign(a, b);
+  const sum = x + y;
+  return sum % 2n === 0n ? decFormat(sum / 2n, e) : decFormat((sum * 10n) / 2n, e + 1);
+}
+
 
 /** The first `limit` items claimNext would pick with the same `resumeOnly`, in order, without claiming or locking. */
 export async function nextUp(

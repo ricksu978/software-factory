@@ -26,10 +26,10 @@ describe("queue order", dbTest, () => {
   });
 
   const names = new Map<string, string>();
-  async function item(name: string, state: string, rank: number, set = ""): Promise<string> {
+  async function item(name: string, state: string, rank: number | null, set = "", from = source): Promise<string> {
     const id = (await db.pool.query<{ id: string }>(
       "insert into item (source_id, external_id, title, state, backlog_rank) values ($1, $2, $2, $3, $4) returning id",
-      [source, name, state, rank],
+      [from, name, state, rank],
     )).rows[0].id;
     if (set) await db.pool.query(`update item set ${set} where id = $1`, [id]);
     names.set(id, name);
@@ -72,7 +72,6 @@ describe("queue order", dbTest, () => {
     await item("A", "Queued", 1);
     await item("B", "Queued", 2);
     const c = await item("C", "Queued", 3);
-    const move = (id: string, dir: "up" | "down") => withTx(db.pool, (cl) => moveInQueue(cl, id, dir, { reason: "unit", createdBy: operator }));
     await move(c, "up");
     assert.deepEqual(await order(), ["A", "C", "B"]);
     await move(c, "up");
@@ -108,5 +107,60 @@ describe("queue order", dbTest, () => {
   test("moving an item that isn't in the queue throws", async () => {
     const n = await item("N", "NotReady", 1);
     await assert.rejects(withTx(db.pool, (cl) => moveInQueue(cl, n, "up", { reason: "unit", createdBy: operator })), /isn't in the factory queue/);
+  });
+
+  const move = (id: string, dir: "up" | "down") => withTx(db.pool, (cl) => moveInQueue(cl, id, dir, { reason: "unit", createdBy: operator }));
+
+  test("a move steps one place when two backlog sources' ranks tie", async () => {
+    const other = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit-2') returning id")).rows[0].id;
+    // Fresh ids each round, since the tie between two rank-1 items falls to their ids.
+    for (let round = 0; round < 12; round++) {
+      await db.pool.query("truncate item, override cascade");
+      await item("A", "Queued", 1);
+      await item("X", "Queued", 1, "", other);
+      const c = await item("C", "Queued", 2);
+      const before = await order();
+      await move(c, "up");
+      assert.deepEqual(await order(), [before[0], "C", before[1]], `round ${round}`);
+      await move(c, "up");
+      assert.deepEqual(await order(), ["C", ...before.slice(0, 2)], `round ${round}`);
+      await move(c, "down");
+      await move(c, "down");
+      assert.deepEqual(await order(), [...before.slice(0, 2), "C"], `round ${round}`);
+      const a = before[0] === "A" ? (await db.pool.query("select id from item where external_id = 'A'")).rows[0].id : null;
+      if (a) {
+        await move(a, "down");
+        assert.deepEqual(await order(), [before[1], "A", "C"], `round ${round}`);
+      }
+    }
+  });
+
+  test("an item with no board rank moves down past another one", async () => {
+    await item("A", "Queued", 1);
+    const n = await item("N", "Queued", null);
+    await item("M", "Queued", null);
+    const first = await order();
+    const top = first[1] === "N" ? n : (await db.pool.query("select id from item where external_id = 'M'")).rows[0].id;
+    await move(top, "down");
+    assert.deepEqual(await order(), ["A", first[2], first[1]]);
+    await move(top, "up");
+    await move(top, "up");
+    assert.deepEqual(await order(), [first[1], "A", first[2]]);
+  });
+
+  test("an item moves back and forth between the same two many times and still lands between them", async () => {
+    await item("A", "Queued", 1);
+    await item("B", "Queued", 2);
+    const c = await item("C", "Queued", 3);
+    const d = await item("D", "Queued", 4);
+    // C and D swap places over and over inside the gap between A and B, halving it each time.
+    await move(c, "up");
+    await move(d, "up");
+    await move(d, "up");
+    assert.deepEqual(await order(), ["A", "D", "C", "B"]);
+    for (let i = 0; i < 80; i++) {
+      await move(i % 2 ? d : c, "up");
+      assert.deepEqual(await order(), i % 2 ? ["A", "D", "C", "B"] : ["A", "C", "D", "B"], `move ${i}`);
+    }
   });
 });
