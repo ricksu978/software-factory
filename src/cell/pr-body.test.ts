@@ -129,6 +129,13 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
+  test("a bare code block right under a heading stays in the body, with the text after it", () => {
+    const body = "## Problem\n\nX.\n\n## Testing\n\n```\nnpm run lint\n```\n\nIt passes.";
+    for (const open of ["```markdown", "```md", "```"]) {
+      assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\``), { body }, open);
+    }
+  });
+
   test("a blank line before the wrapper's closing fence and a note right under it leaves the note out", () => {
     const body = "## Problem\n\nThe thing broke.\n\n## Change\n\nFixed it.";
     for (const open of ["```markdown", "```md", "```"]) {

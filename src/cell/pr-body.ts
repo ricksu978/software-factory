@@ -120,7 +120,8 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * code block inside the wrapper open. Such a line could open a bare code block inside the body instead, so it's taken as
  * one when the body shows it: a `## ` heading outside a code block follows it, read as if it closed the wrapper (so
  * unwrap would find that heading outside the wrapper), or the block it would open closes just before another fence-only
- * line that would close the wrapper. A `## ` line inside a note's code block is code, so it doesn't count.
+ * line that would close the wrapper, or it sits right under a `## ` heading, whose section closing there would leave
+ * empty. A `## ` line inside a note's code block is code, so it doesn't count.
  *
  * Otherwise the tail is read the other way too, with the line opening a block, from the wrapper's own fence state. When
  * that reading finds a `## ` heading outside a code block, the line might open a bare block in a body that goes on with
@@ -138,7 +139,7 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       continue;
     }
     if (closes(line, wrapper)) {
-      if (!opensBareBlock(lines, i, wrapper)) return hasHeading(lines.slice(i)) ? { ambiguous: i } : i;
+      if (!opensBareBlock(lines, from, i, wrapper)) return hasHeading(lines.slice(i)) ? { ambiguous: i } : i;
     }
     const o = opening(line);
     if (o) inner = o;
@@ -148,10 +149,14 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
 
 /**
  * Whether the fence-only line `i` surely opens a bare code block inside the wrapper, as wrapperEnd describes. The
- * heading check reads the tail as if line `i` closed the wrapper, so code blocks start fresh after it.
+ * heading check reads the tail as if line `i` closed the wrapper, so code blocks start fresh after it. A line right
+ * under a `## ` heading, with only blank lines between, opens a block too: closing the wrapper there would leave that
+ * section empty and drop what follows it. Line `i` is outside the wrapper's code blocks, so the heading is too.
  */
-function opensBareBlock(lines: string[], i: number, wrapper: { char: string; len: number }): boolean {
+function opensBareBlock(lines: string[], from: number, i: number, wrapper: { char: string; len: number }): boolean {
   if (hasHeading(lines.slice(i + 1))) return true;
+  const last = lines.slice(from + 1, i).findLast((l) => l.trim() !== "");
+  if (last?.startsWith("## ")) return true;
   const own = opening(lines[i]!)!;
   const end = lines.findIndex((l, j) => j > i && closes(l, own));
   if (end < 0) return false;
