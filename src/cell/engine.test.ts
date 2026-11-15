@@ -1170,6 +1170,17 @@ describe("runCell", () => {
     assert.equal(started.body.ciFailure?.sha, head);
   });
 
+  for (const conclusion of ["success", "pending"] as const) {
+    test(`a claim at green on the factory's CI answer whose head has no failed check (${conclusion}) gives Green no findings and opens the PR (PBI 317)`, async () => {
+      const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: CI_BACK_TO_GREEN } } });
+      h.deps.api.ciChecks = async () => [{ name: "ci", conclusion, url: "https://ci/4" }];
+      assert.equal(await h.run(), "done");
+      const started = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started")!;
+      assert.equal(started.body.ciFailure, undefined);
+      assert.ok(h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed"));
+    });
+  }
+
   test("a claim at green on any other answer reads no CI before Green (PBI 317)", async () => {
     const asked: string[] = [];
     const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: "go on" } } });
