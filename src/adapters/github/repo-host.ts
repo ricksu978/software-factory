@@ -3,7 +3,7 @@
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
-import { factoryThread, logTail, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { factoryThread, LOGGED_CHECKS, logTail, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -283,7 +283,12 @@ async function jobLog(gh: GitHubClient, r: { owner: string; repo: string }, id: 
 async function failedOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<FailedCheck[]> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as GhCheckRun[];
-  return Promise.all(runs.filter(failedRun).map(async (c) => ({ name: c.name, url: c.html_url || c.details_url || "", log: await jobLog(gh, r, c.id) })));
+  // Only the first LOGGED_CHECKS failed runs' logs reach the cell, so the rest aren't downloaded at all.
+  return Promise.all(runs.filter(failedRun).map(async (c, i) => ({
+    name: c.name,
+    url: c.html_url || c.details_url || "",
+    log: i < LOGGED_CHECKS ? await jobLog(gh, r, c.id) : null,
+  })));
 }
 
 async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {

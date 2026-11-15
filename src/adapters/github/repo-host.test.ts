@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { botKey, FAILED_LOG_CHARS, FAILED_LOG_LINE_CHARS, logTail, loginKey, standingSummaries, type Review } from "../types.ts";
+import { botKey, FAILED_LOG_CHARS, FAILED_LOG_LINE_CHARS, LOGGED_CHECKS, logTail, loginKey, standingSummaries, type Review } from "../types.ts";
 import { cellRepoHost, githubRepoHost, hunkRanges, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -369,6 +369,20 @@ describe("githubRepoHost", () => {
       { name: "deploy", url: "https://ci/4", log: null },
       { name: "types", url: "https://ci/7", log: lines(3).join("\n") },
     ]);
+  });
+
+  test("failedChecksOnSha reads the logs of the first LOGGED_CHECKS failed runs only, and gives the rest a null log", async () => {
+    const runs = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `leg ${i}`, status: "completed", conclusion: "failure", html_url: `https://ci/${i}` }));
+    const read: number[] = [];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => { read.push(p.job_id); return `log ${p.job_id}`; },
+    });
+    const failed = await host.failedChecksOnSha("o/r", "abc");
+    assert.equal(failed.length, 30);
+    assert.deepEqual(read.sort((a, b) => a - b), Array.from({ length: LOGGED_CHECKS }, (_, i) => i + 1));
+    assert.ok(failed.slice(0, LOGGED_CHECKS).every((c, i) => c.log === `log ${i + 1}`));
+    assert.ok(failed.slice(LOGGED_CHECKS).every((c) => c.log === null));
   });
 
   test("pendingChecksOnSha names each check run not yet completed and each pending commit status, and none that finished", async () => {

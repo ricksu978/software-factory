@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { FAILED_LOG_CHARS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type ReviewComment, type RepoHost } from "../adapters/types.ts";
+import { FAILED_LOG_CHARS, LOGGED_CHECKS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type ReviewComment, type RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
@@ -185,7 +185,7 @@ export type ReviewThread = {
 };
 
 /** How many failed checks a CI failure's log finding gives a log, and how many more it names by name and URL (PBI 232). */
-export const LOGGED_CHECKS = 5;
+export { LOGGED_CHECKS };
 export const NAMED_CHECKS = 20;
 /** The most characters a CI failure's log finding holds, whatever CI gave: every later Green brief copies it (PBI 232). */
 export const CI_LOGS_CHARS = 40_000;

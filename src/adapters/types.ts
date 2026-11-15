@@ -102,6 +102,12 @@ export type OpenedThread = { threadId: string; path: string; line: number; body:
 /** A check that failed on a commit, as the cell API hands it to a cell waiting on CI (PBI 232). */
 export type FailedCheck = { name: string; url: string; log: string | null };
 
+/**
+ * How many failed checks a CI failure's log finding gives a log (PBI 232). The repo host reads logs for these only, and
+ * gives the rest a null log, since the cell names them by name and URL alone.
+ */
+export const LOGGED_CHECKS = 5;
+
 /** How many lines from the end of a failed check's log the cell API returns. */
 export const FAILED_LOG_LINES = 100;
 
@@ -175,7 +181,7 @@ export interface RepoHost {
   checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
   /**
    * The checks that failed on `sha`, each with its URL and the last 100 lines of its log, or a null log when the host
-   * can't give it (PBI 232). A check that passed, was skipped or ended neutral isn't one of them.
+   * can't give it (PBI 232). Only the first LOGGED_CHECKS failed checks carry a log; the rest have a null one. A check that passed, was skipped or ended neutral isn't one of them.
    */
   failedChecksOnSha(repo: string, sha: string): Promise<FailedCheck[]>;
   /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
