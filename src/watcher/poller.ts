@@ -386,6 +386,12 @@ export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
  * review.
  */
 export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
+/**
+ * The kind of the event that logs a re-queue for Green of an item that waited on an older "Address failed" question
+ * naming only CI failures, asked before #292 sent a CI failure back to Green (PBI 317). Its payload holds `questionId`
+ * and `prNumber`.
+ */
+export const REQUEUED_FOR_GREEN = "requeued_for_green";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */

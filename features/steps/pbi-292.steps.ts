@@ -89,7 +89,8 @@ function cell(world: object): CellCtx {
   return w.pbi18;
 }
 
-function ctx(world: object): Ctx {
+/** PBI 317's steps name the PR's head and install this CI on the cell its claim runs. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi292?: Ctx };
   w.pbi292 ??= { roles: new Map(), rules: new Map(), shas: new Map(), fixes: 0, replyToPerson: false, noCommitFrom: null, reads: 0, installedOn: null };
   return w.pbi292;
@@ -131,7 +132,7 @@ function roleOf(world: object, head: string | undefined, label: string | undefin
 }
 
 /** The real commit a label names, once CI was asked about it. */
-function shaOf(world: object, label: string): string {
+export function shaOf(world: object, label: string): string {
   const c = ctx(world);
   const role = c.roles.get(label);
   assert.ok(role, `no commit is labelled "${label}"`);
@@ -171,7 +172,7 @@ function checksOn(c: Ctx, run: CellCtx, sha: string): Check[] {
   return c.rules.get(classify(c, run, sha)) ?? [{ name: "ci", conclusion: "success", url: "https://github.com/acme/widgets/actions/runs/1", failingTests: [] }];
 }
 
-function install(world: object) {
+export function install(world: object) {
   const c = (world as { pbi292?: Ctx }).pbi292;
   const run = (world as { pbi18?: CellCtx }).pbi18;
   if (!c || !run || c.installedOn === run) return;

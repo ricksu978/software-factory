@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { decide } from "../../src/control/decisions.ts";
 import { withTx } from "../../src/store/db.ts";
-import { REQUEUED_FOR_ADDRESS } from "../../src/watcher/poller.ts";
+import { REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { ctx as dashCtx } from "./pbi-175.steps.ts";
@@ -83,7 +83,8 @@ async function harness(world: object): Promise<PollCtx> {
 
 type BaseFailure = { sha: string; tests: string[]; base: string };
 
-async function waits(world: object, n: number, body: string, opts: { askedAt?: string; pr?: number; repo?: string; baseFailure?: BaseFailure } = {}): Promise<void> {
+/** PBI 317's items wait on their questions here too, with `poll: false`. */
+export async function waits(world: object, n: number, body: string, opts: { askedAt?: string; pr?: number; repo?: string; baseFailure?: BaseFailure; poll?: boolean } = {}): Promise<void> {
   const repo = opts.repo ?? REPO;
   assert.equal(repo, REPO, `the scenarios' PRs are all in ${REPO}`);
   const prNumber = opts.pr ?? 57;
@@ -122,7 +123,9 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
   ctx(world).prs.set(n, prNumber);
   baseFailDb(world).items.set(n, id);
   dashCtx(world).sourceId ??= c.sourceId;
-  // The factory has been polling all along, so the item has seen a poll before the scenario's own.
+  // The factory has been polling all along, so the item has seen a poll before the scenario's own. PBI 317's question
+  // is answered on the poll that first sees it, so its items leave the first poll to the scenario.
+  if (opts.poll === false) return;
   await poll(c);
   polled(c);
 }
@@ -240,7 +243,7 @@ async function owner(world: object): Promise<string> {
   return m.owner;
 }
 
-async function answer(world: object, n: number, text: string): Promise<void> {
+export async function answer(world: object, n: number, text: string): Promise<void> {
   const item = base260(world).items.get(n);
   assert.ok(item, `no item ${n} was set up`);
   const userId = await owner(world);
@@ -360,8 +363,14 @@ Then("item {int} has a system event recording its re-queue for address after a r
 });
 
 Then("the event names item {int}'s question", long, async function (n: number) {
-  const all = await requeues(this, n);
-  assert.ok(all.length > 0, `item ${n} has no ${REQUEUED_FOR_ADDRESS} event`);
+  // PBI 317's re-queue for Green names its question too, and this step reads it as well.
+  polled(pollCtx(this));
+  const id = base260(this).items.get(n)?.id;
+  assert.ok(id, `no item ${n} was set up`);
+  const all = (await pool().query<EventRow>(
+    "select actor, actor_id, payload from event where item_id = $1 and kind = any($2) order by at, id", [id, [REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN]],
+  )).rows;
+  assert.ok(all.length > 0, `item ${n} has no ${REQUEUED_FOR_ADDRESS} or ${REQUEUED_FOR_GREEN} event`);
   const question = base260(this).items.get(n)!.question;
   for (const e of all) assert.equal(e.payload?.questionId, question, `the event names question ${e.payload?.questionId}`);
 });
