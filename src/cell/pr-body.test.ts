@@ -47,6 +47,34 @@ describe("cleanSummary", () => {
   });
 });
 
+describe("cleanSummary with code blocks (PBI 291)", () => {
+  const CODE = "```ts\nawait saveInBatches(order, 50);\n```";
+  const WITH = `${BODY}\n\n${CODE}`;
+
+  test("a markdown, md or bare wrapper keeps the code blocks inside it", () => {
+    for (const open of ["```markdown", "```md", "```", "~~~markdown", "````"]) {
+      const close = open.replace(/[a-z]+$/, "");
+      assert.deepEqual(cleanSummary(`Here it is:\n\n${open}\n${WITH}\n${close}\n\nLet me know.`), { body: WITH }, open);
+    }
+    const two = `${WITH}\n\nAfter:\n\n\`\`\`\nnpm run lint\n\`\`\``;
+    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${two}\n\`\`\``), { body: two });
+  });
+
+  test("a body that leaves a code block open gives a finding", () => {
+    for (const text of [`${BODY}\n\n\`\`\`ts\nawait x;`, `\`\`\`markdown\n${BODY}\n\n\`\`\`python\nrows\n\`\`\``, `Here:\n\n${BODY}\n\`\`\``]) {
+      const r = cleanSummary(text);
+      assert.ok("finding" in r, text);
+      assert.match(r.finding, /^The PR body leaves a code block open/);
+      assert.match(r.finding, /PR body alone, with nothing before or after it/);
+    }
+  });
+
+  test("a clean body with balanced code blocks is unchanged", () => {
+    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n${CODE}`;
+    assert.deepEqual(cleanSummary(body), { body });
+  });
+});
+
 describe("summaryOf", () => {
   test("cleans the text of a call that succeeded", () => {
     assert.deepEqual(summaryOf({ ok: true, text: `Done.\n\n${BODY}` }), { body: BODY });
