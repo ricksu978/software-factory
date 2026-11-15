@@ -104,10 +104,11 @@ function closes(line: string, o: { char: string; len: number }): boolean {
 /**
  * PBI 297: the line that closes the wrapper opened on line `from`, or -1. It's the first fence-only line that leaves no
  * code block inside the wrapper open. Such a line could open a bare code block inside the body instead, so it's taken as
- * one when a `## ` heading follows it, or when the block it would open closes and either its code starts on the very
- * next line or it closes just before another fence-only line that would close the wrapper. A note after the wrapper
- * starts after a blank line, while a bare code block's code starts right under its fence, so a body whose bare code
- * block is followed by more text, with no heading after it, stays whole.
+ * one only when the body shows it: a `## ` heading follows it, or the block it would open closes just before another
+ * fence-only line that would close the wrapper, or the block reads as a body's code block. That last one needs a blank
+ * line before the fence and the code right under it, as a body sets off its code blocks, while a wrapper's closing
+ * fence sits right under the body's last line. And the block can't hold a fence that names a language, since that's a
+ * note's own code block. So a note after the wrapper is left out whether or not a blank line follows the wrapper's fence.
  */
 function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number {
   let inner: { char: string; len: number } | null = null;
@@ -130,7 +131,9 @@ function opensBareBlock(lines: string[], i: number, wrapper: { char: string; len
   const own = opening(lines[i]!)!;
   const end = lines.findIndex((l, j) => j > i && closes(l, own));
   if (end < 0) return false;
-  if (end > i + 1 && lines[i + 1]!.trim() !== "") return true;
   const next = lines.slice(end + 1).find((l) => l.trim() !== "");
-  return next !== undefined && closes(next, wrapper);
+  if (next !== undefined && closes(next, wrapper)) return true;
+  const code = lines.slice(i + 1, end);
+  const setOff = lines[i - 1]!.trim() === "" && code.length > 0 && code[0]!.trim() !== "";
+  return setOff && !code.some((l) => (opening(l)?.info ?? "") !== "");
 }

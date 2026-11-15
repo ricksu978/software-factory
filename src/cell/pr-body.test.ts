@@ -105,6 +105,15 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
+  test("a note right under the wrapper's closing fence, with no blank line between, is left out", () => {
+    const body = "## Problem\n\nX.\n\n## What changes\n\nY.";
+    for (const open of ["```markdown", "```md", "```"]) {
+      for (const note of ["Run:\n```\nnpm test\n```", "Run:\n```sh\nnpm test\n```", "Run:\n\n```\nnpm test\n```"]) {
+        assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\`\n${note}`), { body }, `${open} / ${note}`);
+      }
+    }
+  });
+
   test("the reply from #297's report ends at Fixed it.", () => {
     const body = "## Problem\n\nA stray fence.\n\n## What changes\n\nThe wrapper runs to its own fence.\n\nFixed it.";
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nNote: to check it yourself, run:\n\n\`\`\`\nnpm test -- src/cell/pr-body.test.ts\n\`\`\``), { body });
