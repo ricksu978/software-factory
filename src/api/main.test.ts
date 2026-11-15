@@ -1,0 +1,156 @@
+import assert from "node:assert/strict";
+import { createServer, request, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { after, before, describe, test } from "node:test";
+import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
+import { dbTest, startTestDb } from "../store/test-db.ts";
+import { main, startApi, type Api } from "./main.ts";
+
+describe("the API at startup", () => {
+  test("names every setting it lacks, before it connects or listens", async () => {
+    await assert.rejects(main({}), /FACTORY_DB_URI, FACTORY_BLOB, OIDC_ISSUER, API_AUDIENCE, GITHUB_WEBHOOK_SECRET are not set/);
+  });
+
+  test("refuses a PORT that isn't a port", async () => {
+    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", PORT: "web" };
+    await assert.rejects(main(env), /PORT web isn't a port/);
+  });
+});
+
+describe("the API", dbTest, () => {
+  let db: Awaited<ReturnType<typeof startTestDb>>;
+  let issuerServer: Server;
+  let issuer: string;
+  let key: CryptoKey;
+  let api: Api;
+  let base: string;
+  let port: number;
+  const itemId = "00000000-0000-4000-8000-000000000001";
+
+  before(async () => {
+    db = await startTestDb();
+    const pair = await generateKeyPair("RS256", { extractable: true });
+    key = pair.privateKey;
+    const jwk = { ...(await exportJWK(pair.publicKey)), kid: "k", alg: "RS256" };
+    issuerServer = createServer((req, res) => {
+      const send = (b: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(b));
+      if (req.url?.endsWith("/.well-known/openid-configuration")) send({ issuer, jwks_uri: `${issuer}/certs` });
+      else send({ keys: [jwk] });
+    });
+    await new Promise<void>((r) => issuerServer.listen(0, "127.0.0.1", r));
+    issuer = `http://127.0.0.1:${(issuerServer.address() as AddressInfo).port}/realm`;
+    const source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'api-test') returning id")).rows[0].id;
+    await db.pool.query("insert into item (id, source_id, external_id, title, state) values ($1, $2, '1', 'one', 'InProgress')", [itemId, source]);
+    for (const [name, role] of [["vera", "viewer"], ["otto", "operator"], ["olga", "owner"]]) {
+      await db.pool.query(`insert into "user" (issuer, subject, role, github_login) values ($1, $2, $3, $2)`, [issuer, name, role]);
+    }
+    api = await startApi({ pool: db.pool, issuer, audience: "factory-api", webhookSecret: "s", readBlob: async () => null, env: {} }, 0);
+    port = (api.server.address() as AddressInfo).port;
+    base = `http://127.0.0.1:${port}`;
+  });
+
+  after(async () => {
+    await api?.stop();
+    await new Promise<void>((r) => issuerServer.close(() => r()));
+    await db?.stop();
+  });
+
+  const token = (sub: string) => {
+    const now = Math.floor(Date.now() / 1000);
+    return new SignJWT({}).setProtectedHeader({ alg: "RS256", kid: "k" }).setIssuer(issuer).setAudience("factory-api").setSubject(sub)
+      .setIssuedAt(now).setExpirationTime(now + 300).sign(key);
+  };
+  const as = async (sub: string, path: string, init: RequestInit = {}) =>
+    fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${await token(sub)}`, "content-type": "application/json", ...init.headers } });
+
+  /** Sends `path` exactly as written, which fetch would normalise. */
+  const raw = (path: string) => new Promise<number>((resolve, reject) => {
+    request({ host: "127.0.0.1", port, path }, (res) => {
+      res.resume();
+      resolve(res.statusCode!);
+    }).on("error", reject).end();
+  });
+
+  test("a path whose dot segments or encoding normalise to another is refused", async () => {
+    assert.equal(await raw("/v1/x/../floor"), 400);
+    assert.equal(await raw("/v1/items%2fx"), 400);
+    assert.equal(await raw("/v1/%2e%2e/floor"), 400);
+    assert.equal(await raw("/v1/floor"), 401, "a clean path reaches the bearer check");
+  });
+
+  test("a 401 tells the caller to bring a bearer token", async () => {
+    const r = await fetch(`${base}/v1/floor`);
+    assert.equal(r.status, 401);
+    assert.match(r.headers.get("www-authenticate") ?? "", /^Bearer/);
+  });
+
+  test("the floor has no token banner or heartbeat when neither is known", async () => {
+    const b = await (await as("vera", "/v1/floor")).json();
+    assert.equal(b.claudeToken, null);
+    assert.equal(b.workerHeartbeat, null);
+    assert.equal(b.canOperate, false);
+  });
+
+  test("an unknown item or one that isn't an id is 404", async () => {
+    assert.equal((await as("vera", "/v1/items/00000000-0000-4000-8000-000000000999")).status, 404);
+    assert.equal((await as("vera", "/v1/items/nope")).status, 404);
+  });
+
+  test("a blob path outside the stored patterns is 404", async () => {
+    assert.equal((await as("vera", "/v1/blobs/secrets/key.txt")).status, 404);
+  });
+
+  test("/v1/events gives the activity log as JSON, and a stream to a caller that asks for one", async () => {
+    const log = await (await as("vera", "/v1/events")).json();
+    assert.ok(Array.isArray(log.events));
+    const ctl = new AbortController();
+    const r = await as("vera", "/v1/events", { headers: { accept: "text/event-stream" }, signal: ctl.signal });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get("content-type") ?? "", /text\/event-stream/);
+    const reader = r.body!.getReader();
+    assert.match(new TextDecoder().decode((await reader.read()).value), /: open/);
+    await db.pool.query("select pg_notify('factory_events', '{\"kind\":\"test\"}')");
+    let seen = "";
+    while (!seen.includes("data:")) seen += new TextDecoder().decode((await reader.read()).value);
+    assert.match(seen, /data: \{"kind":"test"\}/);
+    ctl.abort();
+  });
+
+  test("an override needs a known kind, a reason, and for a WIP pin a whole limit", async () => {
+    const post = (b: unknown) => as("otto", "/v1/overrides", { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post({ kind: "explode", reason: "r" })).status, 400);
+    assert.equal((await post({ kind: "pause", reason: " " })).status, 400);
+    assert.equal((await post({ kind: "wip", value: 0, reason: "r" })).status, 400);
+    assert.equal((await post({ kind: "wip", value: 2.5, reason: "r" })).status, 400);
+    assert.equal((await as("otto", "/v1/overrides", { method: "POST", body: "{" })).status, 400);
+    assert.equal((await post({ kind: "requeue", itemId, reason: "r" })).status, 409, "an InProgress item isn't re-queued");
+  });
+
+  test("a second WIP pin replaces the first", async () => {
+    for (const value of [2, 4]) {
+      assert.equal((await as("otto", "/v1/overrides", { method: "POST", body: JSON.stringify({ kind: "wip", value, reason: "pin" }) })).status, 201);
+    }
+    const pins = (await db.pool.query("select value from override where kind = 'wip' and cleared_at is null")).rows;
+    assert.deepEqual(pins.map((p) => p.value), [4]);
+  });
+
+  test("a decision on an item that isn't waiting for it is 409, and an unknown kind is 400", async () => {
+    const post = (b: unknown) => as("otto", `/v1/items/${itemId}/decisions`, { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post({ kind: "answer", text: "x" })).status, 409);
+    assert.equal((await post({ kind: "maybe" })).status, 400);
+  });
+
+  test("an owner can't add a user without an http issuer, or with a login someone has", async () => {
+    const post = (b: unknown) => as("olga", "/v1/users", { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post({ issuer: "ftp://x", subject: "n", role: "viewer" })).status, 400);
+    assert.equal((await post({ issuer, subject: "n", role: "king" })).status, 400);
+    assert.equal((await post({ issuer, subject: "nora", role: "viewer", github_login: "VERA" })).status, 409);
+  });
+
+  test("an owner changing a user's role keeps one row", async () => {
+    const post = (role: string) => as("olga", "/v1/users", { method: "POST", body: JSON.stringify({ issuer, subject: "nick", role }) });
+    assert.equal((await post("viewer")).status, 201);
+    assert.equal((await post("operator")).status, 201);
+    assert.deepEqual((await db.pool.query(`select role from "user" where subject = 'nick'`)).rows, [{ role: "operator" }]);
+  });
+});

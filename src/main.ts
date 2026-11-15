@@ -103,7 +103,7 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
 }
 
 /** Reads a stored transcript or report from the blob account, or null when it isn't there. */
-function blobReader(connectionString: string): (path: string) => Promise<string | null> {
+export function blobReader(connectionString: string): (path: string) => Promise<string | null> {
   const service = BlobServiceClient.fromConnectionString(connectionString);
   return async (path) => {
     const [container, ...rest] = path.split("/");

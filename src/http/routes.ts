@@ -37,7 +37,7 @@ export type DashboardDeps = {
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
 const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
-const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
+export const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
 type User = { id: string; role: Role; product_owner: boolean; github_login: string | null };
 
@@ -71,7 +71,7 @@ export function tokenBanner(env: Record<string, string | undefined>, now = Date.
   return days <= 30 ? `The Claude token expires in ${Math.max(days, 0)} days. Make a new one with claude setup-token and update the secret.` : null;
 }
 
-async function floor(pool: pg.Pool) {
+export async function floor(pool: pg.Pool) {
   // One row per item, by its oldest open question, counted as the scheduler counts the waiting (Run contract 3).
   const waiting = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, min(q.asked_at) as since from item i
@@ -163,7 +163,7 @@ async function verdicts(deps: DashboardDeps, externalId: string, stages: { stage
  * Spec §13's Phase 0 exit measure from this database: every run with a merge sha, oldest merge first. A run's merge
  * date is the item's first move to Accepted after the run started, and its cost is its own stage runs' sum.
  */
-async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
+export async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
   const rows = (await pool.query<Omit<Phase0Row, "repo">>(
     `select * from (
        select i.id as item_id, i.external_id, i.title, r.pr_url, r.risk_tier, r.tier_reasons,
@@ -181,7 +181,7 @@ async function phase0(pool: pg.Pool): Promise<Phase0Row[]> {
  * payload, so a decision's text or a readiness detail never reaches the page. A setting change (PBI 175) also gives its
  * setting, and its reason (PBI 176), which an operator wrote for everyone to read. A factory-wide event has no item.
  */
-async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
+export async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
   const rows = (await pool.query<Omit<ActivityRow, "repo"> & { item_id: string | null }>(
     `select e.at, i.id as item_id, i.external_id, i.title, e.kind, e.payload->>'from' as "from", e.payload->>'to' as "to", e.payload->>'event' as event,
        coalesce(u.github_login, e.actor_id) as actor, e.payload->>'setting' as setting,
@@ -268,7 +268,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
 }
 
 /** Where the item's time went (PBI 187): its moves, every run's stage attempts and its questions, read up to `now`. */
-async function itemTime(pool: pg.Pool, id: string, state: ItemState, now: Date) {
+export async function itemTime(pool: pg.Pool, id: string, state: ItemState, now: Date) {
   // An item held from before issue_created_at was stored counts from its first logged event until a poll fills it in.
   const createdAt = (await pool.query<{ at: Date | null }>(
     "select coalesce(issue_created_at, (select min(at) from event where item_id = $1)) as at from item where id = $1", [id],

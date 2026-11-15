@@ -2,19 +2,27 @@
 // item ones on its next tick, and the cell API's /lease reads pause, kill, restart and stop_run directly.
 import type pg from "pg";
 
-export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart";
+export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart" | "wip";
 export type Override = {
   id: string; scope: "factory" | "backlog" | "item"; targetId: string | null; kind: OverrideKind;
   reason: string; createdBy: string | null; createdAt: Date; expiresAt: Date | null;
 };
 
-/** Records an override. Every override needs a reason, so a blank one throws before anything is written. */
+/**
+ * Records an override. Every override needs a reason, so a blank one throws before anything is written. A WIP pin
+ * (spec §8, kind `wip`) carries the pinned limit as its value and clears the pin before it, so one pin is active.
+ */
 export async function setOverride(
   c: pg.Pool | pg.PoolClient,
-  o: { scope: "factory" | "item"; targetId: string | null; kind: OverrideKind; reason: string; createdBy: string; expiresAt: Date | null },
+  o: { scope: "factory" | "item"; targetId: string | null; kind: OverrideKind; reason: string; createdBy: string; expiresAt: Date | null; value?: number },
 ): Promise<void> {
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   if ((o.scope === "item") !== (o.targetId !== null)) throw new Error("an item override names its item, and a factory override names none");
+  if ((o.kind === "wip") !== (o.value !== undefined)) throw new Error("a WIP pin carries its limit, and no other override carries a value");
+  if (o.kind === "wip") {
+    if (o.scope !== "factory" || !Number.isInteger(o.value) || o.value! < 1) throw new Error("a WIP pin is factory-wide and pins a whole number of at least 1");
+    await c.query("update override set cleared_at = now(), cleared_by = $1 where cleared_at is null and scope = 'factory' and kind = 'wip'", [o.createdBy]);
+  }
   // resume clears the factory's pause, drain, kill and restart, recording who cleared them, and keeps its own row for the
   // audit trail (spec §8). That row is cleared from the start, so it's never active.
   const resume = o.kind === "resume";
@@ -22,9 +30,9 @@ export async function setOverride(
     await c.query("update override set cleared_at = now(), cleared_by = $1 where cleared_at is null and scope = 'factory' and kind in ('pause', 'drain', 'kill', 'restart')", [o.createdBy]);
   }
   await c.query(
-    `insert into override (scope, target_id, kind, reason, created_by, expires_at, cleared_at, cleared_by)
-     values ($1, $2, $3, $4, $5, $6, case when $7 then now() end, case when $7 then $5::uuid end)`,
-    [o.scope, o.targetId, o.kind, o.reason, o.createdBy, o.expiresAt, resume],
+    `insert into override (scope, target_id, kind, reason, created_by, expires_at, cleared_at, cleared_by, value)
+     values ($1, $2, $3, $4, $5, $6, case when $7 then now() end, case when $7 then $5::uuid end, $8::jsonb)`,
+    [o.scope, o.targetId, o.kind, o.reason, o.createdBy, o.expiresAt, resume, o.value === undefined ? null : JSON.stringify(o.value)],
   );
 }
 

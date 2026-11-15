@@ -20,7 +20,7 @@
 // - POST /v1/items/{id}/decisions takes {kind, text}, kind being approve, changes or answer, under decide's rules.
 // - POST /webhooks/github is today's handleWebhook, checked by its signature and never by a bearer token.
 // - startApi rejects, before it listens, when the issuer's discovery document has no jwks_uri, naming jwks_uri.
-import { After, Given, Then, When } from "@cucumber/cucumber";
+import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -53,7 +53,7 @@ type Ctx = {
   api?: Serving;
   startError?: unknown;
   started: boolean;
-  /** True once a "fresh factory database" step ran, so the scenario has a database. */
+  /** True for a scenario tagged @db, whose "fresh factory database" step may be PBI 222's, so the API gets the database. */
   db: boolean;
   /** Each person's last token, so "again with the same token" sends it. */
   tokens: Map<string, string>;
@@ -82,6 +82,10 @@ function signingKeys() {
   })();
   return keys;
 }
+
+Before({ tags: "@pbi-284 and @db" }, function () {
+  ctx(this).db = true;
+});
 
 After({ tags: "@pbi-284", ...long }, async function () {
   const c = ctx(this);
