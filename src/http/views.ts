@@ -50,7 +50,11 @@ export type Issue = { external_id: string; repo: string | null };
 /** The PR an item's open run holds (PBI 145). A row with no open run, or a run with no PR yet, leaves these null. */
 export type OpenPr = { pr_number?: number | null; pr_url?: string | null };
 
-export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
+export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null;
+  /** PBI 292: the CI failure the item's Green attempt is fixing, or null when it fixes none. */
+  ci_failure?: CiFailure | null };
+/** PBI 292: a CI failure on a commit one of the run's stages pushed, as the cell reported it for Green to fix. */
+export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null };
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
 /** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
@@ -150,10 +154,35 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
+/**
+ * A failed check's name, linked to its URL. POST /stage takes only https URLs under the run's repo, and any other
+ * stored URL shows the name as plain text, so a link a cell sent can't run script on the dashboard.
+ */
+const checkLink = (c: CiFailure["checks"][number]) => /^https:\/\//.test(c.url)
+  ? `<a href="${escapeHtml(c.url)}">${escapeHtml(c.name)}</a>`
+  : escapeHtml(c.name);
+
+/** The failed checks of a CI failure, each linked to its run, as in "ci and e2e". */
+const checkLinks = (f: CiFailure) => f.checks.length
+  ? f.checks.map(checkLink).join(", ")
+  : "no check the factory could read";
+
+/** Floor's Stage cell for an item fixing CI (PBI 292): that it is, the checks that failed and the commit, in place of "green". */
+const fixingCiStage = (f: CiFailure) => `fixing CI <span class="muted">${checkLinks(f)} failed on <code>${shortSha(f.sha)}</code></span>`;
+
+/** Run detail's line for an item fixing CI (PBI 292): the commit and each failed check, with its URL and failing tests. */
+function fixingCiSection(f: CiFailure): string {
+  const items = f.checks.map((c) => `<li>${checkLink(c)}${c.url ? ` ${escapeHtml(c.url)}` : ""}${c.failingTests.length
+    ? `<ul>${c.failingTests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
+    : ` <span class="muted">named no failing test</span>`}</li>`);
+  return `<section id="fixing-ci" class="banner" role="status"><p>Fixing CI: Green is fixing the CI failure on commit <code>${shortSha(f.sha)}</code>. The checks that failed:</p>${
+    items.length ? `<ul>${items.join("")}</ul>` : `<p class="muted">CI named no failed check the factory could read.</p>`}</section>`;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
-  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
+  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done or their CI fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
 }
 
 /**
@@ -183,7 +212,7 @@ ${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${es
 ${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span></li>`), "No ready item waits on another.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
+${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
 ${controls}
 <script>
@@ -225,6 +254,8 @@ export type RunDetail = {
   verdicts: { name: string; red: string; green: string }[];
   /** True when the stored transcripts can be served, so each one is a link. */
   linkBlobs: boolean;
+  /** PBI 292: the CI failure the item is fixing at Green, or null when it fixes none. */
+  fixingCi?: CiFailure | null;
   /** An operator's override buttons for this item, or null for anyone else. */
   controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
   /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
@@ -338,7 +369,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
 ${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
