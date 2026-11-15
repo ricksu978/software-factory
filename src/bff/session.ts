@@ -101,11 +101,26 @@ export type NewSession = {
 
 export type Who = { issuer: string; subject: string };
 
+/** A live session: who it is for, and the tokens the BFF calls the API with. */
+export type Session = Who & {
+  accessToken: string;
+  accessTokenExpiresAt: Date;
+  refreshTokenEncrypted: string | null;
+};
+
+/** What a refresh changes in a session. */
+export type Tokens = Pick<Session, "accessToken" | "accessTokenExpiresAt" | "refreshTokenEncrypted">;
+
 /** Where sessions live. The BFF's only reach into the database. */
 export type SessionStore = {
   create(s: NewSession): Promise<void>;
-  /** The live session under the hash, marking it seen, or null when there is none or it has expired. */
-  find(cookieHash: string): Promise<Who | null>;
+  /**
+   * The live session under the hash, marking it seen, or null when there is none, it has been idle for seven days, or
+   * it is past its 30 days.
+   */
+  find(cookieHash: string): Promise<Session | null>;
+  /** Replaces the session's tokens after a refresh. */
+  updateTokens(cookieHash: string, t: Tokens): Promise<void>;
   remove(cookieHash: string): Promise<void>;
 };
 
@@ -120,13 +135,20 @@ export function pgSessions(pool: pg.Pool): SessionStore {
       );
     },
     async find(cookieHash) {
-      const r = await pool.query<Who>(
+      const r = await pool.query<Session>(
         `update session set last_seen_at = now()
          where cookie_hash = $1 and expires_at > now() and last_seen_at > now() - make_interval(secs => $2)
-         returning issuer, subject`,
+         returning issuer, subject, access_token as "accessToken", access_token_expires_at as "accessTokenExpiresAt",
+           refresh_token_encrypted as "refreshTokenEncrypted"`,
         [cookieHash, SESSION_IDLE_SECONDS],
       );
       return r.rows[0] ?? null;
+    },
+    async updateTokens(cookieHash, t) {
+      await pool.query(
+        "update session set access_token = $2, access_token_expires_at = $3, refresh_token_encrypted = $4 where cookie_hash = $1",
+        [cookieHash, t.accessToken, t.accessTokenExpiresAt, t.refreshTokenEncrypted],
+      );
     },
     async remove(cookieHash) {
       await pool.query("delete from session where cookie_hash = $1", [cookieHash]);

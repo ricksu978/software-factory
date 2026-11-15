@@ -2,6 +2,9 @@
 // tokens with RS256, and enforces PKCE (S256) at its token address as a real provider does. Its /authorize signs the
 // browser straight in as the provider's current user, with no page in between. Each "next sign-in" setting applies to
 // the next token response only. It records every authorization request, every token request and every token it issued.
+// PBI 289 adds the refresh_token grant: a refresh token the provider issued, sent back by the client it was issued to,
+// gets a new access token and a new refresh token, unless a "next refresh" setting says otherwise. A refresh token it
+// never issued, or one it has since replaced, is refused with invalid_grant.
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -11,7 +14,17 @@ export type AccessTokenKind = "jwt" | "opaque" | "dotted";
 type Grant = { user: string; clientId: string; redirectUri: string; challenge?: string; method?: string; nonce?: string };
 
 export type TokenRequest = { form: Record<string, string>; authorization?: string; status: number };
-export type Issued = { user: string; accessToken: string; idToken: string; refreshToken?: string };
+export type Issued = {
+  user: string;
+  accessToken: string;
+  /** Absent on a refresh, which answers with no ID token. */
+  idToken?: string;
+  refreshToken?: string;
+  /** Which grant issued these tokens: a sign-in's code, or a refresh. */
+  grant: "authorization_code" | "refresh_token";
+  /** For a refresh, the refresh token it was given. */
+  refreshedWith?: string;
+};
 
 export type Provider = {
   issuer: string;
@@ -30,6 +43,19 @@ export type Provider = {
     /** A string to issue it, null to issue none, undefined for a fresh random one. */
     refreshToken?: string | null;
   };
+  /** Settings for the next refresh only. */
+  nextRefresh: {
+    /** The access token to issue, instead of a fresh JWT. */
+    accessToken?: string;
+    /** Seconds the issued access token lasts, 300 when unset. */
+    expiresIn?: number;
+    /** The refresh token to issue, instead of a fresh random one. */
+    refreshToken?: string;
+    /** Refuse the refresh with invalid_grant. */
+    refuse?: boolean;
+  };
+  /** When set, every access token carries a counter in its jti, so no two the provider issues are ever the same. */
+  distinctAccessTokens: boolean;
   stop(): Promise<void>;
 };
 
@@ -73,6 +99,8 @@ export async function startProvider(user: string): Promise<Provider> {
     tokenRequests: [],
     issued: [],
     next: {},
+    nextRefresh: {},
+    distinctAccessTokens: false,
     async stop() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -81,6 +109,39 @@ export async function startProvider(user: string): Promise<Provider> {
 
   const json = (res: import("node:http").ServerResponse, status: number, body: unknown) =>
     res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(body));
+
+  let counter = 0;
+  const accessJwt = (sub: string, clientId: string, now: number, life: number) => jwt(privateKey, kid, {
+    iss: p.issuer, sub, aud: "factory-api", azp: clientId, scope: "openid", iat: now, exp: now + life,
+    jti: p.distinctAccessTokens ? `at-${++counter}-${randomBytes(4).toString("hex")}` : randomBytes(8).toString("hex"),
+  });
+  /** The refresh tokens the provider would honour, each with the user and client it was issued to. */
+  const live = new Map<string, { user: string; clientId: string }>();
+
+  /** The client a token request authenticates as: client_secret_basic, or client_id in the form. */
+  const clientOf = (form: Record<string, string>, authorization: string | undefined) => {
+    const basic = /^Basic\s+(.+)$/i.exec(authorization ?? "")?.[1];
+    if (basic) return decodeURIComponent(Buffer.from(basic, "base64").toString("utf8").split(":")[0]);
+    return form.client_id ?? "";
+  };
+
+  const refresh = (res: import("node:http").ServerResponse, form: Record<string, string>, record: TokenRequest) => {
+    const settings = p.nextRefresh;
+    p.nextRefresh = {};
+    const held = form.refresh_token ? live.get(form.refresh_token) : undefined;
+    if (settings.refuse || !held || held.clientId !== clientOf(form, record.authorization)) {
+      return json(res, 400, { error: "invalid_grant", error_description: "the refresh token isn't valid" });
+    }
+    live.delete(form.refresh_token);
+    const now = Math.floor(Date.now() / 1000);
+    const life = settings.expiresIn ?? 300;
+    const accessToken = settings.accessToken ?? accessJwt(subjectOf(held.user), held.clientId, now, life);
+    const refreshToken = settings.refreshToken ?? `rt-${randomBytes(16).toString("hex")}`;
+    live.set(refreshToken, held);
+    p.issued.push({ user: held.user, accessToken, refreshToken, grant: "refresh_token", refreshedWith: form.refresh_token });
+    record.status = 200;
+    return json(res, 200, { access_token: accessToken, token_type: "Bearer", expires_in: life, scope: "openid", refresh_token: refreshToken });
+  };
 
   const server: Server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", base);
@@ -123,6 +184,7 @@ export async function startProvider(user: string): Promise<Provider> {
       const form = Object.fromEntries(new URLSearchParams(await readBody(req)));
       const record: TokenRequest = { form, authorization: req.headers.authorization, status: 400 };
       p.tokenRequests.push(record);
+      if (form.grant_type === "refresh_token") return refresh(res, form, record);
       const g = form.code ? grants.get(form.code) : undefined;
       if (form.grant_type !== "authorization_code" || !g) return json(res, 400, { error: "invalid_grant" });
       grants.delete(form.code);
@@ -141,14 +203,15 @@ export async function startProvider(user: string): Promise<Provider> {
         ? randomBytes(24).toString("hex")
         : kind === "dotted"
           ? `not-a.real-jwt.${randomBytes(8).toString("hex")}`
-          : jwt(privateKey, kid, { iss: p.issuer, sub, aud: "factory-api", azp: g.clientId, scope: "openid", iat: now, exp: now + 300, jti: randomBytes(8).toString("hex") });
+          : accessJwt(sub, g.clientId, now, 300);
       const nonce = g.nonce === undefined ? undefined : next.differentNonce ? `not-${g.nonce}` : g.nonce;
       const idToken = jwt(privateKey, kid, {
         iss: p.issuer, sub, aud: g.clientId, azp: g.clientId, iat: now, exp: now + 300, preferred_username: g.user,
         ...(nonce === undefined ? {} : { nonce }),
       });
       const refreshToken = next.refreshToken === null ? undefined : next.refreshToken ?? `rt-${randomBytes(16).toString("hex")}`;
-      p.issued.push({ user: g.user, accessToken, idToken, refreshToken });
+      p.issued.push({ user: g.user, accessToken, idToken, refreshToken, grant: "authorization_code" });
+      if (refreshToken) live.set(refreshToken, { user: g.user, clientId: g.clientId });
       record.status = 200;
       return json(res, 200, {
         access_token: accessToken, token_type: "Bearer", expires_in: 300, id_token: idToken, scope: "openid",
