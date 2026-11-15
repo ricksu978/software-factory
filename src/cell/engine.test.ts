@@ -10,7 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
-import { changedFiles, ciLogs, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { changedFiles, CI_LOGS_CHARS, ciLogs, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { FAILED_LOG_CHARS } from "../adapters/types.ts";
 import { shellGit } from "./git.ts";
 
@@ -1094,11 +1094,28 @@ describe("runCell", () => {
     const unit = { name: "unit", url: "https://ci/unit", log: "line 1\nAssertionError: expected 3 to equal 4" };
     const lint = { name: "lint", url: "https://ci/lint", log: null };
     h.deps.api.checks = async () => (++checks === 1 ? { status: "failure", failedChecks: [unit, lint] } : { status: "success", failedChecks: [] });
+    // In production `/ci-checks` names the same failed checks, so Green gets both findings.
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: "failure", url: "https://ci/unit" }, { name: "lint", conclusion: "failure", url: "https://ci/lint" }];
     assert.equal(await h.run(), "done");
     const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
     const finding = retry.slice(retry.indexOf("## Your last attempt failed"));
-    assert.match(finding, /CI failed on [0-9a-f]{40}/);
+    assert.match(finding, /CI failed on [0-9a-f]{40}: the check "unit" failed, https:\/\/ci\/unit/);
+    assert.match(finding, /CI failed on [0-9a-f]{40}: the check "lint" failed, https:\/\/ci\/lint/);
     for (const text of ['"unit"', "https://ci/unit", "line 1\nAssertionError: expected 3 to equal 4", '"lint"', "https://ci/lint", "Its log couldn't be read"]) assert.ok(finding.includes(text), `the finding lacks ${text}:\n${finding}`);
+    assert.ok(!finding.includes("named no failed check"), finding);
+  });
+
+  test("CI failing at open-pr with `/ci-checks` unreadable doesn't say no check was named while `/checks` named some (PBI 232)", async () => {
+    let checks = 0;
+    let greens = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (++checks === 1 ? { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] } : { status: "success", failedChecks: [] });
+    h.deps.api.ciChecks = async () => { throw new Error("ci-checks down"); };
+    assert.equal(await h.run(), "done");
+    const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
+    const finding = retry.slice(retry.indexOf("## Your last attempt failed"));
+    assert.ok(finding.includes("https://ci/unit") && finding.includes("boom"), finding);
+    assert.ok(!finding.includes("named no failed check"), finding);
   });
 
   test("a failed check's name and URL sit in fenced JSON, so a hostile name can't close its quote and pass as instructions (PBI 232)", () => {
@@ -1766,4 +1783,15 @@ test("ciLogs fences at most FAILED_LOG_CHARS of a log, from its end", () => {
   const finding = ciLogs("CI failed on abc", [{ name: "unit", url: "https://ci/u", log }])!;
   assert.ok(finding.includes("END"));
   assert.ok(!finding.includes("a".repeat(FAILED_LOG_CHARS)));
+});
+
+test("ciLogs keeps the whole finding under CI_LOGS_CHARS however many checks fail with long logs (PBI 232)", () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ name: `matrix leg ${i} ${"n".repeat(300)}`, url: `https://ci/${i}/${"u".repeat(3000)}`, log: `${"x".repeat(FAILED_LOG_CHARS)}END ${i}` }));
+  const finding = ciLogs("CI failed on abc", many)!;
+  assert.ok(finding.length < CI_LOGS_CHARS, `${finding.length} characters`);
+  for (let i = 0; i < LOGGED_CHECKS; i++) assert.ok(finding.includes(`END ${i}`), `check ${i}'s log tail`);
+  assert.ok(!finding.includes(`END ${LOGGED_CHECKS}`), "a check past the logged ones has no log");
+  assert.ok(finding.includes(`https://ci/${LOGGED_CHECKS + NAMED_CHECKS - 1}/`), "the named checks have their URL");
+  assert.ok(!finding.includes(`https://ci/${LOGGED_CHECKS + NAMED_CHECKS}/`));
+  assert.ok(finding.includes(`CI failed ${100 - LOGGED_CHECKS - NAMED_CHECKS} more checks`));
 });
