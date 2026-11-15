@@ -704,7 +704,7 @@ async function runEngine(world: object): Promise<void> {
     async transition(b: Record<string, any>) { e.calls.push({ route: "/transition", body: b }); },
     async policyResults(b: Record<string, any>) { e.calls.push({ route: "/policy-results", body: b }); },
     async pr(b: Record<string, any>) { e.calls.push({ route: "/pr", body: b }); },
-    async checks() { return "success"; },
+    async checks() { return { status: "success", failedChecks: [] }; },
     async upload() {},
   };
   const agent = async (a: { prompt: string; cwd: string; model: string }) => {
