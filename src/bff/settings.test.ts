@@ -32,3 +32,9 @@ test("a missing session key, issuer or client id is named", () => {
 test("an empty client secret means a public client", () => {
   assert.equal(readSettings(env({ OIDC_CLIENT_SECRET: undefined })).clientSecret, undefined);
 });
+
+test("API_URL is the API's base address, and without it the BFF has no API to forward to", () => {
+  assert.equal(readSettings(env({ API_URL: "http://localhost:7400/" })).apiUrl, "http://localhost:7400");
+  assert.equal(readSettings(env()).apiUrl, undefined);
+  assert.throws(() => readSettings(env({ API_URL: "not a url" })), /API_URL/);
+});

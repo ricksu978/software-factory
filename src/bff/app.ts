@@ -5,12 +5,33 @@
 //                        stores the session and sets the session cookie, the only cookie the browser keeps.
 //   POST /auth/logout    deletes the session and clears the cookie. It needs an Origin of the BFF's own.
 //   GET  /auth/session   the signed-in browser's { issuer, subject }, or 401.
+// And step 7b (§04 and §05):
+//   *    /bff/*          a state-changing call (anything but GET, HEAD and OPTIONS) needs an Origin of the BFF's own,
+//                        or gets 403.
+//   *    /bff/v1/*       needs a live session, or gets 401. The BFF refreshes an access token that expires within 60
+//                        seconds, then forwards the call one for one to the API's /v1/*, with the session's access token
+//                        as a bearer token and none of the browser's cookies or credentials.
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { discover, finishSignIn, isJwt, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
+import { ResponseBodyError } from "openid-client";
+import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
 import {
-  hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type SessionStore,
+  hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type Session, type SessionStore,
 } from "./session.ts";
+
+/** An access token with this long or less left is refreshed before a call goes to the API. */
+export const REFRESH_WITHIN_MS = 60_000;
+const API_TIMEOUT_MS = 30_000;
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+/** The browser's request headers that go on to the API. Cookies, Authorization and Origin never do. */
+const FORWARDED_REQUEST_HEADERS = [
+  "accept", "accept-language", "content-type", "if-match", "if-none-match", "if-modified-since", "if-unmodified-since",
+];
+/** The API's response headers that don't come back: hop-by-hop ones, cookies, and those fetch has already undone. */
+const DROPPED_RESPONSE_HEADERS = new Set([
+  "connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length", "set-cookie", "upgrade",
+  "proxy-authenticate", "trailer", "te",
+]);
 
 /** The sign-in cookie: state, nonce and PKCE verifier, sealed under the session key, for the provider's round trip. */
 export const SIGNIN_COOKIE = "factory_signin";
@@ -27,6 +48,8 @@ export type BffConfig = {
   origin: string;
   key: Buffer;
   sessions: SessionStore;
+  /** The API's base address, with no path. Without it /bff/v1/* answers 502. */
+  apiUrl?: string;
   fetch?: typeof fetch;
 };
 
@@ -47,7 +70,93 @@ export function createBff(cfg: BffConfig): Hono {
     return c.text(`Sign-in refused: ${why}`, status);
   };
 
+  const doFetch = cfg.fetch ?? fetch;
+  /** Refreshes in flight, by cookie hash, so calls that arrive together spend the refresh token once. */
+  const refreshing = new Map<string, Promise<Session | null>>();
+
+  /** The session with an access token good for more than a minute, refreshing it if need be, or null. */
+  const freshSession = async (hash: string): Promise<Session | null> => {
+    const s = await cfg.sessions.find(hash);
+    if (!s || s.accessTokenExpiresAt.getTime() - Date.now() > REFRESH_WITHIN_MS) return s;
+    let p = refreshing.get(hash);
+    if (!p) {
+      p = refreshTokens(hash, s).finally(() => refreshing.delete(hash));
+      refreshing.set(hash, p);
+    }
+    return p;
+  };
+
+  /** Trades the session's refresh token at the provider and stores what comes back. Null when there is none or it's refused. */
+  const refreshTokens = async (hash: string, s: Session): Promise<Session | null> => {
+    if (!s.refreshTokenEncrypted) return null;
+    let token: string;
+    try {
+      token = open(cfg.key, REFRESH_TOKEN, s.refreshTokenEncrypted);
+    } catch {
+      return null;
+    }
+    let t: Awaited<ReturnType<typeof refresh>>;
+    try {
+      t = await refresh(await provider(), token);
+    } catch (e) {
+      // The provider refusing the refresh token ends the session's use. Anything else is the provider not answering.
+      if (e instanceof ResponseBodyError) return null;
+      throw e;
+    }
+    const tokens = {
+      accessToken: t.accessToken,
+      accessTokenExpiresAt: new Date(Date.now() + (Number(t.expiresIn) || 300) * 1000),
+      refreshTokenEncrypted: t.refreshToken ? seal(cfg.key, REFRESH_TOKEN, t.refreshToken) : s.refreshTokenEncrypted,
+    };
+    await cfg.sessions.updateTokens(hash, tokens);
+    return { ...s, ...tokens };
+  };
+
   const app = new Hono();
+
+  app.use("/bff/*", async (c, next) => {
+    if (!SAFE_METHODS.has(c.req.method) && c.req.header("origin") !== origin) {
+      return c.json({ error: "a state-changing call needs an Origin of the BFF's own" }, 403);
+    }
+    await next();
+  });
+
+  app.all("/bff/v1/*", async (c) => {
+    const id = getCookie(c, SESSION_COOKIE);
+    let s: Session | null = null;
+    if (id) {
+      try {
+        s = await freshSession(hashSessionId(id));
+      } catch (e) {
+        console.error("the BFF couldn't refresh an access token:", (e as Error).message);
+        return c.json({ error: "the sign-in provider didn't answer" }, 502);
+      }
+    }
+    if (!s) return c.json({ error: "not signed in" }, 401);
+    if (!cfg.apiUrl) return c.json({ error: "the BFF has no API to forward to" }, 502);
+
+    const from = new URL(c.req.url);
+    const to = `${cfg.apiUrl}${from.pathname.slice("/bff".length)}${from.search}`;
+    const headers = new Headers({ authorization: `Bearer ${s.accessToken}` });
+    for (const h of FORWARDED_REQUEST_HEADERS) {
+      const v = c.req.header(h);
+      if (v !== undefined) headers.set(h, v);
+    }
+    const method = c.req.method;
+    const body = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
+    let r: Response;
+    try {
+      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    } catch (e) {
+      console.error(`the BFF couldn't reach the API for ${method} ${from.pathname}:`, (e as Error).message);
+      return c.json({ error: "the API didn't answer" }, 502);
+    }
+    const back = new Headers();
+    r.headers.forEach((v, k) => {
+      if (!DROPPED_RESPONSE_HEADERS.has(k)) back.set(k, v);
+    });
+    return new Response(r.body, { status: r.status, statusText: r.statusText, headers: back });
+  });
 
   app.get("/auth/login", async (c) => {
     const { checks: s, to } = await startSignIn(await provider(), redirectUri, cfg.scopes);
