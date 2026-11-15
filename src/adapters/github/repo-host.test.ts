@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
 import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
-import { cellRepoHost, githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
+import { cellRepoHost, githubRepoHost, hunkRanges, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
 
@@ -32,6 +32,21 @@ describe("githubRepoHost", () => {
     assert.deepEqual(p.repositories, ["software-factory"]);
     assert.deepEqual(p.permissions, { contents: "write", pull_requests: "write", issues: "write" });
     assert.ok(!("statuses" in p.permissions) && !("checks" in p.permissions));
+  });
+
+  test("missingPermissions names each permission the installation holds below what the factory needs (PBI 264)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "admin", pull_requests: "read", metadata: "read" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), ["pull_requests: write", "issues: write"]);
+    assert.deepEqual([calls[0].params.owner, calls[0].params.repo], ["o", "r"]);
+  });
+
+  test("missingPermissions is empty when the installation holds every permission the factory needs", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "write", pull_requests: "write", issues: "write" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), []);
   });
 
   const pr = { base: { ref: "main" }, user: { login: "author" }, head: { sha: "abc" } };
@@ -245,6 +260,28 @@ describe("githubRepoHost", () => {
       comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "Name it" }] } }]);
   });
 
+  test("diffLines reads the PR's diff at the commit from the merge base, one range per hunk on its new side", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,
+      "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files: [
+        { filename: "src/a.ts", changes: 4, patch: "@@ -1,3 +1,5 @@\n a\n+b\n+c\n d\n e\n@@ -40,2 +42,7 @@ f\n" },
+        { filename: "img.png", changes: 0 },
+      ] }),
+    });
+    assert.deepEqual(await host.diffLines("o/r", 3, "def"), [{ path: "src/a.ts", from: 1, to: 5 }, { path: "src/a.ts", from: 42, to: 48 }]);
+    assert.deepEqual(calls[1].params, { owner: "o", repo: "r", basehead: "main...def", per_page: 1 });
+  });
+
+  test("diffLines is null when GitHub can't give the whole diff", async () => {
+    const at = (files: unknown[]) => stubGitHub({ "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr, "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files }) }).host;
+    assert.equal(await at(Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}`, changes: 1, patch: "@@ -1 +1 @@\n+x" }))).diffLines("o/r", 3, "def"), null);
+    assert.equal(await at([{ filename: "big.ts", changes: 9000 }]).diffLines("o/r", 3, "def"), null);
+  });
+
+  test("hunkRanges reads a one-line hunk and skips one that only deletes", () => {
+    assert.deepEqual(hunkRanges("a.ts", "@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +9,0 @@\n-z\n-w"), [{ path: "a.ts", from: 3, to: 3 }]);
+  });
+
   test("postReview returns the threads its own line comments opened, by the review's id", async () => {
     const thread = (id: string, review: number, path: string, line: number, body: string) =>
       ({ id, path, line, comments: { nodes: [{ body, pullRequestReview: { databaseId: review } }] } });
@@ -360,6 +397,27 @@ describe("githubRepoHost", () => {
     assert.equal(calls[0].params.ref, "abc");
     const none = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [] }) });
     assert.equal(await none.host.ciChecksOnSha("o/r", "abc"), null);
+  });
+
+  test("ciChecksOnSha names the tests a failed Actions job's log says failed, and none when the log can't be read (PBI 292)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") =>
+      ({ id, name, status: "completed", conclusion, html_url: `https://github.com/o/r/runs/${id}`, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => {
+        if (p.job_id === 3) throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+        return "2026-11-15T01:02:03.4567890Z not ok 1 - parses the config\n2026-11-15T01:02:03.4567890Z ok 2 - reads\n";
+      },
+    });
+    assert.deepEqual(await host.ciChecksOnSha("o/r", "abc"), [
+      { name: "lint", conclusion: "success", url: "https://github.com/o/r/runs/1" },
+      { name: "ci", conclusion: "failure", url: "https://github.com/o/r/runs/2", failingTests: ["parses the config"] },
+      { name: "e2e", conclusion: "failure", url: "https://github.com/o/r/runs/3" },
+      { name: "other", conclusion: "failure", url: "https://github.com/o/r/runs/4" },
+    ]);
+    assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
   });
 
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {

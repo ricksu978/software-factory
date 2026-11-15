@@ -2,7 +2,8 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { type ChangeCause, factoryThread, newestCause, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { failingTests } from "../../core/failing-tests.ts";
+import { type ChangeCause, factoryThread, newestCause, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type DiffRange, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -20,6 +21,18 @@ export type AppLike = {
 // the token every permission the App holds.
 export const CELL_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write" } as const;
 
+const LEVEL = { read: 1, write: 2, admin: 3 } as Record<string, number>;
+
+/**
+ * Each of CELL_PERMISSIONS the installation holds below the level asked, as "name: level" (PBI 264). The readiness
+ * gate needs the same set: it comments on and edits issues, and the cell it hands an item to pushes and opens a PR.
+ */
+export function permissionsMissing(granted: Record<string, string> | undefined): string[] {
+  return Object.entries(CELL_PERMISSIONS)
+    .filter(([name, level]) => (LEVEL[granted?.[name] ?? ""] ?? 0) < LEVEL[level])
+    .map(([name, level]) => `${name}: ${level}`);
+}
+
 const COMPARE_PAGE = 100;
 type CompareCommit = { sha: string; parents?: { sha: string }[] };
 
@@ -36,6 +49,23 @@ export function firstParentLine(commits: CompareCommit[], sha: string): string[]
   return line.reverse();
 }
 
+/**
+ * The new-side line ranges of one file's unified-diff patch, one per hunk, context lines included, since GitHub places
+ * a line comment on any line a hunk shows (PBI 266). A hunk that only deletes shows no new-side line.
+ */
+export function hunkRanges(path: string, patch: string): DiffRange[] {
+  const out: DiffRange[] = [];
+  for (const m of patch.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const from = Number(m[1]);
+    const count = m[2] === undefined ? 1 : Number(m[2]);
+    if (count > 0) out.push({ path, from, to: from + count - 1 });
+  }
+  return out;
+}
+
+/** GitHub's compare lists at most this many files, so a diff that reaches it may be cut short. */
+const COMPARE_FILES = 300;
+
 const split = (repo: string) => {
   const [owner, name] = repo.split("/");
   return { owner, repo: name };
@@ -43,7 +73,7 @@ const split = (repo: string) => {
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
 type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState"
-  | "openReviewComments" | "postReview" | "resolveThread">;
+  | "openReviewComments" | "postReview" | "resolveThread" | "diffLines">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -87,6 +117,19 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const nodes = res.repository.pullRequest.reviewThreads.nodes as { id: string; path: string; line: number | null; comments: { nodes: { body: string; pullRequestReview: { databaseId: number | null } | null }[] } }[];
       return { threads: nodes.filter((t) => t.comments.nodes[0]?.pullRequestReview?.databaseId === review.id)
         .map((t) => ({ threadId: t.id, path: t.path, line: t.line ?? 0, body: t.comments.nodes[0].body })) };
+    },
+
+    async diffLines(repo, prNumber, commitSha) {
+      const gh = await client();
+      const r = split(repo);
+      const base = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data.base.ref as string;
+      // Three dots diff from the merge base, as the PR's own diff does. Files come only on the first page, so one
+      // commit per page keeps the answer small.
+      const files = ((await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${base}...${commitSha}`, per_page: 1 }))
+        .data.files ?? []) as { filename: string; patch?: string; changes?: number }[];
+      // A list cut at the cap, or a changed file GitHub gave no patch for, leaves lines the factory can't tell about.
+      if (files.length >= COMPARE_FILES || files.some((f) => f.patch === undefined && (f.changes ?? 0) > 0)) return null;
+      return files.flatMap((f) => hunkRanges(f.filename, f.patch ?? ""));
     },
 
     async resolveThread(_repo, threadId) {
@@ -231,12 +274,35 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { name: string; status: string; conclusion: string | null; html_url: string | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
-  return runs.map((c) => ({
-    name: c.name, url: c.html_url ?? "",
-    conclusion: c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure",
+  return Promise.all(runs.map(async (c) => {
+    const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
+    const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion === "failure" && c.app?.slug === "github-actions") {
+      const tests = await failingTestsOfJob(gh, r, c.id);
+      if (tests.length) check.failingTests = tests;
+    }
+    return check;
   }));
+}
+
+/**
+ * PBI 292: the tests a failed GitHub Actions job's log names as failing. An Actions check run's id is its job's id. The
+ * log needs the App's `actions: read`; a log the factory can't read, or one naming no test, gives none, so the check
+ * still goes back to Green with its name and URL.
+ */
+async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: string }, jobId: number | undefined): Promise<string[]> {
+  if (typeof jobId !== "number") return [];
+  try {
+    const { data } = await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: jobId });
+    const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : ArrayBuffer.isView(data) ? new TextDecoder().decode(data) : "";
+    return failingTests(text);
+  } catch (e) {
+    const why = (e as { status?: unknown })?.status === 403 ? " (the App needs `actions: read`; grant it and accept the new permission on the installation)" : "";
+    console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);
+    return [];
+  }
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
@@ -271,6 +337,11 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         installation_id: installationId, repositories: [split(repo).repo], permissions: { ...CELL_PERMISSIONS },
       });
       return { token: data.token, expiresAt: data.expires_at };
+    },
+
+    async missingPermissions(repo) {
+      const { data } = await app.octokit.request("GET /repos/{owner}/{repo}/installation", split(repo));
+      return permissionsMissing(data.permissions);
     },
 
     async checksOnSha(repo, sha) {

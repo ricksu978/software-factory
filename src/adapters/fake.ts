@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { type ChangeCause, loginKey, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { type ChangeCause, loginKey, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -131,7 +131,8 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * `submittedAt`, which is how the fake ties a comment to its review.
  * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
- * `factory[bot]` in `reviewComments`, which postReview returns.
+ * `factory[bot]` in `reviewComments`, which postReview returns. diffLines answers from `diffs`, by `repo#number@sha`, and
+ * with null for a commit it holds no diff for, as GitHub's does when it can't give the whole diff (PBI 266).
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -146,9 +147,14 @@ export function fakeRepoHost(): RepoHost & {
   reviewComments: Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>;
   postedReviews: PostedReview[];
   resolvedThreads: { repo: string; threadId: string }[];
+  diffs: Map<string, DiffRange[]>;
   mergeCalls: MergeCall[];
+  /** The permissions the App lacks, by repo (PBI 264). A repo not here lacks none. */
+  permissionsMissing: Map<string, string[]>;
 } {
+  const diffs = new Map<string, DiffRange[]>();
   const mergeCalls: MergeCall[] = [];
+  const permissionsMissing = new Map<string, string[]>();
   const postedReviews: PostedReview[] = [];
   const resolvedThreads: { repo: string; threadId: string }[] = [];
   let openedThreads = 0;
@@ -168,9 +174,13 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, mergeCalls,
+    prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
+    mergeCalls, permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+    async missingPermissions(repo) {
+      return [...(permissionsMissing.get(repo) ?? [])];
     },
     async openOrUpdatePr({ repo, branch, base, title, body }) {
       const open = prs.find((p) => p.repo === repo && p.branch === branch && p.open);
@@ -263,6 +273,9 @@ export function fakeRepoHost(): RepoHost & {
       const threads = comments.map(({ path, line, body }) => ({ threadId: `review-thread-${++openedThreads}`, path, line, body }));
       if (threads.length) reviewComments.set(key, [...(reviewComments.get(key) ?? []), ...threads.map((t) => ({ ...t, author: "factory[bot]" }))]);
       return { threads };
+    },
+    async diffLines(repo, prNumber, commitSha) {
+      return diffs.get(`${repo}#${prNumber}@${commitSha}`)?.map((r) => ({ ...r })) ?? null;
     },
     async resolveThread(repo, threadId) {
       const thread = [...reviewComments.entries()].find(([k, cs]) => k.startsWith(`${repo}#`) && cs.some((c) => c.threadId === threadId))?.[1]

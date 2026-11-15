@@ -392,6 +392,9 @@ function watchConsole(c: Ctx): void {
 
 // A bare, capitalised state, so PBI 17's `item "B" is queued` and `item "B" is "Queued"` stay theirs alone.
 Given(/^item "([^"]*)" is ([A-Z][A-Za-z]*)$/, long, async function (ext: string, state: string) {
+  // PBI 265's scenarios set up their items on PBI 89's control plane, through `itemIs`.
+  const own = (this as { itemIs?: (name: string, state: string) => Promise<void> }).itemIs;
+  if (own) return own(ext, state);
   const c = ctx(this);
   await item(c, ext, { state: state as ItemState });
   c.ext = ext;
