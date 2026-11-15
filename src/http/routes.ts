@@ -6,6 +6,7 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
 import type { ItemState } from "../core/states.ts";
+import type { CiFailure } from "../cell/api-client.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
@@ -132,13 +133,17 @@ async function floor(pool: pg.Pool) {
   )).rows.map(({ repo_url, ...b }): MainBreakRow => ({ ...b, repo: repoName(repo_url) }));
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
+  // PBI 292: an item In progress whose run's newest attempt is a Green attempt sent back to fix a CI failure is fixing
+  // CI, with the commit CI failed on and the failed checks.
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
   // factory's own note on an attempt it closed (PBI 239) isn't an agent message, so Floor skips it; Run detail shows it.
   const active = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
-       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message
+       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message,
+       (select case when i.state = 'InProgress' and s.stage_id = 'green' then s.ci_failure end from stage_run s
+         where s.run_id = r.id order by s.started_at desc, s.attempt desc limit 1) as ci_failure
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
     [LEASE_RAN_OUT],
@@ -258,6 +263,17 @@ async function featuresAt(deps: DashboardDeps, fi: FactoryItem | null, sha: stri
   return out;
 }
 
+/**
+ * PBI 292: the CI failure the item is fixing, while it's In progress on an open run whose newest attempt is a Green
+ * attempt the cell reported as fixing one. Null otherwise.
+ */
+export function fixingCi(state: string, run: { open?: boolean } | null, stages: { stage_id: string; attempt: number; started_at?: Date; ci_failure?: CiFailure | null }[]): CiFailure | null {
+  if (state !== "InProgress" || !run?.open) return null;
+  const newest = stages.reduce<(typeof stages)[number] | null>((a, s) =>
+    !a || (s.started_at?.getTime() ?? 0) > (a.started_at?.getTime() ?? 0) || ((s.started_at?.getTime() ?? 0) === (a.started_at?.getTime() ?? 0) && s.attempt > a.attempt) ? s : a, null);
+  return newest?.stage_id === "green" ? newest.ci_failure ?? null : null;
+}
+
 async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
@@ -294,6 +310,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
+    fixingCi: fixingCi(item.state, run, stages),
     controls: canOperate
       ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
       : null,

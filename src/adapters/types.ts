@@ -109,7 +109,11 @@ export type DiffRange = { path: string; from: number; to: number };
  * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
  * has reported nothing yet.
  */
-export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
+export type CiCheck = {
+  name: string; conclusion: "success" | "failure" | "pending"; url: string;
+  /** PBI 292: the tests a failed check names as failing, when its run reports them. Empty or absent when it names none. */
+  failingTests?: string[];
+};
 
 /** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */
 export type MergeState = "clean" | "blocked" | "behind" | "unstable" | "unknown" | "dirty" | "draft" | "has_hooks";
