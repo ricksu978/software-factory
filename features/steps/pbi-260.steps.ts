@@ -59,6 +59,11 @@ export type Ctx = {
   /** The cell harness's real commits, by the feature's names for them. */
   shas: Map<string, string>;
   npmLog?: string;
+  /**
+   * The scheduler's clock, for a scenario that dates its question. Without it the tick runs on the real clock, and a
+   * fixed date ages past the 5-day timeout (PBI 305's scenarios did at 2026-11-15T09:00Z).
+   */
+  now?: Date;
 };
 
 /** PBI 305's steps put their items here too, so this file's question, Hold and event steps find them. */
@@ -323,7 +328,7 @@ async function schedulerTick(world: object): Promise<{ result: TickResult; error
   };
   try {
     const result = await tick({
-      pool: pool(), now: new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
+      pool: pool(), now: m.now ?? new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
       secret: "pbi-260-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
       launcher: { start: async (env) => (m.started.push(env), `exec-${m.started.length}`), stop: async () => {} },
     });
