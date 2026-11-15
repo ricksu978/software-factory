@@ -103,8 +103,9 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
   // A run stopped at address has been claimed before, so its repo and config commit are already pinned.
   await pool().query(
     `insert into run (item_id, run_number, next_stage, branch, pr_number, pr_url, reviews_seen_at, repo_id, config_sha)
-     values ($1, 1, 'address', $2, $3, $4, now() - interval '7 days', (select id from repo where lower(url) = lower($5)), 'c1')`,
-    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`, `https://github.com/${repo}`],
+     values ($1, 1, 'address', $2, $3, $4, coalesce($6::timestamptz, now()) - interval '7 days', (select id from repo where lower(url) = lower($5)), 'c1')`,
+    // Dated from the question when it has a date, so a fixed date never falls behind the real clock.
+    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`, `https://github.com/${repo}`, opts.askedAt ?? null],
   );
   const question = (await pool().query<{ id: string }>(
     `insert into question (item_id, kind, body, asked_at, base_failure)
@@ -133,8 +134,9 @@ Given("item {int} waits in NeedsInput on the question {string}", long, async fun
 
 Given("item {int} waits in NeedsInput on the question {string}, asked at {string}", long, async function (n: number, body: string, at: string) {
   await waits(this, n, body, { askedAt: at });
-  // The scheduler runs a day after the question was asked: inside the 2-day reminder and 5-day timeout windows.
-  base260(this).now = new Date(Date.parse(at) + 24 * 60 * 60 * 1000);
+  // The scheduler runs a day after the question was asked: inside the 2-day reminder and 5-day timeout windows,
+  // whatever today's date.
+  base260(this).clock = new Date(Date.parse(at) + 24 * 60 * 60 * 1000);
 });
 
 Given(

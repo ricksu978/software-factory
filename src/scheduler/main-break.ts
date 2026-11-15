@@ -1,0 +1,107 @@
+// PBI 255: what the factory reads from CI when a merge commit fails on main. It compares the commit's checks with its
+// first parent's, to tell a merge that broke main from one merged onto a main already red, reads the failing tests out
+// of a failed check's log, and writes the bug item it files for a break.
+import type { CheckRun } from "../adapters/types.ts";
+
+/** A failed check as a break records it in main_break.failed_checks: its name, its page and the tests its log names. */
+export type FailedCheck = { name: string; url: string; tests: string[] };
+
+/**
+ * What CI on a red merge commit says against its first parent. `broke`: at least one check failed that the first parent
+ * passed or never ran. `already red`: the first parent failed every check that failed. `undecided`: a failed check is
+ * still running on the first parent. `cancelled`: no check run failed and at least one was cancelled, as when a later
+ * push to the branch cancelled it, so nothing failed to charge. `no checks`: no check run failed or was cancelled, so
+ * there is nothing to compare, as with a CI that reports only commit statuses. A check cancelled on the first parent
+ * counts as one that never ran there.
+ */
+export type Comparison = { verdict: "broke" | "already red" | "undecided" | "cancelled" | "no checks"; failed: CheckRun[] };
+
+export function compareWithParent(merge: CheckRun[], parent: CheckRun[]): Comparison {
+  const failed = merge.filter((r) => r.status === "failure");
+  if (failed.length === 0) return { verdict: merge.some((r) => r.status === "cancelled") ? "cancelled" : "no checks", failed };
+  const onParent = new Map(parent.filter((r) => r.status !== "cancelled").map((r) => [r.name, r.status]));
+  if (failed.some((r) => (onParent.get(r.name) ?? "success") === "success")) return { verdict: "broke", failed };
+  if (failed.some((r) => onParent.get(r.name) === "pending")) return { verdict: "undecided", failed };
+  return { verdict: "already red", failed };
+}
+
+// What GitHub Actions puts in front of each log line, and the colours a reporter may print in CI.
+const STAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/;
+const ANSI = /\x1b\[[\d;]*m/g;
+// A TAP result line, as node's test runner printed it before Node 23, or with `--test-reporter tap`.
+const TAP_LINE = /^(\s*)(not ok|ok) \d+(?: - (.*))?$/;
+// The spec reporter, node's default since Node 23, lists each failing leaf test once more after its summary, under
+// `✖ failing tests:`, as `✖ <name> (<duration>)` after a `test at <file>` line.
+const SPEC_HEADING = /^✖ failing tests:\s*$/;
+const SPEC_LINE = /^✖ (.+?)(?: \([\d.]+m?s\))?\s*$/;
+// Cucumber's summary lists each scenario that didn't pass under `Failed scenarios:`, `Ambiguous scenarios:` and the
+// like, as `  1) <scenario> # <file>:<line>`.
+const CUCUMBER_HEADING = /^(?:Failed|Ambiguous|Undefined|Pending) scenarios:\s*$/;
+const CUCUMBER_LINE = /^ {2}\d+\) (.+?) # (\S+:\d+)\s*$/;
+
+/**
+ * The failing tests a check's log names, once each, in order: node's test runner's failures in its spec reporter's
+ * `failing tests` list or as TAP `not ok` lines, and cucumber's failed scenarios, each with its file and line. A
+ * failing TAP suite is left out when a test inside it failed, so only the leaf is named, and a TODO doesn't count. A
+ * log with none of these names none.
+ */
+export function failingTests(log: string | null): string[] {
+  const names: string[] = [];
+  const add = (name: string) => {
+    if (name && !names.includes(name)) names.push(name);
+  };
+  const tap: { indent: number; failed: boolean; name: string }[] = [];
+  let section: "spec" | "cucumber" | null = null;
+  for (const raw of (log ?? "").split(/\r?\n/)) {
+    const line = raw.replace(STAMP, "").replace(ANSI, "");
+    // A step's group marker ends whatever list the step before it printed.
+    if (line.startsWith("##[")) section = null;
+    if (SPEC_HEADING.test(line)) section = "spec";
+    else if (CUCUMBER_HEADING.test(line)) section = "cucumber";
+    else if (section === "spec") {
+      const m = SPEC_LINE.exec(line);
+      if (m) add(m[1]);
+    } else if (section === "cucumber") {
+      const m = CUCUMBER_LINE.exec(line);
+      if (m) add(`${m[1]} (${m[2]})`);
+      else if (line.trim() && !line.startsWith(" ")) section = null;
+    }
+    const m = TAP_LINE.exec(line);
+    if (!m || /\s#\s*TODO\b/i.test(m[3] ?? "")) continue;
+    tap.push({ indent: m[1].length, failed: m[2] === "not ok", name: (m[3] ?? "").replace(/\s+#\s*SKIP\b.*$/i, "").trim() });
+  }
+  tap.forEach((r, i) => {
+    if (!r.failed) return;
+    // A suite's own line comes after its tests' lines, which are indented deeper.
+    for (let k = i - 1; k >= 0 && tap[k].indent > r.indent; k--) if (tap[k].failed) return;
+    add(r.name);
+  });
+  return names;
+}
+
+/** At most this many failing tests are listed for each check, so a log full of failures can't swamp the item. */
+const TESTS_PER_CHECK = 20;
+
+/**
+ * The bug item the factory files when `sha` broke `branch`: it names the commit, the PR and item it came from, each
+ * failed check with its URL on one line, and the failing tests the logs name. Its one acceptance criterion is a green
+ * branch, so the item meets the Definition of Ready's need for one.
+ */
+export function bugItem(p: { sha: string; branch: string; prNumber: number | null; prUrl: string | null; itemExternalId: string; checks: FailedCheck[] }): { title: string; body: string } {
+  const pr = p.prNumber === null ? "a PR" : `PR #${p.prNumber}${p.prUrl ? ` (${p.prUrl})` : ""}`;
+  const tests = p.checks.flatMap((c) => [...c.tests.slice(0, TESTS_PER_CHECK), ...(c.tests.length > TESTS_PER_CHECK ? [`and ${c.tests.length - TESTS_PER_CHECK} more in ${c.name}`] : [])]);
+  const body = [
+    `CI failed on \`${p.branch}\` for the merge commit ${p.sha}, the merge of ${pr} for item #${p.itemExternalId}. At least one of the checks below passed on the commit's first parent, so this merge broke \`${p.branch}\`. The factory fixes it before it builds anything else.`,
+    "",
+    "## Acceptance criteria",
+    "",
+    `- CI passes every check on \`${p.branch}\` again, the checks below included.`,
+    "",
+    "## Failed checks",
+    "",
+    ...p.checks.map((c) => `- ${c.name}: ${c.url}`),
+    "",
+    ...(tests.length ? ["Failing tests the checks' logs name:", ...tests.map((t) => `- ${t}`)] : ["No check's log names a failing test."]),
+  ].join("\n");
+  return { title: `${p.branch} is red: commit ${p.sha.slice(0, 7)} broke it`, body };
+}

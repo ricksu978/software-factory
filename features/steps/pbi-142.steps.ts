@@ -94,8 +94,12 @@ Given("the item still carries its {string} label on the board", async function (
 
 When("the poller runs twice", long, async function () {
   const c = pollCtx(this);
+  const before = c.polls;
   await poll(c);
   await poll(c);
+  // A poll that failed, its afterPoll hook included, fails here, so no Then reads the state a broken poll left.
+  polled(c);
+  assert.equal(c.polls, before + 2, `the poller ran ${c.polls - before} times, not twice`);
 });
 
 Then("the item's run records the merge commit {string}", long, async function (sha: string) {

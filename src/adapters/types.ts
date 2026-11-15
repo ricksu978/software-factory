@@ -29,6 +29,12 @@ export interface BacklogAdapter {
   setStatus(externalId: string, status: string): Promise<void>;
   linkPr(externalId: string, prUrl: string): Promise<void>;
   close(externalId: string): Promise<void>;
+  /**
+   * PBI 255: files a new item on the board, in `repo`, with these labels and the board's own opt-in label, and answers
+   * its external id, so a caller never names the opt-in label itself. A second call
+   * with the same `dedupeKey` files nothing and answers the first item's id, as `comment` dedupes.
+   */
+  fileItem(p: { title: string; body: string; labels: string[]; repo: string | null }, dedupeKey: string): Promise<string>;
   parseWebhook(headers: Record<string, string>, body: unknown): FactoryWebhookEvent;
 }
 
@@ -223,4 +229,16 @@ export interface RepoHost {
   mergeView(repo: string, prNumber: number): Promise<MergeView>;
   /** Squash-merges the PR at `headSha`. GitHub refusing, a moved head for one, comes back as `merged: false`. */
   mergePr(repo: string, prNumber: number, p: { method: "squash"; headSha: string | null }): Promise<MergeResult>;
+  /** PBI 255: each check run that reported on `sha`, with its outcome and its page. A cancelled run is reported as `cancelled`, since it proves nothing either way. Empty when none has. */
+  checkRuns(repo: string, sha: string): Promise<CheckRun[]>;
+  /** PBI 255: the log of the check run named `check` on `sha`, or null when the host keeps none. */
+  checkLog(repo: string, sha: string, check: string): Promise<string | null>;
+  /** PBI 255: the commit's first parent, which for a merge onto `main` is the main commit it was merged onto. Null for a root commit. */
+  firstParent(repo: string, sha: string): Promise<string | null>;
 }
+
+/**
+ * One check run on a commit (PBI 255). `pending`: it hasn't finished. `cancelled`: it ended cancelled, as when a later
+ * push cancelled it, so it proves nothing either way.
+ */
+export type CheckRun = { name: string; status: "pending" | "success" | "failure" | "cancelled"; url: string };
