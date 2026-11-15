@@ -4,16 +4,17 @@ import type pg from "pg";
 import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
 import { doneChildren, filedChildren, keepSplit, keptSplit } from "../store/splits.ts";
-import { loadPolicy, PolicyError, readinessSha, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
+import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
-import { logAttemptedMerge, mergeBlocker } from "./merge.ts";
+import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
 import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -36,6 +37,12 @@ export type PollDeps = {
    * poller uses the code's own, readinessLogic().
    */
   logic?: ReadinessLogic;
+  /**
+   * Where the default policies come from, for a repo without its own (PBI 261): the worker reads them from the commit
+   * of `main` it last fetched, for both the fingerprint and the gate's criteria. Unset, they come from the policy
+   * directory beside the code.
+   */
+  defaults?: DefaultPolicies;
 };
 
 type Row = {
@@ -46,6 +53,8 @@ type Row = {
 
 type Readiness = {
   sha: string; head: string; dor: Policy | null; policyErrors: string[]; dodExists: boolean; configValid: boolean; repoKnown: boolean;
+  /** Each permission the App lacks on the repo (PBI 264). */
+  missingPermissions: string[];
 };
 
 const system = { actor: "system", actorId: "poller" } as const;
@@ -116,12 +125,14 @@ async function closeOpenPr(host: RepoHost, repo: string | null, row: Row, why: s
 }
 
 /** Reads every readiness input for one repo at its default branch head, once per poll. */
-async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic): Promise<Readiness> {
+async function readiness(
+  pool: pg.Pool, host: RepoHost, repo: string | null, logic: ReadinessLogic, defaults?: DefaultPolicies,
+): Promise<Readiness> {
   const known = repo !== null && (await pool.query("select 1 from repo where url = $1", [`https://github.com/${repo}`])).rowCount === 1;
   if (!repo || !known) {
     // The logic still counts, so a change to it re-checks these items too (PBI 149).
     const none = { dor: null, scenarios: null, "pr-review": null, risk: null, dod: null, config: null };
-    return { sha: `unknown repo:${readinessSha(none, logic)}`, head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false };
+    return { sha: `unknown repo:${readinessSha(none, logic)}`, head: "", dor: null, policyErrors: [], dodExists: false, configValid: false, repoKnown: false, missingPermissions: [] };
   }
   const head = await host.defaultBranchSha(repo);
   const raw = new Map<string, string | null>();
@@ -132,14 +143,14 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
   const texts = { config: raw.get(".factory/config.yml") ?? null } as Parameters<typeof readinessSha>[0];
   for (const name of POLICIES) {
     const text = raw.get(`.factory/${name}.md`) ?? null;
-    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name))!.text);
+    texts[name] = text ?? (name === "dod" ? null : (await loadPolicy(async () => null, name, defaults))!.text);
   }
 
   const policyErrors: string[] = [];
   const loaded = new Map<PolicyName, Policy | null>();
   for (const name of POLICIES) {
     try {
-      loaded.set(name, await loadPolicy(read, name));
+      loaded.set(name, await loadPolicy(read, name, defaults));
     } catch (e) {
       if (!(e instanceof PolicyError)) throw e;
       policyErrors.push(e.message);
@@ -152,10 +163,39 @@ async function readiness(pool: pg.Pool, host: RepoHost, repo: string | null, log
   } catch {
     configValid = false;
   }
+  // A permission the owner grants later changes the sha, so a NotReady item it failed is gated again (PBI 264). A
+  // repo missing none keeps the sha over its files and the logic alone.
+  const missingPermissions = [...((await host.missingPermissions?.(repo)) ?? [])].sort();
+  const sha = readinessSha(texts, logic);
   return {
-    sha: readinessSha(texts, logic), head, dor: loaded.get("dor") ?? null, policyErrors,
-    dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true,
+    sha: missingPermissions.length > 0 ? `${sha}:missing:${missingPermissions.join(",")}` : sha, head, dor: loaded.get("dor") ?? null, policyErrors,
+    dodExists: (loaded.get("dod") ?? null) !== null, configValid, repoKnown: true, missingPermissions,
   };
+}
+
+/**
+ * Reads each default once per poll, so every repo in the poll sees the same text for it. A source that can be pinned
+ * is pinned to one commit before the first read, so all the defaults in one poll come from that commit, even if a
+ * fetch moves `main` mid-poll. Nothing is read, and nothing pinned, in a poll that needs no default.
+ */
+function oncePerPoll(defaults: DefaultPolicies): DefaultPolicies {
+  let source: Promise<(name: Parameters<DefaultPolicies>[0]) => Promise<string>> | undefined;
+  const read = new Map<string, Promise<string>>();
+  return (name) => {
+    source ??= defaults.pin ? defaults.pin() : Promise.resolve(defaults);
+    if (!read.has(name)) read.set(name, source.then((r) => r(name)));
+    return read.get(name)!;
+  };
+}
+
+/**
+ * The readiness fingerprint the poller takes for `repo` (PBI 261): the sha a NotReady item's stored one is compared
+ * with. Given `defaults`, the defaults come from it, as the worker's come from `main`'s fetched commit.
+ */
+export async function readinessFingerprint(d: {
+  pool: pg.Pool; repoHost: RepoHost; repo: string; logic?: ReadinessLogic; defaults?: DefaultPolicies;
+}): Promise<string> {
+  return (await readiness(d.pool, d.repoHost, d.repo, d.logic ?? readinessLogic(), d.defaults && oncePerPoll(d.defaults))).sha;
 }
 
 /**
@@ -213,7 +253,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
   //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
-  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
+  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10). A NeedsInput
+  //    item that waits on "no trusted review text to address" goes back too, once the factory answers it (PBI 305).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
@@ -230,10 +271,20 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (row.state === "InReview" && (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at))) {
-      await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
-    } else if (row.state === "InReview" && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
-      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181).
+    } else if (row.state === "NeedsInput" && !row.held && ((await requeueForAddress(pool, row, pr)) || (await requeueForGreen(pool, row)))) {
+      // The factory answered the item's "no trusted review text to address" question, and the scheduler claims it
+      // again at address (PBI 305). Or it answered an older "Address failed" question naming only CI failures, and the
+      // scheduler claims it again at green (PBI 317).
+    } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
+      // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
+      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
+      // unless the question is the one PBI 305 answers above.
+      if (row.state === "InReview") {
+        await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+      }
+    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
+      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
+      // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
   });
@@ -264,14 +315,20 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     }
   });
 
+  w.step("re-queuing items stopped by a red base");
+  // 3b. Items stopped by a red base (PBI 260). Once CI passes on a newer commit of the base branch, the factory answers
+  //     the question itself and the scheduler claims the item again at its stage, merging the base as every claim does.
+  await requeueAfterBasePassed(pool, repoHost, sourceId);
+
   w.step("checking readiness");
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, or when a readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
   //    An item that left the backlog is skipped: step 3 withdrew it, or failed to read it and retries next poll.
   const logic = deps.logic ?? readinessLogic();
+  const defaults = deps.defaults && oncePerPoll(deps.defaults);
   const byRepo = new Map<string, Promise<Readiness>>();
   const readinessOf = (fi: FactoryItem) => {
     const key = fi.repo ?? "";
-    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic));
+    if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
@@ -290,6 +347,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const r = await readinessOf(fi);
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
+      missingPermissions: r.missingPermissions,
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
@@ -301,7 +359,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // A queued item goes in blocked by its open dependencies, so no claim takes it before step 3 reads them next poll.
     const blockedBy = out.ready ? await depsOf(fi) : [];
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(fi), blockedBy]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)
@@ -335,8 +393,154 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   return { seen: listed.items.length, cursor: listed.cursor };
 }
 
+/** The kind of the event that logs a re-queue after CI passed on the base (PBI 260). */
+export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
 /**
- * The factory's merge (PBI 181). An InReview item that isn't held, whose PR GitHub reads `clean`, that an allowlisted
+ * The kind of the event that logs a re-queue for address of an item that waited on "no trusted review text to
+ * address", once its PR conflicts with its base or a newer trusted review asks for changes (PBI 305). Its payload holds
+ * `questionId`, `prNumber`, `reason` ("conflict" or "review"), `base` for a conflict and `at`, the review's time, for a
+ * review.
+ */
+export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
+/**
+ * The kind of the event that logs a re-queue for Green of an item that waited on an older "Address failed" question
+ * naming only CI failures, asked before #292 sent a CI failure back to Green (PBI 317). Its payload holds `questionId`
+ * and `prNumber`.
+ */
+export const REQUEUED_FOR_GREEN = "requeued_for_green";
+/** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
+const BASE_COMMITS_READ = 20;
+/** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
+const DEFAULT_BASE = "main";
+
+/**
+ * PBI 260: answers each open question that blames a red base, on an item that isn't held, once CI has passed on a
+ * commit of that base after the one the cell failed on and no newer commit's CI has failed. The answer names that commit and leaves `answered_by` null,
+ * since no person gave it, and the re-queue is a system event. The item stays in NeedsInput at its stage, where the
+ * scheduler claims an answered item. A held item is skipped, so the first poll after its release answers it. The
+ * answer re-reads the item and question under a lock, so a person's answer, a Hold or a second poll that came first
+ * wins and nothing is logged twice.
+ */
+async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: string): Promise<void> {
+  const waiting = (await pool.query<{ id: string; external_id: string; question_id: string; repo: string | null; sha: string; base: string | null }>(
+    `select i.id, i.external_id, q.id as question_id, coalesce(i.repo, replace(rp.url, 'https://github.com/', '')) as repo,
+            q.base_failure->>'sha' as sha, q.base_failure->>'base' as base
+     from item i
+     join question q on q.item_id = i.id and q.kind = 'needs_input' and q.answer is null and q.closed_at is null and q.base_failure is not null
+     left join lateral (select repo_id from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
+     left join repo rp on rp.id = r.repo_id
+     where i.source_id = $1 and i.state = 'NeedsInput' and not i.held`,
+    [sourceId],
+  )).rows;
+  // One read of CI per commit per poll, however many items wait on the same base.
+  const ci = new Map<string, Promise<string>>();
+  const passed = (repo: string, sha: string) => {
+    const key = `${repo}@${sha}`;
+    if (!ci.has(key)) ci.set(key, host.checksOnSha(repo, sha));
+    return ci.get(key)!;
+  };
+  await each(waiting, (w) => `re-queuing item ${w.external_id} after its base passed`, async (w) => {
+    if (!w.repo || !w.sha) return;
+    const base = w.base ?? DEFAULT_BASE;
+    const after = (await host.commitsAfter(w.repo, base, w.sha)).slice(-BASE_COMMITS_READ).reverse();
+    let green: string | null = null;
+    // The newest commit with a verdict decides: a failure there means the base is red again, so the question stays open.
+    for (const sha of after) {
+      const status = await passed(w.repo, sha);
+      if (status === "failure") break;
+      if (status === "success") {
+        green = sha;
+        break;
+      }
+    }
+    if (!green) return;
+    await withTx(pool, async (c) => {
+      const cur = await c.query(
+        `select 1 from item i join question q on q.item_id = i.id
+         where i.id = $1 and q.id = $2 and i.state = 'NeedsInput' and not i.held and q.answer is null and q.closed_at is null
+         for update of i, q`,
+        [w.id, w.question_id],
+      );
+      if (cur.rowCount === 0) return;
+      const answer = `CI passed on ${green}, a newer commit of the base ${base} than ${w.sha}, where the cell failed. The factory picks the item up again at its stage and merges the base first.`;
+      await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [w.question_id, answer]);
+      await appendEvent(c, { ...system, itemId: w.id, kind: REQUEUED_AFTER_BASE_PASSED, payload: { sha: green, base, failedSha: w.sha, questionId: w.question_id } });
+    });
+  });
+}
+
+/**
+ * PBI 305: answers the question "no trusted review text to address" that a NeedsInput item which isn't held waits on,
+ * once its PR conflicts with its base or a trusted review or open-thread comment newer than the question asks for
+ * changes. A PR whose mergeability GitHub hasn't worked out yet doesn't count as conflicting. The answer names what
+ * changed and leaves `answered_by` null, as PBI 260's does, and the re-queue is a system event. The run's next stage
+ * is address, where the scheduler claims the answered item. The item and question are re-read under a lock after the
+ * PR was read, so a person's answer, a Hold or another poll that came first wins and nothing is logged twice. Returns
+ * whether it answered.
+ */
+async function requeueForAddress(
+  pool: pg.Pool, row: Row, pr: { mergeable: boolean | null; lastChangesRequestedAt: string | null },
+): Promise<boolean> {
+  const conflict = pr.mergeable === false;
+  if (!conflict && !pr.lastChangesRequestedAt) return false;
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; asked_at: Date }>(
+      `select q.id, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.body = $2 and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id, NO_REVIEW_TEXT],
+    )).rows[0];
+    if (!q) return false;
+    const review = newer(pr.lastChangesRequestedAt, q.asked_at) ? new Date(pr.lastChangesRequestedAt!).toISOString() : null;
+    if (!conflict && !review) return false;
+    const prNumber = row.pr_number!;
+    const base = DEFAULT_BASE;
+    const what = [
+      ...(conflict ? [`PR #${prNumber} conflicts with its base ${base}.`] : []),
+      ...(review ? [`A trusted review asked for changes on PR #${prNumber} at ${review}, after this question.`] : []),
+    ];
+    const answer = `${what.join(" ")} The factory picks the item up again at address.`;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, answer]);
+    await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
+    const payload = conflict ? { questionId: q.id, prNumber, reason: "conflict", base, ...(review ? { at: review } : {}) } : { questionId: q.id, prNumber, reason: "review", at: review };
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_ADDRESS, payload });
+    return true;
+  });
+}
+
+/**
+ * PBI 317: answers the older "Address failed" question that a NeedsInput item which isn't held waits on, asked before
+ * #292 sent a CI failure back to Green (CI_TO_GREEN_SINCE), when every finding it names is a CI failure. The same
+ * question asked since then is address giving up on fixes CI failed on, and waits for a person, whose answer reruns
+ * address so its thread replies go out. The answer is CI_BACK_TO_GREEN and
+ * leaves `answered_by` null, as PBI 260's and 305's do, and the re-queue is a system event. The run's next stage is
+ * green, where the scheduler claims the answered item, and the cell reads the failed checks of the PR's head as Green's
+ * findings. The item and question are re-read under a lock after the PR was read, so a person's answer, a Hold or
+ * another poll that came first wins and nothing is logged twice. Returns whether it answered.
+ */
+async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; body: string; asked_at: Date }>(
+      `select q.id, q.body, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id],
+    )).rows[0];
+    if (!q || !olderCiFailedQuestion(q.body, q.asked_at)) return false;
+    const prNumber = row.pr_number!;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, CI_BACK_TO_GREEN]);
+    await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_GREEN, payload: { questionId: q.id, prNumber } });
+    return true;
+  });
+}
+
+/**
+ * The factory's merge (PBI 181). An InReview or NeedsInput item (PBI 262) that isn't held, whose PR GitHub reads `clean`, that an allowlisted
  * user approved and whose Definition of Done lines left for the person who merges are all ticked, is squash-merged at
  * the head the view was read at. First the attempt, with the PR, the head and the approvers, is logged as
  * `factory_merge_attempt` in its own committed write, so a merge GitHub made while the call failed is still logged as
@@ -344,7 +548,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
  * so a Hold or a claim that lands meanwhile waits, and the re-read under the lock sees the one that came first. A merge
  * moves the item through `merged`, as a person's would, and logs `factory_merged`. A refusal logs
  * `factory_merge_refused` with GitHub's message, and the next poll tries again. An item held or moved between the
- * two writes isn't merged, and `factory_merge_refused` closes its attempt.
+ * two writes isn't merged, and `factory_merge_refused` closes its attempt. A NeedsInput item's open question closes
+ * unanswered with a note naming the merge, and `factory_merged` says the item waited in NeedsInput and names the
+ * question (PBI 262).
  */
 async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumber: number, row: Row, trusted: string[]): Promise<void> {
   // Only an allowlisted user's approval counts, as with requested changes (Run contract 10): a stranger's never merges.
@@ -354,11 +560,15 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
   if (mergeBlocker(view) !== null) return;
   const mayMerge = async (c: pg.PoolClient) => {
     const cur = (await c.query<{ state: ItemState; held: boolean }>("select state, held from item where id = $1 for update", [row.id])).rows[0];
-    return !!cur && cur.state === "InReview" && !cur.held;
+    return !!cur && cur.state === row.state && !cur.held;
   };
   const attempted = await withTx(pool, async (c) => {
     if (!(await mayMerge(c))) return false;
-    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy } });
+    // A NeedsInput item's attempt names the question it waits on, so a merge recovered from it is logged as this one
+    // would be (PBI 262).
+    const asked = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
+    const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: asked?.body ?? null, questionId: asked?.id ?? null } : {};
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_attempt", payload: { repo, prNumber, headSha: view.headSha, approvers: view.approvedBy, ...waiting } });
     return true;
   });
   if (!attempted) return;
@@ -374,10 +584,23 @@ async function mergeIfReady(pool: pg.Pool, host: RepoHost, repo: string, prNumbe
       await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merge_refused", payload: { repo, prNumber, reason: res.reason } });
       return;
     }
+    // The question a NeedsInput item waited on, which the move to Accepted closes unanswered (PBI 194).
+    const question = row.state === "NeedsInput" ? await openQuestion(c, row.id) : null;
     await transitionItem(c, row.id, "merged", system);
     await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, res.sha]);
-    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy } });
+    if (question) {
+      await c.query("update question set closed_note = $2 where id = $1", [question.id, mergedNote(prNumber, res.sha)]);
+    }
+    const waiting = row.state === "NeedsInput" ? { waitingIn: row.state, question: question?.body ?? null } : {};
+    await appendEvent(c, { ...system, itemId: row.id, kind: "factory_merged", payload: { repo, prNumber, mergeSha: res.sha, approvers: view.approvedBy, ...waiting } });
   });
+}
+
+/** The newest question the item waits on, still unanswered and open. */
+async function openQuestion(c: pg.ClientBase, itemId: string): Promise<{ id: string; body: string } | null> {
+  return (await c.query<{ id: string; body: string }>(
+    "select id, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [itemId],
+  )).rows[0] ?? null;
 }
 
 /**

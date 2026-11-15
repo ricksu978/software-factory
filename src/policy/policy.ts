@@ -13,6 +13,18 @@ export type Criterion = {
 export type Verdict = { index: number; criterion: string; status: "passed" | "failed" | "person"; reason: string };
 export type Policy = { name: PolicyName; source: "repo" | "default"; sha: string; text: string; criteria: Criterion[] };
 
+/**
+ * Reads the text of the factory's default for a policy a repo has no `.factory/<name>.md` for (PBI 261). The worker
+ * reads each default from the commit of `main` it last fetched, not from the checkout's disk. dod.md has no default.
+ */
+export type DefaultPolicies = ((name: Exclude<PolicyName, "dod">) => Promise<string>) & {
+  /**
+   * A reader fixed to the commit the defaults come from right now, so every read through it sees one commit even if
+   * the source moves meanwhile. The poller pins once per poll. A source that can't move has no `pin`.
+   */
+  pin?: () => Promise<(name: Exclude<PolicyName, "dod">) => Promise<string>>;
+};
+
 export class PolicyError extends Error {
   override name = "PolicyError";
 }
@@ -43,14 +55,18 @@ export function parseCriteria(markdown: string): Criterion[] {
 /**
  * Loads `.factory/<name>.md` through `read`, or the factory's default when the repo has none. `read` returns null
  * only on a 404, and any error it throws propagates, so a failed read never falls back to the default. A missing
- * dod.md has no default and returns null. A `run:` or `ci:` line outside dod.md throws PolicyError.
+ * dod.md has no default and returns null. A `run:` or `ci:` line outside dod.md throws PolicyError. The default comes
+ * from `defaults` when given, as the worker's comes from `main`'s fetched commit (PBI 261), and otherwise from the
+ * policy directory beside the code, as a cell's comes from its image.
  */
-export async function loadPolicy(read: (path: string) => Promise<string | null>, name: PolicyName): Promise<Policy | null> {
+export async function loadPolicy(
+  read: (path: string) => Promise<string | null>, name: PolicyName, defaults?: DefaultPolicies,
+): Promise<Policy | null> {
   let text = await read(`.factory/${name}.md`);
   let source: Policy["source"] = "repo";
   if (text === null) {
     if (name === "dod") return null;
-    text = await readFile(join(policyDir(), `${name}.md`), "utf8");
+    text = defaults ? await defaults(name) : await readFile(join(policyDir(), `${name}.md`), "utf8");
     source = "default";
   }
   if (name !== "dod" && /`run:[^`]*`/.test(text)) throw new PolicyError(`${name}.md: run: lines are allowed only in dod.md`);
@@ -102,7 +118,8 @@ export type ReadinessLogic = { judgePrompt: string; version: number; splitPrompt
 
 /** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
 // 2 (PBI 237): an open dependency no longer fails the gate. The scheduler holds a blocked item back instead.
-export const READINESS_VERSION = 2;
+// 3 (PBI 264): each permission the App is missing on the item's repo fails the gate.
+export const READINESS_VERSION = 3;
 
 /**
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its

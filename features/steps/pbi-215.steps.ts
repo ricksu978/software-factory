@@ -138,7 +138,8 @@ function sha(world: object, label: string): string {
   return s;
 }
 
-function prepare(world: object, nextStage: string, base: string): void {
+// PBI 260's steps reuse it to put a cell behind an item the poller re-queued.
+export function prepare(world: object, nextStage: string, base: string): void {
   assert.equal(base, "main", "PBI 18's harness builds every run on main");
   const c = setUp(world, nextStage, true);
   const bin = join(c.root, "bin");
@@ -360,7 +361,8 @@ Then("that base run came after the first attempt's failure and before the second
 
 type Db = { server?: Server; origin?: string; secret: string; items: Map<number, string> };
 
-function db(world: object): Db {
+// PBI 260's steps register their items here, so "the owner answers item ...'s question" finds them.
+export function db(world: object): Db {
   const w = world as { pbi215db?: Db };
   w.pbi215db ??= { secret: "pbi-215-secret", items: new Map() };
   return w.pbi215db;

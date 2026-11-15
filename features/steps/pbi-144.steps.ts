@@ -9,7 +9,7 @@ import { acceptanceCriteria } from "../../src/adapters/github/backlog.ts";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../src/gate/file-split.ts";
-import { gate } from "../../src/gate/readiness.ts";
+import { gate, type GateContext } from "../../src/gate/readiness.ts";
 import { itemTextHash, SPLIT_HEADING, type SplitChild, type SplitOutcome } from "../../src/gate/split.ts";
 import { loadPolicy, type Policy } from "../../src/policy/policy.ts";
 
@@ -66,6 +66,20 @@ export type Ctx = {
   alsoOversized?: Set<string>;
   /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
   replies?: { title: string; reply: string }[];
+  /** PBI 264: a scripted judge that replaces this harness's, which passes every line. */
+  judgeOverride?: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** PBI 264: a scripted coding model that replaces this harness's, which always answers `reply`. */
+  agentOverride?: (a: AgentArgs) => Promise<AgentResult>;
+  /** PBI 264: more of the gate's context, such as the App's missing permissions. */
+  gateExtras?: Partial<GateContext>;
+  /** PBI 264: every body the factory wrote over an issue, in order. */
+  edits: { externalId: string; body: string }[];
+  /** PBI 264: issues the factory's App opened other than through filing a split. */
+  appOpened: Set<string>;
+  /** PBI 264: issues whose body a person edited. */
+  personEdited: Set<string>;
+  /** PBI 264: the in-memory pass takes up a Queued child even while an earlier child it needs is open. */
+  ignoreBlockers?: boolean;
 };
 
 export function ctx(world: object): Ctx {
@@ -73,7 +87,7 @@ export function ctx(world: object): Ctx {
   w.pbi144 ??= {
     fake: fakeBacklog(), dor: DOR, repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
     requests: [], states: new Map(), seen: new Map(), runs: new Set(), filed: [], subIssues: new Map(), board: new Map(),
-    blocks: new Map(), refusals: [], errors: [], polls: 0,
+    blocks: new Map(), refusals: [], errors: [], polls: 0, edits: [], appOpened: new Set(), personEdited: new Set(),
   };
   return w.pbi144;
 }
@@ -154,6 +168,19 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     async removeLabel(id, label) {
       await replaceItem(c, id, (fi) => ({ labels: fi.labels.filter((l) => l !== label) }));
     },
+    async authorship(id) {
+      return {
+        openedByApp: c.filed.some((i) => i.externalId === id) || c.appOpened.has(id),
+        editedByOthers: c.personEdited.has(id),
+        editedByApp: c.edits.some((e) => e.externalId === id),
+      };
+    },
+    async editBody(id, body) {
+      c.edits.push({ externalId: id, body });
+      await replaceItem(c, id, (fi) => ({
+        body, acceptanceCriteria: acceptanceCriteria(body, HEADING), updatedAt: new Date(Date.parse(fi.updatedAt) + 1000).toISOString(),
+      }));
+    },
   };
 }
 
@@ -205,13 +232,15 @@ export async function poll(c: Ctx): Promise<void> {
       for (const b of c.blocks.get(fi.externalId) ?? []) if (!(await c.fake.adapter.getItem(b))?.closed) openDeps.push(b);
       const out = await gate(fi, {
         readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true,
-        judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, file },
+        judge: c.judgeOverride ?? judge(c), adapter,
+        split: { sop: { models: { coding: "coding-model" } }, agent: c.agentOverride ?? agent(c), seen: c.seen, file },
         ...(c.kept ? { splits: keptStore(c.kept) } : {}),
+        ...c.gateExtras,
       });
       st.state = out.ready ? "Queued" : "NotReady";
       st.hash = itemTextHash(fi);
       // The scheduler takes up a Queued item only once nothing blocks it (PBI 237: the gate no longer judges blockers).
-      if (out.ready && openDeps.length === 0) c.runs.add(fi.externalId);
+      if (out.ready && (openDeps.length === 0 || c.ignoreBlockers)) c.runs.add(fi.externalId);
     } catch (e) {
       c.errors.push(e);
     }

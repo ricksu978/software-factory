@@ -2,7 +2,8 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
-import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { failingTests } from "../../core/failing-tests.ts";
+import { factoryThread, LOGGED_CHECKS, logTail, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -20,6 +21,51 @@ export type AppLike = {
 // the token every permission the App holds.
 export const CELL_PERMISSIONS = { contents: "write", pull_requests: "write", issues: "write" } as const;
 
+const LEVEL = { read: 1, write: 2, admin: 3 } as Record<string, number>;
+
+/**
+ * Each of CELL_PERMISSIONS the installation holds below the level asked, as "name: level" (PBI 264). The readiness
+ * gate needs the same set: it comments on and edits issues, and the cell it hands an item to pushes and opens a PR.
+ */
+export function permissionsMissing(granted: Record<string, string> | undefined): string[] {
+  return Object.entries(CELL_PERMISSIONS)
+    .filter(([name, level]) => (LEVEL[granted?.[name] ?? ""] ?? 0) < LEVEL[level])
+    .map(([name, level]) => `${name}: ${level}`);
+}
+
+const COMPARE_PAGE = 100;
+type CompareCommit = { sha: string; parents?: { sha: string }[] };
+
+/**
+ * The first-parent line from the branch head back to `sha`, oldest first. The head is the newest listed commit no
+ * other listed commit has as a parent. A commit that came in through a merge commit's second parent isn't on it.
+ */
+export function firstParentLine(commits: CompareCommit[], sha: string): string[] {
+  const bySha = new Map(commits.map((c) => [c.sha, c]));
+  const parents = new Set(commits.flatMap((c) => (c.parents ?? []).map((p) => p.sha)));
+  const head = commits.findLast((c) => !parents.has(c.sha));
+  const line: string[] = [];
+  for (let c = head; c && c.sha !== sha; c = bySha.get(c.parents?.[0]?.sha ?? "")) line.push(c.sha);
+  return line.reverse();
+}
+
+/**
+ * The new-side line ranges of one file's unified-diff patch, one per hunk, context lines included, since GitHub places
+ * a line comment on any line a hunk shows (PBI 266). A hunk that only deletes shows no new-side line.
+ */
+export function hunkRanges(path: string, patch: string): DiffRange[] {
+  const out: DiffRange[] = [];
+  for (const m of patch.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+    const from = Number(m[1]);
+    const count = m[2] === undefined ? 1 : Number(m[2]);
+    if (count > 0) out.push({ path, from, to: from + count - 1 });
+  }
+  return out;
+}
+
+/** GitHub's compare lists at most this many files, so a diff that reaches it may be cut short. */
+const COMPARE_FILES = 300;
+
 const split = (repo: string) => {
   const [owner, name] = repo.split("/");
   return { owner, repo: name };
@@ -27,7 +73,7 @@ const split = (repo: string) => {
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
 type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState"
-  | "openReviewComments" | "postReview" | "resolveThread">;
+  | "openReviewComments" | "postReview" | "resolveThread" | "diffLines">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -71,6 +117,19 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const nodes = res.repository.pullRequest.reviewThreads.nodes as { id: string; path: string; line: number | null; comments: { nodes: { body: string; pullRequestReview: { databaseId: number | null } | null }[] } }[];
       return { threads: nodes.filter((t) => t.comments.nodes[0]?.pullRequestReview?.databaseId === review.id)
         .map((t) => ({ threadId: t.id, path: t.path, line: t.line ?? 0, body: t.comments.nodes[0].body })) };
+    },
+
+    async diffLines(repo, prNumber, commitSha) {
+      const gh = await client();
+      const r = split(repo);
+      const base = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...r, pull_number: prNumber })).data.base.ref as string;
+      // Three dots diff from the merge base, as the PR's own diff does. Files come only on the first page, so one
+      // commit per page keeps the answer small.
+      const files = ((await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...r, basehead: `${base}...${commitSha}`, per_page: 1 }))
+        .data.files ?? []) as { filename: string; patch?: string; changes?: number }[];
+      // A list cut at the cap, or a changed file GitHub gave no patch for, leaves lines the factory can't tell about.
+      if (files.length >= COMPARE_FILES || files.some((f) => f.patch === undefined && (f.changes ?? 0) > 0)) return null;
+      return files.flatMap((f) => hunkRanges(f.filename, f.patch ?? ""));
     },
 
     async resolveThread(_repo, threadId) {
@@ -188,10 +247,54 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
   }
 }
 
+/** A check run as the REST API gives it. The exported CheckRun is the RepoHost view of one. */
+type GhCheckRun = { id: number; name: string; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null };
+
+/** The text of a job's logs response: Octokit gives a string, an ArrayBuffer or a byte view, by runtime. Else null. */
+function logText(data: unknown): string | null {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+  return null;
+}
+
+/** The conclusions of a completed check run that pass. */
+const PASSING = ["success", "neutral", "skipped"];
+
+const failedRun = (c: GhCheckRun) => c.status === "completed" && !PASSING.includes(c.conclusion ?? "");
+
+/**
+ * A failed check run's log, by its id, which for GitHub Actions is its job's id. A check from another CI, or a log
+ * GitHub no longer keeps, has none to give, and so does a log GitHub fails to give: the check is still named.
+ */
+async function jobLog(gh: GitHubClient, r: { owner: string; repo: string }, id: number): Promise<string | null> {
+  try {
+    const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: id })).data;
+    const text = logText(data);
+    return text === null ? null : logTail(text);
+  } catch (e) {
+    // A 403 means the App lacks Actions (read), so say so rather than pass it off as a check from another CI.
+    if ((e as { status?: number }).status === 403) {
+      console.error(`repo-host: GitHub refused the log of job ${id} on ${r.owner}/${r.repo}; does the App hold Actions (read)?`);
+    }
+    return null;
+  }
+}
+
+async function failedOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<FailedCheck[]> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as GhCheckRun[];
+  // Only the first LOGGED_CHECKS failed runs' logs reach the cell, so the rest aren't downloaded at all.
+  return Promise.all(runs.filter(failedRun).map(async (c, i) => ({
+    name: c.name,
+    url: c.html_url || c.details_url || "",
+    log: i < LOGGED_CHECKS ? await jobLog(gh, r, c.id) : null,
+  })));
+}
+
 async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
-  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { status: string; conclusion: string | null }[];
-  if (runs.some((c) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? ""))) return "failure";
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as GhCheckRun[];
+  if (runs.some(failedRun)) return "failure";
   if (runs.length === 0) {
     // "none" only when no commit status has reported either, so a repo whose CI reports statuses still reads pending.
     const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
@@ -200,16 +303,46 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
   return runs.some((c) => c.status !== "completed") ? "pending" : "success";
 }
 
+/** PBI 234: each check run not yet completed, by name, and each commit status still pending, by context. */
+async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<string[]> {
+  // ponytail: one page of 100 check runs and the combined status's statuses, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string }[];
+  const statuses = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.statuses ?? []) as { context: string; state: string }[];
+  return [...runs.filter((c) => c.status !== "completed").map((c) => c.name), ...statuses.filter((s) => s.state === "pending").map((s) => s.context)];
+}
+
 /** Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, and any other end fails. */
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { name: string; status: string; conclusion: string | null; html_url: string | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
-  return runs.map((c) => ({
-    name: c.name, url: c.html_url ?? "",
-    conclusion: c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure",
+  return Promise.all(runs.map(async (c) => {
+    const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
+    const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion === "failure" && c.app?.slug === "github-actions") {
+      const tests = await failingTestsOfJob(gh, r, c.id);
+      if (tests.length) check.failingTests = tests;
+    }
+    return check;
   }));
+}
+
+/**
+ * PBI 292: the tests a failed GitHub Actions job's log names as failing. An Actions check run's id is its job's id. The
+ * log needs the App's `actions: read`; a log the factory can't read, or one naming no test, gives none, so the check
+ * still goes back to Green with its name and URL.
+ */
+async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: string }, jobId: number | undefined): Promise<string[]> {
+  if (typeof jobId !== "number") return [];
+  try {
+    const { data } = await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: jobId });
+    return failingTests(logText(data) ?? "");
+  } catch (e) {
+    const why = (e as { status?: unknown })?.status === 403 ? " (the App needs `actions: read`; grant it and accept the new permission on the installation)" : "";
+    console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);
+    return [];
+  }
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
@@ -246,8 +379,21 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return { token: data.token, expiresAt: data.expires_at };
     },
 
+    async missingPermissions(repo) {
+      const { data } = await app.octokit.request("GET /repos/{owner}/{repo}/installation", split(repo));
+      return permissionsMissing(data.permissions);
+    },
+
     async checksOnSha(repo, sha) {
       return checksOn(await client(), split(repo), sha);
+    },
+
+    async failedChecksOnSha(repo, sha) {
+      return failedOn(await client(), split(repo), sha);
+    },
+
+    async pendingChecksOnSha(repo, sha) {
+      return pendingChecksOn(await client(), split(repo), sha);
     },
 
     async ciChecksOnSha(repo, sha) {
@@ -268,6 +414,29 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
         return status === "ahead" || status === "identical";
       } catch (e) {
         if (notFound(e)) return false; // a sha GitHub doesn't know
+        throw e;
+      }
+    },
+
+    async commitsAfter(repo, branch, sha) {
+      // Compare lists every commit the branch holds that `sha` doesn't, so a PR merged with a merge commit brings in
+      // the PR's own commits, whose checks come from PR CI. Only the branch's first-parent line is the base's history.
+      const gh = await client();
+      const compare = async (page?: number) =>
+        (await gh.request("GET /repos/{owner}/{repo}/compare/{basehead}", { ...split(repo), basehead: `${sha}...${branch}`, ...(page ? { per_page: COMPARE_PAGE, page } : {}) })).data;
+      try {
+        const first = await compare();
+        if (first.status !== "ahead") return [];
+        let commits: CompareCommit[] = first.commits ?? [];
+        if ((first.total_commits ?? 0) > commits.length) {
+          // ponytail: unpaged, compare stops at its 250 oldest commits. The last two pages hold the newest, which is
+          // enough for the 20 the poller reads; a first-parent line longer than the window is cut at its edge.
+          const last = Math.ceil(first.total_commits / COMPARE_PAGE);
+          commits = (await Promise.all([last - 1, last].filter((p) => p >= 1).map(compare))).flatMap((d) => d.commits ?? []);
+        }
+        return firstParentLine(commits, sha);
+      } catch (e) {
+        if (notFound(e)) return [];
         throw e;
       }
     },
@@ -325,6 +494,40 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       }
     },
 
+    async checkRuns(repo, sha) {
+      // ponytail: one page of 100 check runs, as checksOn reads; commit statuses aren't check runs, so they aren't listed.
+      const runs = (await (await client()).request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...split(repo), ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string; conclusion: string | null; html_url: string }[];
+      // A cancelled run proves nothing either way: GitHub cancels a push's run when the next push to the branch starts
+      // under `concurrency: cancel-in-progress`. It's reported as its own status, so compareWithParent can read it as a
+      // check that didn't run on a first parent, and a merge whose only unpassed runs were cancelled isn't charged.
+      return runs.map((c): CheckRun => ({
+        name: c.name, url: c.html_url,
+        status: c.status !== "completed" ? "pending" : c.conclusion === "cancelled" ? "cancelled" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure",
+      }));
+    },
+
+    async checkLog(repo, sha, check) {
+      // A GitHub Actions check run's id is its job's id, so the job's log is the check's. A check run another App
+      // reports has no such log, and GitHub expires old logs, so either one reads as no log. A 403 isn't one of those: it
+      // means the App lacks Actions: read, so it's thrown for the caller to log rather than read as a log that's gone.
+      const gh = await client();
+      const r = split(repo);
+      const run = ((await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, check_name: check, per_page: 1 })).data.check_runs as { id: number; name: string }[])
+        .find((c) => c.name === check);
+      if (!run) return null;
+      try {
+        const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: run.id })).data;
+        return logText(data);
+      } catch (e) {
+        if ([404, 410].includes((e as { status?: number }).status ?? 0)) return null;
+        throw e;
+      }
+    },
+
+    async firstParent(repo, sha) {
+      const commit = (await (await client()).request("GET /repos/{owner}/{repo}/commits/{ref}", { ...split(repo), ref: sha })).data as { parents: { sha: string }[] };
+      return commit.parents[0]?.sha ?? null;
+    },
   };
 }
 

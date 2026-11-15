@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
-import { cellRepoHost, githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
+import { botKey, FAILED_LOG_CHARS, FAILED_LOG_LINE_CHARS, LOGGED_CHECKS, logTail, loginKey, standingSummaries, type Review } from "../types.ts";
+import { cellRepoHost, githubRepoHost, hunkRanges, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
 
@@ -20,6 +20,7 @@ function stubGitHub(routes: Record<string, (p: Record<string, any>) => unknown>,
   return { calls, host: githubRepoHost(app, 7) };
 }
 
+const commit = (sha: string, ...parents: string[]) => ({ sha, parents: parents.map((p) => ({ sha: p })) });
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
 describe("githubRepoHost", () => {
@@ -31,6 +32,21 @@ describe("githubRepoHost", () => {
     assert.deepEqual(p.repositories, ["software-factory"]);
     assert.deepEqual(p.permissions, { contents: "write", pull_requests: "write", issues: "write" });
     assert.ok(!("statuses" in p.permissions) && !("checks" in p.permissions));
+  });
+
+  test("missingPermissions names each permission the installation holds below what the factory needs (PBI 264)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "admin", pull_requests: "read", metadata: "read" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), ["pull_requests: write", "issues: write"]);
+    assert.deepEqual([calls[0].params.owner, calls[0].params.repo], ["o", "r"]);
+  });
+
+  test("missingPermissions is empty when the installation holds every permission the factory needs", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/installation": () => ({ permissions: { contents: "write", pull_requests: "write", issues: "write" } }),
+    });
+    assert.deepEqual(await host.missingPermissions!("o/r"), []);
   });
 
   const pr = { base: { ref: "main" }, user: { login: "author" }, head: { sha: "abc" } };
@@ -223,6 +239,28 @@ describe("githubRepoHost", () => {
       comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "Name it" }] } }]);
   });
 
+  test("diffLines reads the PR's diff at the commit from the merge base, one range per hunk on its new side", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,
+      "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files: [
+        { filename: "src/a.ts", changes: 4, patch: "@@ -1,3 +1,5 @@\n a\n+b\n+c\n d\n e\n@@ -40,2 +42,7 @@ f\n" },
+        { filename: "img.png", changes: 0 },
+      ] }),
+    });
+    assert.deepEqual(await host.diffLines("o/r", 3, "def"), [{ path: "src/a.ts", from: 1, to: 5 }, { path: "src/a.ts", from: 42, to: 48 }]);
+    assert.deepEqual(calls[1].params, { owner: "o", repo: "r", basehead: "main...def", per_page: 1 });
+  });
+
+  test("diffLines is null when GitHub can't give the whole diff", async () => {
+    const at = (files: unknown[]) => stubGitHub({ "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr, "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files }) }).host;
+    assert.equal(await at(Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}`, changes: 1, patch: "@@ -1 +1 @@\n+x" }))).diffLines("o/r", 3, "def"), null);
+    assert.equal(await at([{ filename: "big.ts", changes: 9000 }]).diffLines("o/r", 3, "def"), null);
+  });
+
+  test("hunkRanges reads a one-line hunk and skips one that only deletes", () => {
+    assert.deepEqual(hunkRanges("a.ts", "@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +9,0 @@\n-z\n-w"), [{ path: "a.ts", from: 3, to: 3 }]);
+  });
+
   test("postReview returns the threads its own line comments opened, by the review's id", async () => {
     const thread = (id: string, review: number, path: string, line: number, body: string) =>
       ({ id, path, line, comments: { nodes: [{ body, pullRequestReview: { databaseId: review } }] } });
@@ -305,6 +343,63 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("failedChecksOnSha names each failed run with its URL and the last 100 lines of its job's log, or null when the log can't be read", async () => {
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`);
+    const runs = [
+      { id: 1, name: "build", status: "completed", conclusion: "success", html_url: "https://ci/1" },
+      { id: 2, name: "unit", status: "completed", conclusion: "failure", html_url: "https://ci/2" },
+      { id: 3, name: "lint", status: "completed", conclusion: "timed_out", html_url: null, details_url: "https://ci/3" },
+      { id: 4, name: "deploy", status: "completed", conclusion: "cancelled", html_url: "https://ci/4" },
+      { id: 5, name: "e2e", status: "in_progress", conclusion: null, html_url: "https://ci/5" },
+      { id: 6, name: "docs", status: "completed", conclusion: "neutral", html_url: "https://ci/6" },
+      { id: 7, name: "types", status: "completed", conclusion: "failure", html_url: "https://ci/7" },
+    ];
+    const logs: Record<number, string | ArrayBuffer | Uint8Array> = {
+      2: lines(250).join("\n") + "\n",
+      3: new TextEncoder().encode(lines(12).join("\r\n")).buffer as ArrayBuffer,
+      7: Buffer.from(lines(3).join("\n")),
+    };
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => logs[p.job_id] ?? (() => { throw Object.assign(new Error("404"), { status: 404 }); })(),
+    });
+    assert.deepEqual(await host.failedChecksOnSha("o/r", "abc"), [
+      { name: "unit", url: "https://ci/2", log: lines(250).slice(150).join("\n") },
+      { name: "lint", url: "https://ci/3", log: lines(12).join("\n") },
+      { name: "deploy", url: "https://ci/4", log: null },
+      { name: "types", url: "https://ci/7", log: lines(3).join("\n") },
+    ]);
+  });
+
+  test("failedChecksOnSha reads the logs of the first LOGGED_CHECKS failed runs only, and gives the rest a null log", async () => {
+    const runs = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `leg ${i}`, status: "completed", conclusion: "failure", html_url: `https://ci/${i}` }));
+    const read: number[] = [];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => { read.push(p.job_id); return `log ${p.job_id}`; },
+    });
+    const failed = await host.failedChecksOnSha("o/r", "abc");
+    assert.equal(failed.length, 30);
+    assert.deepEqual(read.sort((a, b) => a - b), Array.from({ length: LOGGED_CHECKS }, (_, i) => i + 1));
+    assert.ok(failed.slice(0, LOGGED_CHECKS).every((c, i) => c.log === `log ${i + 1}`));
+    assert.ok(failed.slice(LOGGED_CHECKS).every((c) => c.log === null));
+  });
+
+  test("pendingChecksOnSha names each check run not yet completed and each pending commit status, and none that finished", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { name: "lint", status: "completed", conclusion: "success" },
+        { name: "ci", status: "in_progress", conclusion: null },
+        { name: "e2e", status: "queued", conclusion: null },
+      ] }),
+      "GET /repos/{owner}/{repo}/commits/{ref}/status": () => ({ total_count: 2, statuses: [
+        { context: "deploy/preview", state: "pending" },
+        { context: "license", state: "success" },
+      ] }),
+    });
+    assert.deepEqual(await host.pendingChecksOnSha("o/r", "abc"), ["ci", "e2e", "deploy/preview"]);
+  });
+
   test("ciChecksOnSha names each check run with its verdict and URL, and gives null when none reported (PBI 229)", async () => {
     const run = (name: string, status: string, conclusion: string | null) => ({ name, status, conclusion, html_url: `https://github.com/o/r/runs/${name}` });
     const { host, calls } = stubGitHub({
@@ -323,6 +418,27 @@ describe("githubRepoHost", () => {
     assert.equal(calls[0].params.ref, "abc");
     const none = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [] }) });
     assert.equal(await none.host.ciChecksOnSha("o/r", "abc"), null);
+  });
+
+  test("ciChecksOnSha names the tests a failed Actions job's log says failed, and none when the log can't be read (PBI 292)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") =>
+      ({ id, name, status: "completed", conclusion, html_url: `https://github.com/o/r/runs/${id}`, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => {
+        if (p.job_id === 3) throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+        return "2026-11-15T01:02:03.4567890Z not ok 1 - parses the config\n2026-11-15T01:02:03.4567890Z ok 2 - reads\n";
+      },
+    });
+    assert.deepEqual(await host.ciChecksOnSha("o/r", "abc"), [
+      { name: "lint", conclusion: "success", url: "https://github.com/o/r/runs/1" },
+      { name: "ci", conclusion: "failure", url: "https://github.com/o/r/runs/2", failingTests: ["parses the config"] },
+      { name: "e2e", conclusion: "failure", url: "https://github.com/o/r/runs/3" },
+      { name: "other", conclusion: "failure", url: "https://github.com/o/r/runs/4" },
+    ]);
+    assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
   });
 
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {
@@ -348,6 +464,90 @@ describe("githubRepoHost", () => {
       assert.equal(calls[0].params.basehead, "abc...factory/pbi-1-r1");
     }
     assert.equal(await stubGitHub({}).host.onBranch("o/r", "main", "abc"), false);
+  });
+
+  test("checkRuns reads each check run's outcome and page, and a skipped or neutral one passes, and a cancelled one reads as cancelled (PBI 255)", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { name: "test", status: "completed", conclusion: "failure", html_url: "u1" },
+        { name: "lint", status: "completed", conclusion: "skipped", html_url: "u2" },
+        { name: "bdd", status: "in_progress", conclusion: null, html_url: "u3" },
+        { name: "build", status: "completed", conclusion: "timed_out", html_url: "u4" },
+        { name: "e2e", status: "completed", conclusion: "cancelled", html_url: "u5" },
+      ] }),
+    });
+    assert.deepEqual(await host.checkRuns("o/r", "abc"), [
+      { name: "test", status: "failure", url: "u1" }, { name: "lint", status: "success", url: "u2" },
+      { name: "bdd", status: "pending", url: "u3" }, { name: "build", status: "failure", url: "u4" },
+      { name: "e2e", status: "cancelled", url: "u5" },
+    ]);
+  });
+
+  test("checkLog reads the Actions job log of the named check run, and is null for an unknown check or a log that's gone (PBI 255)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [{ id: 31, name: "test" }, { id: 32, name: "bdd" }] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => (p.job_id === 31 ? "not ok 1 - a" : (() => { throw Object.assign(new Error("gone"), { status: 410 }); })()),
+    });
+    assert.equal(await host.checkLog("o/r", "abc", "test"), "not ok 1 - a");
+    assert.equal(calls.find((c) => c.route.endsWith("/check-runs"))!.params.check_name, "test");
+    assert.equal(await host.checkLog("o/r", "abc", "bdd"), null);
+    assert.equal(await host.checkLog("o/r", "abc", "nope"), null);
+  });
+
+  test("checkLog throws a 403, an App without Actions: read, instead of reading it as no log (PBI 255)", async () => {
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [{ id: 31, name: "test" }] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": () => { throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 }); },
+    });
+    await assert.rejects(host.checkLog("o/r", "abc", "test"), (e: { status?: number }) => e.status === 403);
+  });
+
+  test("firstParent is the commit's first parent, and null for a root commit (PBI 255)", async () => {
+    const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}": (p) => ({ parents: p.ref === "m" ? [{ sha: "p1" }, { sha: "p2" }] : [] }) });
+    assert.equal(await host.firstParent("o/r", "m"), "p1");
+    assert.equal(await host.firstParent("o/r", "root"), null);
+  });
+
+  test("commitsAfter lists the branch's commits after the sha when it's ahead, and none when it's at, behind or off the sha", async () => {
+    const ahead = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 2, commits: [commit("c2", "c1"), commit("c3", "c2")] }) });
+    assert.deepEqual(await ahead.host.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.equal(ahead.calls[0].params.basehead, "c1...main");
+    for (const status of ["identical", "diverged", "behind"]) {
+      const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status, commits: [{ sha: "x" }] }) });
+      assert.deepEqual(await host.commitsAfter("o/r", "main", "c1"), []);
+    }
+    assert.deepEqual(await stubGitHub({}).host.commitsAfter("o/r", "main", "c1"), []);
+  });
+
+  test("commitsAfter follows the branch's first parents, leaving out a PR's commits that came in through a merge commit", async () => {
+    // main: c1 -> m (merge of p2), p1 -> p2 branched from c1 and passed its own PR CI.
+    const commits = [commit("p1", "c1"), commit("p2", "p1"), commit("m", "c1", "p2")];
+    const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 3, commits }) });
+    assert.deepEqual(await host.commitsAfter("o/r", "main", "c1"), ["m"]);
+    // c2 landed on main while p1 was open: the line is c2, the merge, then c3, and p1 stays out.
+    const later = [commit("c2", "c1"), commit("p1", "c1"), commit("m", "c2", "p1"), commit("c3", "m")];
+    const { host: host2 } = stubGitHub({ "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ status: "ahead", total_commits: 4, commits: later }) });
+    assert.deepEqual(await host2.commitsAfter("o/r", "main", "c1"), ["c2", "m", "c3"]);
+  });
+
+  test("commitsAfter reads the last pages when the branch is further ahead than one compare lists", async () => {
+    const all = Array.from({ length: 300 }, (_, i) => commit(`c${i + 1}`, `c${i}`));
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/compare/{basehead}": (p) =>
+        p.page ? { status: "ahead", total_commits: 300, commits: all.slice((p.page - 1) * p.per_page, p.page * p.per_page) } : { status: "ahead", total_commits: 300, commits: all.slice(0, 250) },
+    });
+    const got = await host.commitsAfter("o/r", "main", "c0");
+    assert.equal(got.length, 200);
+    assert.equal(got.at(-1), "c300");
+    assert.deepEqual(calls.map((c) => c.params.page).filter(Boolean).sort(), [2, 3]);
+  });
+
+  test("fakeRepoHost's commitsAfter lists the commits after the sha on its branch, and none for a sha off it", async () => {
+    const fake = fakeRepoHost();
+    fake.branches.set("o/r@main", ["c1", "c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c1"), ["c2", "c3"]);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "c3"), []);
+    assert.deepEqual(await fake.commitsAfter("o/r", "main", "zz"), []);
   });
 });
 
@@ -417,5 +617,27 @@ describe("githubRepoHost merges (PBI 181)", () => {
       "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => { throw Object.assign(new Error("boom"), { status: 500 }); },
     });
     await assert.rejects(host.mergePr("o/r", 3, { method: "squash", headSha: null }), /boom/);
+  });
+});
+
+describe("logTail", () => {
+  test("keeps the last 100 lines and a short log whole", () => {
+    const log = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join("\r\n") + "\r\n";
+    assert.equal(logTail(log), Array.from({ length: 100 }, (_, i) => `line ${i + 151}`).join("\n"));
+    assert.equal(logTail("a\nb\n"), "a\nb");
+  });
+
+  test("cuts a long line and marks the cut", () => {
+    const tail = logTail(`ok\n${"x".repeat(5_000_000)}\nend`);
+    assert.deepEqual(tail.split("\n"), ["ok", `${"x".repeat(FAILED_LOG_LINE_CHARS)}…`, "end"]);
+  });
+
+  test("drops the oldest lines when 100 long lines outgrow the whole-tail cap", () => {
+    const log = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"y".repeat(1000)}`).join("\n");
+    const tail = logTail(log);
+    assert.ok(tail.length <= FAILED_LOG_CHARS);
+    const lines = tail.split("\n");
+    assert.ok(lines.at(-1)!.startsWith("100 "));
+    assert.ok(lines.length < 100 && lines.length > 1);
   });
 });

@@ -2,7 +2,11 @@
 // item ones on its next tick, and the cell API's /lease reads pause, kill, restart and stop_run directly.
 import type pg from "pg";
 
-export type OverrideKind = "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart";
+// start_now, move_up and move_down are PBI 265's selection overrides (spec §8): Start now takes the next free slot ahead
+// of every other item, and Move up and Move down change an item's place in the factory queue, never the board's.
+export type OverrideKind =
+  | "pause" | "resume" | "drain" | "hold" | "unhold" | "stop_run" | "requeue" | "kill" | "restart"
+  | "start_now" | "move_up" | "move_down";
 export type Override = {
   id: string; scope: "factory" | "backlog" | "item"; targetId: string | null; kind: OverrideKind;
   reason: string; createdBy: string | null; createdAt: Date; expiresAt: Date | null;

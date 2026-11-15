@@ -31,7 +31,21 @@ export interface SplitBoard {
   addBlockedBy(externalId: string, blockerId: string): Promise<void>;
   /** Takes `label` off the issue. Taking off a label it lacks succeeds. */
   removeLabel(externalId: string, label: string): Promise<void>;
+  /**
+   * Who opened the issue and who has edited its body since (PBI 264). The factory rewrites a filed child only when its
+   * own App opened it, its body carries a split marker, and nobody else has edited the body since. Unset, the board
+   * can't say, and the factory edits no issue.
+   */
+  authorship?(externalId: string): Promise<IssueAuthorship>;
+  /** Replaces the issue's body (PBI 264). The factory calls it only for a child it may rewrite. */
+  editBody?(externalId: string, body: string): Promise<void>;
 }
+
+/**
+ * `openedByApp`: the factory's own App opened the issue. `editedByOthers`: anyone but the App has edited its body since
+ * it was opened. `editedByApp`: the App has edited its body since it was opened, as a rewrite does.
+ */
+export type IssueAuthorship = { openedByApp: boolean; editedByOthers: boolean; editedByApp: boolean };
 
 /** What filing needs: the board, the source's opt-in label and backlog status, and the criteria heading it reads. */
 export type FileSplitDeps = { board: SplitBoard; optInLabel: string; backlogStatus: string; criteriaHeading: string };

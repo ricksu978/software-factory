@@ -196,6 +196,16 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(q.rows, [{ kind: "needs_input", body: "The base fails in the cell.", base_failure: { sha: "b4se001", tests: ["parses the config"] } }]);
   });
 
+  test("a blocked question's base failure keeps the base branch the cell names (PBI 260)", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "blocked", question: { kind: "needs_input", body: "b", baseFailure: { sha: "b4se001", tests: ["t"], base: "main" } },
+    });
+    assert.equal(r.status, 200);
+    const q = await db.pool.query("select base_failure from question where item_id = $1", [cell.itemId]);
+    assert.deepEqual(q.rows[0].base_failure, { sha: "b4se001", tests: ["t"], base: "main" });
+  });
+
   test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
     const cell = await claimed();
     const r = await send(cell.runId, cell.token, "POST", "/transition", {
@@ -536,12 +546,49 @@ describe("cell API", dbTest, () => {
     host.checks.set(`${repo}@0a0a0a0`, "success");
     assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0ff0ff0")).status, 400);
     assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=0a0a0a0")).status, 400);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success" });
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=def5678")).body, { status: "success", failedChecks: [] });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending", failedChecks: [] });
     clock = new Date(at.getTime() + 599_000);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "pending", failedChecks: [] });
     clock = new Date(at.getTime() + 600_000);
-    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none" });
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "none", failedChecks: [] });
+  });
+
+  test("checks: CI that failed answers each failed check with its URL and log, from the repo host (PBI 232)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    host.checks.set(`${repo}@abc1234`, "failure");
+    const failed = [{ name: "unit", url: "https://ci/unit", log: "1 failing" }, { name: "lint", url: "https://ci/lint", log: null }];
+    host.failedChecks.set(`${repo}@abc1234`, failed);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).body, { status: "failure", failedChecks: failed });
+  });
+
+  test("checks: CI that failed still answers failure, with no detail, when reading the failed checks errors (PBI 232)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["abc1234"]);
+    host.checks.set(`${repo}@abc1234`, "failure");
+    const original = host.failedChecksOnSha;
+    const originalError = console.error;
+    host.failedChecksOnSha = async () => { throw new Error("502 Bad Gateway"); };
+    console.error = () => {};
+    try {
+      const res = await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234");
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { status: "failure", failedChecks: [] });
+    } finally {
+      host.failedChecksOnSha = original;
+      console.error = originalError;
+    }
+  });
+
+  test("pending-checks: names the checks still pending on one of the run's own commits, and a sha off the branch or on main gets 400", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.pendingChecks.set(`${repo}@abc1234`, ["ci", "e2e"]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0ff0ff0")).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=0a0a0a0")).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
   });
 
   test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {

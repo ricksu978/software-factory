@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
+import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
 import { clearRestartOnStart, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
-import { tick } from "./scheduler.ts";
+import { FAILED_RECHECK_MS, tick, type CiMemo } from "./scheduler.ts";
 
 // The scenarios in features/pbi-17-scheduler.feature cover WIP, the brake, the kill switch, stop and re-queue. These
 // cover the rest of plan Task 13's list.
@@ -179,6 +180,220 @@ describe("scheduler", dbTest, () => {
     assert.equal((await state(silent)).state, "Failed");
     assert.match((await backlog.comments("1")).join(), /No CI ran on main/);
     assert.equal((await state(green)).state, "Done");
+  });
+
+  // PBI 255: a red merge commit compared with its first parent. The scenarios cover the rest.
+  async function redMerge(externalId: string, sha: string, parent: string, mergeRuns: CheckRun[], parentRuns: CheckRun[], mergedAgo = 60_000) {
+    const id = await item(externalId, "Accepted");
+    await openRun(id, `merge_sha = '${sha}', repo_id = '${repoId}', pr_number = 9`);
+    await db.pool.query("insert into event (at, actor, actor_id, item_id, kind, payload) values ($1, 'system', 't', $2, 'transition', '{\"to\":\"Accepted\"}')", [ago(mergedAgo), id]);
+    repoHost.parents.set(`${REPO}@${sha}`, parent);
+    repoHost.runs.set(`${REPO}@${sha}`, mergeRuns);
+    repoHost.runs.set(`${REPO}@${parent}`, parentRuns);
+    repoHost.checks.set(`${REPO}@${sha}`, "failure");
+    return id;
+  }
+  const check = (name: string, status: CheckRun["status"]): CheckRun => ({ name, status, url: `https://github.com/${REPO}/runs/${name}` });
+
+  test("a red merge whose failed check still runs on its first parent waits a poll, and counts it passed after an hour (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "pending")]);
+    await run();
+    assert.equal((await state(id)).state, "Accepted");
+    await run(new Date(NOW.getTime() + 3_600_000));
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 1);
+  });
+
+  test("a red merge with no failed check run, as with CI that reports statuses, is charged and files no bug item (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [], []);
+    await run();
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 0);
+    assert.equal((await db.pool.query("select count(*)::int as n from main_break")).rows[0].n, 0);
+  });
+
+  test("a merge whose own run was cancelled by the next merge isn't charged: it waits on main and the next merge is charged with the break (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "cancelled")], [check("test", "success")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "cancelled")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    assert.equal((await state(first)).state, "Accepted");
+    assert.match((await backlog.comments("1")).join(), /was cancelled/);
+    assert.equal((await state(second)).state, "Failed");
+    assert.deepEqual((await db.pool.query("select merge_sha from main_break")).rows, [{ merge_sha: "m2" }]);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await run();
+    assert.equal((await state(first)).state, "Done");
+  });
+
+  test("a bug item names no label of its own, so the board adds only its own opt-in label (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const fileItem = backlog.adapter.fileItem;
+    const asked: string[][] = [];
+    backlog.adapter.fileItem = async (p, key) => { asked.push(p.labels); return fileItem(p, key); };
+    await run();
+    backlog.adapter.fileItem = fileItem;
+    assert.deepEqual(asked, [[]]);
+  });
+
+  test("a bug item whose filing fails is filed on a later tick, and once (PBI 255)", async () => {
+    const id = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const fileItem = backlog.adapter.fileItem;
+    backlog.adapter.fileItem = async () => { throw new Error("GitHub is down"); };
+    await run();
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal(backlog.filed.length, 0);
+    backlog.adapter.fileItem = fileItem;
+    await run();
+    await run();
+    assert.equal(backlog.filed.length, 1);
+    assert.equal((await db.pool.query("select bug_external_id from main_break")).rows[0].bug_external_id, backlog.filed[0]);
+  });
+
+  test("a break that clears before its bug item could be filed gets none (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const fileItem = backlog.adapter.fileItem;
+    backlog.adapter.fileItem = async () => { throw new Error("GitHub is down"); };
+    await run();
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await run();
+    backlog.adapter.fileItem = fileItem;
+    await run();
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+    assert.equal(backlog.filed.length, 0);
+  });
+
+  test("a bug item stops coming first once main is green again (PBI 255)", async () => {
+    const charged = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    await run();
+    const bug = await item(backlog.filed[0], "Queued", "priority = 0");
+    const urgent = await item("90", "Queued", "priority = 9");
+    assert.ok(charged && bug && urgent);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    assert.ok((await db.pool.query("select cleared_sha from main_break where bug_item_id = $1", [bug])).rows[0]?.cleared_sha === "f1");
+    await db.pool.query("update wip_policy set current_wip = 1");
+    await run();
+    assert.equal((await state(urgent)).state, "InProgress");
+    assert.equal((await state(bug)).state, "Queued");
+  });
+
+  test("a bug item whose merge leaves main red with the same checks is charged, not set to wait (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    await run();
+    const bug = await redMerge(backlog.filed[0], "m2", "m1", [check("test", "failure")], [check("test", "failure")]);
+    await db.pool.query("update main_break set bug_item_id = $1", [bug]);
+    await run();
+    assert.equal((await state(bug)).state, "Failed");
+    assert.equal((await db.pool.query("select waits_on_branch from run where item_id = $1", [bug])).rows[0].waits_on_branch, null);
+    assert.equal(backlog.filed.length, 1);
+    assert.equal((await db.pool.query("select count(*)::int as n from main_break where cleared_at is null")).rows[0].n, 1);
+  });
+
+  test("one read of main per pass answers every waiting item and standing break on it (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    const third = await redMerge("3", "m3", "m2", [check("test", "failure")], [check("test", "failure")], 40_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "m3"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    const commitsAfter = repoHost.commitsAfter;
+    const asked: string[] = [];
+    repoHost.commitsAfter = async (repo, branch, sha) => { asked.push(sha); return commitsAfter(repo, branch, sha); };
+    await run();
+    assert.deepEqual(asked, ["m1"]);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "m3", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    asked.length = 0;
+    await run();
+    repoHost.commitsAfter = commitsAfter;
+    assert.deepEqual(asked, ["m1"]);
+    assert.equal((await state(second)).state, "Done");
+    assert.equal((await state(third)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+  });
+
+  test("a red main's failed commits are read once per recheck window, not every tick, and a re-run turned green is seen after it (PBI 255)", async () => {
+    await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "x1", "x2"]);
+    for (const sha of ["x1", "x2"]) repoHost.checks.set(`${REPO}@${sha}`, "failure");
+    await db.pool.query("update wip_policy set current_wip = 0");
+    const ciMemo: CiMemo = new Map();
+    const memoRun = (now: Date) =>
+      tick({ pool: db.pool, launcher, now, killFlag: false, repoHost, backlogFor: () => backlog.adapter, secret: "s3cret", controlUrl: "http://control:7400", sopVersion: "default@1", ciMemo });
+    await memoRun(NOW);
+    await memoRun(NOW);
+    const checksOnSha = repoHost.checksOnSha;
+    const read: string[] = [];
+    repoHost.checksOnSha = async (repo, sha) => { read.push(sha); return checksOnSha(repo, sha); };
+    await memoRun(new Date(NOW.getTime() + 15_000));
+    assert.equal(read.length, 0);
+    repoHost.checks.set(`${REPO}@x2`, "success");
+    await memoRun(new Date(NOW.getTime() + FAILED_RECHECK_MS));
+    repoHost.checksOnSha = checksOnSha;
+    assert.ok(read.includes("x2"));
+    assert.equal((await state(second)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "x2");
+  });
+
+  test("a merge onto a main already red with no standing break records the break at its first parent, charges nothing and files no bug item (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    await run();
+    assert.equal((await state(first)).state, "Accepted");
+    assert.equal((await state(second)).state, "Accepted");
+    assert.equal(backlog.filed.length, 0);
+    const breaks = (await db.pool.query("select merge_sha, item_id, failed_checks, cleared_at from main_break")).rows;
+    assert.deepEqual(breaks, [{ merge_sha: "p1", item_id: null, failed_checks: [{ name: "test", url: `https://github.com/${REPO}/runs/test`, tests: [] }], cleared_at: null }]);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await run();
+    assert.equal((await state(first)).state, "Done");
+    assert.equal((await db.pool.query("select cleared_sha from main_break")).rows[0].cleared_sha, "f1");
+  });
+
+  test("a merge found broken after a later merge recorded main red at it uncharged takes that break over and files its bug item (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "pending")]);
+    const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    assert.equal((await state(first)).state, "Accepted");
+    assert.equal((await db.pool.query("select item_id from main_break where merge_sha = 'm1'")).rows[0].item_id, null);
+    repoHost.runs.set(`${REPO}@p1`, [check("test", "success")]);
+    await run();
+    assert.equal((await state(first)).state, "Failed");
+    assert.equal((await state(second)).state, "Accepted");
+    const breaks = (await db.pool.query("select merge_sha, item_id, pr_number, bug_external_id from main_break")).rows;
+    assert.equal(breaks.length, 1);
+    assert.deepEqual(breaks[0], { merge_sha: "m1", item_id: first, pr_number: 9, bug_external_id: backlog.filed[0] });
+    assert.equal(backlog.filed.length, 1);
+  });
+
+  test("a merge found broken after the uncharged break recorded at it cleared takes it over and files no bug item (PBI 255)", async () => {
+    const first = await redMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "pending")]);
+    await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "failure")], 50_000);
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2"]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await run();
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1", "m2", "f1"]);
+    repoHost.checks.set(`${REPO}@f1`, "success");
+    await run();
+    assert.equal((await db.pool.query("select cleared_sha from main_break where merge_sha = 'm1'")).rows[0].cleared_sha, "f1");
+    repoHost.runs.set(`${REPO}@p1`, [check("test", "success")]);
+    await run();
+    assert.equal((await state(first)).state, "Failed");
+    assert.equal((await db.pool.query("select item_id from main_break where merge_sha = 'm1'")).rows[0].item_id, first);
+    assert.equal(backlog.filed.length, 0);
   });
 
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {

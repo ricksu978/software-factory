@@ -108,19 +108,19 @@ export function ctx(world: object): Ctx {
 }
 
 const ORDINALS: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5 };
-function ordinal(word: string): number {
+export function ordinal(word: string): number {
   const n = ORDINALS[word] ?? Number(/^(\d+)(st|nd|rd|th)$/.exec(word)?.[1]);
   assert.ok(Number.isInteger(n) && n > 0, `not an ordinal: ${word}`);
   return n;
 }
 
-function review(c: Ctx, n: number): ReviewSpec {
+export function review(c: Ctx, n: number): ReviewSpec {
   let r = c.reviews.get(n);
   if (!r) c.reviews.set(n, (r = { findings: [], verdicts: new Map(), clean: false }));
   return r;
 }
 
-function raise(c: Ctx, n: number, f: Finding) {
+export function raise(c: Ctx, n: number, f: Finding) {
   review(c, n).findings.push(f);
   if (!c.raisedAt.has(f.body)) c.raisedAt.set(f.body, n);
   c.last = f.body;
@@ -151,10 +151,38 @@ function threadsNow(c: Ctx): Map<string, ThreadState> {
   return out;
 }
 
-/** The factory's open threads whose id the brief holds. */
+/** Every JSON array fenced in a brief, flattened to its objects. */
+export function briefEntries(prompt: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const m of prompt.matchAll(/(`{3,})json\n([\s\S]*?)\n\1/g)) {
+    try {
+      const data = JSON.parse(m[2]) as unknown;
+      if (Array.isArray(data)) for (const x of data) if (x && typeof x === "object") out.push(x as Record<string, unknown>);
+    } catch { /* not JSON the steps read */ }
+  }
+  return out;
+}
+
+/**
+ * The PR reviewer's findings the brief holds by an id with no thread on the PR behind it: a finding the factory put in
+ * a review's summary instead of a line comment (PBI 266). The scripted agents answer one by that id, as a thread.
+ */
+function summaryFindingsInBrief(c: Ctx, prompt: string) {
+  const known = new Set([...c.threads.map((t) => t.threadId), ...c.personThreads.map((t) => t.threadId)]);
+  const out: { threadId: string; body: string; path: string; line: number }[] = [];
+  for (const x of briefEntries(prompt)) {
+    const body = typeof x.finding === "string" ? x.finding : typeof x.body === "string" ? x.body : null;
+    if (typeof x.threadId !== "string" || known.has(x.threadId) || body === null || !c.raisedAt.has(body)) continue;
+    if (out.some((y) => y.threadId === x.threadId)) continue;
+    out.push({ threadId: x.threadId, body, path: String(x.path ?? ""), line: Number(x.line ?? 0) });
+  }
+  return out;
+}
+
+/** The factory's open threads whose id the brief holds, then the summary findings it holds (PBI 266). */
 export function threadsInBrief(c: Ctx, prompt: string) {
   const now = threadsNow(c);
-  return c.threads.filter((t) => !now.get(t.threadId)!.resolved && prompt.includes(t.threadId));
+  return [...c.threads.filter((t) => !now.get(t.threadId)!.resolved && prompt.includes(t.threadId)), ...summaryFindingsInBrief(c, prompt)];
 }
 
 function greenStarts(run: CellCtx): number {
@@ -293,6 +321,8 @@ function addresser(c: Ctx, rec: AgentRecord, cwd: string): string {
 // ---- Givens: CI ----
 
 Given("CI passes on every commit unless a scenario says otherwise", function () {
+  // PBI 292 says it in a Background before any run is set up. Its steps put these fakes on the run before it runs.
+  if (!(this as { pbi18?: unknown }).pbi18) { (this as { pbi128Later?: boolean }).pbi128Later = true; return; }
   ctx(this);
 });
 
