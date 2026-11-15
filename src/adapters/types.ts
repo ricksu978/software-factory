@@ -190,7 +190,7 @@ export interface RepoHost {
   mergeView(repo: string, prNumber: number): Promise<MergeView>;
   /** Squash-merges the PR at `headSha`. GitHub refusing, a moved head for one, comes back as `merged: false`. */
   mergePr(repo: string, prNumber: number, p: { method: "squash"; headSha: string | null }): Promise<MergeResult>;
-  /** PBI 255: each check run that reported on `sha`, with its outcome and its page, leaving out a cancelled one, which proves nothing. Empty when none has. */
+  /** PBI 255: each check run that reported on `sha`, with its outcome and its page. A cancelled run is reported as `cancelled`, since it proves nothing either way. Empty when none has. */
   checkRuns(repo: string, sha: string): Promise<CheckRun[]>;
   /** PBI 255: the log of the check run named `check` on `sha`, or null when the host keeps none. */
   checkLog(repo: string, sha: string, check: string): Promise<string | null>;
