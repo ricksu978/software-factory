@@ -296,7 +296,10 @@ After({ tags: "@pbi-288", ...long }, async function () {
 // ---- Background ----
 
 Given("a test sign-in provider is running with the user {string}", long, async function (user: string) {
-  ctx(this).provider = await startProvider(user);
+  const p = (ctx(this).provider = await startProvider(user));
+  const r = await fetch(new URL(".well-known/openid-configuration", p.issuer.endsWith("/") ? p.issuer : `${p.issuer}/`), { signal: AbortSignal.timeout(10_000) });
+  assert.equal(r.status, 200, `the test provider's discovery document answered ${r.status}`);
+  assert.equal((await r.json() as { issuer?: string }).issuer, p.issuer, "the test provider's discovery document names another issuer");
 });
 
 Given("the BFF is running against that provider as its issuer", long, async function () {
@@ -323,19 +326,34 @@ Given("the BFF is running against that provider as its issuer", long, async func
 // ---- Starting and stopping the BFF ----
 
 Given("the BFF is stopped", long, async function () {
-  await stopBff(ctx(this));
+  const c = ctx(this);
+  const b = c.bff;
+  assert.ok(b, "no BFF was running to stop");
+  await stopBff(c);
+  assert.ok(b.exit !== undefined, "the BFF's process hasn't exited");
+  assert.ok(!(await answers(c.port!)), `something still answers on port ${c.port} after the BFF stopped`);
 });
+
+/** A started BFF either answers on its port or has exited by the time settle() returns. */
+async function settled(b: Bff, port: number): Promise<void> {
+  assert.ok(b.child.pid !== undefined || b.exit !== undefined, "the BFF's process never started");
+  assert.ok(b.exit !== undefined || (await answers(port)), `the BFF neither answered on port ${port} nor exited within 30 seconds: ${b.out}`);
+}
 
 When("the BFF starts with no port set", long, async function () {
   const c = ctx(this);
   const { PORT: _port, BFF_ORIGIN: _origin, ...env } = c.env!;
-  await settle(spawnBff(c, env), 7403);
+  const b = spawnBff(c, env);
+  await settle(b, 7403);
+  await settled(b, 7403);
 });
 
 When("the BFF starts with no session key set", long, async function () {
   const c = ctx(this);
   const { BFF_SESSION_KEY: _key, ...env } = c.env!;
-  await settle(spawnBff(c, env), c.port!);
+  const b = spawnBff(c, env);
+  await settle(b, c.port!);
+  await settled(b, c.port!);
 });
 
 async function restart(c: Ctx): Promise<void> {
@@ -402,10 +420,28 @@ async function signIn(c: Ctx, b: Browser): Promise<void> {
   }
 }
 
+/** Asserts the sign-in walk got back to the BFF's /auth/callback and the BFF answered it, whatever it answered. */
+function reachedCallback(c: Ctx, b: Browser): Seen {
+  const last = b.seen.at(-1);
+  assert.ok(b.callback, `the sign-in walk never reached /auth/callback; it ended at ${last?.url.href} with ${last?.status}: ${last?.body}`);
+  assert.notEqual(b.callback.status, 0, `the BFF didn't answer /auth/callback: ${b.callback.body}`);
+  return b.callback;
+}
+
+/** Asserts the sign-in finished: the callback redirected and the browser now holds the session cookie. */
+async function signedIn(c: Ctx, b: Browser): Promise<void> {
+  const cb = reachedCallback(c, b);
+  assert.ok(isRedirect(cb), `/auth/callback answered ${cb.status}, not a redirect: ${cb.body}`);
+  const name = await sessionCookie();
+  const v = b.cookies(bffHost).get(name);
+  assert.ok(typeof v === "string" && v.length > 0, `the browser holds no ${name} cookie after sign-in`);
+}
+
 async function callback(c: Ctx, b: Browser, query: Record<string, string>): Promise<void> {
   const url = bffUrl(c, "/auth/callback");
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   b.callback = c.callback = await b.request(url);
+  assert.notEqual(b.callback.status, 0, `the BFF didn't answer /auth/callback: ${b.callback.body}`);
 }
 
 function loginParams(b: Browser): URLSearchParams | null {
@@ -433,32 +469,50 @@ Given("a browser has started sign-in at {string}", long, async function (path: s
 When("{string} signs in through the BFF", long, async function (_user: string) {
   const c = ctx(this);
   c.issuedBefore = c.provider!.issued.length;
-  await signIn(c, browser(c, 1));
+  const b = browser(c, 1);
+  b.callback = undefined;
+  await signIn(c, b);
+  reachedCallback(c, b);
 });
 
 Given("{string} has signed in through the BFF", long, async function (_user: string) {
   const c = ctx(this);
-  await signIn(c, browser(c, 1));
+  const b = browser(c, 1);
+  b.callback = undefined;
+  await signIn(c, b);
+  await signedIn(c, b);
 });
 
 When("{string} signs in through the BFF in one browser", long, async function (_user: string) {
   const c = ctx(this);
-  await signIn(c, browser(c, 1));
+  const b = browser(c, 1);
+  b.callback = undefined;
+  await signIn(c, b);
+  reachedCallback(c, b);
 });
 
 Given("{string} has signed in through the BFF in one browser", long, async function (_user: string) {
   const c = ctx(this);
-  await signIn(c, browser(c, 1));
+  const b = browser(c, 1);
+  b.callback = undefined;
+  await signIn(c, b);
+  await signedIn(c, b);
 });
 
 When("{string} signs in through the BFF in a second browser", long, async function (_user: string) {
   const c = ctx(this);
-  await signIn(c, browser(c, 2));
+  const b = browser(c, 2);
+  b.callback = undefined;
+  await signIn(c, b);
+  reachedCallback(c, b);
 });
 
 Given("{string} has signed in through the BFF in a second browser", long, async function (_user: string) {
   const c = ctx(this);
-  await signIn(c, browser(c, 2));
+  const b = browser(c, 2);
+  b.callback = undefined;
+  await signIn(c, b);
+  await signedIn(c, b);
 });
 
 When("the provider sends the browser back to {string} with a code for {string} and a different state", long, async function (_path: string, user: string) {
@@ -752,6 +806,7 @@ Then("the two browsers hold different session cookies", long, async function () 
 
 async function check(c: Ctx, b: Browser): Promise<Check> {
   const s = await b.request(bffUrl(c, "/auth/session"));
+  assert.notEqual(s.status, 0, `the BFF didn't answer /auth/session: ${s.body}`);
   c.check = { status: s.status, body: s.body };
   c.checks.push(c.check);
   return c.check;
@@ -842,6 +897,7 @@ Then("the BFF doesn't treat the browser as signed in", function () {
 
 async function signOut(c: Ctx, b: Browser, path: string): Promise<void> {
   c.logout = await b.request(bffUrl(c, path), { method: "POST", headers: { origin: bffUrl(c, "/").origin } });
+  assert.notEqual(c.logout.status, 0, `the BFF didn't answer ${path}: ${c.logout.body}`);
 }
 
 When("alice's browser signs out at {string}", long, async function (path: string) {
@@ -892,6 +948,12 @@ Given("the role {string} has lost its grants on sessions", long, async function 
   const c = ctx(this);
   await pool().query(`revoke all on session from ${role}`);
   c.revoked = true;
+  const { rows } = await pool().query<{ insert: boolean; select: boolean; update: boolean; delete: boolean }>(
+    `select has_table_privilege($1, 'session', 'insert') as insert, has_table_privilege($1, 'session', 'select') as select,
+            has_table_privilege($1, 'session', 'update') as update, has_table_privilege($1, 'session', 'delete') as delete`,
+    [role],
+  );
+  assert.deepEqual(rows[0], { insert: false, select: false, update: false, delete: false }, `${role} still holds rights on session`);
 });
 
 // ---- Refresh tokens ----
@@ -1062,6 +1124,7 @@ async function follow(b: Browser, at: Seen): Promise<Seen> {
 When("a browser opens {string}", local, async function (url: string) {
   const l = lc(ctx(this));
   l.page = await follow(l.browser, await l.browser.request(new URL(url)));
+  assert.notEqual(l.page.status, 0, `nothing answered on the way from ${url}: ${l.page.body}`);
 });
 
 Then("the browser lands on Keycloak's sign-in page for the realm on port {int}", function (port: number) {
