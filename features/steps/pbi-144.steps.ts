@@ -66,6 +66,11 @@ export type Ctx = {
   alsoOversized?: Set<string>;
   /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
   replies?: { title: string; reply: string }[];
+  /**
+   * PBI 226: titles of children the board files without the labels the factory asks for, as every child was filed
+   * before PBI 237 gave children the opt-in label, so a child can still be one that never entered the factory.
+   */
+  unlabelled?: Set<string>;
   /** PBI 264: a scripted judge that replaces this harness's, which passes every line. */
   judgeOverride?: (item: FactoryItem, dor: Policy) => Promise<string>;
   /** PBI 264: a scripted coding model that replaces this harness's, which always answers `reply`. */
@@ -136,7 +141,7 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     async createIssue(repo, title, body, labels = []) {
       refuse(c, "file", title);
       const externalId = await c.fake.seed({
-        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [...labels], repo, status: "", fields: {},
+        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: c.unlabelled?.has(title) ? [] : [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
       c.filed.push({ externalId, title, url, repo });

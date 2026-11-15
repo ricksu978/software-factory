@@ -6,13 +6,19 @@
 // child's PR and that PR in the fake repo host, as the cell and the scheduler would have left them. A Done child's
 // issue is closed, as its merged PR closed it. A person closing an issue closes the fake issue; the fake backlog keeps
 // no close reason, and a person's close goes through no factory write.
-import { DataTable, Given, Then, When } from "@cucumber/cucumber";
+// Since PBI 237 the factory files each child with the opt-in label, so it enters the factory on the next poll. A
+// scenario about a child that never carried the label, or that a person closed before it entered the factory, has the
+// board file that child without labels, as every child was filed before PBI 237 shipped. A Before hook reads which
+// child from the scenario's steps, since the Background files the children before the scenario's own steps run.
+// "The factory holds child X in state Y" is PBI 237's wording too. Here it sets the state; in PBI 237 it checks it.
+import { Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { ItemState } from "../../src/core/states.ts";
 import { SPLIT_DONE_HEADING } from "../../src/gate/split-done.ts";
 import { upsertItem } from "../../src/store/items.ts";
 import { ctx as ctx144, polled, replaceItem, type Ctx as Ctx144 } from "./pbi-144.steps.ts";
 import { ctx as ctx225, moves, pollMore, show } from "./pbi-225.steps.ts";
+import { heldIn as pbi237HeldIn } from "./pbi-237.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
 const HEADING = "Acceptance criteria";
@@ -99,6 +105,17 @@ async function parentClosed(c: Ctx144): Promise<boolean> {
   return fi.closed;
 }
 
+const UNLABELLED = [/^child "(.+)" has never carried the label /, /^a person closed child "(.+)" as .+ before it entered the factory$/];
+
+Before({ tags: "@pbi-226" }, function ({ pickle }) {
+  for (const step of pickle.steps) {
+    for (const re of UNLABELLED) {
+      const m = re.exec(step.text);
+      if (m) (ctx144(this).unlabelled ??= new Set()).add(m[1]);
+    }
+  }
+});
+
 // ---- the second parent ----
 
 Given("a second parent issue {string} in {string} on that board, carrying the label {string}", async function (title: string, repo: string, label: string) {
@@ -161,6 +178,7 @@ Given("the factory holds child {string} in state {string} with PR {int} open", l
 });
 
 Given("the factory holds child {string} in state {string}", long, async function (title: string, state: ItemState) {
+  if ((this as { pbi237?: unknown }).pbi237) return pbi237HeldIn(this, title, state);
   await hold(this, title, state);
 });
 
