@@ -100,10 +100,11 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
     "insert into item (source_id, external_id, title, state, repo) values ($1, $2, $3, 'NeedsInput', $4) returning id",
     [c.sourceId, ext, `Item ${n}`, repo],
   )).rows[0].id;
+  // A run stopped at address has been claimed before, so its repo and config commit are already pinned.
   await pool().query(
-    `insert into run (item_id, run_number, next_stage, branch, pr_number, pr_url, reviews_seen_at)
-     values ($1, 1, 'address', $2, $3, $4, now() - interval '7 days')`,
-    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`],
+    `insert into run (item_id, run_number, next_stage, branch, pr_number, pr_url, reviews_seen_at, repo_id, config_sha)
+     values ($1, 1, 'address', $2, $3, $4, now() - interval '7 days', (select id from repo where lower(url) = lower($5)), 'c1')`,
+    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`, `https://github.com/${repo}`],
   );
   const question = (await pool().query<{ id: string }>(
     `insert into question (item_id, kind, body, asked_at, base_failure)
