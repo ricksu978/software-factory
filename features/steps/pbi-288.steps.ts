@@ -16,7 +16,8 @@
 // The session cookie is named by SESSION_COOKIE in src/bff/session.ts, and openRefreshToken there opens a refresh token
 // sealed under a session key. While the session table has a test audit on it, every statement or row the BFF touches
 // records the role it ran as. "I read the AppHost" is PBI 169's step, and "{string} is up" is PBI 6's.
-// Givens never assert on the BFF's answers, so a scenario fails on its Then.
+// Every step asserts something. A Given asserts only what it arranges, such as that sign-in started or a cookie was
+// copied, so a scenario can't pass on a precondition that never held.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -35,6 +36,8 @@ const REALM_DIR = join(repo, "aspire-apphost", "keycloak");
 const APPHOST = "--apphost . --non-interactive --nologo";
 const CLIENT_ID = "dashboard";
 const CLIENT_SECRET = "pbi-288-client-secret";
+/** The sign-in cookie the BFF sets at /auth/login, holding the state, nonce and PKCE verifier. */
+const SIGNIN_COOKIE = "factory_signin";
 const local = { timeout: 600_000 };
 
 type SessionModule = {
@@ -414,12 +417,17 @@ When("a browser starts sign-in at {string}", long, async function (path: string)
   const c = ctx(this);
   const b = browser(c, 1);
   b.login = await b.request(bffUrl(c, path));
+  assert.notEqual(b.login.status, 0, `the BFF didn't answer ${path}: ${b.login.body}`);
 });
 
 Given("a browser has started sign-in at {string}", long, async function (path: string) {
   const c = ctx(this);
   const b = browser(c, 1);
   b.login = await b.request(bffUrl(c, path));
+  assert.ok(isRedirect(b.login), `${path} answered ${b.login.status}, not a redirect: ${b.login.body}`);
+  const to = new URL(b.login.headers.get("location")!, b.login.url);
+  assert.equal(`${to.origin}${to.pathname}`, providerOf(c).authorizationEndpoint, `${path} didn't send the browser to the authorization endpoint`);
+  assert.ok(b.login.setCookies.some((k) => k.name === SIGNIN_COOKIE && k.value && !clears(k)), `${path} set no ${SIGNIN_COOKIE} cookie`);
 });
 
 When("{string} signs in through the BFF", long, async function (_user: string) {
@@ -475,28 +483,50 @@ When("a browser arrives at {string} with a code for {string} and no sign-in cook
   await callback(c, b, { code, state: randomBytes(16).toString("base64url"), iss: c.provider!.issuer });
 });
 
+/** The running test provider. A step that arranges it fails here when none is running. */
+function providerOf(c: Ctx): Provider {
+  assert.ok(c.provider, "the test sign-in provider isn't running");
+  assert.equal(typeof c.provider.next, "object", "the test sign-in provider takes no next sign-in settings");
+  return c.provider;
+}
+
+/** The next sign-in settings the test provider recognises, and the values each takes. */
+const NEXT_SETTINGS: { [K in keyof Provider["next"]]-?: (v: unknown) => boolean } = {
+  accessToken: (v) => v === "jwt" || v === "opaque" || v === "dotted",
+  differentNonce: (v) => typeof v === "boolean",
+  refreshToken: (v) => v === null || (typeof v === "string" && v.length > 0),
+};
+
+function arrange<K extends keyof Provider["next"]>(c: Ctx, key: K, value: Provider["next"][K]): void {
+  const p = providerOf(c);
+  assert.ok(Object.hasOwn(NEXT_SETTINGS, key), `the test sign-in provider doesn't recognise the setting ${String(key)}`);
+  assert.ok(NEXT_SETTINGS[key](value), `the test sign-in provider doesn't take ${JSON.stringify(value)} for ${String(key)}`);
+  p.next[key] = value;
+  assert.equal(p.next[key], value, `the test sign-in provider didn't keep ${String(key)}`);
+}
+
 Given("the provider will put a different nonce in the next ID token", function () {
-  ctx(this).provider!.next.differentNonce = true;
+  arrange(ctx(this), "differentNonce", true);
 });
 
 Given("the provider will issue an opaque access token for the next sign-in", function () {
-  ctx(this).provider!.next.accessToken = "opaque";
+  arrange(ctx(this), "accessToken", "opaque");
 });
 
 Given("the provider will issue an access token of three dotted parts that don't decode to a JWT for the next sign-in", function () {
-  ctx(this).provider!.next.accessToken = "dotted";
+  arrange(ctx(this), "accessToken", "dotted");
 });
 
 Given("the provider will issue a JWT access token for the next sign-in", function () {
-  ctx(this).provider!.next.accessToken = "jwt";
+  arrange(ctx(this), "accessToken", "jwt");
 });
 
 Given("the provider will issue the refresh token {string} for the next sign-in", function (token: string) {
-  ctx(this).provider!.next.refreshToken = token;
+  arrange(ctx(this), "refreshToken", token);
 });
 
 Given("the provider will issue no refresh token for the next sign-in", function () {
-  ctx(this).provider!.next.refreshToken = null;
+  arrange(ctx(this), "refreshToken", null);
 });
 
 // ---- The authorization request ----
@@ -790,14 +820,17 @@ When("a browser presents a session cookie the BFF never issued", long, async fun
 
 Given("alice's browser has kept a copy of its session cookie", long, async function () {
   const c = ctx(this);
-  c.copied = browser(c, 1).cookies(bffHost).get((await load<SessionModule>("src/bff/session.ts"))?.SESSION_COOKIE ?? "");
+  const name = await sessionCookie();
+  assert.ok(typeof name === "string" && name.length > 0, "src/bff/session.ts exports no SESSION_COOKIE name");
+  c.copied = browser(c, 1).cookies(bffHost).get(name);
+  assert.ok(typeof c.copied === "string" && c.copied.length > 0, `alice's browser holds no ${name} cookie to copy`);
 });
 
 When("a browser presents the copied session cookie", long, async function () {
   const c = ctx(this);
   c.other = new Browser();
-  const name = (await load<SessionModule>("src/bff/session.ts"))?.SESSION_COOKIE;
-  if (name && c.copied) c.other.cookies(bffHost).set(name, c.copied);
+  assert.ok(c.copied, "no session cookie was copied to present");
+  c.other.cookies(bffHost).set(await sessionCookie(), c.copied);
   await check(c, c.other);
 });
 
