@@ -136,6 +136,9 @@ Given("item {int} waits in NeedsInput on the question {string}", long, async fun
 
 Given("item {int} waits in NeedsInput on the question {string}, asked at {string}", long, async function (n: number, body: string, at: string) {
   await waits(this, n, body, { askedAt: at });
+  // The scheduler's clock runs a day after the question, past the scenario's reviews and well before the 5 days in
+  // which an unanswered question times out, so the scenario reads the same on any date.
+  base260(this).now = new Date(Date.parse(at) + 24 * 3_600_000);
 });
 
 Given(
