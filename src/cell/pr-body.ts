@@ -15,13 +15,16 @@ export function summaryOf(reply: { ok: boolean; text: string }): { body: string 
  * `## Problem` heading is the body as it is. Otherwise, a reply that wraps the body in a fenced block keeps only the
  * fence's contents, and the text before the first `## ` heading is dropped. A reply that still doesn't start with a
  * `## Problem` heading gives a finding instead, which fails the open-pr attempt and goes into its retry's brief. So does
- * a body that leaves a code block open (PBI 291), since its stray fence would swallow the rest of the PR body.
+ * a body that leaves a code block open (PBI 291), since its stray fence would swallow the rest of the PR body, and a
+ * wrapper whose closing fence can't be told from a bare code block's opening fence (PBI 297), since either guess could
+ * drop part of the body or let a note in.
  */
 export function cleanSummary(reply: string): { body: string } | { finding: string } {
   const PROBLEM = /^## Problem[ \t]*(\n|$)/;
   const trimmed = reply.trim();
   if (PROBLEM.test(trimmed)) return balanced(trimmed);
   const text = unwrap(trimmed);
+  if (typeof text !== "string") return text;
   const at = text.search(/^## /m);
   const body = at < 0 ? "" : text.slice(at).trim();
   if (PROBLEM.test(body)) return balanced(body);
@@ -74,7 +77,7 @@ function blocksOf(lines: string[]): { from: number; to: number | null }[] {
  * 297). A wrapper that never closes that way runs to the reply's last line that holds only a fence, so a code block it
  * leaves open still gives balanced's finding. Any other reply with one fenced block keeps that block.
  */
-function unwrap(text: string): string {
+function unwrap(text: string): string | { finding: string } {
   const lines = text.split("\n");
   const inside = (from: number, to: number) => {
     const outside = hasHeading(lines.slice(0, from)) || hasHeading(lines.slice(to + 1));
@@ -85,6 +88,11 @@ function unwrap(text: string): string {
     const o = opening(lines[from]!)!;
     if (["", "markdown", "md"].includes(o.info.toLowerCase())) {
       let to = wrapperEnd(lines, from, o);
+      if (typeof to !== "number") {
+        return {
+          finding: `The fence-only line ${to.ambiguous + 1} of the reply could close the PR body's wrapper or open a code block inside it, and a \`## \` heading after it only counts in the second reading, so it's not clear where the PR body ends. ${ALONE}`,
+        };
+      }
       if (to < 0) to = lines.findLastIndex((l) => closes(l, o));
       const body = to > from ? inside(from, to) : null;
       if (body !== null) return body;
@@ -110,13 +118,18 @@ function closes(line: string, o: { char: string; len: number }): boolean {
 /**
  * PBI 297: the line that closes the wrapper opened on line `from`, or -1. It's the first fence-only line that leaves no
  * code block inside the wrapper open. Such a line could open a bare code block inside the body instead, so it's taken as
- * one only when the body shows it: a `## ` heading outside a code block follows it, read as if it closed the wrapper
- * (so unwrap would find that heading outside the wrapper), or the block it would open closes just before another
- * fence-only line that would close the wrapper. A `## ` line inside a note's code block is code, so it doesn't count. Nothing else is a signal the wrapper's own closing fence can't give, so
- * a bare inner block followed by plain text and no heading closes the wrapper early, and a note after the wrapper is
- * left out however it's spaced.
+ * one when the body shows it: a `## ` heading outside a code block follows it, read as if it closed the wrapper (so
+ * unwrap would find that heading outside the wrapper), or the block it would open closes just before another fence-only
+ * line that would close the wrapper. A `## ` line inside a note's code block is code, so it doesn't count.
+ *
+ * Otherwise the tail is read the other way too, with the line opening a block, from the wrapper's own fence state. When
+ * that reading finds a `## ` heading outside a code block, the line might open a bare block in a body that goes on with
+ * more sections, or close the wrapper before a note whose code block holds a `## ` line. The fences read the same both
+ * ways, so neither guess is safe: one drops sections of the body, the other lets a note in. That line is returned as
+ * `ambiguous`, which gives a finding. With no such heading, a bare inner block followed by plain text closes the wrapper
+ * early, and a note after the wrapper is left out however it's spaced.
  */
-function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number {
+function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number | { ambiguous: number } {
   let inner: { char: string; len: number } | null = null;
   for (let i = from + 1; i < lines.length; i++) {
     const line = lines[i]!;
@@ -124,14 +137,19 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       if (closes(line, inner)) inner = null;
       continue;
     }
-    if (closes(line, wrapper) && !opensBareBlock(lines, i, wrapper)) return i;
+    if (closes(line, wrapper)) {
+      if (!opensBareBlock(lines, i, wrapper)) return hasHeading(lines.slice(i)) ? { ambiguous: i } : i;
+    }
     const o = opening(line);
     if (o) inner = o;
   }
   return -1;
 }
 
-/** Whether the fence-only line `i` reads as opening a bare code block inside the wrapper, as wrapperEnd describes. */
+/**
+ * Whether the fence-only line `i` surely opens a bare code block inside the wrapper, as wrapperEnd describes. The
+ * heading check reads the tail as if line `i` closed the wrapper, so code blocks start fresh after it.
+ */
 function opensBareBlock(lines: string[], i: number, wrapper: { char: string; len: number }): boolean {
   if (hasHeading(lines.slice(i + 1))) return true;
   const own = opening(lines[i]!)!;

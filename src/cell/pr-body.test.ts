@@ -99,16 +99,26 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
 
   test("a `## ` line inside a note's code block is code, so the note is left out", () => {
     const body = "## Problem\n\nX.";
-    for (const note of ["```\n## not a heading\n```", "```md\n## Testing\n```", "```\n## build\nnpm run build\n```\n\nThen:\n\n```sh\n## lint\nnpm run lint\n```"]) {
+    for (const note of ["```md\n## Testing\n```", "```sh\nnpm run build\n## then lint\nnpm run lint\n```"]) {
       assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n${note}`), { body }, note);
     }
   });
 
-  test("a bare code block followed by a heading inside it, read as a note, closes the wrapper", () => {
-    // Fence, line, fence, `## ` line, fence reads the same whether it's a body's bare block and a section or the wrapper's
-    // closing fence and a note's code block. The wrapper closes at its first fence-only line, so a note can't leak in.
-    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`;
-    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\``), { body: BODY });
+  test("a fence that could close the wrapper or open a bare block before more sections gives a finding", () => {
+    // Fence, text, fence, `## ` line reads the same as a body's bare block and its next section, or as the wrapper's
+    // closing fence and a note whose code block holds a `## ` line. Either guess drops sections or lets a note in.
+    const replies = [
+      "Here:\n\n```markdown\n## Problem\n\nX.\n\n```\ncode\n```\n\n## Testing\n\nfoo\n```",
+      "```markdown\n## Problem\n\nX.\n\n```\ncode\n```\n\nMore text.\n\n## Testing\n\nfoo\n```",
+      `\`\`\`markdown\n${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.\n\`\`\``,
+      "```markdown\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## not a heading\n```",
+    ];
+    for (const reply of replies) {
+      const r = cleanSummary(reply);
+      assert.ok("finding" in r, reply);
+      assert.match(r.finding, /could close the PR body's wrapper or open a code block inside it/);
+      assert.match(r.finding, /PR body alone, with nothing before or after it/);
+    }
   });
 
   test("a bare code block inside the wrapper followed by plain text and no heading closes the wrapper", () => {
