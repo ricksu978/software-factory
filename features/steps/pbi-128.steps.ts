@@ -293,6 +293,8 @@ function addresser(c: Ctx, rec: AgentRecord, cwd: string): string {
 // ---- Givens: CI ----
 
 Given("CI passes on every commit unless a scenario says otherwise", function () {
+  // PBI 292 says it in a Background before any run is set up. Its steps put these fakes on the run before it runs.
+  if (!(this as { pbi18?: unknown }).pbi18) { (this as { pbi128Later?: boolean }).pbi128Later = true; return; }
   ctx(this);
 });
 

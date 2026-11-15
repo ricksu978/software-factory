@@ -19,7 +19,14 @@ export type StageReport = {
   scenarioNotes?: string[];
   /** PBI 190: each time in this attempt the PR reviewer was asked to restate an answer, by round, with why it couldn't be read. */
   restates?: { round: number; reason: string }[];
+  /**
+   * PBI 292: set on a Green attempt that fixes a CI failure on one of the run's own commits: the commit CI failed on
+   * and each failed check, with its URL and the tests it names as failing. Floor and the item's page show it.
+   */
+  ciFailure?: CiFailure;
 };
+/** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
+export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
   /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */
