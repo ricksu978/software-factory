@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
 import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
-import { cellRepoHost, githubRepoHost, ownersOf, type GitHubClient } from "./repo-host.ts";
+import { cellRepoHost, githubRepoHost, hunkRanges, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
 
@@ -237,6 +237,28 @@ describe("githubRepoHost", () => {
     assert.deepEqual(calls, [{ route: "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", params: {
       owner: "o", repo: "r", pull_number: 3, commit_id: "abc", body: "Two things", event: "COMMENT",
       comments: [{ path: "a.ts", line: 4, side: "RIGHT", body: "Name it" }] } }]);
+  });
+
+  test("diffLines reads the PR's diff at the commit from the merge base, one range per hunk on its new side", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr,
+      "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files: [
+        { filename: "src/a.ts", changes: 4, patch: "@@ -1,3 +1,5 @@\n a\n+b\n+c\n d\n e\n@@ -40,2 +42,7 @@ f\n" },
+        { filename: "img.png", changes: 0 },
+      ] }),
+    });
+    assert.deepEqual(await host.diffLines("o/r", 3, "def"), [{ path: "src/a.ts", from: 1, to: 5 }, { path: "src/a.ts", from: 42, to: 48 }]);
+    assert.deepEqual(calls[1].params, { owner: "o", repo: "r", basehead: "main...def", per_page: 1 });
+  });
+
+  test("diffLines is null when GitHub can't give the whole diff", async () => {
+    const at = (files: unknown[]) => stubGitHub({ "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => pr, "GET /repos/{owner}/{repo}/compare/{basehead}": () => ({ files }) }).host;
+    assert.equal(await at(Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}`, changes: 1, patch: "@@ -1 +1 @@\n+x" }))).diffLines("o/r", 3, "def"), null);
+    assert.equal(await at([{ filename: "big.ts", changes: 9000 }]).diffLines("o/r", 3, "def"), null);
+  });
+
+  test("hunkRanges reads a one-line hunk and skips one that only deletes", () => {
+    assert.deepEqual(hunkRanges("a.ts", "@@ -3 +3 @@\n-x\n+y\n@@ -9,2 +9,0 @@\n-z\n-w"), [{ path: "a.ts", from: 3, to: 3 }]);
   });
 
   test("postReview returns the threads its own line comments opened, by the review's id", async () => {
