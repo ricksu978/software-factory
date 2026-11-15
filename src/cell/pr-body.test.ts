@@ -106,16 +106,33 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
 
   test("a bare code block in the middle of a wrapped body, with more sections after it, is kept whole", () => {
     // Fence, text, fence, `## ` line could also be the wrapper's closing fence and a note whose code block holds a `## `
-    // line. A bare code block inside the body is far likelier, so the body reaches the PR whole, as PBI 291 made it.
+    // line. The fences here are spaced as a bare block's, so the body reaches the PR whole, as PBI 291 made it.
     const bodies = [
       "## Problem\n\nX.\n\n```\ncode\n```\n\n## Testing\n\nfoo",
       "## Problem\n\nX.\n\n```\ncode\n```\n\nMore text.\n\n## Testing\n\nfoo",
       `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`,
-      "## Problem\nx\n```\na\n```\n## What changes\ny",
     ];
     for (const body of bodies) {
       assert.deepEqual(cleanSummary(`Here:\n\n\`\`\`markdown\n${body}\n\`\`\``), { body }, body);
       assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body }, `${body} / note`);
+    }
+  });
+
+  test("a note whose bare code block holds a `## ` line is left out, after a fence spaced as the wrapper's end", () => {
+    const reply = "```markdown\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## not a heading\n```";
+    assert.deepEqual(cleanSummary(reply), { body: "## Problem\n\nX." });
+  });
+
+  test("a fence that could close the wrapper or open a bare block, with a `## ` line after either way, gives a finding unless spaced as one", () => {
+    // Text right before and right after the fences reads as a mid-body bare block or as the wrapper's end before a
+    // note whose code block holds a `## ` line. PBI 297 leans toward closing the wrapper, so this fails the attempt.
+    for (const reply of [
+      "```markdown\n## Problem\nx\n```\na\n```\n## What changes\ny\n```",
+      "```markdown\n## Problem\n\nX.\n\n```\n\nRun:\n\n```\n## not a heading\n```",
+    ]) {
+      const r = cleanSummary(reply);
+      assert.ok("finding" in r, reply);
+      assert.match(r.finding, /not clear where the PR body ends/);
     }
   });
 

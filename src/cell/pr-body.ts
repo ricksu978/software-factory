@@ -126,11 +126,12 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * Otherwise, when the line opening a block still leaves a balanced body that a later fence-only line closes, both
  * readings fit, and the spacing decides (see spacing). A line spaced as a closing fence closes the wrapper, so a note
  * after it is left out. A line spaced as an opening fence, whose block's own closing fence is spaced as one too, opens a
- * bare block inside the body, so the body reaches the PR whole as PBI 291 made it. When a `## ` heading outside a code
- * block follows only in the second reading, the bare block is taken however it's spaced: agents often leave the
- * language off a code block, and that's far likelier than a note whose code block holds a `## ` line. Any other line
- * that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of the
- * body or let a note in. A line that can't open a block that closes balanced closes the wrapper.
+ * bare block inside the body, so the body reaches the PR whole as PBI 291 made it. That holds when a `## ` heading
+ * outside a code block follows only in the second reading too: a mid-body bare block reads the same as the wrapper's
+ * end before a note whose code block holds a `## ` line, and PBI 297's AC 1 leans toward closing the wrapper, so the
+ * spacing decides there as well and no line is taken as a bare block just because a heading would follow. Any other
+ * line that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of
+ * the body or let a note in. A line that can't open a block that closes balanced closes the wrapper.
  */
 function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number | { ambiguous: number } {
   let inner: { char: string; len: number } | null = null;
@@ -143,13 +144,11 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
     if (closes(line, wrapper) && !opensBareBlock(lines, from, i, wrapper)) {
       const heading = hasHeading(lines.slice(i));
       if (!closesLater(lines, i, wrapper)) return heading ? { ambiguous: i } : i;
-      if (!heading) {
-        const look = spacing(lines, i);
-        if (look === "closing") return i;
-        const own = opening(line)!;
-        const end = lines.findIndex((l, j) => j > i && closes(l, own));
-        if (look !== "opening" || spacing(lines, end) !== "closing") return { ambiguous: i };
-      }
+      const look = spacing(lines, i);
+      if (look === "closing") return i;
+      const own = opening(line)!;
+      const end = lines.findIndex((l, j) => j > i && closes(l, own));
+      if (look !== "opening" || spacing(lines, end) !== "closing") return { ambiguous: i };
     }
     const o = opening(line);
     if (o) inner = o;
