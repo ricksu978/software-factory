@@ -464,7 +464,7 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("update override set created_at = now() - interval '6 minutes' where kind = 'restart'");
     const busy = await item("InProgress", "busy");
     await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
-    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell is wrapping up, with 9 minutes left/);
+    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. 9 minutes left in the wrap-up/);
     await db.pool.query("update item set state = 'Queued', lease_expires = null where id = $1", [busy.id]);
     const ready = (await get("/", "op")).html;
     assert.match(ready, /Ready to restart\. No cell is running/);

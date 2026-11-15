@@ -117,11 +117,17 @@ export type Restart = { minutesLeft: number; running: number; reason?: string };
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** Floor's line for a restart being prepared: a countdown while a cell still runs, then that it's safe to restart. */
+/**
+ * Floor's line for a restart being prepared (PBI 140, PBI 302): how many cells still run and the minutes left in the
+ * wrap-up, or that it has run out while a cell whose stop failed still runs. Once none runs, that it's safe to restart.
+ */
 function restartStatus(r: Restart): string {
   const why = r.reason ? ` Reason: ${escapeHtml(r.reason)}.` : "";
+  const left = r.minutesLeft > 0
+    ? `${plural(r.minutesLeft, "minute", "minutes")} left in the wrap-up.`
+    : `The wrap-up has run out, and the factory keeps trying to stop ${r.running === 1 ? "it" : "them"}.`;
   const text = r.running > 0
-    ? `Preparing to restart: ${plural(r.running, "cell is", "cells are")} wrapping up, with ${plural(r.minutesLeft, "minute", "minutes")} left before the factory stops ${r.running === 1 ? "it" : "them"}.`
+    ? `Preparing to restart: ${plural(r.running, "cell", "cells")} still running. ${left}`
     : "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker.";
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
 }
