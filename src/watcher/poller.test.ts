@@ -7,8 +7,8 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { NO_REVIEW_TEXT } from "../core/questions.ts";
-import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS } from "./poller.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
+import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -582,6 +582,50 @@ describe("pollOnce", dbTest, () => {
     await Promise.all([poll(), poll()]);
     assert.ok((await question(q)).answer);
     assert.equal((await requeues(id)).length, 1);
+  });
+
+  const greens = async (id: string) =>
+    (await db.pool.query<{ actor: string; payload: Record<string, unknown> }>("select actor, payload from event where item_id = $1 and kind = $2", [id, REQUEUED_FOR_GREEN])).rows;
+  const nextStage = async (id: string) => (await db.pool.query("select next_stage from run where item_id = $1", [id])).rows[0].next_stage;
+
+  test("an older \"Address failed\" question naming only CI failures is answered once, for Green, by the factory (PBI 317)", async () => {
+    const { id, q, pr } = await waiting("Address failed:\n- CI failed on m3rge01\n- CI failed on m3rge02, the PR addresser's fix");
+    await poll();
+    await poll();
+    const a = await question(q);
+    assert.equal(a.answer, CI_BACK_TO_GREEN);
+    assert.equal(a.answered_by, null);
+    assert.ok(a.answered_at);
+    const events = await greens(id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].actor, "system");
+    assert.deepEqual(events[0].payload, { questionId: q, prNumber: pr });
+    assert.equal(await nextStage(id), "green");
+  });
+
+  test("one naming something besides CI failures, a held item, or a person's answer keeps it as it was (PBI 317)", async () => {
+    const mixed = await waiting("Address failed:\n- CI failed on m3rge01\n- the locked scenario file \"a.feature\" changed");
+    const heldOne = await waiting("Address failed:\n- CI failed on m3rge01");
+    await db.pool.query("update item set held = true where id = $1", [heldOne.id]);
+    const answered = await waiting("Address failed:\n- CI failed on m3rge01");
+    await db.pool.query("update question set answer = 'Leave it', decision = 'answer', answered_at = now() where id = $1", [answered.q]);
+    await poll();
+    for (const w of [mixed, heldOne]) assert.equal((await question(w.q)).answer, null);
+    assert.equal((await question(answered.q)).answer, "Leave it");
+    for (const w of [mixed, heldOne, answered]) {
+      assert.equal((await greens(w.id)).length, 0);
+      assert.equal(await nextStage(w.id), "address");
+    }
+    await db.pool.query("update item set held = false where id = $1", [heldOne.id]);
+    await poll();
+    assert.equal((await question(heldOne.q)).answer, CI_BACK_TO_GREEN);
+  });
+
+  test("two polls at once answer an older CI-failed question and log its re-queue once (PBI 317)", async () => {
+    const { id, q } = await waiting("Address failed:\n- CI failed on m3rge01");
+    await Promise.all([poll(), poll()]);
+    assert.equal((await question(q)).answer, CI_BACK_TO_GREEN);
+    assert.equal((await greens(id)).length, 1);
   });
 
   test("an InProgress item with an open PR and a newer review stays InProgress", async () => {
