@@ -160,13 +160,21 @@ describe("issueRef", () => {
     assert.doesNotMatch(floor(null, false), /Prepare restart/);
   });
 
-  test("counts down the wrap-up while a cell still runs, and says it's ready once none does", () => {
-    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells are wrapping up, with 9 minutes left/);
-    assert.match(floor({ minutesLeft: 1, running: 1 }), /1 cell is wrapping up, with 1 minute left/);
+  test("counts the cells still running and the wrap-up's minutes, and says it's ready once none runs", () => {
+    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells still running\. 9 minutes left in the wrap-up\./);
+    assert.match(floor({ minutesLeft: 1, running: 1 }), /Preparing to restart: 1 cell still running\. 1 minute left in the wrap-up\./);
     const ready = floor({ minutesLeft: 9, running: 0 });
     assert.match(ready, /Ready to restart\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
     assert.doesNotMatch(ready, /Preparing to restart/);
     assert.doesNotMatch(floor(null), /restart\./);
+  });
+
+  // PBI 302: a cell whose stop failed once the wrap-up ran out still counts, with no minutes claimed and no "Ready".
+  test("says the wrap-up has run out while a cell whose stop failed still runs", () => {
+    const out = floor({ minutesLeft: 0, running: 1 });
+    assert.match(out, /Preparing to restart: 1 cell still running\. The wrap-up has run out/);
+    assert.doesNotMatch(out, /minutes? left/);
+    assert.doesNotMatch(out, /Ready to restart/);
   });
 
   test("links #N to its issue on GitHub when the repo is known", () => {
