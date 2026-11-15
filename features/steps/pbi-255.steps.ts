@@ -359,15 +359,13 @@ Given("the poller has run again", long, async function () {
 async function claim(world: object): Promise<void> {
   const mine = ctx(world);
   pollCtx(world).ranOther = "the scheduler's claim";
-  const before = mine.claims.length;
   const claimed = await withTx(pool(), (tx) => claimNext(tx, "scheduler", new Date()));
   mine.claims.push(claimed?.itemId ?? null);
-  assert.equal(mine.claims.length, before + 1, "the claim wasn't recorded");
+  // Every scenario that claims has an item queued to claim, so a claim that took none fails here.
+  assert.ok(claimed, "the scheduler claimed no item");
   // A claimed item is leased to the scheduler, so the claim really took it.
-  if (claimed) {
-    const r = await pool().query<{ state: string }>("select state from item where id = $1", [claimed.itemId]);
-    assert.equal(r.rows[0]?.state, "InProgress", `the claimed item is in state ${r.rows[0]?.state}, not InProgress`);
-  }
+  const r = await pool().query<{ state: string }>("select state from item where id = $1", [claimed.itemId]);
+  assert.equal(r.rows[0]?.state, "InProgress", `the claimed item is in state ${r.rows[0]?.state}, not InProgress`);
 }
 
 When("the scheduler claims the next item", long, async function () {

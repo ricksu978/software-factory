@@ -428,7 +428,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
     async checkRuns(repo, sha) {
       // ponytail: one page of 100 check runs, as checksOn reads; commit statuses aren't check runs, so they aren't listed.
       const runs = (await (await client()).request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...split(repo), ref: sha, per_page: 100 })).data.check_runs as { name: string; status: string; conclusion: string | null; html_url: string }[];
-      return runs.map((c): CheckRun => ({
+      // A cancelled run proves nothing either way: GitHub cancels a push's run when the next push to the branch starts
+      // under `concurrency: cancel-in-progress`. It reads as a check that didn't run, so a first parent whose run was
+      // cancelled doesn't count as having failed it, and a merge that failed the check there is charged with the break.
+      return runs.filter((c) => !(c.status === "completed" && c.conclusion === "cancelled")).map((c): CheckRun => ({
         name: c.name, url: c.html_url,
         status: c.status !== "completed" ? "pending" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure",
       }));

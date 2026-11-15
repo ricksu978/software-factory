@@ -217,7 +217,12 @@ Given("the factory holds two items in state {string}, checked against the repo's
 });
 
 When("the poller runs once", long, async function () {
-  await poll(ctx(this));
+  const c = ctx(this);
+  const before = c.polls;
+  await poll(c);
+  // A poll that failed, its afterPoll hook included, fails here, so no Then reads the state a broken poll left.
+  polled(c);
+  assert.equal(c.polls, before + 1, "the poller didn't run");
 });
 
 When("a person removes the item's {string} label on the board", async function (label: string) {
