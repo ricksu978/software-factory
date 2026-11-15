@@ -127,9 +127,11 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * readings fit, and the spacing decides (see spacing). A line spaced as a closing fence closes the wrapper, so a note
  * after it is left out. A line spaced as an opening fence, whose block's own closing fence is spaced as one too, opens a
  * bare block inside the body, so the body reaches the PR whole as PBI 291 made it. When a `## ` heading outside a code
- * block follows only in the second reading, a line spaced as a closing fence still closes the wrapper, so a note whose
- * code block holds a `## ` line is left out. Spaced any other way, it opens a bare block: agents often leave the
- * language off a code block, and a bare block before more sections is far likelier than such a note. Any other line
+ * block follows only in the second reading, a line spaced as a closing fence is returned as `ambiguous`: a bare block
+ * that starts with a blank line is spaced just like a wrapper's end before a note whose code block holds a `## ` line,
+ * and closing the wrapper there would silently drop the sections after that block. Spaced any other way, it opens a
+ * bare block: agents often leave the language off a code block, and a bare block before more sections is far likelier
+ * than such a note. Any other line
  * that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of the
  * body or let a note in. A line that can't open a block that closes balanced closes the wrapper.
  */
@@ -145,7 +147,7 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       const heading = hasHeading(lines.slice(i));
       if (!closesLater(lines, i, wrapper)) return heading ? { ambiguous: i } : i;
       const look = spacing(lines, i);
-      if (look === "closing") return i;
+      if (look === "closing") return heading ? { ambiguous: i } : i;
       if (!heading) {
         const own = opening(line)!;
         const end = lines.findIndex((l, j) => j > i && closes(l, own));

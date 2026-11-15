@@ -121,9 +121,18 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
-  test("a note whose bare code block holds a `## ` line is left out, after a fence spaced as the wrapper's end", () => {
-    const reply = "```markdown\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## not a heading\n```";
-    assert.deepEqual(cleanSummary(reply), { body: "## Problem\n\nX." });
+  test("a fence spaced as the wrapper's end, with a `## ` heading after it only as a bare block, gives a finding", () => {
+    // The first reply is a note whose bare code block holds a `## ` line. The second is a bare block that starts with a
+    // blank line, before another section. Both are spaced the same, so closing the wrapper there could silently drop
+    // the second one's code and `## How to check` section.
+    for (const reply of [
+      "```markdown\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## not a heading\n```",
+      "```markdown\n## Problem\nx\n## Fix\nRun:\n```\n\nnpm test\n```\n\n## How to check\ny\n```",
+    ]) {
+      const r = cleanSummary(reply);
+      assert.ok("finding" in r, reply);
+      assert.match(r.finding, /not clear where the PR body ends/);
+    }
   });
 
   test("a fence that could close the wrapper or open a bare block that never closes gives a finding", () => {
