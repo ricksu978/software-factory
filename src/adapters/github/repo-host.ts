@@ -296,7 +296,8 @@ async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: str
     const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : ArrayBuffer.isView(data) ? new TextDecoder().decode(data) : "";
     return failingTests(text);
   } catch (e) {
-    console.error(`reading the log of job ${jobId} failed, so its check names no failing test:`, e);
+    const why = (e as { status?: unknown })?.status === 403 ? " (the App needs `actions: read`; grant it and accept the new permission on the installation)" : "";
+    console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);
     return [];
   }
 }

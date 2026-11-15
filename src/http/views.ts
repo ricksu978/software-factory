@@ -154,9 +154,17 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
+/**
+ * A failed check's name, linked to its URL. POST /stage takes only https URLs under the run's repo, and any other
+ * stored URL shows the name as plain text, so a link a cell sent can't run script on the dashboard.
+ */
+const checkLink = (c: CiFailure["checks"][number]) => /^https:\/\//.test(c.url)
+  ? `<a href="${escapeHtml(c.url)}">${escapeHtml(c.name)}</a>`
+  : escapeHtml(c.name);
+
 /** The failed checks of a CI failure, each linked to its run, as in "ci and e2e". */
 const checkLinks = (f: CiFailure) => f.checks.length
-  ? f.checks.map((c) => `<a href="${escapeHtml(c.url)}">${escapeHtml(c.name)}</a>`).join(", ")
+  ? f.checks.map(checkLink).join(", ")
   : "no check the factory could read";
 
 /** Floor's Stage cell for an item fixing CI (PBI 292): that it is, the checks that failed and the commit, in place of "green". */
@@ -164,7 +172,7 @@ const fixingCiStage = (f: CiFailure) => `fixing CI <span class="muted">${checkLi
 
 /** Run detail's line for an item fixing CI (PBI 292): the commit and each failed check, with its URL and failing tests. */
 function fixingCiSection(f: CiFailure): string {
-  const items = f.checks.map((c) => `<li><a href="${escapeHtml(c.url)}">${escapeHtml(c.name)}</a> ${escapeHtml(c.url)}${c.failingTests.length
+  const items = f.checks.map((c) => `<li>${checkLink(c)} ${escapeHtml(c.url)}${c.failingTests.length
     ? `<ul>${c.failingTests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
     : ` <span class="muted">named no failing test</span>`}</li>`);
   return `<section id="fixing-ci" class="banner" role="status"><p>Fixing CI: Green is fixing the CI failure on commit <code>${shortSha(f.sha)}</code>. The checks that failed:</p>${

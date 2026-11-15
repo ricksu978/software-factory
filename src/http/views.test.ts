@@ -123,6 +123,20 @@ describe("floorPage", () => {
     assert.match(floor({ built: "aaa1111", restart: "bbb2222333" }), /A restart is needed to pick up main's commit <code>bbb2222<\/code>/);
   });
 
+  // PBI 292: a check URL comes from the cell, so Floor links only an https one and shows any other as plain text.
+  test("links a fixing-CI check only when its URL is https", () => {
+    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const row = { id: "i1", title: "Export", external_id: "1", repo: null, state: "InProgress", stage: "green", since: null, cost: "0", badges: [], message: null };
+    const ci_failure = { sha: "abc1234def", checks: [
+      { name: "ci", url: "https://github.com/acme/widgets/actions/runs/7201", failingTests: [] },
+      { name: "e2e", url: "javascript:alert(1)", failingTests: [] },
+    ] };
+    const html = floorPage({ ...empty, active: [{ ...row, ci_failure }] }, null);
+    assert.ok(html.includes('<a href="https://github.com/acme/widgets/actions/runs/7201">ci</a>'));
+    assert.ok(html.includes(", e2e failed on"));
+    assert.doesNotMatch(html, /javascript:/);
+  });
+
   // PBI 215: while an item waits on a question that blames the base, Floor says the base fails in cells.
   test("says the base fails in cells, with each blocked item, its base commit and failing tests, only while one waits", () => {
     const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
