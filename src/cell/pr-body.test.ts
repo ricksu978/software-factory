@@ -97,6 +97,14 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
   });
 
+  test("a bare code block inside the wrapper is kept when plain text follows it and no heading comes later", () => {
+    const body = "## Problem\n\nX.\n\n## What changes\n\nY.\n\n```\nnpm run lint\n```\n\nThen merge it.";
+    for (const open of ["```markdown", "```md", "```"]) {
+      assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\``), { body }, open);
+      assert.deepEqual(cleanSummary(`Sure.\n\n${open}\n${body}\n\`\`\`\n\nLet me know.`), { body }, `${open} with chatter`);
+    }
+  });
+
   test("the reply from #297's report ends at Fixed it.", () => {
     const body = "## Problem\n\nA stray fence.\n\n## What changes\n\nThe wrapper runs to its own fence.\n\nFixed it.";
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nNote: to check it yourself, run:\n\n\`\`\`\nnpm test -- src/cell/pr-body.test.ts\n\`\`\``), { body });

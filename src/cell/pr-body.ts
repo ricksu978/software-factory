@@ -104,8 +104,10 @@ function closes(line: string, o: { char: string; len: number }): boolean {
 /**
  * PBI 297: the line that closes the wrapper opened on line `from`, or -1. It's the first fence-only line that leaves no
  * code block inside the wrapper open. Such a line could open a bare code block inside the body instead, so it's taken as
- * one when a `## ` heading follows it, or when the block it would open closes just before another fence-only line that
- * would close the wrapper, as in a body that ends with a bare code block.
+ * one when a `## ` heading follows it, or when the block it would open closes and either its code starts on the very
+ * next line or it closes just before another fence-only line that would close the wrapper. A note after the wrapper
+ * starts after a blank line, while a bare code block's code starts right under its fence, so a body whose bare code
+ * block is followed by more text, with no heading after it, stays whole.
  */
 function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number {
   let inner: { char: string; len: number } | null = null;
@@ -128,6 +130,7 @@ function opensBareBlock(lines: string[], i: number, wrapper: { char: string; len
   const own = opening(lines[i]!)!;
   const end = lines.findIndex((l, j) => j > i && closes(l, own));
   if (end < 0) return false;
+  if (end > i + 1 && lines[i + 1]!.trim() !== "") return true;
   const next = lines.slice(end + 1).find((l) => l.trim() !== "");
   return next !== undefined && closes(next, wrapper);
 }
