@@ -4,7 +4,8 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-# Only fast-forwards, and only on main, so work on another branch is never touched.
+# Only fast-forwards, and only on main, so work on another branch is never touched. The AppHost runs the same pull and
+# Docker check itself (PBI 205, src/apphost/start.ts), but this script needs both first, to build the cell image below.
 $branch = git branch --show-current
 if ($branch -eq 'main') {
   git pull --ff-only
