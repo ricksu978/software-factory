@@ -38,7 +38,51 @@ export class StartStopped extends Error {
   override name = "StartStopped";
 }
 
+/** How often a start asks Docker again while it waits for Docker Desktop. */
+export const DOCKER_POLL_MS = 3_000;
+
 /** Runs the checks, then starts the resources. Throws StartStopped, having started nothing, when a check fails. */
-export async function startAppHost(_deps: StartDeps): Promise<void> {
-  // Red stub (PBI 205): no behaviour yet.
+export async function startAppHost(deps: StartDeps): Promise<void> {
+  pullMain(deps);
+  await ensureDocker(deps);
+  await deps.startResources();
+}
+
+/** Git's own words for a failed command, stderr first, as it printed them. */
+const gitSaid = (r: GitResult) => [r.stderr, r.stdout].map((s) => s.trim()).filter(Boolean).join("\n");
+
+/** On `main`, fast-forwards it from its upstream. On any other branch, or none, warns and touches nothing. */
+function pullMain(deps: StartDeps): void {
+  const current = deps.git(["branch", "--show-current"]);
+  if (current.status !== 0) throw new StartStopped(`git couldn't name the checkout's branch:\n${gitSaid(current)}`);
+  const branch = current.stdout.trim();
+  if (branch !== "main") {
+    deps.warn(branch
+      ? `On branch '${branch}', not 'main', so it runs as it is and pulls nothing.`
+      : "On no branch (a detached HEAD), not on 'main', so it runs as it is and pulls nothing.");
+    return;
+  }
+  // --ff-only: a main that has diverged, or local edits the pull would overwrite, fail the pull rather than merge.
+  const pull = deps.git(["pull", "--ff-only"]);
+  if (pull.status !== 0) {
+    const said = gitSaid(pull);
+    throw new StartStopped(`git pull --ff-only failed, so no resource started.${said ? `\n${said}` : ""}`);
+  }
+  const said = pull.stdout.trim();
+  if (said) deps.say(said);
+}
+
+/** When Docker doesn't answer, launches Docker Desktop and waits up to DOCKER_WAIT_MS for it. */
+async function ensureDocker(deps: StartDeps): Promise<void> {
+  if (await deps.dockerAnswers()) return;
+  const exe = deps.findDockerDesktop();
+  if (!exe) throw new StartStopped(DOCKER_NOT_INSTALLED);
+  deps.say("Starting Docker Desktop...");
+  deps.launch(exe);
+  const deadline = deps.now() + DOCKER_WAIT_MS;
+  do {
+    await deps.sleep(DOCKER_POLL_MS);
+    if (await deps.dockerAnswers()) return;
+  } while (deps.now() < deadline);
+  throw new StartStopped(DOCKER_TIMED_OUT);
 }
