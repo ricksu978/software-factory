@@ -163,4 +163,17 @@ describe("queue order", dbTest, () => {
       assert.deepEqual(await order(), i % 2 ? ["A", "D", "C", "B"] : ["A", "C", "D", "B"], `move ${i}`);
     }
   });
+  test("a moved item keeps its place when a board change shifts it and the items around it", async () => {
+    const a = await item("A", "Queued", 3);
+    const b = await item("B", "Queued", 4);
+    const c = await item("C", "Queued", 5);
+    await move(c, "up");
+    assert.deepEqual(await order(), ["A", "C", "B"]);
+    // A new issue goes to the top of the board, and every rank below it grows by one.
+    for (const [id, rank] of [[a, 4], [b, 5], [c, 6]] as const) await db.pool.query("update item set backlog_rank = $2 where id = $1", [id, rank]);
+    assert.deepEqual(await order(), ["A", "C", "B"]);
+    // An issue above them leaves the board, and every rank shrinks by two.
+    for (const [id, rank] of [[a, 2], [b, 3], [c, 4]] as const) await db.pool.query("update item set backlog_rank = $2 where id = $1", [id, rank]);
+    assert.deepEqual(await order(), ["A", "C", "B"]);
+  });
 });

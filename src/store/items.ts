@@ -98,11 +98,15 @@ const START_NOW = `exists (select from override o where ${activeOn("'start_now'"
 // board one. The board's own order is never touched, and a board poll leaves the move as it is. A key is a rank and a
 // tie: an unmoved item's rank is its board rank and its tie is its id read as a 128-bit number, so no two items' keys
 // are equal, even when two backlog sources both rank from 1. A move stores a key strictly between the two items it
-// lands between, its rank null when it lands among items with no board rank, which sort last.
+// lands between, its rank null when it lands among items with no board rank, which sort last. A moved item that has a
+// board rank keeps its rank as an offset from that board rank, so when a board change shifts it and the items around
+// it alike, it moves with them and keeps its moved place. One with no board rank keeps an absolute rank.
 const LATEST_MOVE = `(select o.value from override o where ${activeOn("'move_up', 'move_down'")} order by o.created_at desc, o.id desc limit 1)`;
 const ID_NUM = `((('x' || substr(replace(i.id::text, '-', ''), 1, 16))::bit(64)::bigint::numeric + 9223372036854775808) * 18446744073709551616
        + (('x' || substr(replace(i.id::text, '-', ''), 17, 16))::bit(64)::bigint::numeric + 9223372036854775808))`;
-const QUEUE_RANK = `(case when ${LATEST_MOVE} is null then i.backlog_rank else (${LATEST_MOVE}->>'rank')::numeric end)`;
+const QUEUE_RANK = `(case when ${LATEST_MOVE} is null then i.backlog_rank
+       when ${LATEST_MOVE} ? 'offset' then i.backlog_rank + (${LATEST_MOVE}->>'offset')::numeric
+       else (${LATEST_MOVE}->>'rank')::numeric end)`;
 const QUEUE_TIE = `coalesce((${LATEST_MOVE}->>'tie')::numeric, ${ID_NUM})`;
 // A SignOff or NeedsInput item whose question was answered, and that has no newer open one.
 const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
@@ -126,7 +130,8 @@ const CLAIMABLE = `from item i
  * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
  * ordered with: those with the same Start now, Queued or answered, and priority. The item's new queue key, strictly
  * between the two items it lands between even when their board ranks tie, is kept on the override, so it ends when the
- * override does. An item already at that end is logged
+ * override does. Its rank is kept as an offset from the item's board rank where it has one, so a board reorder that
+ * shifts the item and its neighbours alike leaves the moved order as it was. An item already at that end is logged
  * all the same and stays put. One that isn't in the queue throws.
  */
 export async function moveInQueue(
@@ -136,9 +141,9 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string }>(
+  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
     `select i.id, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority,
-       ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum
+       ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
      from item i where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
   const me = rows.find((r) => r.id === itemId);
@@ -151,9 +156,11 @@ export async function moveInQueue(
   const [before, after] = dir === "up" ? [group[at - 2], group[at - 1]] : [group[at + 1], group[at + 2]];
   const stays = dir === "up" ? at === 0 : at === last;
   const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
+  // Kept relative to the item's own board rank where it has one, so a board change that shifts it carries the move.
+  const value = key.rank !== null && me.board !== null ? { offset: decAdd(key.rank, `-${me.board}`.replace(/^--/, "")), tie: key.tie } : key;
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
-    [itemId, dir === "up" ? "move_up" : "move_down", key, o.reason.trim(), o.createdBy],
+    [itemId, dir === "up" ? "move_up" : "move_down", value, o.reason.trim(), o.createdBy],
   );
 }
 
