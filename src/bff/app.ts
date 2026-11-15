@@ -7,7 +7,7 @@
 //   GET  /auth/session   the signed-in browser's { issuer, subject }, or 401.
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { discover, exchangeCode, fetchKeys, isJwt, pkce, randomToken, verifyIdToken, type Discovery } from "./oidc.ts";
+import { discover, finishSignIn, isJwt, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
 import {
   hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type SessionStore,
 } from "./session.ts";
@@ -30,16 +30,15 @@ export type BffConfig = {
   fetch?: typeof fetch;
 };
 
-type SignIn = { state: string; nonce: string; verifier: string };
+type SignIn = SignInChecks;
 
 export function createBff(cfg: BffConfig): Hono {
-  const f = cfg.fetch ?? fetch;
   const origin = new URL(cfg.origin).origin;
   const secure = origin.startsWith("https:");
   const redirectUri = `${origin}/auth/callback`;
-  let discovery: Promise<Discovery> | undefined;
+  let discovery: Promise<Provider> | undefined;
   // Discovery is read on first use and kept, and read again after a failure, so the BFF starts without the provider.
-  const provider = () => (discovery ??= discover(cfg.issuer, f).catch((e) => { discovery = undefined; throw e; }));
+  const provider = () => (discovery ??= discover({ issuer: cfg.issuer, clientId: cfg.clientId, clientSecret: cfg.clientSecret, fetch: cfg.fetch }).catch((e) => { discovery = undefined; throw e; }));
 
   const clearSignIn = (c: Context) => deleteCookie(c, SIGNIN_COOKIE, { path: SIGNIN_PATH, secure, httpOnly: true, sameSite: "Lax" });
   const clearSession = (c: Context) => deleteCookie(c, SESSION_COOKIE, { path: "/", secure, httpOnly: true, sameSite: "Strict" });
@@ -51,14 +50,7 @@ export function createBff(cfg: BffConfig): Hono {
   const app = new Hono();
 
   app.get("/auth/login", async (c) => {
-    const d = await provider();
-    const { verifier, challenge } = pkce();
-    const s: SignIn = { state: randomToken(), nonce: randomToken(), verifier };
-    const to = new URL(d.authorizationEndpoint);
-    for (const [k, v] of Object.entries({
-      response_type: "code", client_id: cfg.clientId, redirect_uri: redirectUri, scope: cfg.scopes,
-      state: s.state, nonce: s.nonce, code_challenge: challenge, code_challenge_method: "S256",
-    })) to.searchParams.set(k, v);
+    const { checks: s, to } = await startSignIn(await provider(), redirectUri, cfg.scopes);
     setCookie(c, SIGNIN_COOKIE, seal(cfg.key, SIGNIN_COOKIE, JSON.stringify(s)), {
       path: SIGNIN_PATH, httpOnly: true, sameSite: "Lax", secure, maxAge: SIGNIN_SECONDS,
     });
@@ -77,7 +69,7 @@ export function createBff(cfg: BffConfig): Hono {
     if (!q.state || q.state !== s.state) return refuse(c, 400, "the state doesn't match the one sent");
     if (q.error) return refuse(c, 401, `the provider answered ${q.error}`);
     if (!q.code) return refuse(c, 400, "the provider sent no code");
-    let d: Discovery;
+    let d: Provider;
     try {
       d = await provider();
     } catch (e) {
@@ -85,29 +77,30 @@ export function createBff(cfg: BffConfig): Hono {
       clearSignIn(c);
       return c.text("Sign-in failed: the sign-in provider didn't answer", 502);
     }
-    if (q.iss !== undefined && q.iss !== d.issuer) return refuse(c, 400, "the response came from another issuer");
+    if (q.iss !== undefined && q.iss !== d.serverMetadata().issuer) return refuse(c, 400, "the response came from another issuer");
 
-    let tokens;
-    let claims;
+    // openid-client takes the redirect URI from the address it's given, so it gets the one the provider was sent.
+    const back = new URL(redirectUri);
+    back.search = new URL(c.req.url).search;
+    let tokens: SignedIn;
     try {
-      tokens = await exchangeCode(d, { code: q.code, verifier: s.verifier, redirectUri, clientId: cfg.clientId, clientSecret: cfg.clientSecret }, f);
-      claims = verifyIdToken(tokens.id_token, { keys: await fetchKeys(d, f), issuer: d.issuer, clientId: cfg.clientId, nonce: s.nonce });
+      tokens = await finishSignIn(d, back, s);
     } catch (e) {
       return refuse(c, 401, (e as Error).message);
     }
     // The API can only check JWTs (design §04), so a provider that issues opaque access tokens can't sign anyone in.
-    if (!isJwt(tokens.access_token)) return refuse(c, 401, "the provider's access token isn't a JWT");
+    if (!isJwt(tokens.accessToken)) return refuse(c, 401, "the provider's access token isn't a JWT");
 
     const id = newSessionId();
     const now = Date.now();
     try {
       await cfg.sessions.create({
         cookieHash: hashSessionId(id),
-        issuer: claims.iss,
-        subject: claims.sub,
-        accessToken: tokens.access_token,
-        accessTokenExpiresAt: new Date(now + (Number(tokens.expires_in) || 300) * 1000),
-        refreshTokenEncrypted: tokens.refresh_token ? seal(cfg.key, REFRESH_TOKEN, tokens.refresh_token) : null,
+        issuer: tokens.issuer,
+        subject: tokens.subject,
+        accessToken: tokens.accessToken,
+        accessTokenExpiresAt: new Date(now + (Number(tokens.expiresIn) || 300) * 1000),
+        refreshTokenEncrypted: tokens.refreshToken ? seal(cfg.key, REFRESH_TOKEN, tokens.refreshToken) : null,
         expiresAt: new Date(now + SESSION_MAX_SECONDS * 1000),
       });
     } catch (e) {

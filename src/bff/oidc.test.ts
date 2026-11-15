@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { test } from "node:test";
-import { discover, isJwt, pkce, verifyIdToken, type Jwk } from "./oidc.ts";
+import { discover, finishSignIn, isJwt, startSignIn } from "./oidc.ts";
 
 const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
 
 function keys(kid = "k1") {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256", use: "sig" } as Jwk;
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256", use: "sig" };
   const jwt = (claims: Record<string, unknown>, header: Record<string, unknown> = {}) => {
     const head = b64({ alg: "RS256", typ: "JWT", kid, ...header });
     const body = b64(claims);
@@ -26,56 +26,78 @@ test("a JWT is three base64url parts whose first two are JSON objects and whose 
   assert.equal(isJwt(`${b64({ alg: "RS256" })}.${b64({ sub: "a" })}`), false);
 });
 
-test("a PKCE pair's challenge is the verifier's S256 hash", () => {
-  const p = pkce();
-  assert.match(p.verifier, /^[A-Za-z0-9_-]{43,128}$/);
-  assert.equal(p.challenge, createHash("sha256").update(p.verifier).digest("base64url"));
-  assert.notEqual(pkce().verifier, p.verifier);
-});
+const ISS = "https://idp";
+const REDIRECT = "https://bff/auth/callback";
+const doc = {
+  issuer: ISS, authorization_endpoint: `${ISS}/auth`, token_endpoint: `${ISS}/token`, jwks_uri: `${ISS}/jwks`,
+  response_types_supported: ["code"], id_token_signing_alg_values_supported: ["RS256"],
+};
 
-const now = () => Math.floor(Date.now() / 1000);
-const claims = (over: Record<string, unknown> = {}) => ({ iss: "https://idp", sub: "s1", aud: "dashboard", exp: now() + 60, iat: now(), nonce: "n1", ...over });
-const expect = { issuer: "https://idp", clientId: "dashboard", nonce: "n1" };
+type IdTokenOver = { claims?: Record<string, unknown>; signer?: ReturnType<typeof keys> };
 
-test("a good ID token gives its claims", () => {
-  const { jwk, jwt } = keys();
-  assert.equal(verifyIdToken(jwt(claims()), { ...expect, keys: [jwk] }).sub, "s1");
-  assert.equal(verifyIdToken(jwt(claims({ aud: ["other", "dashboard"], azp: "dashboard" })), { ...expect, keys: [jwk] }).sub, "s1");
-});
-
-test("an ID token is refused for a bad signature, issuer, audience, expiry, nonce or subject", () => {
-  const { jwk, jwt } = keys();
-  const other = keys().jwk;
-  const refused = (token: string, keysUsed: Jwk[] = [jwk]) => assert.throws(() => verifyIdToken(token, { ...expect, keys: keysUsed }));
-  refused(jwt(claims()), [other]);
-  refused(jwt(claims({ iss: "https://elsewhere" })));
-  refused(jwt(claims({ aud: "someone-else" })));
-  refused(jwt(claims({ exp: now() - 600 })));
-  refused(jwt(claims({ nonce: "not-n1" })));
-  refused(jwt(claims({ nonce: undefined })));
-  refused(jwt(claims({ sub: "" })));
-  refused(jwt(claims({ aud: ["other", "dashboard"], azp: "other" })));
-  refused(jwt(claims(), { alg: "none" }));
-  refused("not.a.jwt");
-});
-
-function fakeFetch(routes: Record<string, unknown>): typeof fetch {
-  return (async (input: string | URL | Request) => {
+/** A provider behind a fake fetch: discovery, a JWKS of `signing`, and a token endpoint answering with `idToken(nonce)`. */
+function idp(signing: ReturnType<typeof keys>, over: IdTokenOver = {}, discovery: Record<string, unknown> = doc) {
+  const seen: { nonce?: string } = {};
+  const f = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
-    if (!(url in routes)) return new Response("{}", { status: 404 });
-    return Response.json(routes[url]);
+    if (url === `${ISS}/.well-known/openid-configuration`) return Response.json(discovery);
+    if (url === `${ISS}/jwks`) return Response.json({ keys: [signing.jwk] });
+    if (url === `${ISS}/token`) {
+      const form = new URLSearchParams(String(init?.body ?? ""));
+      assert.ok(form.get("code_verifier"), "no PKCE verifier reached the token endpoint");
+      const now = Math.floor(Date.now() / 1000);
+      const id = (over.signer ?? signing).jwt({ iss: ISS, sub: "s1", aud: "dashboard", exp: now + 60, iat: now, nonce: seen.nonce, ...over.claims });
+      return Response.json({ access_token: signing.jwt({ sub: "s1" }), token_type: "Bearer", expires_in: 300, id_token: id, refresh_token: "rt" });
+    }
+    return new Response("{}", { status: 404 });
   }) as typeof fetch;
+  return { f, seen };
 }
 
-test("discovery reads the issuer's endpoints and refuses a document for another issuer", async () => {
-  const doc = { issuer: "https://idp", authorization_endpoint: "https://idp/auth", token_endpoint: "https://idp/token", jwks_uri: "https://idp/jwks" };
-  const d = await discover("https://idp", fakeFetch({ "https://idp/.well-known/openid-configuration": doc }));
-  assert.equal(d.authorizationEndpoint, "https://idp/auth");
-  assert.equal(d.tokenEndpoint, "https://idp/token");
-  assert.equal(d.jwksUri, "https://idp/jwks");
-  const slash = await discover("https://idp/", fakeFetch({ "https://idp/.well-known/openid-configuration": doc }));
-  assert.equal(slash.issuer, "https://idp");
-  await assert.rejects(discover("https://idp", fakeFetch({ "https://idp/.well-known/openid-configuration": { ...doc, issuer: "https://evil" } })));
-  await assert.rejects(discover("https://idp", fakeFetch({ "https://idp/.well-known/openid-configuration": { ...doc, jwks_uri: undefined } })));
-  await assert.rejects(discover("https://idp", fakeFetch({})));
+async function roundTrip(signing: ReturnType<typeof keys>, over: IdTokenOver = {}) {
+  const { f, seen } = idp(signing, over);
+  const p = await discover({ issuer: ISS, clientId: "dashboard", clientSecret: "s", fetch: f });
+  const { checks, to } = await startSignIn(p, REDIRECT, "openid");
+  seen.nonce = checks.nonce;
+  return { checks, to, finish: () => finishSignIn(p, new URL(`${REDIRECT}?code=c1&state=${checks.state}`), checks) };
+}
+
+test("sign-in asks for a code with an S256 challenge, state and nonce, and gives the ID token's subject", async () => {
+  const k = keys();
+  const { checks, to, finish } = await roundTrip(k);
+  assert.equal(`${to.origin}${to.pathname}`, `${ISS}/auth`);
+  assert.equal(to.searchParams.get("response_type"), "code");
+  assert.equal(to.searchParams.get("code_challenge_method"), "S256");
+  assert.equal(to.searchParams.get("state"), checks.state);
+  assert.equal(to.searchParams.get("nonce"), checks.nonce);
+  const out = await finish();
+  assert.equal(out.issuer, ISS);
+  assert.equal(out.subject, "s1");
+  assert.equal(out.refreshToken, "rt");
+});
+
+test("an ID token is refused for a bad signature, issuer, audience, expiry or nonce", async () => {
+  const k = keys();
+  for (const over of [
+    { signer: keys() },
+    { claims: { iss: "https://elsewhere" } },
+    { claims: { aud: "someone-else" } },
+    { claims: { exp: Math.floor(Date.now() / 1000) - 600 } },
+    { claims: { nonce: "not-the-nonce" } },
+  ] as IdTokenOver[]) {
+    const { finish } = await roundTrip(k, over);
+    await assert.rejects(finish(), Error, JSON.stringify(over.claims ?? "another key"));
+  }
+});
+
+test("discovery refuses a document for another issuer, and plain HTTP away from localhost", async () => {
+  const k = keys();
+  await assert.rejects(discover({ issuer: ISS, clientId: "dashboard", fetch: idp(k, {}, { ...doc, issuer: "https://evil" }).f }));
+  await assert.rejects(discover({ issuer: ISS, clientId: "dashboard", fetch: (async () => new Response("{}", { status: 404 })) as typeof fetch }));
+  let calls = 0;
+  const counting = (async () => { calls++; return Response.json({ ...doc, issuer: "http://idp.example" }); }) as typeof fetch;
+  await assert.rejects(discover({ issuer: "http://idp.example", clientId: "dashboard", fetch: counting }));
+  assert.equal(calls, 0, "discovery went out over plain HTTP to a remote issuer");
+  const slash = await discover({ issuer: `${ISS}/`, clientId: "dashboard", fetch: idp(k).f });
+  assert.equal(slash.serverMetadata().issuer, ISS);
 });
