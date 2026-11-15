@@ -24,7 +24,14 @@ export type StageReport = {
   scenarioNotes?: string[];
   /** PBI 190: each time in this attempt the PR reviewer was asked to restate an answer, by round, with why it couldn't be read. */
   restates?: { round: number; reason: string }[];
+  /**
+   * PBI 292: set on a Green attempt that fixes a CI failure on one of the run's own commits: the commit CI failed on
+   * and each failed check, with its URL and the tests it names as failing. Floor and the item's page show it.
+   */
+  ciFailure?: CiFailure;
 };
+/** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
+export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
   /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */
@@ -44,9 +51,10 @@ export type CellApi = {
   pendingChecks?(sha: string): Promise<string[]>;
   /**
    * The checks CI named on one of the run's own commits, or null when none has reported there (PBI 229). A cell API
-   * without it judges every dod.md line by its command or the judge, as before.
+   * without it judges every dod.md line by its command or the judge, as before. With `on: "base"` it reads a commit on
+   * the base branch instead, as PBI 292 does to tell a CI failure the base shares from the item's own.
    */
-  ciChecks?(sha: string): Promise<CiCheck[] | null>;
+  ciChecks?(sha: string, on?: "base"): Promise<CiCheck[] | null>;
   /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
@@ -86,7 +94,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
       return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
     },
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
-    ciChecks: async (sha) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}`)).checks,
+    ciChecks: async (sha, on) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}${on ? `&on=${on}` : ""}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
       const res = await fetch(url, { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body });

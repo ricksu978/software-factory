@@ -1,5 +1,6 @@
 // The software factory's local platform (plan Task 2). `aspire run` from the repo root starts it.
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createBuilder, EndpointProperty, refExpr } from './.aspire/modules/aspire.mjs';
 
 const builder = await createBuilder();
@@ -117,6 +118,29 @@ const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withEnvironment('CELL_CONTROL_URL', cellControlUrl)
   .waitForCompletion(migrate, { exitCode: 0 });
 
+// The BFF (redesign step 7a, src/bff/main.ts): signs people in and keeps sessions in Postgres as factory_bff. It runs
+// on 7403 beside today's dashboard on 7400 until the cut-over moves it, and floats with the others under
+// FACTORY_FLOAT_PORTS. Under `aspire run` it signs in at the local Keycloak realm on 7430 through the realm's public
+// `dashboard` client, so it has no client secret there. Published, the issuer and the secret are parameters (§04).
+// The session key encrypts refresh tokens at rest: 32 random bytes in base64, such as `openssl rand -base64 32`.
+const bffSessionKey = await secret('bff-session-key');
+const bffIssuer = runMode ? 'http://localhost:7430/realms/factory' : await builder.addParameter('oidc-issuer');
+const bffClientSecret = runMode ? '' : await secret('oidc-client-secret');
+const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
+  .withNpm({ install: false })
+  .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7403, env: 'PORT' })
+  .withEnvironment('FACTORY_DB_URI', dbUri)
+  .withEnvironment('OIDC_ISSUER', bffIssuer)
+  .withEnvironment('OIDC_CLIENT_ID', 'dashboard')
+  .withEnvironment('OIDC_CLIENT_SECRET', bffClientSecret)
+  .withEnvironment('OIDC_SCOPES', 'openid')
+  .withEnvironment('BFF_SESSION_KEY', bffSessionKey)
+  .waitForCompletion(migrate, { exitCode: 0 });
+// The address the browser reaches the BFF on, built from its own endpoint so it follows the port.
+const bffPort = await bff.getEndpoint('http').property(EndpointProperty.Port);
+await bff.withEnvironment('BFF_ORIGIN', refExpr`http://localhost:${bffPort}`);
+if (keycloak) await bff.waitFor(keycloak);
+
 // The dev identity exists only under `aspire run`, so nothing published from this AppHost carries it.
 if (runMode) {
   for (const app of [migrate, control]) {
@@ -133,4 +157,19 @@ if (runMode) {
   await worker.withEnvironment('FACTORY_ENV', 'local');
 }
 
-await builder.build().run();
+// Before any resource starts, the AppHost pulls main fast-forward-only and brings Docker up (PBI 205,
+// src/apphost/start.ts), however it was launched, so control, the worker and migrate run the pulled code. A check that
+// fails shows why and exits before anything starts. A pull that changes this file takes effect on the next start.
+// `aspire publish` starts nothing, so it skips them. The path is a variable so this project's tsc, rooted here, doesn't
+// compile the repo's src; the AppHost's runtime loads the .ts file itself.
+// run() returns Aspire's PromiseLike, and runAppHostStart wants a Promise, so await it inside an async function.
+const build = async () => { await builder.build().run(); };
+if (runMode) {
+  const startModule = '../src/apphost/node-start.ts';
+  const { runAppHostStart } = (await import(startModule)) as {
+    runAppHostStart(repo: string, startResources: () => Promise<void>): Promise<void>;
+  };
+  await runAppHostStart(fileURLToPath(new URL('..', import.meta.url)), build);
+} else {
+  await build();
+}

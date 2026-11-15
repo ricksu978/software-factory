@@ -6,9 +6,11 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
 import type { ItemState } from "../core/states.ts";
+import type { CiFailure } from "../cell/api-client.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
-import { LEASE_RAN_OUT, nextUp } from "../store/items.ts";
+import { withTx } from "../store/db.ts";
+import { LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
@@ -35,7 +37,25 @@ export type DashboardDeps = {
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
-const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
+const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue", "start_now", "move_up", "move_down"];
+
+/**
+ * Which of PBI 265's selection overrides an item takes. Start now fits an item that can still be picked up: Eligible,
+ * NotReady, Queued, or waiting on a question that's been answered. Move up and Move down fit an item in the factory
+ * queue: Queued, or answered.
+ */
+async function selectable(pool: pg.Pool, id: string, state: string): Promise<{ startable: boolean; movable: boolean }> {
+  let answered = false;
+  if (state === "SignOff" || state === "NeedsInput") {
+    answered = (await pool.query(
+      `select from item i where i.id = $1
+         and exists (select from question q where q.item_id = i.id and q.answer is not null)
+         and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null)`, [id],
+    )).rowCount === 1;
+  }
+  const movable = state === "Queued" || answered;
+  return { startable: movable || state === "Eligible" || state === "NotReady", movable };
+}
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
 const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
@@ -106,13 +126,17 @@ async function floor(pool: pg.Pool) {
   )).rows;
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
+  // PBI 292: an item In progress whose run's newest attempt is a Green attempt sent back to fix a CI failure is fixing
+  // CI, with the commit CI failed on and the failed checks.
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
   // factory's own note on an attempt it closed (PBI 239) isn't an agent message, so Floor skips it; Run detail shows it.
   const active = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
-       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message
+       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message,
+       (select case when i.state = 'InProgress' and s.stage_id = 'green' then s.ci_failure end from stage_run s
+         where s.run_id = r.id order by s.started_at desc, s.attempt desc limit 1) as ci_failure
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
     [LEASE_RAN_OUT],
@@ -232,6 +256,17 @@ async function featuresAt(deps: DashboardDeps, fi: FactoryItem | null, sha: stri
   return out;
 }
 
+/**
+ * PBI 292: the CI failure the item is fixing, while it's In progress on an open run whose newest attempt is a Green
+ * attempt the cell reported as fixing one. Null otherwise.
+ */
+export function fixingCi(state: string, run: { open?: boolean } | null, stages: { stage_id: string; attempt: number; started_at?: Date; ci_failure?: CiFailure | null }[]): CiFailure | null {
+  if (state !== "InProgress" || !run?.open) return null;
+  const newest = stages.reduce<(typeof stages)[number] | null>((a, s) =>
+    !a || (s.started_at?.getTime() ?? 0) > (a.started_at?.getTime() ?? 0) || ((s.started_at?.getTime() ?? 0) === (a.started_at?.getTime() ?? 0) && s.attempt > a.attempt) ? s : a, null);
+  return newest?.stage_id === "green" ? newest.ci_failure ?? null : null;
+}
+
 async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
@@ -258,11 +293,21 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const scope = signing && fi?.body.trim() ? fi.body : null;
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
+  // An active Start now shows to anyone who opens the page (PBI 265).
+  const startNow = (await pool.query<{ reason: string; by: string | null }>(
+    `select o.reason, u.github_login as by from override o left join "user" u on u.id = o.created_by
+     where o.scope = 'item' and o.target_id = $1 and o.kind = 'start_now' and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+     order by o.created_at desc limit 1`, [id],
+  )).rows[0] ?? null;
   const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
-    controls: canOperate ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned" } : null,
+    fixingCi: fixingCi(item.state, run, stages),
+    controls: canOperate
+      ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
+      : null,
+    startNow,
     durations,
   };
 }
@@ -449,6 +494,22 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
           send(res, 409, "Only a Failed or Abandoned item can be re-queued.");
           return true;
         }
+        if (kind === "start_now" || kind === "move_up" || kind === "move_down") {
+          const can = await selectable(deps.pool, itemId, state);
+          if (kind === "start_now" ? !can.startable : !can.movable) {
+            send(res, 409, kind === "start_now"
+              ? "Only an Eligible, NotReady or Queued item, or one whose question was answered, can be started now."
+              : "Only an item in the factory queue, Queued or answered, can move up or down it.");
+            return true;
+          }
+        }
+      }
+      // A move takes its new rank from its neighbours in the queue, so it's worked out and logged in one go (PBI 265).
+      if (itemId && (kind === "move_up" || kind === "move_down")) {
+        await withTx(deps.pool, (c) => moveInQueue(c, itemId, kind === "move_up" ? "up" : "down", { reason: b.reason.trim(), createdBy: user.id }));
+        console.log(`override: ${identity.subject} set the ${kind} on item ${itemId}: ${JSON.stringify(b.reason.trim())}`);
+        send(res, 303, "", { location: `/items/${itemId}` });
+        return true;
       }
       // The scheduler applies it on its next tick, every 15 seconds, and /lease reads pause, kill, restart and stop_run directly.
       await setOverride(deps.pool, { scope: itemId ? "item" : "factory", targetId: itemId, kind, reason: b.reason.trim(), createdBy: user.id, expiresAt: null });

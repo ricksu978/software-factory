@@ -46,6 +46,28 @@ const NONE_AFTER_MS = 600_000;
 const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
+/**
+ * Reads a `/stage` report's `ciFailure` (PBI 292): the commit CI failed on and each failed check, with its URL and
+ * failing tests. Each string is cut to 500 characters, and at most 20 checks and 20 tests a check are kept.
+ * Floor and Run detail link each check's `url`, so it must be an https link under the run's repo on GitHub, or under
+ * `https://github.com/` for a run with no repo yet. An empty `url` means GitHub gave the check none, and the views show
+ * its name unlinked. Any other URL, a `javascript:` one included, gets 400, as a `prUrl` that differs from the one the
+ * factory builds does.
+ */
+export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; checks: { name: string; url: string; failingTests: string[] }[] } {
+  const base = repoUrl ? `${repoUrl.replace(/\/$/, "")}/` : "https://github.com/";
+  const f = v as { sha?: unknown; checks?: unknown } | null;
+  const isStr = (x: unknown): x is string => typeof x === "string";
+  if (!f || !isStr(f.sha) || !Array.isArray(f.checks)) throw new BadRequest("ciFailure must be { sha, checks }");
+  const checks = f.checks.map((c: { name?: unknown; url?: unknown; failingTests?: unknown }) => {
+    if (!isStr(c?.name) || !isStr(c?.url) || !(c.failingTests === undefined || (Array.isArray(c.failingTests) && c.failingTests.every(isStr)))) {
+      throw new BadRequest("each ciFailure check must be { name, url, failingTests }");
+    }
+    if (c.url !== "" && (!c.url.startsWith(base) || !/^https:\/\//.test(c.url))) throw new BadRequest(`each ciFailure check's url must start with ${base}`);
+    return { name: cut(c.name)!, url: cut(c.url)!, failingTests: ((c.failingTests ?? []) as string[]).slice(0, 20).map((t) => cut(t)!) };
+  });
+  return { sha: cut(f.sha)!, checks: checks.slice(0, 20) };
+}
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
 const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -319,9 +341,14 @@ const routes: Record<string, Route> = {
 
   // PBI 229: the checks CI named on one of the run's own commits, for a dod.md line's `ci:` check. A commit the cell
   // hasn't pushed, or one of main's, gets null, as a commit CI hasn't reported on does, so its line's command runs.
+  // PBI 292: with `on=base`, the checks on a commit of the base instead, and null for any other commit, so a cell can
+  // tell a CI failure the base shares from the item's own.
   "GET ci-checks": async (deps, { run, query }) => {
     const sha = shaOf(query);
-    if (await notOwnCommit(deps, run, sha)) return { checks: null };
+    const on = query.get("on");
+    if (on !== null && on !== "base") throw new BadRequest("on must be base");
+    const refused = on === "base" ? !(await deps.repoHost.onBranch(repoOf(run), BASE, sha)) : await notOwnCommit(deps, run, sha);
+    if (refused) return { checks: null };
     return { checks: await deps.repoHost.ciChecksOnSha(repoOf(run), sha) };
   },
 
@@ -337,19 +364,20 @@ const routes: Record<string, Route> = {
       && body.restates.every((r) => Number.isInteger(r?.round) && typeof r?.reason === "string")
       ? JSON.stringify(body.restates.map((r: { round: number; reason: string }) => ({ round: r.round, reason: cut(r.reason) })))
       : (() => { throw new BadRequest("restates must be a list of { round, reason }"); })();
+    const ciFailure = body.ciFailure === undefined ? null : JSON.stringify(ciFailureOf(body.ciFailure, run.repo_url));
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
-         message = coalesce($12, message), restates = coalesce($13::jsonb, restates)
+         message = coalesce($12, message), restates = coalesce($13::jsonb, restates), ci_failure = coalesce($14::jsonb, ci_failure)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'))`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb)`,
         values,
       );
     }

@@ -124,10 +124,20 @@ export function logTail(log: string): string {
 }
 
 /**
+ * The lines of one file a PR's diff covers on its new side, `from` to `to` inclusive, so a line comment on any of them
+ * is one GitHub can place (PBI 266). A file the PR doesn't change has no range.
+ */
+export type DiffRange = { path: string; from: number; to: number };
+
+/**
  * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
  * has reported nothing yet.
  */
-export type CiCheck = { name: string; conclusion: "success" | "failure" | "pending"; url: string };
+export type CiCheck = {
+  name: string; conclusion: "success" | "failure" | "pending"; url: string;
+  /** PBI 292: the tests a failed check names as failing, when its run reports them. Empty or absent when it names none. */
+  failingTests?: string[];
+};
 
 /** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */
 export type MergeState = "clean" | "blocked" | "behind" | "unstable" | "unknown" | "dirty" | "draft" | "has_hooks";
@@ -201,6 +211,12 @@ export interface RepoHost {
    * threads apart from the ones people open (PBI 128).
    */
   postReview(p: { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[] }): Promise<{ threads: OpenedThread[] }>;
+  /**
+   * The new-side line ranges of the PR's diff at `commitSha`, against the PR's base, which a line comment in a review
+   * at that commit must fall in (PBI 266). Null when the host can't give the whole diff, as GitHub can't past 300
+   * files, so the caller can't tell which lines it covers.
+   */
+  diffLines(repo: string, prNumber: number, commitSha: string): Promise<DiffRange[] | null>;
   /** Resolves one review thread by its id. Resolving a thread that's already resolved succeeds and changes nothing. */
   resolveThread(repo: string, threadId: string): Promise<void>;
   /** What decides a factory merge: GitHub's merge state, the head, the body and the approvers (PBI 181). */
