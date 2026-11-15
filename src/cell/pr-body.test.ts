@@ -97,11 +97,18 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
   });
 
-  test("a bare code block inside the wrapper is kept when plain text follows it and no heading comes later", () => {
-    const body = "## Problem\n\nX.\n\n## What changes\n\nY.\n\n```\nnpm run lint\n```\n\nThen merge it.";
+  test("a bare code block inside the wrapper followed by plain text and no heading closes the wrapper", () => {
+    const body = "## Problem\n\nX.\n\n## What changes\n\nY.";
     for (const open of ["```markdown", "```md", "```"]) {
-      assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\``), { body }, open);
-      assert.deepEqual(cleanSummary(`Sure.\n\n${open}\n${body}\n\`\`\`\n\nLet me know.`), { body }, `${open} with chatter`);
+      assert.deepEqual(cleanSummary(`${open}\n${body}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\nThen merge it.\n\`\`\``), { body }, open);
+      assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\`\nnpm run lint\n\`\`\`\n\nDone.\n\`\`\``), { body }, `${open} no blank`);
+    }
+  });
+
+  test("a blank line before the wrapper's closing fence and a note right under it leaves the note out", () => {
+    const body = "## Problem\n\nThe thing broke.\n\n## Change\n\nFixed it.";
+    for (const open of ["```markdown", "```md", "```"]) {
+      assert.deepEqual(cleanSummary(`${open}\n${body}\n\n\`\`\`\nI also ran:\n\`\`\`\nnpm test\n\`\`\``), { body }, open);
     }
   });
 
