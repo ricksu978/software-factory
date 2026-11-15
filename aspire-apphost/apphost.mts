@@ -139,7 +139,8 @@ if (runMode) {
 // fails shows why and exits before anything starts. A pull that changes this file takes effect on the next start.
 // `aspire publish` starts nothing, so it skips them. The path is a variable so this project's tsc, rooted here, doesn't
 // compile the repo's src; the AppHost's runtime loads the .ts file itself.
-const build = () => builder.build().run();
+// run() returns Aspire's PromiseLike, and runAppHostStart wants a Promise, so await it inside an async function.
+const build = async () => { await builder.build().run(); };
 if (runMode) {
   const startModule = '../src/apphost/node-start.ts';
   const { runAppHostStart } = (await import(startModule)) as {
