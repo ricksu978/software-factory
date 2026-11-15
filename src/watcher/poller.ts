@@ -373,6 +373,13 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 
 /** The kind of the event that logs a re-queue after CI passed on the base (PBI 260). */
 export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
+/**
+ * The kind of the event that logs a re-queue for address of an item that waited on "no trusted review text to
+ * address", once its PR conflicts with its base or a newer trusted review asks for changes (PBI 305). Its payload holds
+ * `questionId`, `prNumber`, `reason` ("conflict" or "review"), `base` for a conflict and `at`, the review's time, for a
+ * review.
+ */
+export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
