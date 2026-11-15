@@ -199,4 +199,5 @@ export interface RepoHost {
 }
 
 /** One check run on a commit (PBI 255). `pending` is one that hasn't finished. */
-export type CheckRun = { name: string; status: "pending" | "success" | "failure"; url: string };
+/** A check run on a commit. `cancelled`: it ended cancelled, as when a later push cancelled it, so it proves nothing either way. */
+export type CheckRun = { name: string; status: "pending" | "success" | "failure" | "cancelled"; url: string };

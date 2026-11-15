@@ -9,15 +9,17 @@ export type FailedCheck = { name: string; url: string; tests: string[] };
 /**
  * What CI on a red merge commit says against its first parent. `broke`: at least one check failed that the first parent
  * passed or never ran. `already red`: the first parent failed every check that failed. `undecided`: a failed check is
- * still running on the first parent. `no checks`: no check run failed, so there is nothing to compare, as with a CI
- * that reports only commit statuses.
+ * still running on the first parent. `cancelled`: no check run failed and at least one was cancelled, as when a later
+ * push to the branch cancelled it, so nothing failed to charge. `no checks`: no check run failed or was cancelled, so
+ * there is nothing to compare, as with a CI that reports only commit statuses. A check cancelled on the first parent
+ * counts as one that never ran there.
  */
-export type Comparison = { verdict: "broke" | "already red" | "undecided" | "no checks"; failed: CheckRun[] };
+export type Comparison = { verdict: "broke" | "already red" | "undecided" | "cancelled" | "no checks"; failed: CheckRun[] };
 
 export function compareWithParent(merge: CheckRun[], parent: CheckRun[]): Comparison {
   const failed = merge.filter((r) => r.status === "failure");
-  if (failed.length === 0) return { verdict: "no checks", failed };
-  const onParent = new Map(parent.map((r) => [r.name, r.status]));
+  if (failed.length === 0) return { verdict: merge.some((r) => r.status === "cancelled") ? "cancelled" : "no checks", failed };
+  const onParent = new Map(parent.filter((r) => r.status !== "cancelled").map((r) => [r.name, r.status]));
   if (failed.some((r) => (onParent.get(r.name) ?? "success") === "success")) return { verdict: "broke", failed };
   if (failed.some((r) => onParent.get(r.name) === "pending")) return { verdict: "undecided", failed };
   return { verdict: "already red", failed };

@@ -403,7 +403,7 @@ describe("githubRepoHost", () => {
     assert.equal(await stubGitHub({}).host.onBranch("o/r", "main", "abc"), false);
   });
 
-  test("checkRuns reads each check run's outcome and page, and a skipped or neutral one passes, and a cancelled one reads as not run (PBI 255)", async () => {
+  test("checkRuns reads each check run's outcome and page, and a skipped or neutral one passes, and a cancelled one reads as cancelled (PBI 255)", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
         { name: "test", status: "completed", conclusion: "failure", html_url: "u1" },
@@ -416,6 +416,7 @@ describe("githubRepoHost", () => {
     assert.deepEqual(await host.checkRuns("o/r", "abc"), [
       { name: "test", status: "failure", url: "u1" }, { name: "lint", status: "success", url: "u2" },
       { name: "bdd", status: "pending", url: "u3" }, { name: "build", status: "failure", url: "u4" },
+      { name: "e2e", status: "cancelled", url: "u5" },
     ]);
   });
 

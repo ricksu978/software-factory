@@ -55,7 +55,7 @@ describe("failingTests (PBI 255)", () => {
 });
 
 describe("compareWithParent (PBI 255)", () => {
-  const run = (name: string, status: "success" | "failure" | "pending") => ({ name, status, url: `u/${name}` });
+  const run = (name: string, status: "success" | "failure" | "pending" | "cancelled") => ({ name, status, url: `u/${name}` });
 
   test("a merge that fails a check its first parent passed broke main, and every failed check is listed", () => {
     const got = compareWithParent([run("test", "failure"), run("lint", "failure"), run("bdd", "success")], [run("test", "success"), run("lint", "failure")]);
@@ -73,6 +73,14 @@ describe("compareWithParent (PBI 255)", () => {
 
   test("a check still running on the first parent leaves it undecided", () => {
     assert.equal(compareWithParent([run("test", "failure")], [run("test", "pending")]).verdict, "undecided");
+  });
+
+  test("a check cancelled on the first parent counts as never run there, so the merge broke main", () => {
+    assert.equal(compareWithParent([run("test", "failure")], [run("test", "cancelled")]).verdict, "broke");
+  });
+
+  test("a merge whose only unpassed runs were cancelled failed nothing, so it reads as cancelled", () => {
+    assert.equal(compareWithParent([run("test", "cancelled"), run("lint", "success")], [run("test", "failure")]).verdict, "cancelled");
   });
 
   test("with no failed check run, nothing can be compared", () => {

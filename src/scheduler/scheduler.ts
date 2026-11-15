@@ -395,6 +395,15 @@ async function settleMerges(d: MergedCiDeps, status: Status) {
       const cmp = compareWithParent(await d.repoHost.checkRuns(repo, row.merge_sha), parentRuns);
       // A failed check still running on the first parent can't be compared yet. After an hour it counts as passed there.
       if (cmp.verdict === "undecided" && !late) return;
+      if (cmp.verdict === "cancelled") {
+        // No check failed on the merge: its only unpassed runs were cancelled, as when a later merge's push cancelled
+        // them under `cancel-in-progress`. It broke nothing, so it isn't charged and no break is recorded. It waits on
+        // main like a merge onto a main already red, and is Done once CI passes on a later main commit that contains it.
+        await d.pool.query("update run set waits_on_branch = $2 where id = $1", [row.run_id, BASE]);
+        const body = `CI on ${BASE} for the merge commit ${row.merge_sha} was cancelled before it finished, as when a later push to ${BASE} cancels it, and no check failed. The item stays Accepted and waits on ${BASE}, and it's Done once CI passes on a later ${BASE} commit.`;
+        await isolated(`commenting the wait on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci-wait:${row.merge_sha}`));
+        return;
+      }
       if (cmp.verdict === "already red") {
         // The bug item of a standing break is the fix for main. Its merge leaving main red fails it, rather than parking
         // the one item that can make main green behind itself. No new break is recorded, so no second bug item is filed.
