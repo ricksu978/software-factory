@@ -2,14 +2,52 @@
 // It signs people in at OIDC_ISSUER with the authorization code flow and PKCE, keeps sessions in Postgres as
 // factory_bff, and answers on PORT, or 7403 until the cut-over.
 // Settings: FACTORY_DB_URI, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_SCOPES, BFF_SESSION_KEY, PORT and
-// BFF_ORIGIN, the address the browser reaches it on.
-// Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, and GET /auth/session, which answers the signed-in
-// browser's { issuer, subject } or 401.
-// Not built yet: this stub only listens, and answers 404 to everything.
-import { createServer } from "node:http";
+// BFF_ORIGIN, the address the browser reaches it on. It refuses to start without a usable BFF_SESSION_KEY.
+// Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, and GET /auth/session (src/bff/app.ts).
+// Forwarding the dashboard's calls to the API and the webhook pass-through come in later steps.
+import { serve } from "@hono/node-server";
+import { createPool } from "../store/db.ts";
+import { createBff } from "./app.ts";
+import { pgSessions } from "./session.ts";
+import { readSettings, type BffSettings } from "./settings.ts";
 
-/** The BFF's port when PORT doesn't set one, until the cut-over moves it to 7400 (design §10). */
-export const BFF_PORT = 7403;
+export { BFF_PORT } from "./settings.ts";
 
-const server = createServer((_req, res) => res.writeHead(404).end());
-server.listen(process.env.PORT ? Number(process.env.PORT) : 0);
+/** The role the BFF works in Postgres as. It reaches session and nothing else (design §08). */
+export const BFF_DB_ROLE = "factory_bff";
+
+let settings: BffSettings;
+try {
+  settings = readSettings(process.env);
+} catch (e) {
+  console.error(`the BFF can't start: ${(e as Error).message}`);
+  process.exit(1);
+}
+
+// Whatever login FACTORY_DB_URI or the managed identity carries, every connection switches to factory_bff before its
+// first query. The client runs queries in order, so nothing the BFF sends can go ahead of the switch.
+const pool = createPool(settings.dbUri);
+pool.on("connect", (client) => {
+  client.query(`set role ${BFF_DB_ROLE}`).catch((e: Error) => console.error(`the BFF couldn't work as ${BFF_DB_ROLE}:`, e.message));
+});
+
+const app = createBff({
+  issuer: settings.issuer,
+  clientId: settings.clientId,
+  clientSecret: settings.clientSecret,
+  scopes: settings.scopes,
+  origin: settings.origin,
+  key: settings.key,
+  sessions: pgSessions(pool),
+});
+
+const server = serve({ fetch: app.fetch, port: settings.port }, (info) => {
+  console.log(`the BFF is listening on port ${info.port}, for ${settings.origin}, signing in at ${settings.issuer}`);
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    server.close();
+    void pool.end().finally(() => process.exit(0));
+  });
+}
