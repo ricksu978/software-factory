@@ -1,12 +1,15 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, type CheckRun, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
- * last cursor. It has no webhooks, so parseWebhook ignores everything.
+ * last cursor. It has no webhooks, so parseWebhook ignores everything. Each item fileItem files is listed in `filed`,
+ * by external id, once, so a test can read what the factory filed (PBI 255).
  */
-export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void } {
+export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void; filed: string[] } {
   const items = new Map<string, FactoryItem & { seq: number }>();
+  const filed: string[] = [];
+  const filedByKey = new Map<string, string>();
   const comments = new Map<string, { body: string; key: string }[]>();
   const dependencies = new Map<string, string[]>();
   let seq = 0;
@@ -81,10 +84,23 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
           i.closed = true;
         });
       },
+      async fileItem({ title, body, labels, repo }, key) {
+        const known = filedByKey.get(key);
+        if (known) return known;
+        const externalId = autoId();
+        items.set(externalId, {
+          sourceId: "fake", externalId, title, body, acceptanceCriteria: [], labels: [...new Set([...labels, OPT_IN_LABEL])], status: "Backlog", rank: items.size + 1,
+          repo, fields: {}, closed: false, updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(), seq: ++seq,
+        });
+        filedByKey.set(key, externalId);
+        filed.push(externalId);
+        return externalId;
+      },
       parseWebhook() {
         return { kind: "ignored" };
       },
     },
+    filed,
     async seed(partial) {
       // Seeding an explicit id that exists replaces that item, which is how a test edits one.
       const externalId = partial.externalId ?? autoId();
@@ -133,6 +149,8 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
  * `factory[bot]` in `reviewComments`, which postReview returns. diffLines answers from `diffs`, by `repo#number@sha`, and
  * with null for a commit it holds no diff for, as GitHub's does when it can't give the whole diff (PBI 266).
+ * PBI 255: each commit's check runs by `repo@sha` in `runs`, a check's log by `repo@sha:check` in `logs`, and each
+ * commit's first parent by `repo@sha` in `parents`.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
@@ -149,6 +167,9 @@ export function fakeRepoHost(): RepoHost & {
   resolvedThreads: { repo: string; threadId: string }[];
   diffs: Map<string, DiffRange[]>;
   mergeCalls: MergeCall[];
+  runs: Map<string, CheckRun[]>;
+  logs: Map<string, string>;
+  parents: Map<string, string>;
   /** The permissions the App lacks, by repo (PBI 264). A repo not here lacks none. */
   permissionsMissing: Map<string, string[]>;
 } {
@@ -166,6 +187,9 @@ export function fakeRepoHost(): RepoHost & {
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
   const reviewComments = new Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>();
+  const runs = new Map<string, CheckRun[]>();
+  const logs = new Map<string, string>();
+  const parents = new Map<string, string>();
   const pr = (repo: string, n: number) => {
     const found = prs.find((p) => p.repo === repo && p.number === n);
     if (!found) throw new Error(`no PR ${repo}#${n}`);
@@ -175,7 +199,7 @@ export function fakeRepoHost(): RepoHost & {
 
   return {
     prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
-    mergeCalls, permissionsMissing,
+    mergeCalls, runs, logs, parents, permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -298,6 +322,15 @@ export function fakeRepoHost(): RepoHost & {
       if (refusal !== null) return { merged: false, reason: refusal };
       Object.assign(p, { open: false, merged: true, mergeSha: p.mergeAs ?? `merge-${n}` });
       return { merged: true, sha: p.mergeSha! };
+    },
+    async checkRuns(repo, sha) {
+      return structuredClone(runs.get(`${repo}@${sha}`) ?? []);
+    },
+    async checkLog(repo, sha, check) {
+      return logs.get(`${repo}@${sha}:${check}`) ?? null;
+    },
+    async firstParent(repo, sha) {
+      return parents.get(`${repo}@${sha}`) ?? null;
     },
   };
 }

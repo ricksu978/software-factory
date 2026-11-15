@@ -148,6 +148,17 @@ describe("floorPage", () => {
     assert.ok(notice.includes("parses &lt;the&gt; config"));
     assert.doesNotMatch(floorPage(empty, null), /base-fails|base fails in cells/i);
   });
+
+  // PBI 255: a break no factory merge made, recorded when an item merged onto a main already red, has no bug item.
+  test("says main is red at a commit the factory didn't merge, without promising a bug item or a fix", () => {
+    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const html = floorPage({ ...empty, mainBreaks: [{ branch: "main", sha: "p4r3nt1aaaa", repo: "acme/widgets", pr_number: null, charged: null, bug_external_id: null, bug_id: null, bug_title: null, bug_state: null }] }, null);
+    const notice = /<section id="main-red"[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
+    assert.match(notice, /main<\/code> is red/);
+    assert.match(notice, /p4r3nt1/);
+    assert.match(notice, /filed no bug item/);
+    assert.doesNotMatch(notice, /fixes it before|filing its bug item|broke/);
+  });
 });
 
 describe("issueRef", () => {

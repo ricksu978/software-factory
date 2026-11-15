@@ -112,11 +112,14 @@ const QUEUE_TIE = `coalesce((${LATEST_MOVE}->>'tie')::numeric, ${ID_NUM})`;
 const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
            and exists (select from question q where q.item_id = i.id and q.answer is not null)
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))`;
-const ORDER = `order by ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
+// The bug item of a break on main that still stands (PBI 255), ahead of everything else, Start now included.
+const MAIN_BREAK_BUG = `exists (select from main_break b where b.bug_item_id = i.id and b.cleared_at is null)`;
+const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
 
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
-// `resumeOnly`, the waiting-count brake. None of the overrides above gets an item past a hold, an open blocker or the
-// readiness gate: they only order the items that are claimable anyway.
+// `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
+// main before it builds anything else (PBI 255). None of the overrides above gets an item past a hold, an open blocker
+// or the readiness gate: they only order the items that are claimable anyway.
 const CLAIMABLE = `from item i
      where not i.held and cardinality(i.blocked_by) = 0
        and ((i.state = 'Queued'
@@ -128,11 +131,11 @@ const CLAIMABLE = `from item i
  * Moves an item one place up or down the factory queue (PBI 265) and logs it as a move_up or move_down override with
  * the person and the reason. The queue here is every Queued or answered item in the claim order, held and blocked ones
  * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
- * ordered with: those with the same Start now, Queued or answered, and priority. The item's new queue key, strictly
- * between the two items it lands between even when their board ranks tie, is kept on the override, so it ends when the
- * override does. Its rank is kept as an offset from the item's board rank where it has one, so a board reorder that
- * shifts the item and its neighbours alike leaves the moved order as it was. An item already at that end is logged
- * all the same and stays put. One that isn't in the queue throws.
+ * ordered with: those that match it on being a standing break's bug item, Start now, Queued or answered, and priority.
+ * The item's new queue key, strictly between the two items it lands between even when their board ranks tie, is kept
+ * on the override, so it ends when the override does. Its rank is kept as an offset from the item's board rank where it
+ * has one, so a board reorder that shifts the item and its neighbours alike leaves the moved order as it was. An item
+ * already at that end is logged all the same and stays put. One that isn't in the queue throws.
  */
 export async function moveInQueue(
   c: pg.PoolClient, itemId: string, dir: "up" | "down", o: { reason: string; createdBy: string },
@@ -141,14 +144,14 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
-    `select i.id, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority,
+  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
+    `select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority,
        ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
      from item i where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
   const me = rows.find((r) => r.id === itemId);
   if (!me) throw new Error(`item ${itemId} isn't in the factory queue`);
-  const group = rows.filter((r) => r.first === me.first && r.queued === me.queued && r.priority === me.priority);
+  const group = rows.filter((r) => r.bug === me.bug && r.first === me.first && r.queued === me.queued && r.priority === me.priority);
   const at = group.indexOf(me);
   const last = group.length - 1;
   // The two items the move lands between, either of them missing at an end of the queue. An item already at the end
@@ -223,9 +226,10 @@ export async function nextUp(
 }
 
 /**
- * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. An item marked Start now comes first,
- * then answered SignOff and NeedsInput items before Queued ones, then highest priority, then lowest queue rank: the
- * latest Move up or Move down's, or else the backlog rank (PBI 265). Held items and items with an open
+ * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. The bug item of a standing break on main
+ * comes first (PBI 255), then an item marked Start now, then answered SignOff and NeedsInput items before Queued ones,
+ * then highest priority, then lowest queue rank: the latest Move up or Move down's, or else the backlog rank (PBI 265).
+ * Held items and items with an open
  * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
  * With `resumeOnly`, the waiting-count brake is on, so a Queued item counts only when its open run already has a

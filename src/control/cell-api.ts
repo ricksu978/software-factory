@@ -69,7 +69,7 @@ export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; 
   return { sha: cut(f.sha)!, checks: checks.slice(0, 20) };
 }
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
-const BASE = "main";
+export const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
