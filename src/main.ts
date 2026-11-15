@@ -29,6 +29,19 @@ import { handleWebhook } from "./watcher/webhook.ts";
 /** `file`, when set, files each valid split on this board as child issues (PBI 144). */
 export type Source = { id: string; adapter: BacklogAdapter; file?: FileSplitDeps };
 
+/**
+ * The dashboard's origin as a browser sees it, which every dashboard POST must carry. Under Aspire, PORT is the port
+ * behind Aspire's proxy, not the one the browser uses, so the AppHost passes the proxied address as DASHBOARD_ORIGIN.
+ * Without it the origin falls back to PORT.
+ * ponytail: PBI 89's locked scenario still expects the link from CELL_CONTROL_URL alone, so the last fallback is its
+ * port. Drop it once that scenario sets PORT.
+ */
+export function dashboardOrigin(env: Record<string, string | undefined>): string {
+  if (env.DASHBOARD_ORIGIN) return env.DASHBOARD_ORIGIN.replace(/\/+$/, "");
+  const port = env.PORT || new URL(env.CELL_CONTROL_URL ?? "http://localhost:7400").port || "80";
+  return `http://localhost:${port}`;
+}
+
 export type ControlDeps = {
   pool: pg.Pool;
   local: boolean;
@@ -161,10 +174,7 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
   }
   // The control plane listens only on PORT, which Aspire sets from the control resource's endpoint. CELL_CONTROL_URL
   // names the cell API's port, another service's since redesign step 4a, so it never picks the port this listens on.
-  // ponytail: PBI 89's locked scenario still expects the link from CELL_CONTROL_URL alone, so the link falls back to
-  // its port and is logged before the PORT check. Drop the fallback once that scenario sets PORT.
-  const linkPort = env.PORT || new URL(env.CELL_CONTROL_URL ?? "http://localhost:7400").port || "80";
-  const origin = `http://localhost:${linkPort}`;
+  const origin = dashboardOrigin(env);
   const auth = createAuth({ mode: "local", devLogin: env.FACTORY_DEV_LOGIN });
   console.log(`Sign in to the factory dashboard: ${origin}/dev-login?token=${auth.devToken}`);
   if (!env.PORT) throw new Error("PORT is not set: the control plane takes its own port from PORT, not from CELL_CONTROL_URL");
