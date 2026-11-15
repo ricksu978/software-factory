@@ -1115,6 +1115,27 @@ describe("runCell", () => {
     assert.equal(started("green").length, 0);
   });
 
+  test("an address retry that only replies on the head CI failed on posts that attempt's replies before going back to Green", async () => {
+    let addresses = 0;
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [{ threadId: "T1", path: "app.txt", line: 1, author: "owner", body: "rename" }] },
+      script: (a) => {
+        if (a.agent !== "factory-pr-addresser") return;
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)![1];
+        if (++addresses === 1) {
+          writeFileSync(join(a.cwd, "app.txt"), "fix 1\n");
+          git(a.cwd, "commit", "-qam", "fix 1");
+          appendFileSync(file, JSON.stringify({ threadId: "T1", body: "renamed" }) + "\n");
+        } else appendFileSync(file, JSON.stringify({ threadId: "T1", body: "the rename stands; CI's failure is elsewhere" }) + "\n");
+      } });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), "failure");
+    await h.run();
+    const started = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started");
+    assert.equal(started("address").length, 2);
+    assert.ok(started("green").length >= 1);
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/replyToThread").map((c) => c.body),
+      [{ threadId: "T1", body: "the rename stands; CI's failure is elsewhere" }]);
+  });
+
   // PBI 292: Green that leaves the commit CI failed on unchanged has given CI nothing new to judge, so the factory asks.
   test("a Green pass that leaves the commit CI failed on unchanged asks a person instead of reading CI on it again", async () => {
     const reads: string[] = [];

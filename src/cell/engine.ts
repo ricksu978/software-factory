@@ -1248,6 +1248,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await push();
       const head = await git.head();
       const agentChanged = head !== before;
+      // This attempt's replies are read before anything returns, so the replies posted are always the last attempt's.
+      replies = existsSync(replyFile)
+        ? jsonLines(await readFile(replyFile, "utf8")).filter((r): r is { threadId: string; body: string } =>
+          typeof r.threadId === "string" && typeof r.body === "string" && byThread.has(r.threadId))
+        : [];
       // A retry that left the head CI failed on as it was goes back to Green, without reading CI on it again.
       const failedBefore = failedHeads.get(head);
       if (failedBefore) {
@@ -1256,10 +1261,6 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       }
       const ci = await readCi(head);
       if (ci === "none") throw new Blocked("no CI ran on the PR");
-      replies = existsSync(replyFile)
-        ? jsonLines(await readFile(replyFile, "utf8")).filter((r): r is { threadId: string; body: string } =>
-          typeof r.threadId === "string" && typeof r.body === "string" && byThread.has(r.threadId))
-        : [];
       if (ci === "failure") {
         const f = await ciFailed(head);
         if (agentChanged) return ciFindings(f, "the PR addresser's fix");
