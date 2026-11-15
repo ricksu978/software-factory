@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type CheckRun, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, type CheckRun, type FailedCheck, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -139,7 +139,7 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
 
 /**
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
- * `repo@sha`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
+ * `repo@sha` and their failed checks' detail in `failedChecks`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
  * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
  * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS. A review that
@@ -155,6 +155,7 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
+  failedChecks: Map<string, FailedCheck[]>;
   /** The names of the checks still pending, by `repo@sha`. A sha with none set has none pending. */
   pendingChecks: Map<string, string[]>;
   /** The named checks CI reported, by `repo@sha` (PBI 229). */
@@ -181,6 +182,7 @@ export function fakeRepoHost(): RepoHost & {
   let openedThreads = 0;
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
+  const failedChecks = new Map<string, FailedCheck[]>();
   const pendingChecks = new Map<string, string[]>();
   const ciChecks = new Map<string, CiCheck[]>();
   const files = new Map<string, string>();
@@ -198,7 +200,7 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
+    prs, checks, failedChecks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
     mergeCalls, runs, logs, parents, permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
@@ -225,6 +227,9 @@ export function fakeRepoHost(): RepoHost & {
     },
     async checksOnSha(repo, sha) {
       return checks.get(`${repo}@${sha}`) ?? "none";
+    },
+    async failedChecksOnSha(repo, sha) {
+      return failedChecks.get(`${repo}@${sha}`) ?? [];
     },
     async pendingChecksOnSha(repo, sha) {
       return [...(pendingChecks.get(`${repo}@${sha}`) ?? [])];

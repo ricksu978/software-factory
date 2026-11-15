@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../fake.ts";
-import { botKey, loginKey, standingSummaries, type Review } from "../types.ts";
+import { botKey, FAILED_LOG_CHARS, FAILED_LOG_LINE_CHARS, LOGGED_CHECKS, logTail, loginKey, standingSummaries, type Review } from "../types.ts";
 import { cellRepoHost, githubRepoHost, hunkRanges, ownersOf, type GitHubClient } from "./repo-host.ts";
 
 type Call = { route: string; params: Record<string, any> };
@@ -343,6 +343,48 @@ describe("githubRepoHost", () => {
     }
   });
 
+  test("failedChecksOnSha names each failed run with its URL and the last 100 lines of its job's log, or null when the log can't be read", async () => {
+    const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`);
+    const runs = [
+      { id: 1, name: "build", status: "completed", conclusion: "success", html_url: "https://ci/1" },
+      { id: 2, name: "unit", status: "completed", conclusion: "failure", html_url: "https://ci/2" },
+      { id: 3, name: "lint", status: "completed", conclusion: "timed_out", html_url: null, details_url: "https://ci/3" },
+      { id: 4, name: "deploy", status: "completed", conclusion: "cancelled", html_url: "https://ci/4" },
+      { id: 5, name: "e2e", status: "in_progress", conclusion: null, html_url: "https://ci/5" },
+      { id: 6, name: "docs", status: "completed", conclusion: "neutral", html_url: "https://ci/6" },
+      { id: 7, name: "types", status: "completed", conclusion: "failure", html_url: "https://ci/7" },
+    ];
+    const logs: Record<number, string | ArrayBuffer | Uint8Array> = {
+      2: lines(250).join("\n") + "\n",
+      3: new TextEncoder().encode(lines(12).join("\r\n")).buffer as ArrayBuffer,
+      7: Buffer.from(lines(3).join("\n")),
+    };
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => logs[p.job_id] ?? (() => { throw Object.assign(new Error("404"), { status: 404 }); })(),
+    });
+    assert.deepEqual(await host.failedChecksOnSha("o/r", "abc"), [
+      { name: "unit", url: "https://ci/2", log: lines(250).slice(150).join("\n") },
+      { name: "lint", url: "https://ci/3", log: lines(12).join("\n") },
+      { name: "deploy", url: "https://ci/4", log: null },
+      { name: "types", url: "https://ci/7", log: lines(3).join("\n") },
+    ]);
+  });
+
+  test("failedChecksOnSha reads the logs of the first LOGGED_CHECKS failed runs only, and gives the rest a null log", async () => {
+    const runs = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `leg ${i}`, status: "completed", conclusion: "failure", html_url: `https://ci/${i}` }));
+    const read: number[] = [];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => { read.push(p.job_id); return `log ${p.job_id}`; },
+    });
+    const failed = await host.failedChecksOnSha("o/r", "abc");
+    assert.equal(failed.length, 30);
+    assert.deepEqual(read.sort((a, b) => a - b), Array.from({ length: LOGGED_CHECKS }, (_, i) => i + 1));
+    assert.ok(failed.slice(0, LOGGED_CHECKS).every((c, i) => c.log === `log ${i + 1}`));
+    assert.ok(failed.slice(LOGGED_CHECKS).every((c) => c.log === null));
+  });
+
   test("pendingChecksOnSha names each check run not yet completed and each pending commit status, and none that finished", async () => {
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
@@ -575,5 +617,27 @@ describe("githubRepoHost merges (PBI 181)", () => {
       "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge": () => { throw Object.assign(new Error("boom"), { status: 500 }); },
     });
     await assert.rejects(host.mergePr("o/r", 3, { method: "squash", headSha: null }), /boom/);
+  });
+});
+
+describe("logTail", () => {
+  test("keeps the last 100 lines and a short log whole", () => {
+    const log = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join("\r\n") + "\r\n";
+    assert.equal(logTail(log), Array.from({ length: 100 }, (_, i) => `line ${i + 151}`).join("\n"));
+    assert.equal(logTail("a\nb\n"), "a\nb");
+  });
+
+  test("cuts a long line and marks the cut", () => {
+    const tail = logTail(`ok\n${"x".repeat(5_000_000)}\nend`);
+    assert.deepEqual(tail.split("\n"), ["ok", `${"x".repeat(FAILED_LOG_LINE_CHARS)}…`, "end"]);
+  });
+
+  test("drops the oldest lines when 100 long lines outgrow the whole-tail cap", () => {
+    const log = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"y".repeat(1000)}`).join("\n");
+    const tail = logTail(log);
+    assert.ok(tail.length <= FAILED_LOG_CHARS);
+    const lines = tail.split("\n");
+    assert.ok(lines.at(-1)!.startsWith("100 "));
+    assert.ok(lines.length < 100 && lines.length > 1);
   });
 });
