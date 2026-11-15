@@ -67,10 +67,25 @@ Given("item {string} is at green in cell {string} with a live lease", long, asyn
   await pool.query(
     `insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'understand', 1, 'passed'), ($1, 'red', 1, 'passed'),
        ($1, 'green', 1, 'started')`, [run.rows[0].id]);
+  const r = await pool.query<{ state: string; lease_owner: string | null; lease_expires: Date | null; status: string | null }>(
+    `select i.state, i.lease_owner, i.lease_expires, sr.status from item i
+     left join run r on r.item_id = i.id left join stage_run sr on sr.run_id = r.id and sr.stage_id = 'green' and sr.attempt = 1
+     where i.id = $1`, [id]);
+  assert.equal(r.rowCount, 1, `item ${name} has more than one run or green attempt`);
+  const row = r.rows[0];
+  assert.equal(row.state, "InProgress", `item ${name} is ${row.state}, not InProgress`);
+  assert.equal(row.lease_owner, cell, `item ${name}'s lease is held by ${row.lease_owner}, not ${cell}`);
+  assert.ok(row.lease_expires && row.lease_expires > now, `item ${name}'s lease isn't live`);
+  assert.equal(row.status, "started", `item ${name}'s green attempt is ${row.status}, not started`);
 });
 
 Given("an operator prepared a restart {int} hours ago", long, async function (n: number) {
   await prepare(this, "scenario: restart", n * 60);
+  const r = await need().pool.query<{ created_at: Date }>(
+    "select created_at from override where scope = 'factory' and kind = 'restart' and cleared_at is null");
+  assert.equal(r.rowCount, 1, `${r.rowCount} active factory restart overrides, not 1`);
+  const expected = p140(this).clock.getTime() - n * 3_600_000;
+  assert.equal(r.rows[0].created_at.getTime(), expected, `the restart is dated ${r.rows[0].created_at.toISOString()}, not ${n} hours before the clock`);
 });
 
 Given("item {string} is queued behind it", long, async function (name: string) {
