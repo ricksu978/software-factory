@@ -78,7 +78,8 @@ type Engine = {
   ran: boolean;
 };
 
-function ctx(world: object): Ctx {
+/** PBI 140's scenario state. PBI 300's steps share its clock, its cell API and the restart it prepared. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi140?: Ctx };
   w.pbi140 ??= { clock: new Date(), logs: [], restore: [], renewals: [], origins: new Map(), steps: [] };
   return w.pbi140;
@@ -188,7 +189,7 @@ async function cellCall(world: object, cell: string, method: "GET" | "POST", rou
   return call(world, run, method, route, body ?? (method === "POST" ? {} : undefined));
 }
 
-async function renew(world: object, cell: string): Promise<Answer> {
+export async function renew(world: object, cell: string): Promise<Answer> {
   const run = await cellRun(cell);
   const answer = await call(world, run, "POST", "lease", { generation: run.generation });
   ctx(world).renewals.push({ cell, answer });
@@ -209,7 +210,7 @@ async function operatorId(world: object): Promise<string | null> {
   return (await need().pool.query<{ id: string }>(`select id from "user" where subject = $1`, [login])).rows[0]?.id ?? null;
 }
 
-async function prepare(world: object, reason: string, minutesAgo: number) {
+export async function prepare(world: object, reason: string, minutesAgo: number) {
   const c = ctx(world);
   const pool = need().pool;
   await setOverride(pool, { scope: "factory", targetId: null, kind: "restart", reason, createdBy: (await operatorId(world)) as string, expiresAt: null });
