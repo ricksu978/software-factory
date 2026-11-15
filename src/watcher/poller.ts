@@ -4,7 +4,7 @@ import type pg from "pg";
 import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
-import { NO_REVIEW_TEXT } from "../core/questions.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
@@ -270,9 +270,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (row.state === "NeedsInput" && !row.held && (await requeueForAddress(pool, row, pr))) {
+    } else if (row.state === "NeedsInput" && !row.held && ((await requeueForAddress(pool, row, pr)) || (await requeueForGreen(pool, row)))) {
       // The factory answered the item's "no trusted review text to address" question, and the scheduler claims it
-      // again at address (PBI 305).
+      // again at address (PBI 305). Or it answered an older "Address failed" question naming only CI failures, and the
+      // scheduler claims it again at green (PBI 317).
     } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
       // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
       // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
@@ -386,6 +387,12 @@ export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
  * review.
  */
 export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
+/**
+ * The kind of the event that logs a re-queue for Green of an item that waited on an older "Address failed" question
+ * naming only CI failures, asked before #292 sent a CI failure back to Green (PBI 317). Its payload holds `questionId`
+ * and `prNumber`.
+ */
+export const REQUEUED_FOR_GREEN = "requeued_for_green";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
@@ -484,6 +491,35 @@ async function requeueForAddress(
     await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
     const payload = conflict ? { questionId: q.id, prNumber, reason: "conflict", base, ...(review ? { at: review } : {}) } : { questionId: q.id, prNumber, reason: "review", at: review };
     await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_ADDRESS, payload });
+    return true;
+  });
+}
+
+/**
+ * PBI 317: answers the older "Address failed" question that a NeedsInput item which isn't held waits on, asked before
+ * #292 sent a CI failure back to Green (CI_TO_GREEN_SINCE), when every finding it names is a CI failure. The same
+ * question asked since then is address giving up on fixes CI failed on, and waits for a person, whose answer reruns
+ * address so its thread replies go out. The answer is CI_BACK_TO_GREEN and
+ * leaves `answered_by` null, as PBI 260's and 305's do, and the re-queue is a system event. The run's next stage is
+ * green, where the scheduler claims the answered item, and the cell reads the failed checks of the PR's head as Green's
+ * findings. The item and question are re-read under a lock after the PR was read, so a person's answer, a Hold or
+ * another poll that came first wins and nothing is logged twice. Returns whether it answered.
+ */
+async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; body: string; asked_at: Date }>(
+      `select q.id, q.body, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id],
+    )).rows[0];
+    if (!q || !olderCiFailedQuestion(q.body, q.asked_at)) return false;
+    const prNumber = row.pr_number!;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, CI_BACK_TO_GREEN]);
+    await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_GREEN, payload: { questionId: q.id, prNumber } });
     return true;
   });
 }

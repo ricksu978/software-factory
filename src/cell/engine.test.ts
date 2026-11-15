@@ -10,6 +10,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
+import { CI_BACK_TO_GREEN } from "../core/questions.ts";
 import { changedFiles, CI_LOGS_CHARS, ciLogs, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { FAILED_LOG_CHARS } from "../adapters/types.ts";
 import { shellGit } from "./git.ts";
@@ -1193,6 +1194,45 @@ describe("runCell", () => {
     const fixing = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
     assert.equal(fixing[0], null);
     assert.equal(fixing[1], reads[0]);
+  });
+
+  // PBI 317: the factory's answer to an older "Address failed" question naming only CI failures sends the run to Green.
+  test("a claim at green on the factory's CI answer gives Green the failed checks of the PR's head, read before the base merge", async () => {
+    const asked: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: CI_BACK_TO_GREEN } } });
+    const head = git(h.dir, "rev-parse", "HEAD");
+    h.deps.api.ciChecks = async (sha, on) => (asked.push(sha), on === "base" ? [] : sha === head
+      ? [{ name: "lint", conclusion: "success", url: "https://ci/0" }, { name: "e2e", conclusion: "failure", url: "https://ci/9", failingTests: ["signs in"] }]
+      : [{ name: "ci", conclusion: "success", url: "https://ci/1" }]);
+    await h.run();
+    assert.equal(asked[0], head);
+    const brief = h.agentCalls.find((a) => a.stage === "green" && !String(a.prompt).startsWith("# Definition of Done"))!.prompt;
+    assert.ok(brief.includes(`CI failed on ${head}`) && brief.includes("https://ci/9") && brief.includes("signs in"));
+    assert.ok(!brief.includes("https://ci/0"));
+    const started = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started")!;
+    assert.equal(started.body.ciFailure?.sha, head);
+  });
+
+  for (const conclusion of ["success", "pending"] as const) {
+    test(`a claim at green on the factory's CI answer whose head has no failed check (${conclusion}) gives Green no findings and opens the PR (PBI 317)`, async () => {
+      const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: CI_BACK_TO_GREEN } } });
+      h.deps.api.ciChecks = async () => [{ name: "ci", conclusion, url: "https://ci/4" }];
+      assert.equal(await h.run(), "done");
+      const started = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started")!;
+      assert.equal(started.body.ciFailure, undefined);
+      assert.ok(h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "passed"));
+    });
+  }
+
+  test("a claim at green on any other answer reads no CI before Green (PBI 317)", async () => {
+    const asked: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: "go on" } } });
+    const head = git(h.dir, "rev-parse", "HEAD");
+    h.deps.api.ciChecks = async (sha) => (asked.push(sha), [{ name: "ci", conclusion: "failure", url: "https://ci/3" }]);
+    await h.run();
+    assert.ok(!asked.includes(head));
+    const started = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started")!;
+    assert.equal(started.body.ciFailure, undefined);
   });
 
   test("a later claim numbers each stage on from the run's highest attempt, so it writes over no earlier row or blob", async () => {

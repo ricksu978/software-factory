@@ -12,7 +12,7 @@ import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
-import { NO_REVIEW_TEXT } from "../core/questions.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
 import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
@@ -1350,6 +1350,19 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       }
     }
 
+    // PBI 317: a claim at green on the factory's answer to an older "Address failed" question naming only CI failures
+    // fixes CI on the PR's head as it is now, the branch as the cell cloned it, before the base merge moves it. Its
+    // failed checks are Green's findings, as #292's are for a new failure. A head whose CI names no failed check leaves
+    // Green with none, and isn't marked as one CI failed on.
+    let ciOnHead: CiFailure | null = null;
+    if (ctx.nextStage === "green" && ctx.prNumber !== null && ctx.decision?.text === CI_BACK_TO_GREEN && api.ciChecks) {
+      const head = await git.head();
+      const f = await ciFailed(head);
+      // A head CI passed, reran green or still runs on has no failure, so open-pr reads CI on it as on any head.
+      if (f.checks.length) ciOnHead = f;
+      else failedHeads.delete(head);
+    }
+
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
     // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
     const conflict = await git.mergeBase(ctx.base);
@@ -1377,7 +1390,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
 
     const start = ctx.nextStage;
-    let carried: string[] = [];
+    let carried: string[] = ciOnHead ? backToGreen(ciOnHead) : [];
     if (start === "address") {
       // A PR review after address whose fix CI fails on goes back to green, as one after open-pr does.
       const back = await address(conflict.length > 0);
