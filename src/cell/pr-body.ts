@@ -77,8 +77,8 @@ function blocksOf(lines: string[]): { from: number; to: number | null }[] {
 function unwrap(text: string): string {
   const lines = text.split("\n");
   const inside = (from: number, to: number) => {
-    const outside = [...lines.slice(0, from), ...lines.slice(to + 1)];
-    return outside.some((l) => l.startsWith("## ")) ? null : lines.slice(from + 1, to).join("\n");
+    const outside = hasHeading(lines.slice(0, from)) || hasHeading(lines.slice(to + 1));
+    return outside ? null : lines.slice(from + 1, to).join("\n");
   };
   const from = lines.findIndex((l) => opening(l) !== null);
   if (from >= 0) {
@@ -95,6 +95,12 @@ function unwrap(text: string): string {
   return inside(blocks[0]!.from, blocks[0]!.to ?? lines.length) ?? text;
 }
 
+/** Whether the lines hold a `## ` heading outside their code blocks. A `## ` line inside a code block is code, not a heading. */
+function hasHeading(lines: string[]): boolean {
+  const blocks = blocksOf(lines);
+  return lines.some((l, i) => l.startsWith("## ") && !blocks.some((b) => i >= b.from && i <= (b.to ?? lines.length)));
+}
+
 /** Whether the line holds only a fence that closes a block its opening fence `o` opened. */
 function closes(line: string, o: { char: string; len: number }): boolean {
   const m = CLOSING.exec(line);
@@ -104,8 +110,9 @@ function closes(line: string, o: { char: string; len: number }): boolean {
 /**
  * PBI 297: the line that closes the wrapper opened on line `from`, or -1. It's the first fence-only line that leaves no
  * code block inside the wrapper open. Such a line could open a bare code block inside the body instead, so it's taken as
- * one only when the body shows it: a `## ` heading follows it, or the block it would open closes just before another
- * fence-only line that would close the wrapper. Nothing else is a signal the wrapper's own closing fence can't give, so
+ * one only when the body shows it: a `## ` heading outside a code block follows it, read as if it closed the wrapper
+ * (so unwrap would find that heading outside the wrapper), or the block it would open closes just before another
+ * fence-only line that would close the wrapper. A `## ` line inside a note's code block is code, so it doesn't count. Nothing else is a signal the wrapper's own closing fence can't give, so
  * a bare inner block followed by plain text and no heading closes the wrapper early, and a note after the wrapper is
  * left out however it's spaced.
  */
@@ -126,7 +133,7 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
 
 /** Whether the fence-only line `i` reads as opening a bare code block inside the wrapper, as wrapperEnd describes. */
 function opensBareBlock(lines: string[], i: number, wrapper: { char: string; len: number }): boolean {
-  if (lines.slice(i + 1).some((l) => l.startsWith("## "))) return true;
+  if (hasHeading(lines.slice(i + 1))) return true;
   const own = opening(lines[i]!)!;
   const end = lines.findIndex((l, j) => j > i && closes(l, own));
   if (end < 0) return false;

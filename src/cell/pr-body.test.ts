@@ -92,9 +92,23 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
   });
 
-  test("a bare code block inside the wrapper is kept when its body goes on after it", () => {
-    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`;
+  test("a bare code block inside the wrapper is kept when a heading outside any code block follows it", () => {
+    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\n\`\`\`ts\nawait x;\n\`\`\`\n\n## Notes\n\nZ.`;
     assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
+  });
+
+  test("a `## ` line inside a note's code block is code, so the note is left out", () => {
+    const body = "## Problem\n\nX.";
+    for (const note of ["```\n## not a heading\n```", "```md\n## Testing\n```", "```\n## build\nnpm run build\n```\n\nThen:\n\n```sh\n## lint\nnpm run lint\n```"]) {
+      assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n${note}`), { body }, note);
+    }
+  });
+
+  test("a bare code block followed by a heading inside it, read as a note, closes the wrapper", () => {
+    // Fence, line, fence, `## ` line, fence reads the same whether it's a body's bare block and a section or the wrapper's
+    // closing fence and a note's code block. The wrapper closes at its first fence-only line, so a note can't leak in.
+    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`;
+    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\``), { body: BODY });
   });
 
   test("a bare code block inside the wrapper followed by plain text and no heading closes the wrapper", () => {
