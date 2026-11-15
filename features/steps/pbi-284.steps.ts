@@ -27,6 +27,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
 import pg from "pg";
+import { ctx as pbi175 } from "./pbi-175.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 const PORT = 7402;
@@ -58,11 +59,13 @@ type Ctx = {
   tokens: Map<string, string>;
   reply?: Reply;
   delivery?: string;
+  /** Statuses a When-position "the API answers" expected of the replies it read, checked by every later Then. */
+  checks: { status: number; reply: Reply }[];
 };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi284?: Ctx };
-  w.pbi284 ??= { publishJwks: true, env: {}, blobs: new Map(), items: new Map(), tokens: new Map(), started: false, db: false };
+  w.pbi284 ??= { publishJwks: true, env: {}, blobs: new Map(), items: new Map(), tokens: new Map(), started: false, db: false, checks: [] };
   return w.pbi284;
 }
 
@@ -428,14 +431,20 @@ When("GitHub delivers a comment webhook to port {int} signed with another secret
 
 // ---- what the API answered ----
 
+const said = (r: Reply) => `${r.status ?? r.error}: ${r.text.slice(0, 300)}`;
+
+/** The status each When-position "the API answers" expected, asserted once the scenario reaches its outcome. */
+function checked(c: Ctx): void {
+  for (const k of c.checks) assert.equal(k.reply.status, k.status, `earlier, the API answered ${said(k.reply)}`);
+}
+
 function reply(c: Ctx): Reply {
   assert.ok(c.started, "the API wasn't started");
   assert.ok(!c.startError, `the API didn't start: ${String((c.startError as Error)?.message ?? c.startError)}`);
   assert.ok(c.reply, "nothing was asked of the API");
+  checked(c);
   return c.reply;
 }
-
-const said = (r: Reply) => `${r.status ?? r.error}: ${r.text.slice(0, 300)}`;
 
 function body(c: Ctx): Record<string, unknown> {
   const r = reply(c);
@@ -444,8 +453,16 @@ function body(c: Ctx): Record<string, unknown> {
   return r.json as Record<string, unknown>;
 }
 
+// As a When ("And the API answers 200" between two requests) it records what the reply must have been, and the
+// scenario's Thens assert it, so a step that sets the scene doesn't decide the scenario before its outcome.
 Then("the API answers {int}", function (status: number) {
-  const r = reply(ctx(this));
+  const c = ctx(this);
+  if (pbi175(this).stepType === "Action") {
+    assert.ok(c.reply, "nothing was asked of the API");
+    c.checks.push({ status, reply: c.reply });
+    return;
+  }
+  const r = reply(c);
   assert.equal(r.status, status, `the API answered ${said(r)}`);
 });
 
