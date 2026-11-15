@@ -249,6 +249,13 @@ async function readText(gh: GitHubClient, r: { owner: string; repo: string }, re
 
 type CheckRun = { id: number; name: string; status: string; conclusion: string | null; html_url?: string | null; details_url?: string | null };
 
+/** The text of a job's logs response: Octokit gives a string, an ArrayBuffer or a byte view, by runtime. Else null. */
+function logText(data: unknown): string | null {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+  return null;
+}
+
 const failedRun = (c: CheckRun) => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion ?? "");
 
 /**
@@ -258,7 +265,7 @@ const failedRun = (c: CheckRun) => c.status === "completed" && !["success", "neu
 async function jobLog(gh: GitHubClient, r: { owner: string; repo: string }, id: number): Promise<string | null> {
   try {
     const data = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: id })).data;
-    const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : null;
+    const text = logText(data);
     return text === null ? null : logTail(text);
   } catch (e) {
     // A 403 means the App lacks Actions (read), so say so rather than pass it off as a check from another CI.
@@ -321,8 +328,7 @@ async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: str
   if (typeof jobId !== "number") return [];
   try {
     const { data } = await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: jobId });
-    const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : ArrayBuffer.isView(data) ? new TextDecoder().decode(data) : "";
-    return failingTests(text);
+    return failingTests(logText(data) ?? "");
   } catch (e) {
     const why = (e as { status?: unknown })?.status === 403 ? " (the App needs `actions: read`; grant it and accept the new permission on the installation)" : "";
     console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);

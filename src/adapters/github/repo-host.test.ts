@@ -352,8 +352,13 @@ describe("githubRepoHost", () => {
       { id: 4, name: "deploy", status: "completed", conclusion: "cancelled", html_url: "https://ci/4" },
       { id: 5, name: "e2e", status: "in_progress", conclusion: null, html_url: "https://ci/5" },
       { id: 6, name: "docs", status: "completed", conclusion: "neutral", html_url: "https://ci/6" },
+      { id: 7, name: "types", status: "completed", conclusion: "failure", html_url: "https://ci/7" },
     ];
-    const logs: Record<number, string | ArrayBuffer> = { 2: lines(250).join("\n") + "\n", 3: new TextEncoder().encode(lines(12).join("\r\n")).buffer as ArrayBuffer };
+    const logs: Record<number, string | ArrayBuffer | Uint8Array> = {
+      2: lines(250).join("\n") + "\n",
+      3: new TextEncoder().encode(lines(12).join("\r\n")).buffer as ArrayBuffer,
+      7: Buffer.from(lines(3).join("\n")),
+    };
     const { host } = stubGitHub({
       "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: runs }),
       "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => logs[p.job_id] ?? (() => { throw Object.assign(new Error("404"), { status: 404 }); })(),
@@ -362,6 +367,7 @@ describe("githubRepoHost", () => {
       { name: "unit", url: "https://ci/2", log: lines(250).slice(150).join("\n") },
       { name: "lint", url: "https://ci/3", log: lines(12).join("\n") },
       { name: "deploy", url: "https://ci/4", log: null },
+      { name: "types", url: "https://ci/7", log: lines(3).join("\n") },
     ]);
   });
 
