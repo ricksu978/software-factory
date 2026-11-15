@@ -54,6 +54,8 @@ export type Ctx = {
   operator?: string;
   /** The cells each scheduler tick started, by the env the launcher got. */
   started: Record<string, string>[];
+  /** The scheduler's clock, when a scenario dates its question; the real clock otherwise. */
+  clock?: Date;
   /** Whether "the scheduler claims the item and its cell runs" got a cell to run. */
   cellRan?: boolean;
   /** The cell harness's real commits, by the feature's names for them. */
@@ -323,7 +325,7 @@ async function schedulerTick(world: object): Promise<{ result: TickResult; error
   };
   try {
     const result = await tick({
-      pool: pool(), now: new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
+      pool: pool(), now: m.clock ?? new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
       secret: "pbi-260-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
       launcher: { start: async (env) => (m.started.push(env), `exec-${m.started.length}`), stop: async () => {} },
     });
