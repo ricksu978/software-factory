@@ -18,7 +18,8 @@
 // check's URL and failing tests through the cell API's `ciChecks`. PBI 292's Givens and its Green's brief Thens read it.
 //
 // The contract these steps set up, which the factory meets:
-// - An older "Address failed" question is the body "Address failed:" followed by one finding per line, each "- <text>".
+// - An older "Address failed" question was asked before #292 shipped, at CI_TO_GREEN_SINCE, and is the body
+//   "Address failed:" followed by one finding per line, each "- <text>".
 //   A line naming a CI failure reads "CI failed on <commit>", perhaps followed by ", <what the commit was>".
 // - The factory's answer leaves `answered_by` null and says the factory sends the item back to Green to fix the CI
 //   failure: it names Green, says CI failed, and says the item is sent back to fix it. The re-queue is one event of
@@ -38,6 +39,7 @@ import { writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import { ciQuestion } from "../../src/cell/ci-failure.ts";
+import { CI_TO_GREEN_SINCE } from "../../src/core/questions.ts";
 import { REQUEUED_FOR_GREEN } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, polled } from "./pbi-12.steps.ts";
@@ -99,9 +101,18 @@ function cellBehind(world: object): void {
   assert.notEqual(m.shas.get("b4se001"), m.shas.get("b4se002"), "main didn't move on to b4se002");
 }
 
+/**
+ * When the scenarios' questions were asked: before #292 shipped (CI_TO_GREEN_SINCE), since only a question that old
+ * is the older one the factory answers. The scheduler runs a day after it, as in PBI 305's dated scenarios, well
+ * before the 5 days in which an unanswered question times out, so the scenarios read the same on any date.
+ */
+const ASKED_AT = "2026-11-14T09:00:00Z";
+
 async function waitsOn(world: object, n: number, body: string, pr?: number): Promise<void> {
+  assert.ok(Date.parse(ASKED_AT) < CI_TO_GREEN_SINCE.getTime(), "the scenarios' questions must predate #292");
   // Its first poll is the scenario's own, since the poll that first sees an older CI-failed question answers it.
-  await waits(world, n, body, pr === undefined ? { poll: false } : { pr, poll: false });
+  await waits(world, n, body, pr === undefined ? { askedAt: ASKED_AT, poll: false } : { askedAt: ASKED_AT, pr, poll: false });
+  base260(world).clock = new Date(Date.parse(ASKED_AT) + 24 * 60 * 60 * 1000);
   if (pr === undefined || pr === PR) cellBehind(world);
   const q = (await pool().query<{ body: string; state: string }>(
     "select q.body, i.state from question q join item i on i.id = q.item_id where q.id = $1", [base260(world).items.get(n)!.question],

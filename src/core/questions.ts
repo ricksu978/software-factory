@@ -18,6 +18,19 @@ export function onlyCiFailures(body: string): boolean {
 }
 
 /**
+ * When #292 (PR #309) shipped and a CI failure began going back to Green. Address still asks the same "Address failed"
+ * question when CI fails on its own fix on every retry, and that one must reach a person: the run's thread replies
+ * were never posted, so only a rerun of address posts them. So the poller answers only a question asked before this
+ * (PBI 317).
+ */
+export const CI_TO_GREEN_SINCE = new Date("2026-11-15T05:50:19Z");
+
+/** Whether the poller answers this question itself, for Green: an older "Address failed" one naming only CI failures (PBI 317). */
+export function olderCiFailedQuestion(body: string, askedAt: Date): boolean {
+  return askedAt.getTime() < CI_TO_GREEN_SINCE.getTime() && onlyCiFailures(body);
+}
+
+/**
  * The factory's answer to an older "Address failed" question that names only CI failures (PBI 317). The cell reads it
  * back as its decision: a claim at green that carries it reads CI on the PR's head, and Green's findings are its failed checks.
  */

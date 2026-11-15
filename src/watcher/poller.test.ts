@@ -621,6 +621,14 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await question(heldOne.q)).answer, CI_BACK_TO_GREEN);
   });
 
+  test("a CI-only \"Address failed\" question asked since #292 shipped waits for a person, its run still at address (PBI 317)", async () => {
+    const { id, q } = await waiting("Address failed:\n- CI failed on m3rge02, the PR addresser's fix", "2026-11-15T06:00:00Z");
+    await poll();
+    assert.equal((await question(q)).answer, null);
+    assert.equal((await greens(id)).length, 0);
+    assert.equal(await nextStage(id), "address");
+  });
+
   test("two polls at once answer an older CI-failed question and log its re-queue once (PBI 317)", async () => {
     const { id, q } = await waiting("Address failed:\n- CI failed on m3rge01");
     await Promise.all([poll(), poll()]);

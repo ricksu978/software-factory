@@ -4,7 +4,7 @@ import type pg from "pg";
 import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
-import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, onlyCiFailures } from "../core/questions.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
@@ -497,7 +497,9 @@ async function requeueForAddress(
 
 /**
  * PBI 317: answers the older "Address failed" question that a NeedsInput item which isn't held waits on, asked before
- * #292 sent a CI failure back to Green, when every finding it names is a CI failure. The answer is CI_BACK_TO_GREEN and
+ * #292 sent a CI failure back to Green (CI_TO_GREEN_SINCE), when every finding it names is a CI failure. The same
+ * question asked since then is address giving up on fixes CI failed on, and waits for a person, whose answer reruns
+ * address so its thread replies go out. The answer is CI_BACK_TO_GREEN and
  * leaves `answered_by` null, as PBI 260's and 305's do, and the re-queue is a system event. The run's next stage is
  * green, where the scheduler claims the answered item, and the cell reads the failed checks of the PR's head as Green's
  * findings. The item and question are re-read under a lock after the PR was read, so a person's answer, a Hold or
@@ -505,15 +507,15 @@ async function requeueForAddress(
  */
 async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
   return withTx(pool, async (c) => {
-    const q = (await c.query<{ id: string; body: string }>(
-      `select q.id, q.body from item i join question q on q.item_id = i.id
+    const q = (await c.query<{ id: string; body: string; asked_at: Date }>(
+      `select q.id, q.body, q.asked_at from item i join question q on q.item_id = i.id
        where i.id = $1 and i.state = 'NeedsInput' and not i.held
          and q.kind = 'needs_input' and q.answer is null and q.closed_at is null
        order by q.asked_at desc limit 1
        for update of i, q`,
       [row.id],
     )).rows[0];
-    if (!q || !onlyCiFailures(q.body)) return false;
+    if (!q || !olderCiFailedQuestion(q.body, q.asked_at)) return false;
     const prNumber = row.pr_number!;
     await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, CI_BACK_TO_GREEN]);
     await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
