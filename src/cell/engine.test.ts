@@ -1074,13 +1074,61 @@ describe("runCell", () => {
 
   test("a second pass after back to green writes new self-review and open-pr attempts", async () => {
     let checks = 0;
-    const h = harness();
+    let greens = 0;
+    // Green's second pass changes the commit CI failed on, so CI has something new to judge (PBI 292).
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
     h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ++checks === 1 ? "failure" : "success");
     assert.equal(await h.run(), "done");
     const of = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started").map((c) => c.body.attempt);
     assert.deepEqual(of("self-review"), [1, 2]);
     assert.deepEqual(of("open-pr"), [1, 2]);
     assert.deepEqual(of("green"), [1, 2]);
+  });
+
+  // PBI 292: address goes back to Green on a CI failure only when its addresser changed nothing it could change again.
+  test("address whose addresser committed nothing doesn't retry on the head CI failed on, and the run goes back to Green", async () => {
+    let checks = 0;
+    let greens = 0;
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [{ threadId: "T1", path: "app.txt", line: 1, author: "owner", body: "why?" }] },
+      script: (a, stage) => { if (stage === "green" && ++greens === 1) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ++checks === 1 ? "failure" : "success");
+    await h.run();
+    const started = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started");
+    assert.equal(started("address").length, 1);
+    assert.equal(started("green").length, 1);
+    assert.ok(started("green")[0].body.ciFailure);
+  });
+
+  test("address whose addresser committed a fix CI fails on retries address, as before", async () => {
+    let checks = 0;
+    let fixes = 0;
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [{ threadId: "T1", path: "app.txt", line: 1, author: "owner", body: "rename" }] },
+      script: (a) => {
+        if (a.agent !== "factory-pr-addresser") return;
+        writeFileSync(join(a.cwd, "app.txt"), `fix ${++fixes}\n`);
+        git(a.cwd, "commit", "-qam", `fix ${fixes}`);
+      } });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), ++checks === 1 ? "failure" : "success");
+    await h.run();
+    const started = (id: string) => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === id && c.body.status === "started");
+    assert.equal(started("address").length, 2);
+    assert.equal(started("green").length, 0);
+  });
+
+  // PBI 292: Green that leaves the commit CI failed on unchanged has given CI nothing new to judge, so the factory asks.
+  test("a Green pass that leaves the commit CI failed on unchanged asks a person instead of reading CI on it again", async () => {
+    const reads: string[] = [];
+    const h = harness();
+    h.deps.api.checks = async (sha) => (reads.push(sha), h.calls.push({ route: "/checks", body: { sha } }), "failure");
+    h.deps.api.ciChecks = async (_sha, on) => [{ name: "ci", conclusion: on === "base" ? "success" : "failure", url: "https://ci.example/1", failingTests: ["totals"] }];
+    assert.equal(await h.run(), "waiting");
+    assert.equal(new Set(reads).size, reads.length);
+    const q = h.transitions().at(-1).question.body;
+    assert.match(q, /left \w{7} unchanged/);
+    assert.ok(q.includes("https://ci.example/1") && q.includes("totals"));
+    const fixing = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
+    assert.equal(fixing[0], null);
+    assert.equal(fixing[1], reads[0]);
   });
 
   test("a later claim numbers each stage on from the run's highest attempt, so it writes over no earlier row or blob", async () => {

@@ -59,18 +59,11 @@ describe("ciQuestion", () => {
   const second = { sha: "c0ffee2000000000000000000000000000000000", checks: [{ name: "ci", url: url(2), failingTests: [] }] };
 
   test("names each commit CI failed on, how often Green tried, the last commit left unchanged and its failed checks", () => {
-    const q = ciQuestion([first, second], { unchanged: true });
+    const q = ciQuestion([first, second]);
     assert.match(q, /Green tried to fix the CI failure 2 times/);
     assert.ok(q.includes("c0ffee1") && q.includes("c0ffee2"));
     assert.match(q, /Green's last attempt left c0ffee2 unchanged/);
     assert.ok(q.includes(url(2)) && !q.includes(url(1)));
     assert.match(q, /no failing test/);
-  });
-
-  test("says Green used up its attempts when that is why the factory gave up", () => {
-    const q = ciQuestion([first], { attempts: 4 });
-    assert.match(q, /Green tried to fix the CI failure 1 time\b/);
-    assert.match(q, /used all 4/);
-    assert.ok(q.includes(`"a"`) && q.includes(url(1)));
   });
 });

@@ -2,6 +2,7 @@
 // it needs, on the short-lived token from /github-token (Run contract 6).
 import { Octokit } from "@octokit/core";
 import { matchesPath } from "../../core/glob.ts";
+import { failingTests } from "../../core/failing-tests.ts";
 import { factoryThread, standingSummaries, THREAD_SETTLE_MS, type CiCheck, type DiffRange, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
@@ -270,12 +271,34 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { name: string; status: string; conclusion: string | null; html_url: string | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
-  return runs.map((c) => ({
-    name: c.name, url: c.html_url ?? "",
-    conclusion: c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure",
+  return Promise.all(runs.map(async (c) => {
+    const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
+    const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion === "failure" && c.app?.slug === "github-actions") {
+      const tests = await failingTestsOfJob(gh, r, c.id);
+      if (tests.length) check.failingTests = tests;
+    }
+    return check;
   }));
+}
+
+/**
+ * PBI 292: the tests a failed GitHub Actions job's log names as failing. An Actions check run's id is its job's id. The
+ * log needs the App's `actions: read`; a log the factory can't read, or one naming no test, gives none, so the check
+ * still goes back to Green with its name and URL.
+ */
+async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: string }, jobId: number | undefined): Promise<string[]> {
+  if (typeof jobId !== "number") return [];
+  try {
+    const { data } = await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", { ...r, job_id: jobId });
+    const text = typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : ArrayBuffer.isView(data) ? new TextDecoder().decode(data) : "";
+    return failingTests(text);
+  } catch (e) {
+    console.error(`reading the log of job ${jobId} failed, so its check names no failing test:`, e);
+    return [];
+  }
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {

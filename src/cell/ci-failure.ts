@@ -1,7 +1,7 @@
 // PBI 292: a CI failure on a commit one of the run's stages pushed. Spec §6 rows 7 and 8 send it back to Green, with
 // each failed check, its URL and the tests it names as failing, and the Floor and the item's page show the item as
-// fixing CI while Green works on it. When Green leaves the commit unchanged, or runs out of attempts, the factory gives
-// up and asks a person the question built here. A failure whose tests the base fails too stays the base's (PBI 215).
+// fixing CI while Green works on it. When Green leaves the commit unchanged, CI has nothing new to judge, so the
+// factory gives up and asks a person the question built here. A failure whose tests the base fails too stays the base's (PBI 215).
 import type { CiCheck } from "../adapters/types.ts";
 import type { CiFailure } from "./api-client.ts";
 import { sharedWithBase, type BaseLine } from "./base-run.ts";
@@ -44,11 +44,11 @@ export function sharedCiLines(f: CiFailure, onBase: CiCheck[] | null): BaseLine[
 }
 
 /**
- * The question the factory asks when it gives up on a CI failure: what Green tried, on which commits, why it stopped,
- * and each check that failed on the last commit, with its URL and failing tests. `failures` holds every CI failure Green
- * was sent back to fix in this cell, oldest first.
+ * The question the factory asks when it gives up on a CI failure, because Green left the commit CI failed on unchanged:
+ * what Green tried, on which commits, and each check that failed on the last commit, with its URL and failing tests.
+ * `failures` holds every CI failure Green was sent back to fix in this cell, oldest first.
  */
-export function ciQuestion(failures: CiFailure[], why: { unchanged: true } | { attempts: number }): string {
+export function ciQuestion(failures: CiFailure[]): string {
   const last = failures.at(-1)!;
   const n = failures.length;
   const commits = failures.map((f) => short(f.sha)).join(n === 2 ? " and " : ", ");
@@ -58,9 +58,7 @@ export function ciQuestion(failures: CiFailure[], why: { unchanged: true } | { a
   return [
     `CI failed on the factory's own commit ${short(last.sha)}, and the factory gave up fixing it.`,
     `Green tried to fix the CI failure ${n} time${n === 1 ? "" : "s"}, on the commit${n === 1 ? "" : "s"} ${commits} that CI failed on.`,
-    "unchanged" in why
-      ? `Green's last attempt left ${short(last.sha)} unchanged, so CI has nothing new to judge.`
-      : `Green has used all ${why.attempts} of its attempts in this run.`,
+    `Green's last attempt left ${short(last.sha)} unchanged, so CI has nothing new to judge.`,
     `The checks that failed on ${short(last.sha)}:\n${checks}`,
     "Fix the cause on the branch, or say what the factory should do, then answer this question, and Green runs again.",
   ].join("\n\n");
