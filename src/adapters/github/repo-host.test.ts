@@ -378,6 +378,27 @@ describe("githubRepoHost", () => {
     assert.equal(await none.host.ciChecksOnSha("o/r", "abc"), null);
   });
 
+  test("ciChecksOnSha names the tests a failed Actions job's log says failed, and none when the log can't be read (PBI 292)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") =>
+      ({ id, name, status: "completed", conclusion, html_url: `https://github.com/o/r/runs/${id}`, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs": (p) => {
+        if (p.job_id === 3) throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+        return "2026-11-15T01:02:03.4567890Z not ok 1 - parses the config\n2026-11-15T01:02:03.4567890Z ok 2 - reads\n";
+      },
+    });
+    assert.deepEqual(await host.ciChecksOnSha("o/r", "abc"), [
+      { name: "lint", conclusion: "success", url: "https://github.com/o/r/runs/1" },
+      { name: "ci", conclusion: "failure", url: "https://github.com/o/r/runs/2", failingTests: ["parses the config"] },
+      { name: "e2e", conclusion: "failure", url: "https://github.com/o/r/runs/3" },
+      { name: "other", conclusion: "failure", url: "https://github.com/o/r/runs/4" },
+    ]);
+    assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
+  });
+
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {
     const fake = fakeRepoHost();
     fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "success", url: "u" }]);
