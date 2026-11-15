@@ -254,11 +254,15 @@ Given("CI ran these checks on commit {string}:", function (sha: string, table: {
 });
 
 Given("the log of the check {string} on commit {string} names the failing tests {string} and {string}", function (check: string, sha: string, a: string, b: string) {
-  pollCtx(this).host!.logs.set(`${REPO}@${sha}:${check}`, specLog(["loads the policy"], [a, b]));
+  const host = pollCtx(this).host;
+  assert.ok(host, "the fake repo host isn't set up");
+  host.logs.set(`${REPO}@${sha}:${check}`, specLog(["loads the policy"], [a, b]));
 });
 
 Given("the log of the check {string} on commit {string} names no failing test", function (check: string, sha: string) {
-  pollCtx(this).host!.logs.set(`${REPO}@${sha}:${check}`, ["> tsc --noEmit", "src/main.ts(3,1): error TS1005: ';' expected.", "npm error code 2"].join("\n"));
+  const host = pollCtx(this).host;
+  assert.ok(host, "the fake repo host isn't set up");
+  host.logs.set(`${REPO}@${sha}:${check}`, ["> tsc --noEmit", "src/main.ts(3,1): error TS1005: ';' expected.", "npm error code 2"].join("\n"));
 });
 
 // ---- items already waiting, broken or queued ----
@@ -342,7 +346,10 @@ When("the poller runs {int} times", long, async function (times: number) {
 // "the poller has run once" is PBI 260's step, which polls through the same harness and checks the poll didn't fail.
 
 Given("the poller has run again", long, async function () {
-  await poll(pollCtx(this));
+  const c = pollCtx(this);
+  await poll(c);
+  // As PBI 260's "the poller has run once" does: the Floor's Thens read no poll, so a failed poll here must fail now.
+  polled(c);
 });
 
 async function claim(world: object): Promise<void> {
