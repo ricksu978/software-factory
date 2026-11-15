@@ -61,6 +61,12 @@ export type NotReadyRow = Issue & { id: string; title: string; failed: string[] 
 export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
 /** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
 export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
+/**
+ * A break on main that still stands (PBI 255): the merge commit that broke the branch, the PR and the item it came
+ * from, and its bug item, which is null until the factory has filed it, with the factory's own row once it holds one.
+ */
+export type MainBreakRow = { branch: string; sha: string; repo: string; pr_number: number | null; charged: string | null;
+  bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state?: string | null };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -191,6 +197,22 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
   return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done or their CI fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
 }
 
+/** Floor's notice that main is red (PBI 255), naming each commit that broke it, where it came from and its bug item. */
+function mainRedNotice(rows: MainBreakRow[]): string {
+  const branches = [...new Set(rows.map((r) => r.branch))].map((b) => `<code>${escapeHtml(b)}</code>`).join(" and ");
+  const items = rows.map((r) => {
+    const from = [r.pr_number !== null ? `PR #${r.pr_number}` : null, r.charged !== null ? `item ${issueRef(r.charged, r.repo)}` : null].filter(Boolean).join(" for ");
+    const bug = r.bug_external_id === null
+      ? "The factory is filing its bug item."
+      : `Its bug item ${r.bug_id && r.bug_title ? named({ id: r.bug_id, title: r.bug_title, external_id: r.bug_external_id, repo: r.repo }) : issueRef(r.bug_external_id, r.repo)} ${r.bug_state === "Failed" ? `failed to make ${escapeHtml(r.branch)} pass, so ${escapeHtml(r.branch)} stays red until it's re-queued or someone fixes it` : "is claimed first"}.`;
+    // A break with no item charged came from outside the factory, which files no bug item for it.
+    if (r.charged === null) return `<li><code>${escapeHtml(r.branch)}</code> was already red at commit <code>${escapeHtml(r.sha.slice(0, 7))}</code>, which the factory didn't merge, so it filed no bug item. Someone needs to fix <code>${escapeHtml(r.branch)}</code>.</li>`;
+    return `<li>Commit <code>${escapeHtml(r.sha.slice(0, 7))}</code> broke <code>${escapeHtml(r.branch)}</code>${from ? `, the merge of ${from}` : ""}. ${bug}</li>`;
+  });
+  const fixes = rows.some((r) => r.charged !== null) ? "The factory fixes it before it builds anything else, and an" : "An";
+  return `<section id="main-red" class="banner" role="status"><p>${branches} is red. ${fixes} item merged onto it meanwhile waits for it to pass again.</p><ul>${items.join("")}</ul></section>`;
+}
+
 /**
  * A Cost cell, open for its closing tag: the cost to the cent through cost(), with the exact figure in its title so
  * hovering shows it. Floor (PBI 263) and Run detail (PBI 189) both use it.
@@ -198,9 +220,10 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[] }, banner: string | null): string {
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
-  const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
+  const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
+    + f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
