@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { main, startApi, type Api } from "./main.ts";
+import { main, MAX_JSON, MAX_WEBHOOK, startApi, type Api } from "./main.ts";
 
 describe("the API at startup", () => {
   test("names every setting it lacks, before it connects or listens", async () => {
@@ -114,6 +114,41 @@ describe("the API", dbTest, () => {
     while (!seen.includes("data:")) seen += new TextDecoder().decode((await reader.read()).value);
     assert.match(seen, /data: \{"kind":"test"\}/);
     ctl.abort();
+  });
+
+  test("a body over its cap is 413, for the webhook and for a /v1 route", async () => {
+    // Sends `n` bytes chunked, with no content-length, and resolves with the status however early the API answers.
+    // Each goes on its own connection, since one the API answers before reading its body can't be reused.
+    const streamed = (path: string, n: number, headers: Record<string, string> = {}) => new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path, method: "POST", headers, agent: false }, (res) => {
+        res.resume();
+        resolve(res.statusCode!);
+        req.destroy();
+      }).on("error", reject);
+      const chunk = Buffer.alloc(1024 * 1024);
+      let sent = 0;
+      const pump = () => {
+        while (sent < n) {
+          sent += chunk.length;
+          if (!req.write(chunk)) return void req.once("drain", pump);
+        }
+        req.end();
+      };
+      pump();
+    });
+    assert.equal(await streamed("/webhooks/github", MAX_WEBHOOK + 1), 413);
+    const hook = await streamed("/webhooks/github", 0).catch(() => 0);
+    assert.notEqual(hook, 413, "an empty delivery is checked by its signature, not refused for its size");
+    const authorization = `Bearer ${await token("otto")}`;
+    assert.equal(await streamed("/v1/overrides", MAX_JSON + 1, { authorization, "content-type": "application/json" }), 413);
+    const json = await fetch(`${base}/v1/overrides`, {
+      method: "POST", headers: { authorization, "content-type": "application/json", connection: "close" },
+      body: `{"kind":"pause","reason":"${"x".repeat(MAX_JSON)}"}`,
+    });
+    assert.equal(json.status, 413);
+    assert.match((await json.json()).error, /over 1 MiB/);
+    const anon = await streamed("/v1/overrides", MAX_JSON + 1);
+    assert.equal(anon, 401, "an unauthenticated caller is refused before the size matters");
   });
 
   test("an override needs a known kind, a reason, and for a WIP pin a whole limit", async () => {

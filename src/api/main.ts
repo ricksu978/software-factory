@@ -5,6 +5,7 @@
 // removing someone ends their access on their next request.
 import { createAdaptorServer, type HttpBindings } from "@hono/node-server";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Server } from "node:http";
 import type pg from "pg";
@@ -49,6 +50,10 @@ const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "rest
 const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ROLES: Role[] = ["viewer", "operator", "owner"];
+/** The largest webhook delivery the API reads, as today's handler in src/main.ts allows. */
+export const MAX_WEBHOOK = 25 * 1024 * 1024;
+/** The largest JSON body a /v1 route reads, as today's readJson allows. */
+export const MAX_JSON = 1024 * 1024;
 
 /** Thrown for a request the API refuses, answered as JSON with its status. */
 class Refused extends Error {
@@ -101,7 +106,10 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
   });
 
   // GitHub's webhook is checked by its signature alone. It never reads a bearer token (design §03).
-  app.post("/webhooks/github", async (c) => {
+  // Each body is capped before it's read, so no caller can make the process hold more than the cap: a 413 instead.
+  const capped = (maxSize: number, what: string) =>
+    bodyLimit({ maxSize, onError: () => { throw new Refused(413, `the ${what} is over ${maxSize / (1024 * 1024)} MiB`); } });
+  app.post("/webhooks/github", capped(MAX_WEBHOOK, "payload"), async (c) => {
     const rawBody = Buffer.from(await c.req.arrayBuffer());
     const { status } = await handleWebhook({ pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook }, { headers: c.req.header(), rawBody });
     return c.body(null, status);
@@ -121,6 +129,7 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     c.set("user", user);
     await next();
   });
+  app.use("/v1/*", capped(MAX_JSON, "body"));
 
   app.get("/v1/floor", async (c) => {
     const at = now();
