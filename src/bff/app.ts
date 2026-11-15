@@ -77,7 +77,14 @@ export function createBff(cfg: BffConfig): Hono {
     if (!q.state || q.state !== s.state) return refuse(c, 400, "the state doesn't match the one sent");
     if (q.error) return refuse(c, 401, `the provider answered ${q.error}`);
     if (!q.code) return refuse(c, 400, "the provider sent no code");
-    const d = await provider();
+    let d: Discovery;
+    try {
+      d = await provider();
+    } catch (e) {
+      console.error("the BFF couldn't read the provider's discovery document:", (e as Error).message);
+      clearSignIn(c);
+      return c.text("Sign-in failed: the sign-in provider didn't answer", 502);
+    }
     if (q.iss !== undefined && q.iss !== d.issuer) return refuse(c, 400, "the response came from another issuer");
 
     let tokens;

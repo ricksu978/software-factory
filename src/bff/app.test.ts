@@ -165,3 +165,19 @@ test("the session route answers 401 without a session cookie or with one never i
   assert.equal((await get(new Map(), "/auth/session")).status, 401);
   assert.equal((await get(new Map([[SESSION_COOKIE, "made-up"]]), "/auth/session")).status, 401);
 });
+
+test("a callback whose provider discovery fails answers 502 and clears the sign-in cookie", async () => {
+  const jar: Jar = new Map();
+  const login = await get(jar, "/auth/login");
+  const state = new URL(login.headers.get("location")!).searchParams.get("state");
+  assert.ok(jar.has(SIGNIN_COOKIE));
+  const down = createBff({
+    issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"), sessions: store,
+    fetch: async () => { throw new Error("connect ECONNREFUSED"); },
+  });
+  const r = await down.request(new URL(`/auth/callback?code=x&state=${state}`, ORIGIN).href, { headers: { cookie: cookieHeader(jar) } });
+  assert.equal(r.status, 502);
+  absorb(jar, r);
+  assert.ok(!jar.has(SIGNIN_COOKIE));
+  assert.equal(store.rows.size, 0);
+});

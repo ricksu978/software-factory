@@ -6,15 +6,12 @@
 // Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, and GET /auth/session (src/bff/app.ts).
 // Forwarding the dashboard's calls to the API and the webhook pass-through come in later steps.
 import { serve } from "@hono/node-server";
-import { createPool } from "../store/db.ts";
 import { createBff } from "./app.ts";
-import { pgSessions } from "./session.ts";
+import { pgSessions, rolePool } from "./session.ts";
 import { readSettings, type BffSettings } from "./settings.ts";
 
 export { BFF_PORT } from "./settings.ts";
-
-/** The role the BFF works in Postgres as. It reaches session and nothing else (design §08). */
-export const BFF_DB_ROLE = "factory_bff";
+export { BFF_DB_ROLE } from "./session.ts";
 
 let settings: BffSettings;
 try {
@@ -25,11 +22,8 @@ try {
 }
 
 // Whatever login FACTORY_DB_URI or the managed identity carries, every connection switches to factory_bff before its
-// first query. The client runs queries in order, so nothing the BFF sends can go ahead of the switch.
-const pool = createPool(settings.dbUri);
-pool.on("connect", (client) => {
-  client.query(`set role ${BFF_DB_ROLE}`).catch((e: Error) => console.error(`the BFF couldn't work as ${BFF_DB_ROLE}:`, e.message));
-});
+// first query. A connection that can't switch is closed, and the query that wanted it fails (rolePool).
+const pool = rolePool(settings.dbUri);
 
 const app = createBff({
   issuer: settings.issuer,

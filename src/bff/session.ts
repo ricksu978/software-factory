@@ -4,6 +4,28 @@
 // A session lasts seven days idle and 30 days at most.
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type pg from "pg";
+import { createPool } from "../store/db.ts";
+
+/** The role the BFF works in Postgres as. It reaches session and nothing else (design §08). */
+export const BFF_DB_ROLE = "factory_bff";
+
+/**
+ * A pool whose every connection runs `set role` before its first query, whatever login the URL or the managed identity
+ * carries. The switch runs in pg-pool's onConnect hook, which the pool waits for before it hands the connection out.
+ * When the switch fails (the role is missing, or the login isn't a member of it), the pool ends that connection and the
+ * query fails, so nothing ever runs under the login itself.
+ */
+export function rolePool(url: string | undefined, role: string = BFF_DB_ROLE): pg.Pool {
+  return createPool(url, {
+    onConnect: async (c) => {
+      try {
+        await c.query(`set role "${role.replaceAll('"', '""')}"`);
+      } catch (e) {
+        throw new Error(`the BFF couldn't work as ${role}: ${(e as Error).message}`, { cause: e });
+      }
+    },
+  });
+}
 
 /** The name of the session cookie the BFF sets after sign-in and clears at /auth/logout. */
 export const SESSION_COOKIE = "factory_session";
