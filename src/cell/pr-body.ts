@@ -125,8 +125,10 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  *
  * Otherwise the tail is read the other way too, with the line opening a block, from the wrapper's own fence state. When
  * that reading finds a `## ` heading outside a code block, the line might open a bare block in a body that goes on with
- * more sections, or close the wrapper before a note whose code block holds a `## ` line. The fences read the same both
- * ways, so neither guess is safe: one drops sections of the body, the other lets a note in. That line is returned as
+ * more sections, or close the wrapper before a note whose code block holds a `## ` line. When the line opening a block
+ * still leaves a balanced body that a later fence-only line closes, it's taken as a bare block inside the body, so the
+ * body reaches the PR whole as PBI 291 made it: agents often leave the language off a code block, and that's far likelier
+ * than a note whose code block holds a `## ` line. When it doesn't, neither guess is safe, so that line is returned as
  * `ambiguous`, which gives a finding. With no such heading, a bare inner block followed by plain text closes the wrapper
  * early, and a note after the wrapper is left out however it's spaced.
  */
@@ -139,7 +141,10 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       continue;
     }
     if (closes(line, wrapper)) {
-      if (!opensBareBlock(lines, from, i, wrapper)) return hasHeading(lines.slice(i)) ? { ambiguous: i } : i;
+      if (!opensBareBlock(lines, from, i, wrapper)) {
+        if (!hasHeading(lines.slice(i))) return i;
+        if (!closesLater(lines, i, wrapper)) return { ambiguous: i };
+      }
     }
     const o = opening(line);
     if (o) inner = o;
@@ -162,4 +167,22 @@ function opensBareBlock(lines: string[], from: number, i: number, wrapper: { cha
   if (end < 0) return false;
   const next = lines.slice(end + 1).find((l) => l.trim() !== "");
   return next !== undefined && closes(next, wrapper);
+}
+
+/**
+ * Whether, with the fence-only line `i` opening a bare code block, a later fence-only line closes the wrapper and leaves
+ * no code block inside it open.
+ */
+function closesLater(lines: string[], i: number, wrapper: { char: string; len: number }): boolean {
+  let inner: { char: string; len: number } | null = opening(lines[i]!)!;
+  for (let j = i + 1; j < lines.length; j++) {
+    const line = lines[j]!;
+    if (inner) {
+      if (closes(line, inner)) inner = null;
+      continue;
+    }
+    if (closes(line, wrapper)) return true;
+    inner = opening(line);
+  }
+  return false;
 }

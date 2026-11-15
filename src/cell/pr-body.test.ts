@@ -104,21 +104,27 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
-  test("a fence that could close the wrapper or open a bare block before more sections gives a finding", () => {
-    // Fence, text, fence, `## ` line reads the same as a body's bare block and its next section, or as the wrapper's
-    // closing fence and a note whose code block holds a `## ` line. Either guess drops sections or lets a note in.
-    const replies = [
-      "Here:\n\n```markdown\n## Problem\n\nX.\n\n```\ncode\n```\n\n## Testing\n\nfoo\n```",
-      "```markdown\n## Problem\n\nX.\n\n```\ncode\n```\n\nMore text.\n\n## Testing\n\nfoo\n```",
-      `\`\`\`markdown\n${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.\n\`\`\``,
-      "```markdown\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## not a heading\n```",
+  test("a bare code block in the middle of a wrapped body, with more sections after it, is kept whole", () => {
+    // Fence, text, fence, `## ` line could also be the wrapper's closing fence and a note whose code block holds a `## `
+    // line. A bare code block inside the body is far likelier, so the body reaches the PR whole, as PBI 291 made it.
+    const bodies = [
+      "## Problem\n\nX.\n\n```\ncode\n```\n\n## Testing\n\nfoo",
+      "## Problem\n\nX.\n\n```\ncode\n```\n\nMore text.\n\n## Testing\n\nfoo",
+      `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`,
+      "## Problem\nx\n```\na\n```\n## What changes\ny",
     ];
-    for (const reply of replies) {
-      const r = cleanSummary(reply);
-      assert.ok("finding" in r, reply);
-      assert.match(r.finding, /could close the PR body's wrapper or open a code block inside it/);
-      assert.match(r.finding, /PR body alone, with nothing before or after it/);
+    for (const body of bodies) {
+      assert.deepEqual(cleanSummary(`Here:\n\n\`\`\`markdown\n${body}\n\`\`\``), { body }, body);
+      assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body }, `${body} / note`);
     }
+  });
+
+  test("a fence that could close the wrapper or open a bare block that never closes gives a finding", () => {
+    // Read as opening a block, the heading after it counts but the wrapper never closes, so neither guess is safe.
+    const r = cleanSummary("```md\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## Testing\n");
+    assert.ok("finding" in r);
+    assert.match(r.finding, /could close the PR body's wrapper or open a code block inside it/);
+    assert.match(r.finding, /PR body alone, with nothing before or after it/);
   });
 
   test("a bare code block inside the wrapper followed by plain text and no heading closes the wrapper", () => {
