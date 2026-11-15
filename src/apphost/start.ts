@@ -62,6 +62,8 @@ function pullMain(deps: StartDeps): void {
       : "On no branch (a detached HEAD), not on 'main', so it runs as it is and pulls nothing.");
     return;
   }
+  // The commit before the pull, so a pull that changes the AppHost's own files can ask for a restart.
+  const before = deps.git(["rev-parse", "HEAD"]);
   // --ff-only: a main that has diverged, or local edits the pull would overwrite, fail the pull rather than merge.
   const pull = deps.git(["pull", "--ff-only"]);
   if (pull.status !== 0) {
@@ -70,6 +72,26 @@ function pullMain(deps: StartDeps): void {
   }
   const said = pull.stdout.trim();
   if (said) deps.say(said);
+  if (before.status === 0) warnOnAppHostChange(deps, before.stdout.trim());
+}
+
+/** The AppHost's own directory, which it has already run by the time it pulls. */
+export const APPHOST_DIR = "aspire-apphost/";
+export const APPHOST_CHANGED =
+  "The pull changed the AppHost (aspire-apphost/), but this start runs the AppHost as it was before the pull. Stop it and run `aspire run` again to pick up the change.";
+
+/**
+ * The AppHost has built its resource graph from aspire-apphost/ before it pulls, so a pull that changes that directory
+ * starts the old graph while control and the worker run the pulled src/. Warns, asking for a restart, when it did.
+ */
+function warnOnAppHostChange(deps: StartDeps, before: string): void {
+  if (!before) return;
+  const diff = deps.git(["diff", "--name-only", before, "HEAD", "--", APPHOST_DIR]);
+  if (diff.status !== 0) {
+    deps.warn(`git couldn't say whether the pull changed ${APPHOST_DIR}, so run \`aspire run\` again if it did:\n${gitSaid(diff)}`);
+    return;
+  }
+  if (diff.stdout.trim()) deps.warn(APPHOST_CHANGED);
 }
 
 /** When Docker doesn't answer, launches Docker Desktop and waits up to DOCKER_WAIT_MS for it. */

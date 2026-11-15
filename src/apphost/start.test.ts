@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DOCKER_NOT_INSTALLED, DOCKER_TIMED_OUT, DOCKER_WAIT_MS, StartStopped, startAppHost, type GitResult, type StartDeps } from "./start.ts";
+import { APPHOST_CHANGED, DOCKER_NOT_INSTALLED, DOCKER_TIMED_OUT, DOCKER_WAIT_MS, StartStopped, startAppHost, type GitResult, type StartDeps } from "./start.ts";
 
 type Fake = {
   deps: StartDeps;
@@ -11,7 +11,7 @@ type Fake = {
 };
 
 /** Fakes for a start. `git` answers each command by its first argument; Docker answers once `answersAt` has passed. */
-function fake(opts: { branch?: string; pull?: GitResult; dockerUp?: boolean; installed?: boolean; answersAfterLaunchMs?: number | null } = {}): Fake {
+function fake(opts: { branch?: string; pull?: GitResult; diff?: GitResult; dockerUp?: boolean; installed?: boolean; answersAfterLaunchMs?: number | null } = {}): Fake {
   const log: string[] = [];
   const said: string[] = [];
   const warned: string[] = [];
@@ -22,7 +22,9 @@ function fake(opts: { branch?: string; pull?: GitResult; dockerUp?: boolean; ins
     git(args) {
       log.push(`git ${args.join(" ")}`);
       if (args[0] === "branch") return ok(`${opts.branch ?? "main"}\n`);
+      if (args[0] === "rev-parse") return ok("abc123\n");
       if (args[0] === "pull") return opts.pull ?? ok("Already up to date.\n");
+      if (args[0] === "diff") return opts.diff ?? ok();
       return ok();
     },
     async dockerAnswers() {
@@ -63,8 +65,35 @@ async function stops(f: Fake): Promise<StartStopped> {
 test("on main it pulls fast-forward-only, then checks Docker, then starts the resources", async () => {
   const f = fake();
   await startAppHost(f.deps);
-  assert.deepEqual(f.log, ["git branch --show-current", "git pull --ff-only", "docker up", "start"]);
+  assert.deepEqual(f.log, [
+    "git branch --show-current",
+    "git rev-parse HEAD",
+    "git pull --ff-only",
+    "git diff --name-only abc123 HEAD -- aspire-apphost/",
+    "docker up",
+    "start",
+  ]);
   assert.deepEqual(f.warned, []);
+});
+
+test("a pull that changes aspire-apphost/ asks for aspire run again, and still starts", async () => {
+  const f = fake({ diff: { status: 0, stdout: "aspire-apphost/apphost.mts\n", stderr: "" } });
+  await startAppHost(f.deps);
+  assert.deepEqual(f.warned, [APPHOST_CHANGED]);
+  assert.match(f.warned[0]!, /aspire run/);
+  assert.ok(f.log.includes("start"));
+});
+
+test("a pull that changes only src/ asks for no restart", async () => {
+  const f = fake({ diff: { status: 0, stdout: "", stderr: "" } });
+  await startAppHost(f.deps);
+  assert.deepEqual(f.warned, []);
+});
+
+test("a failed pull runs no diff", async () => {
+  const f = fake({ pull: { status: 1, stdout: "", stderr: "fatal: nope\n" } });
+  await stops(f);
+  assert.ok(!f.log.some((l) => l.startsWith("git diff")));
 });
 
 test("a failed pull stops the start with git's message and starts nothing", async () => {
