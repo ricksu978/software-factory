@@ -151,12 +151,16 @@ Given("item {int} waits in NeedsInput on a question saying the base fails in the
 
 Given("CI still fails on the newest commit of {string}", function (base: string) {
   const c = pollCtx(this);
+  assert.ok(c.host, "the poller's fake repo host isn't set up");
   const key = `${REPO}@${base}`;
-  const list = c.host!.branches.get(key) ?? [];
+  const list = c.host.branches.get(key) ?? [];
+  assert.ok(list.length > 0, `${key} holds no base-failure commit for the newest commit to follow`);
   const newest = "b4se-newest";
   list.push(newest);
-  c.host!.branches.set(key, list);
-  c.host!.checks.set(`${REPO}@${newest}`, "failure");
+  c.host.branches.set(key, list);
+  c.host.checks.set(`${REPO}@${newest}`, "failure");
+  assert.equal(c.host.branches.get(key)!.at(-1), newest, `${newest} isn't the newest commit of ${key}`);
+  assert.equal(c.host.checks.get(`${REPO}@${newest}`), "failure", `CI on ${newest} isn't failing`);
 });
 
 // ---- the PR on GitHub ----
@@ -263,7 +267,10 @@ Given("the owner answers item {int}'s question {string} while the poller is read
 
 When("two polls run at the same time", long, async function () {
   const c = pollCtx(this);
+  const before = c.polls;
   await Promise.all([poll(c), poll(c)]);
+  assert.equal(c.error, undefined, `a poll failed: ${String(c.error)}`);
+  assert.equal(c.polls, before + 2, `${c.polls - before} of the two polls ran`);
 });
 
 // ---- the outcomes ----
