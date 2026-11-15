@@ -253,7 +253,14 @@ Given("the owner has answered item {int}'s question {string}", long, async funct
 });
 
 Given("the owner answers item {int}'s question {string} while the poller is reading PR {int}", long, async function (n: number, text: string, pr: number) {
-  const host = pollCtx(this).host!;
+  const host = pollCtx(this).host;
+  assert.ok(host, "the poller's fake repo host isn't set up");
+  prOf(this, pr);
+  const item = base260(this).items.get(n);
+  assert.ok(item, `no item ${n} was set up`);
+  const open = (await pool().query<{ answer: string | null }>("select answer from question where id = $1", [item.question])).rows[0];
+  assert.ok(open, `item ${n}'s question isn't in the database`);
+  assert.equal(open.answer, null, `item ${n}'s question is already answered`);
   const read = host.prState.bind(host);
   let answered = false;
   host.prState = async (repo, number, ...rest) => {
