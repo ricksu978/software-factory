@@ -257,7 +257,9 @@ export type RunDetail = {
   /** PBI 292: the CI failure the item is fixing at Green, or null when it fixes none. */
   fixingCi?: CiFailure | null;
   /** An operator's override buttons for this item, or null for anyone else. */
-  controls: { held: boolean; stoppable: boolean; requeueable: boolean } | null;
+  controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
+  /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
+  startNow?: { reason: string; by: string | null } | null;
   /** The viewer's IANA time zone, from their browser's `tz` cookie (PBI 189). Defaults to UTC. */
   zone?: string;
   /** The time now, for how long a running attempt has taken so far (PBI 189). Defaults to the real time. */
@@ -361,11 +363,13 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         ...(c.held ? [["unhold", "Release the hold"]] : [["hold", "Hold"]]),
         ...(c.stoppable ? [["stop_run", "Stop the run"]] : []),
         ...(c.requeueable ? [["requeue", "Re-queue"]] : []),
+        ...(c.startable ? [["start_now", "Start now"]] : []),
+        ...(c.movable ? [["move_up", "Move up"], ["move_down", "Move down"]] : []),
       ] as [string, string][], d.item.id)}`
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
 ${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${

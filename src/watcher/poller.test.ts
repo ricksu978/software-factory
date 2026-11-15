@@ -7,7 +7,8 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { criteriaHash, pollOnce, readinessFingerprint } from "./poller.ts";
+import { NO_REVIEW_TEXT } from "../core/questions.ts";
+import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -508,6 +509,79 @@ describe("pollOnce", dbTest, () => {
     await poll();
     assert.equal((await row(ext)).state, "NeedsInput");
     assert.equal((await db.pool.query("select 1 from question where item_id = $1 and closed_at is null", [id])).rowCount, 1);
+  });
+
+  /** A NeedsInput item stopped at address on `body`, asked at `askedAt`, with its PR open. */
+  async function waiting(body: string, askedAt = "2026-11-10T09:00:00Z") {
+    const h = await held("NeedsInput", { pr: true, reviewsSeenAt: "2026-11-01T00:00:00Z" });
+    await db.pool.query("update run set next_stage = 'address' where id = $1", [h.run]);
+    const q = (await db.pool.query<{ id: string }>(
+      "insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', $2, $3) returning id", [h.id, body, askedAt],
+    )).rows[0].id;
+    return { ...h, q, p: host.prs.find((p) => p.number === h.pr)! };
+  }
+  const question = async (q: string) =>
+    (await db.pool.query<{ answer: string | null; answered_by: string | null; answered_at: Date | null }>("select answer, answered_by, answered_at from question where id = $1", [q])).rows[0];
+  const requeues = async (id: string) =>
+    (await db.pool.query<{ actor: string; payload: Record<string, unknown> }>("select actor, payload from event where item_id = $1 and kind = $2", [id, REQUEUED_FOR_ADDRESS])).rows;
+
+  test("a conflict answers an item's \"no trusted review text\" question for the factory, once, naming the PR and its base (PBI 305)", async () => {
+    const { id, q, pr, p } = await waiting(NO_REVIEW_TEXT);
+    p.mergeable = false;
+    await poll();
+    await poll();
+    const a = await question(q);
+    assert.equal(a.answered_by, null);
+    assert.ok(a.answered_at);
+    assert.match(a.answer!, new RegExp(`PR #${pr} conflicts with its base main`));
+    const events = await requeues(id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].actor, "system");
+    assert.deepEqual(events[0].payload, { questionId: q, prNumber: pr, reason: "conflict", base: "main" });
+    assert.equal((await db.pool.query("select next_stage from run where item_id = $1", [id])).rows[0].next_stage, "address");
+    assert.equal((await row((await db.pool.query("select external_id from item where id = $1", [id])).rows[0].external_id)).state, "NeedsInput");
+  });
+
+  test("a trusted review newer than the question answers it with the review's time, and an older one doesn't (PBI 305)", async () => {
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'octo', 'octo', 'viewer')`);
+    const { id, q, pr, p } = await waiting(NO_REVIEW_TEXT);
+    p.reviews.push({ state: "changes_requested", submittedAt: "2026-11-10T08:00:00Z", author: "octo", body: "x" });
+    await poll();
+    assert.equal((await question(q)).answer, null);
+    p.reviews.push({ state: "changes_requested", submittedAt: "2026-11-10T10:30:00Z", author: "octo", body: "x" });
+    await poll();
+    const a = await question(q);
+    assert.equal(a.answered_by, null);
+    assert.match(a.answer!, new RegExp(`trusted review asked for changes on PR #${pr} at 2026-11-10T10:30:00.000Z`));
+    const events = await requeues(id);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0].payload, { questionId: q, prNumber: pr, reason: "review", at: "2026-11-10T10:30:00.000Z" });
+  });
+
+  test("a held item, an item on another question, or a PR GitHub hasn't worked out, keeps the question open (PBI 305)", async () => {
+    const heldOne = await waiting(NO_REVIEW_TEXT);
+    await db.pool.query("update item set held = true where id = $1", [heldOne.id]);
+    heldOne.p.mergeable = false;
+    const other = await waiting("Address failed: CI failed on the PR");
+    other.p.mergeable = false;
+    const unknown = await waiting(NO_REVIEW_TEXT);
+    unknown.p.mergeable = null;
+    await poll();
+    for (const w of [heldOne, other, unknown]) {
+      assert.equal((await question(w.q)).answer, null);
+      assert.equal((await requeues(w.id)).length, 0);
+    }
+    await db.pool.query("update item set held = false where id = $1", [heldOne.id]);
+    await poll();
+    assert.ok((await question(heldOne.q)).answer);
+  });
+
+  test("two polls at once answer the question and log the re-queue once (PBI 305)", async () => {
+    const { id, q, p } = await waiting(NO_REVIEW_TEXT);
+    p.mergeable = false;
+    await Promise.all([poll(), poll()]);
+    assert.ok((await question(q)).answer);
+    assert.equal((await requeues(id)).length, 1);
   });
 
   test("an InProgress item with an open PR and a newer review stays InProgress", async () => {

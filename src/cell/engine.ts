@@ -12,6 +12,7 @@ import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
 import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
+import { NO_REVIEW_TEXT } from "../core/questions.ts";
 import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import type { Sop, SopStage, StageId } from "../config/sop.ts";
@@ -1224,7 +1225,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const address = async (mergedConflict: boolean) => {
     const comments = ctx.trustedComments;
     // Issue #28 AC-3: with no trusted review text, only a merge conflict is a reason to be here.
-    if (!comments.length && !mergedConflict) throw new Blocked("no trusted review text to address");
+    if (!comments.length && !mergedConflict) throw new Blocked(NO_REVIEW_TEXT);
     const byThread = new Map(comments.map((c) => [c.threadId, c]));
     let replies: { threadId: string; body: string }[] = [];
     // PBI 292: Green's findings when CI fails on what address pushed and the attempt's agent changed nothing, as when it
