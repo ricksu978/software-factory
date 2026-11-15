@@ -1235,6 +1235,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // only replied. Address has no agent work left to change that commit, so it doesn't retry on it: the run goes back
     // to Green, as spec §6 rows 7 and 8 say. CI failing on a fix the addresser made is retried as before.
     let ciBack: string[] | null = null;
+    // The head address started from, so a thread is only taken as fixed when some attempt's agent committed a change.
+    const start = await git.head();
     const findings = await attempts("address", retriesOf("address") + 1, async (attempt, last) => {
       // Each attempt gets its own reply directory, as pr-review's does, so a line an earlier run left can't resolve
       // this run's thread, and the empty-address path, where no agent runs, reads nothing (PBI 258).
@@ -1260,7 +1262,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         replies = lines.filter((r): r is { threadId: string; body: string } =>
           typeof r.threadId === "string" && typeof r.body === "string" && r.body.trim() !== "" && byThread.has(r.threadId));
         // A thread the addresser fixed, as it says with `"fixed": true`, is resolved like one it replied to (PBI 258).
-        fixed = new Set(lines.filter((r) => typeof r.threadId === "string" && r.fixed === true && byThread.has(r.threadId)).map((r) => r.threadId as string));
+        // With no commit since address started there's no fix for CI to have passed on, so a `fixed` line alone
+        // resolves nothing: the thread needs a reply, or it stays open.
+        fixed = head === start ? new Set() : new Set(lines.filter((r) => typeof r.threadId === "string" && r.fixed === true && byThread.has(r.threadId)).map((r) => r.threadId as string));
         // A retry that left the head CI failed on as it was goes back to Green, without reading CI on it again.
         const failedBefore = failedHeads.get(head);
         if (failedBefore) {

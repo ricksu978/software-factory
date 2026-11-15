@@ -1015,6 +1015,18 @@ describe("runCell", () => {
     assert.ok(at("/repo/resolveThread", "t2") > checked, "resolved after CI passed on the fix");
   });
 
+  test("address leaves open a thread it marked fixed when it changed no code, and resolves the one it replied to (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "Not fixed, the total still skips the tax table.")] },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(file, '{"threadId":"t1","body":"kept, it matches the spec"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2: no commit, so no fix, and no reply");
+  });
+
   test("address leaves open a thread it answered that a reviewer replied in while CI ran, and resolves the rest (PBI 258)", async () => {
     const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
     const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar")], threadCommentCounts: { t1: 1, t2: 1 } },
