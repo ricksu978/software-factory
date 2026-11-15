@@ -277,7 +277,7 @@ export const LEASE_RAN_OUT = "The cell's lease ran out before it reported this a
 /**
  * Closes every attempt of the item's open run that is still started: it gets the status stopped, ends at `now` and
  * carries LEASE_RAN_OUT (PBI 239). The factory calls it whenever an InProgress item goes back to Queued because its
- * lease ran out or a restart ended its cell's claim, so no attempt is left started for a cell that's gone. Like any
+ * lease ran out or a cell wrapping up for a restart ended its claim, so no attempt is left started for a cell that's gone. Like any
  * stopped attempt, it uses up none of the stage's retries.
  */
 export async function closeStartedAttempts(c: pg.PoolClient, itemId: string, now: Date): Promise<void> {

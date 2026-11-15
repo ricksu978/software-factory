@@ -9,8 +9,8 @@ import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "..
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import type { Actor } from "../store/events.ts";
-import { claimNext, closeStartedAttempts, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
-import { activeOverrides, clearItemOverrides, restartWaitMs } from "../store/overrides.ts";
+import { claimNext, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
+import { activeOverrides, clearItemOverrides } from "../store/overrides.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
 import { criteriaHash } from "../watcher/poller.ts";
@@ -86,15 +86,10 @@ async function tickSteps(d: TickDeps, w: Watch): Promise<TickResult> {
   await chaseQuestions(d);
   w.step("polling merged CI");
   await pollMergedCi(d);
-  // Prepare restart (PBI 140): cells are told to stop at their next renewal and wrap up. Once the wrap-up runs out, the
-  // scheduler stops the ones still running. Nothing starts until the control plane or the worker restarts, or an
-  // operator resumes.
-  const restart = overrides.find((o) => o.scope === "factory" && o.kind === "restart");
-  if (restart && d.now.getTime() >= restart.createdAt.getTime() + restartWaitMs()) {
-    w.step("stopping the cells left at the end of the wrap-up");
-    await stopForRestart(d, result);
-  }
-  if (factory("pause") || factory("drain") || restart) return result;
+  // Prepare restart (PBI 140): cells are told to stop at their next renewal and wrap up in their own time. The scheduler
+  // never stops one itself, however long it runs (PBI 300). Nothing starts until the control plane or the worker
+  // restarts, or an operator resumes.
+  if (factory("pause") || factory("drain") || factory("restart")) return result;
   w.step("starting the next item");
   await startNext(d, result);
   return result;
@@ -108,27 +103,6 @@ async function liveCells(d: TickDeps) {
      where i.state = 'InProgress' and i.lease_expires > $1 and r.execution_name is not null`,
     [d.now],
   )).rows;
-}
-
-/**
- * Stops each cell still running when a restart's wrap-up runs out, closes its run's started attempts as stopped with the
- * lease message (PBI 239) and sends its item back to Queued, with run.next_stage where it was. The restarted factory picks the item up at that stage, from the last
- * commit the cell pushed. A stopped attempt uses up none of the stage's retries. A stop that throws is logged and
- * retried next tick, and the other cells are stopped all the same.
- */
-async function stopForRestart(d: TickDeps, result: TickResult) {
-  for (const cell of await liveCells(d)) {
-    await isolated(`stopping ${cell.execution_name}`, async () => {
-      await d.launcher.stop(cell.execution_name);
-      result.stopped.push(cell.execution_name);
-      await withTx(d.pool, async (c) => {
-        const still = await c.query("select 1 from item where id = $1 and state = 'InProgress' and lease_generation = $2 for update", [cell.item_id, cell.generation]);
-        if (!still.rowCount) return;
-        await closeStartedAttempts(c, cell.item_id, d.now);
-        await transitionItem(c, cell.item_id, "lease_expired", system, { reason: "restart" });
-      });
-    });
-  }
 }
 
 async function itemRow(c: pg.Pool | pg.PoolClient, itemId: string) {

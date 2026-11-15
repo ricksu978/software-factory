@@ -137,8 +137,9 @@ describe("floorPage", () => {
 });
 
 describe("issueRef", () => {
-  // PBI 140: Prepare restart sits among the factory's Controls, and Floor counts down its wrap-up until no cell runs.
-  const floor = (restart: { minutesLeft: number; running: number } | null, canOperate = true) =>
+  // PBI 140: Prepare restart sits among the factory's Controls, and Floor says how many cells still wrap up until none
+  // does. PBI 300: the factory stops none of them, so Floor names no deadline.
+  const floor = (restart: { running: number } | null, canOperate = true) =>
     floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate, restart }, null);
 
   test("offers Prepare restart among the Controls to an operator", () => {
@@ -146,10 +147,11 @@ describe("issueRef", () => {
     assert.doesNotMatch(floor(null, false), /Prepare restart/);
   });
 
-  test("counts down the wrap-up while a cell still runs, and says it's ready once none does", () => {
-    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells are wrapping up, with 9 minutes left/);
-    assert.match(floor({ minutesLeft: 1, running: 1 }), /1 cell is wrapping up, with 1 minute left/);
-    const ready = floor({ minutesLeft: 9, running: 0 });
+  test("says how many cells still wrap up, with no deadline, and says it's ready once none does", () => {
+    assert.match(floor({ running: 2 }), /Preparing to restart: 2 cells are still wrapping up\. The factory won&#39;t stop them\./);
+    assert.match(floor({ running: 1 }), /1 cell is still wrapping up\. The factory won&#39;t stop it\./);
+    assert.doesNotMatch(floor({ running: 1 }), /minutes? left/);
+    const ready = floor({ running: 0 });
     assert.match(ready, /Ready to restart\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
     assert.doesNotMatch(ready, /Preparing to restart/);
     assert.doesNotMatch(floor(null), /restart\./);

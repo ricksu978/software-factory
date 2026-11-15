@@ -1,15 +1,15 @@
 @pbi-140
-Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item resumes where it stopped
+Feature: Prepare restart lets local cells wrap up, so each item resumes where it stopped
   An owner who wants to restart the factory or stop Docker needs the cells to stop cleanly first. Prepare
   restart is a factory override on the dashboard's Controls, and like every override it needs a reason.
   While a restart is being prepared, the scheduler starts nothing, and every live cell is told to stop at
   its next lease renewal, as a pause does. A cell stopped this way pushes its work-in-progress commit
   before it exits. The cell API keeps answering, so a cell that is wrapping up can renew, push and
-  report. When the wrap-up runs out, after FACTORY_RESTART_WAIT_MINUTES (15 by default), the factory
-  stops every cell still running. Once no cell runs, Floor says it's safe to restart. A control plane that
-  starts clears a restart override left from before, and so does Resume. After the restart, each item
-  carries on at the stage it was in, from the commit it pushed. An attempt cut short by the restart is
-  recorded as stopped and doesn't use up any of that stage's retries.
+  report. The factory never stops a cell itself, however long it runs: PBI 300 took away the stop that
+  ended the wrap-up after FACTORY_RESTART_WAIT_MINUTES. Once no cell runs, Floor says it's safe to
+  restart. A control plane that starts clears a restart override left from before, and so does Resume.
+  After the restart, each item carries on at the stage it was in, from the commit it pushed. An attempt
+  cut short by the restart is recorded as stopped and doesn't use up any of that stage's retries.
   Scenarios tagged @db need Postgres, which each test starts for itself, so cells and CI both run them.
   The rest run the cell engine against a fake control plane, agent and repo.
 
@@ -41,7 +41,7 @@ Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item r
       When the operator prepares a restart with the reason "upgrading Docker"
       Then the factory holds an active factory override "restart" with the reason "upgrading Docker"
 
-  Rule: While a restart is being prepared, the scheduler starts no cell, and Floor counts down the wrap-up
+  Rule: While a restart is being prepared, the scheduler starts no cell, and Floor shows the cells still wrapping up
 
     @ac-2 @db
     Scenario: A queued item doesn't start while a restart is being prepared
@@ -61,22 +61,23 @@ Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item r
       Then no cell starts
 
     @ac-2 @db
-    Scenario: Floor shows "Preparing to restart" with the whole wrap-up left once the restart is prepared
-      Given the control plane is running with a fake board and FACTORY_RESTART_WAIT_MINUTES unset
+    Scenario: Floor shows "Preparing to restart" with the cells still wrapping up once the restart is prepared
+      Given the control plane is running with a fake board
       And an operator is signed in
       And item "A" is running in cell "cell-a" with a live lease
       When the operator prepares a restart with the reason "upgrading Docker"
       And the operator opens Floor
-      Then Floor shows "Preparing to restart" with 15 minutes left in the wrap-up
+      Then Floor shows "Preparing to restart: 1 cell is still wrapping up. The factory won't stop it."
 
     @ac-2 @db
-    Scenario: The minutes left go down as the wrap-up runs
+    Scenario: Floor names no deadline for the wrap-up, however long it runs
       Given the control plane is running with a fake board and FACTORY_RESTART_WAIT_MINUTES unset
       And an operator is signed in
       And item "A" is running in cell "cell-a" with a live lease
-      And the operator prepared a restart 6 minutes ago
+      And the operator prepared a restart 90 minutes ago
       When the operator opens Floor
-      Then Floor shows "Preparing to restart" with 9 minutes left in the wrap-up
+      Then Floor shows "Preparing to restart: 1 cell is still wrapping up. The factory won't stop it."
+      And Floor doesn't show "minutes left"
 
   Rule: Every live cell is told to stop at its next lease renewal, and the cell API keeps answering it
 
@@ -114,7 +115,7 @@ Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item r
       And item "A"'s run records that green attempt as stopped
 
     @ac-3 @db
-    Scenario: The scheduler doesn't stop the cells itself before the wrap-up runs out
+    Scenario: The scheduler doesn't stop the cells itself
       Given a fresh factory database with WIP 2 and a review capacity of 3
       And item "A" is running in cell "cell-a" with a live lease
       And an operator prepared a restart 1 minute ago
@@ -155,56 +156,16 @@ Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item r
       Then the cell pushes nothing
       And the cell exits as stopped
 
-  Rule: When the wrap-up runs out, the factory stops every cell still running
-
-    @ac-5 @db
-    Scenario Outline: The wrap-up lasts FACTORY_RESTART_WAIT_MINUTES, 15 by default
-      Given a fresh factory database with WIP 2 and a review capacity of 3
-      And FACTORY_RESTART_WAIT_MINUTES is <setting>
-      And item "A" is running in cell "cell-a" with a live lease
-      And item "D" is running in cell "cell-d" with a live lease
-      And an operator prepared a restart <before> minutes ago
-      When the scheduler ticks
-      Then no cell is stopped
-      When <wait> minutes have passed since the restart was prepared and the scheduler ticks
-      Then cells "cell-a" and "cell-d" are stopped with the launcher's stop
-
-      Examples:
-        | setting | before | wait |
-        | unset   | 14     | 15   |
-        | 5       | 4      | 5    |
-
-    @ac-5 @db
-    Scenario: Only the cells still running are stopped when the wrap-up runs out
-      Given a fresh factory database with WIP 2 and a review capacity of 3
-      And item "A" is running in cell "cell-a" with a live lease
-      And item "D" is running in cell "cell-d" with a live lease
-      And an operator prepared a restart 15 minutes ago
-      And cell "cell-a" wrapped up and exited during the wrap-up
-      When the scheduler ticks
-      Then cell "cell-d" is stopped with the launcher's stop
-      And cell "cell-a" is not stopped
-
-    @ac-5 @db
-    Scenario: A cell whose stop fails doesn't keep the others running
-      Given a fresh factory database with WIP 2 and a review capacity of 3
-      And item "A" is running in cell "cell-a" with a live lease
-      And item "D" is running in cell "cell-d" with a live lease
-      And the launcher fails to stop cell "cell-a"
-      And an operator prepared a restart 15 minutes ago
-      When the scheduler ticks
-      Then cell "cell-d" is stopped with the launcher's stop
-      And the log records that stopping cell "cell-a" failed
-
   Rule: Once no cell is running, Floor says it's safe to restart, and the scheduler still starts nothing
 
     @ac-6 @db
-    Scenario: After the wrap-up stops the last cells, Floor says it's ready to restart
+    Scenario: Once the last cell wraps up, Floor says it's ready to restart and the scheduler starts nothing
       Given the control plane is running with a fake board
       And an operator is signed in
       And item "A" is running in cell "cell-a" with a live lease
       And item "B" is queued
       And the operator prepared a restart 15 minutes ago
+      And cell "cell-a" wrapped up and exited during the wrap-up
       When the scheduler ticks
       And the operator opens Floor
       Then Floor shows "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker."
@@ -343,29 +304,3 @@ Feature: Prepare restart lets local cells wrap up for 15 minutes, so each item r
       When the run resumes at green and every green attempt fails
       Then the cell makes 2 green attempts after the stopped one before it reports green's retries used up
       And green's attempt 1 is still recorded as stopped
-
-  Rule: An item whose cell was stopped by the launcher resumes the same way, from its last pushed commit
-
-    @ac-10 @db
-    Scenario: An item whose cell the wrap-up's end stopped resumes at its stage from its last pushed commit
-      Given a fresh factory database with WIP 1 and a review capacity of 3
-      And item "A" was at green in cell "cell-a", and its last pushed commit is red's
-      And an operator prepared a restart 15 minutes ago
-      When the scheduler ticks
-      Then cell "cell-a" is stopped with the launcher's stop
-      And item "A"'s open green attempt is recorded as stopped
-      When the factory restarts and a cell starts for item "A"
-      Then item "A"'s run resumes at green
-      And the new cell's checkout of the run's branch is at red's commit
-
-    @ac-10 @db
-    Scenario: An item stopped by the launcher after an earlier work-in-progress push resumes from that push
-      Given a fresh factory database with WIP 1 and a review capacity of 3
-      And item "A" was at green in cell "cell-a", and its last pushed commit is a work-in-progress commit
-      And an operator prepared a restart 15 minutes ago
-      When the scheduler ticks
-      Then cell "cell-a" is stopped with the launcher's stop
-      And item "A"'s open green attempt is recorded as stopped
-      When the factory restarts and a cell starts for item "A"
-      Then item "A"'s run resumes at green
-      And the new cell's checkout of the run's branch is at that work-in-progress commit

@@ -241,6 +241,7 @@ Given("the control plane is running with a fake board and FACTORY_RESTART_WAIT_M
   await startControlPlane(this);
 });
 
+// PBI 300: FACTORY_RESTART_WAIT_MINUTES no longer does anything. These steps set it, so a scenario can show that.
 Given("FACTORY_RESTART_WAIT_MINUTES is {word}", function (setting: string) {
   if (setting === "unset") delete process.env[WAIT];
   else process.env[WAIT] = setting;
@@ -412,19 +413,6 @@ async function attemptStatus(itemId: string, stageId: string, attempt: number): 
 
 // ---- the scheduler ----
 
-When("{int} minutes have passed since the restart was prepared and the scheduler ticks", long, async function (n: number) {
-  const c = ctx(this);
-  assert.ok(c.preparedAt, "no restart was prepared");
-  const s = p17(this);
-  s.now = minutesFrom(c.preparedAt, n);
-  await tick(s);
-});
-
-Given("the launcher fails to stop cell {string}", function (cell: string) {
-  const s = p17(this);
-  (s.failStop ??= new Set()).add(cell);
-});
-
 function ticked(world: object) {
   const s = p17(world);
   assert.ok(s.ticked, "the scheduler never ticked");
@@ -435,21 +423,8 @@ Then("no cell is stopped", function () {
   assert.deepEqual(ticked(this).stopped, []);
 });
 
-Then("cells {string} and {string} are stopped with the launcher's stop", function (a: string, b: string) {
-  assert.deepEqual([...ticked(this).stopped].sort(), [a, b].sort());
-});
-
-Then("cell {string} is stopped with the launcher's stop", function (cell: string) {
-  assert.ok(ticked(this).stopped.includes(cell), `${cell} wasn't stopped; stopped: ${JSON.stringify(p17(this).stopped)}`);
-});
-
 Then("cell {string} is not stopped", function (cell: string) {
   assert.ok(!ticked(this).stopped.includes(cell), `${cell} was stopped`);
-});
-
-Then("the log records that stopping cell {string} failed", function (cell: string) {
-  const logs = ctx(this).logs;
-  assert.ok(logs.some((l) => l.includes(cell) && /fail/i.test(l)), `no log line says stopping ${cell} failed:\n${logs.join("\n")}`);
 });
 
 // ---- Floor and Run detail ----
@@ -475,13 +450,6 @@ Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kil
   const form = html.slice(at, html.indexOf("</form>", at));
   for (const kind of ["pause", "drain", "resume", "kill"]) assert.ok(form.includes(`value="${kind}"`), `the Controls lack ${kind}`);
   assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
-});
-
-Then("Floor shows {string} with {int} minutes left in the wrap-up", function (text: string, n: number) {
-  const html = unescape(floorHtml(this));
-  const line = html.split(/<\/p>|\n/).find((l) => l.includes(text));
-  assert.ok(line, `Floor doesn't show "${text}"`);
-  assert.match(line, new RegExp(`\\b${n} minutes?\\b`), `"${text}" doesn't say ${n} minutes are left: ${line}`);
 });
 
 Then("Floor shows {string}", function (text: string) {
@@ -581,20 +549,6 @@ Given("cell {string} reported green passed and pushed before it stopped", long, 
   await report(this, cell, "self-review", 1, "stopped");
 });
 
-Given("item {string} was at green in cell {string}, and its last pushed commit is red's", long, async function (name: string, cell: string) {
-  const o = (await runningAt(this, name, cell, "green", ["red"]), ctx(this).origins.get(name)!);
-  o.shas.expected = o.shas.red;
-});
-
-Given("item {string} was at green in cell {string}, and its last pushed commit is a work-in-progress commit", long, async function (name: string, cell: string) {
-  const o = (await runningAt(this, name, cell, "green", ["red", "wip"]), ctx(this).origins.get(name)!);
-  o.shas.expected = o.shas.wip;
-});
-
-Then("item {string}'s open green attempt is recorded as stopped", long, async function (name: string) {
-  assert.equal(await attemptStatus(p17(this).items[name], "green", 1), "stopped");
-});
-
 When("the factory restarts and a cell starts for item {string}", long, async function (_name: string) {
   // The restart: the control plane starts, and a minute later, inside the stopped cells' last leases, its scheduler ticks.
   await clearRestartOnStart(need().pool);
@@ -639,14 +593,6 @@ async function checkoutAt(world: object, name: string, sha: string) {
 }
 
 Then("the new cell's checkout of the run's branch is at the work-in-progress commit the stopped cell pushed", long, async function () {
-  await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.wip);
-});
-
-Then("the new cell's checkout of the run's branch is at red's commit", long, async function () {
-  await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.red);
-});
-
-Then("the new cell's checkout of the run's branch is at that work-in-progress commit", long, async function () {
   await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.wip);
 });
 
