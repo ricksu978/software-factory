@@ -75,6 +75,34 @@ describe("cleanSummary with code blocks (PBI 291)", () => {
   });
 });
 
+describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
+  const CODE = "```ts\nawait saveInBatches(order, 50);\n```";
+
+  test("a markdown, md or bare wrapper closes at its own fence, leaving out a note and its code block after it", () => {
+    for (const open of ["```markdown", "```md", "```", "~~~markdown"]) {
+      const close = open.replace(/[a-z]+$/, "");
+      for (const note of ["```\nnpm test\n```", "```sh\nnpm test\n```", "```\nnpm ci\n```\n\nThen:\n\n```\nnpm test\n```\n\nLet me know."]) {
+        assert.deepEqual(cleanSummary(`Sure.\n\n${open}\n${BODY}\n${close}\n\nTo check it, run:\n\n${note}`), { body: BODY }, `${open} / ${note}`);
+      }
+    }
+  });
+
+  test("a code block inside the wrapper is kept, and the note's code block after it is not", () => {
+    const body = `${BODY}\n\n${CODE}`;
+    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
+  });
+
+  test("a bare code block inside the wrapper is kept when its body goes on after it", () => {
+    const body = `${BODY}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\n## How to check\n\nRun the lint.`;
+    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nRun:\n\n\`\`\`\nnpm test\n\`\`\``), { body });
+  });
+
+  test("the reply from #297's report ends at Fixed it.", () => {
+    const body = "## Problem\n\nA stray fence.\n\n## What changes\n\nThe wrapper runs to its own fence.\n\nFixed it.";
+    assert.deepEqual(cleanSummary(`\`\`\`markdown\n${body}\n\`\`\`\n\nNote: to check it yourself, run:\n\n\`\`\`\nnpm test -- src/cell/pr-body.test.ts\n\`\`\``), { body });
+  });
+});
+
 describe("summaryOf", () => {
   test("cleans the text of a call that succeeded", () => {
     assert.deepEqual(summaryOf({ ok: true, text: `Done.\n\n${BODY}` }), { body: BODY });
