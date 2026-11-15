@@ -117,6 +117,9 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
     if (!list.includes(opts.baseFailure.sha)) list.push(opts.baseFailure.sha);
     c.host!.branches.set(key, list);
   }
+  // A question asked at a fixed time pins the scheduler's clock an hour after the scenario's last moment, the day it
+  // was asked, so the 5-day timeout and the 2-day reminder never fire as the real date moves on.
+  if (opts.askedAt) m.now = new Date(Date.parse(opts.askedAt) + 3 * 60 * 60 * 1000);
   c.extIds.push(ext);
   m.items.set(n, { id, question });
   ctx(world).prs.set(n, prNumber);
