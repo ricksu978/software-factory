@@ -1,10 +1,11 @@
 // The BFF (redesign step 7a, 2026-11-07 design §04, §09, §10 and §12): the one service the browser talks to.
 // It signs people in at OIDC_ISSUER with the authorization code flow and PKCE, keeps sessions in Postgres as
 // factory_bff, and answers on PORT, or 7403 until the cut-over.
-// Settings: FACTORY_DB_URI, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_SCOPES, BFF_SESSION_KEY, PORT and
-// BFF_ORIGIN, the address the browser reaches it on. It refuses to start without a usable BFF_SESSION_KEY.
-// Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, and GET /auth/session (src/bff/app.ts).
-// Forwarding the dashboard's calls to the API and the webhook pass-through come in later steps.
+// Settings: FACTORY_DB_URI, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_SCOPES, BFF_SESSION_KEY, PORT,
+// BFF_ORIGIN, the address the browser reaches it on, and API_URL, the API's base address. It refuses to start without a
+// usable BFF_SESSION_KEY.
+// Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, GET /auth/session, and, since step 7b, /bff/v1/*,
+// which it forwards to the API's /v1/* (src/bff/app.ts). The webhook pass-through comes in a later step.
 import { serve } from "@hono/node-server";
 import { createBff } from "./app.ts";
 import { pgSessions, rolePool } from "./session.ts";
@@ -33,6 +34,7 @@ const app = createBff({
   origin: settings.origin,
   key: settings.key,
   sessions: pgSessions(pool),
+  apiUrl: settings.apiUrl,
 });
 
 const server = serve({ fetch: app.fetch, port: settings.port }, (info) => {
