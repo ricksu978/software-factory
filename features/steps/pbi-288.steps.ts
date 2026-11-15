@@ -69,6 +69,8 @@ type Ctx = {
   revoked?: boolean;
   aspireStarted?: boolean;
   local?: { browser: Browser; page?: Seen; back?: Seen };
+  /** The source of src/bff/main.ts, as "I read src/bff/main.ts" read it. */
+  mainSource?: string;
 };
 
 function ctx(world: object): Ctx {
@@ -917,14 +919,17 @@ Then("the stored refresh token doesn't decrypt under a different session key", l
 // ---- Reading the code and the AppHost ----
 
 When("I read src\\/bff\\/main.ts", function () {
-  // The Thens read src/bff/ themselves.
+  assert.ok(existsSync(BFF_MAIN), "src/bff/main.ts doesn't exist");
+  const source = readFileSync(BFF_MAIN, "utf8");
+  assert.ok(source.trim().length > 0, "src/bff/main.ts is empty");
+  ctx(this).mainSource = source;
 });
 
 Then("it serves its routes with Hono", function () {
-  assert.ok(existsSync(BFF_MAIN), "src/bff/main.ts doesn't exist");
+  const main = ctx(this).mainSource;
+  assert.ok(main !== undefined, "src/bff/main.ts wasn't read");
   const dir = join(repo, "src", "bff");
   const files = readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => readFileSync(join(dir, f), "utf8"));
-  const main = readFileSync(BFF_MAIN, "utf8");
   assert.ok(files.some((s) => /from\s+["']hono["']/.test(s) && /new\s+Hono\b/.test(s)), "nothing in src/bff/ builds its routes with new Hono()");
   assert.match(main, /from\s+["']@hono\/node-server["']/, "src/bff/main.ts doesn't serve through @hono/node-server");
   const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
