@@ -1,17 +1,33 @@
 // Every Aspire integration pin in aspire.config.json must exist on NuGet, or `aspire run` fails its package restore.
 // It reads nuget.org, so it skips offline, except on GitHub Actions. A cell's commands run with CI=true and no network,
-// so it keys on GITHUB_ACTIONS, which the cell's command env never carries.
+// so it keys on GITHUB_ACTIONS, which the cell's command env never carries. A network error, a 5xx or a 429 is tried
+// again a few times, so one nuget.org hiccup doesn't fail CI.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 
 const { packages } = JSON.parse(readFileSync(new URL("../aspire.config.json", import.meta.url), "utf8")) as { packages: Record<string, string> };
+
+const TRIES = 3;
+
+async function index(id: string): Promise<Response> {
+  for (let n = 1; ; n++) {
+    try {
+      const r = await fetch(`https://api.nuget.org/v3-flatcontainer/${id.toLowerCase()}/index.json`, { signal: AbortSignal.timeout(30_000) });
+      if ((r.status < 500 && r.status !== 429) || n === TRIES) return r;
+    } catch (e) {
+      if (n === TRIES) throw e;
+    }
+    await sleep(1000 * n);
+  }
+}
 
 for (const [id, version] of Object.entries(packages)) {
   test(`${id} ${version} is published on nuget.org`, async (t) => {
     let r: Response;
     try {
-      r = await fetch(`https://api.nuget.org/v3-flatcontainer/${id.toLowerCase()}/index.json`, { signal: AbortSignal.timeout(30_000) });
+      r = await index(id);
     } catch (e) {
       if (process.env.GITHUB_ACTIONS) throw e;
       return t.skip(`nuget.org unreachable: ${(e as Error).message}`);
