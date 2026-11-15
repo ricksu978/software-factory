@@ -339,8 +339,12 @@ Given("the factory holds item {int} in state {string} with priority {int} and ba
 // ---- polls and claims ----
 
 When("the poller runs {int} times", long, async function (times: number) {
+  assert.ok(times > 0, "the poller must run at least once");
   const c = pollCtx(this);
   for (let i = 0; i < times; i++) await poll(c);
+  // A poll that failed fails here, so no Then reads the state a broken poll left.
+  polled(c);
+  assert.equal(c.polls, times, `the poller ran ${c.polls} times, not ${times}`);
 });
 
 // "the poller has run once" is PBI 260's step, which polls through the same harness and checks the poll didn't fail.
@@ -355,8 +359,15 @@ Given("the poller has run again", long, async function () {
 async function claim(world: object): Promise<void> {
   const mine = ctx(world);
   pollCtx(world).ranOther = "the scheduler's claim";
+  const before = mine.claims.length;
   const claimed = await withTx(pool(), (tx) => claimNext(tx, "scheduler", new Date()));
   mine.claims.push(claimed?.itemId ?? null);
+  assert.equal(mine.claims.length, before + 1, "the claim wasn't recorded");
+  // A claimed item is leased to the scheduler, so the claim really took it.
+  if (claimed) {
+    const r = await pool().query<{ state: string }>("select state from item where id = $1", [claimed.itemId]);
+    assert.equal(r.rows[0]?.state, "InProgress", `the claimed item is in state ${r.rows[0]?.state}, not InProgress`);
+  }
 }
 
 When("the scheduler claims the next item", long, async function () {
