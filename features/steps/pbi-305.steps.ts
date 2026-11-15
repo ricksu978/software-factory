@@ -133,6 +133,8 @@ Given("item {int} waits in NeedsInput on the question {string}", long, async fun
 
 Given("item {int} waits in NeedsInput on the question {string}, asked at {string}", long, async function (n: number, body: string, at: string) {
   await waits(this, n, body, { askedAt: at });
+  // The scheduler runs a day after the question was asked: inside the 2-day reminder and 5-day timeout windows.
+  base260(this).now = new Date(Date.parse(at) + 24 * 60 * 60 * 1000);
 });
 
 Given(
