@@ -16,9 +16,15 @@ describe("ciFailureOf", () => {
     assert.equal(ciFailureOf(failure(url), `${repo}/`).checks[0].url, url);
   });
 
+  test("keeps an empty check URL, which GitHub sends as a null html_url, as no link", () => {
+    assert.equal(ciFailureOf(failure(""), repo).checks[0].url, "");
+    assert.equal(ciFailureOf(failure(""), null).checks[0].url, "");
+  });
+
   test("gives 400 for a javascript:, http or data URL, or one outside the run's repo", () => {
     rejects("javascript:alert(document.cookie)");
     rejects(" javascript:alert(1)");
+    rejects(" ");
     rejects("http://github.com/acme/widgets/actions/runs/1");
     rejects("data:text/html,<script>alert(1)</script>");
     rejects("https://github.com/acme/widgets-evil/actions/runs/1");

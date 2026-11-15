@@ -172,7 +172,7 @@ const fixingCiStage = (f: CiFailure) => `fixing CI <span class="muted">${checkLi
 
 /** Run detail's line for an item fixing CI (PBI 292): the commit and each failed check, with its URL and failing tests. */
 function fixingCiSection(f: CiFailure): string {
-  const items = f.checks.map((c) => `<li>${checkLink(c)} ${escapeHtml(c.url)}${c.failingTests.length
+  const items = f.checks.map((c) => `<li>${checkLink(c)}${c.url ? ` ${escapeHtml(c.url)}` : ""}${c.failingTests.length
     ? `<ul>${c.failingTests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
     : ` <span class="muted">named no failing test</span>`}</li>`);
   return `<section id="fixing-ci" class="banner" role="status"><p>Fixing CI: Green is fixing the CI failure on commit <code>${shortSha(f.sha)}</code>. The checks that failed:</p>${

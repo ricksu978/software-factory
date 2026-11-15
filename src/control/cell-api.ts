@@ -47,13 +47,12 @@ const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
 /**
- * PBI 292: a Green attempt's CI failure as the cell reports it: the commit CI failed on and each failed check, with
- * its URL and failing tests. Each string is cut to 500 characters, and at most 20 checks and 20 tests a check are kept.
- */
-/**
- * Reads a `/stage` report's `ciFailure` (PBI 292). Floor and Run detail link each check's `url`, so it must be an
- * https link under the run's repo on GitHub, or under `https://github.com/` for a run with no repo yet. Any other
- * URL, a `javascript:` one included, gets 400, as a `prUrl` that differs from the one the factory builds does.
+ * Reads a `/stage` report's `ciFailure` (PBI 292): the commit CI failed on and each failed check, with its URL and
+ * failing tests. Each string is cut to 500 characters, and at most 20 checks and 20 tests a check are kept.
+ * Floor and Run detail link each check's `url`, so it must be an https link under the run's repo on GitHub, or under
+ * `https://github.com/` for a run with no repo yet. An empty `url` means GitHub gave the check none, and the views show
+ * its name unlinked. Any other URL, a `javascript:` one included, gets 400, as a `prUrl` that differs from the one the
+ * factory builds does.
  */
 export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; checks: { name: string; url: string; failingTests: string[] }[] } {
   const base = repoUrl ? `${repoUrl.replace(/\/$/, "")}/` : "https://github.com/";
@@ -64,7 +63,7 @@ export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; 
     if (!isStr(c?.name) || !isStr(c?.url) || !(c.failingTests === undefined || (Array.isArray(c.failingTests) && c.failingTests.every(isStr)))) {
       throw new BadRequest("each ciFailure check must be { name, url, failingTests }");
     }
-    if (!c.url.startsWith(base) || !/^https:\/\//.test(c.url)) throw new BadRequest(`each ciFailure check's url must start with ${base}`);
+    if (c.url !== "" && (!c.url.startsWith(base) || !/^https:\/\//.test(c.url))) throw new BadRequest(`each ciFailure check's url must start with ${base}`);
     return { name: cut(c.name)!, url: cut(c.url)!, failingTests: ((c.failingTests ?? []) as string[]).slice(0, 20).map((t) => cut(t)!) };
   });
   return { sha: cut(f.sha)!, checks: checks.slice(0, 20) };

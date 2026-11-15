@@ -484,3 +484,17 @@ describe("Floor's Cost column (PBI 263)", () => {
     assert.match(floor("0"), /<td title="\$0">\$0\.00<\/td>/);
   });
 });
+
+describe("runDetailPage fixing CI", () => {
+  const detail = (fixingCi: RunDetail["fixingCi"]): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000292", external_id: "292", repo: "octo/repo", title: "t", state: "Building" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, fixingCi,
+  });
+
+  test("shows a check GitHub gave no URL by its name, unlinked and with no URL text", () => {
+    const html = runDetailPage(detail({ sha: "abc1234def", checks: [{ name: "lint", url: "", failingTests: [] }] }), null);
+    assert.match(html, /<li>lint <span class="muted">named no failing test<\/span><\/li>/);
+    assert.doesNotMatch(html, /<a href="">/);
+  });
+});
