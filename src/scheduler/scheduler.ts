@@ -454,13 +454,17 @@ async function charge(d: MergedCiDeps, row: { item_id: string; repo_id: string; 
   await isolated(`commenting CI on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`));
 }
 
-/** Files the bug item of each break that has none yet. The dedupe key keeps a retry after a lost answer from filing a second. */
+/**
+ * Files the bug item of each standing break that has none yet. A break that cleared before its bug item was filed, as
+ * when filing failed for a few polls or a merge took over a cleared row, gets none: main is already green. The dedupe
+ * key keeps a retry after a lost answer from filing a second.
+ */
 async function fileBugItems(d: MergedCiDeps) {
   const r = await d.pool.query<{ id: string; merge_sha: string; branch: string; pr_number: number | null; pr_url: string | null; failed_checks: FailedCheck[]; repo_url: string; source_id: string; external_id: string }>(
     `select b.id, b.merge_sha, b.branch, b.pr_number, b.failed_checks, repo.url as repo_url, i.source_id, i.external_id,
        (select r.pr_url from run r where r.item_id = b.item_id and r.merge_sha = b.merge_sha order by r.started_at desc limit 1) as pr_url
      from main_break b join repo on repo.id = b.repo_id join item i on i.id = b.item_id
-     where b.bug_external_id is null order by b.at`,
+     where b.bug_external_id is null and b.cleared_at is null order by b.at`,
   );
   for (const b of r.rows) {
     await isolated(`filing the bug item for ${b.merge_sha}`, async () => {
