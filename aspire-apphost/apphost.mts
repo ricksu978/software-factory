@@ -1,5 +1,6 @@
 // The software factory's local platform (plan Task 2). `aspire run` from the repo root starts it.
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createBuilder, EndpointProperty, refExpr } from './.aspire/modules/aspire.mjs';
 
 const builder = await createBuilder();
@@ -133,4 +134,19 @@ if (runMode) {
   await worker.withEnvironment('FACTORY_ENV', 'local');
 }
 
-await builder.build().run();
+// Before any resource starts, the AppHost pulls main fast-forward-only and brings Docker up (PBI 205,
+// src/apphost/start.ts), however it was launched, so control, the worker and migrate run the pulled code. A check that
+// fails shows why and exits before anything starts. A pull that changes this file takes effect on the next start.
+// `aspire publish` starts nothing, so it skips them. The path is a variable so this project's tsc, rooted here, doesn't
+// compile the repo's src; the AppHost's runtime loads the .ts file itself.
+// run() returns Aspire's PromiseLike, and runAppHostStart wants a Promise, so await it inside an async function.
+const build = async () => { await builder.build().run(); };
+if (runMode) {
+  const startModule = '../src/apphost/node-start.ts';
+  const { runAppHostStart } = (await import(startModule)) as {
+    runAppHostStart(repo: string, startResources: () => Promise<void>): Promise<void>;
+  };
+  await runAppHostStart(fileURLToPath(new URL('..', import.meta.url)), build);
+} else {
+  await build();
+}
