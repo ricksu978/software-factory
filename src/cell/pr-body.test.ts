@@ -135,6 +135,20 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
+  test("a fence spaced as the wrapper's end, whose bare block ends at a fence with a blank line after it, gives a finding", () => {
+    // A bare block that starts with a blank line, in the body's last section with text after it. Closing the wrapper at
+    // its first fence would silently drop the code and the text after it. A note's code block would open at a fence
+    // with its code right after it, not a blank line.
+    for (const reply of [
+      "```markdown\n## Problem\n\nX.\n\n## Fix\n\nRun:\n```\n\nnpm test\n```\n\nDone.\n```",
+      "```markdown\n## Problem\n\nX.\n\nSee:\n```\n\nnpm test\n\n```\n\nok\n```",
+    ]) {
+      const r = cleanSummary(reply);
+      assert.ok("finding" in r, reply);
+      assert.match(r.finding, /not clear where the PR body ends/);
+    }
+  });
+
   test("a fence that could close the wrapper or open a bare block that never closes gives a finding", () => {
     // Read as opening a block, the heading after it counts but the wrapper never closes, so neither guess is safe.
     const r = cleanSummary("```md\n## Problem\n\nX.\n```\n\nRun:\n\n```\n## Testing\n");

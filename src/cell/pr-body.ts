@@ -129,7 +129,10 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * bare block inside the body, so the body reaches the PR whole as PBI 291 made it. When a `## ` heading outside a code
  * block follows only in the second reading, a line spaced as a closing fence is returned as `ambiguous`: a bare block
  * that starts with a blank line is spaced just like a wrapper's end before a note whose code block holds a `## ` line,
- * and closing the wrapper there would silently drop the sections after that block. Spaced any other way, it opens a
+ * and closing the wrapper there would silently drop the sections after that block. So is one whose block, read as a
+ * bare block, closes at a fence with a blank line, or nothing, after it: a bare block that starts with a blank line,
+ * with text after it in the body's last section, reads just like that, while a note's code block opens at a fence with
+ * its code right after it. Spaced any other way, it opens a
  * bare block: agents often leave the language off a code block, and a bare block before more sections is far likelier
  * than such a note. Any other line
  * that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of the
@@ -147,12 +150,10 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       const heading = hasHeading(lines.slice(i));
       if (!closesLater(lines, i, wrapper)) return heading ? { ambiguous: i } : i;
       const look = spacing(lines, i);
-      if (look === "closing") return heading ? { ambiguous: i } : i;
-      if (!heading) {
-        const own = opening(line)!;
-        const end = lines.findIndex((l, j) => j > i && closes(l, own));
-        if (look !== "opening" || spacing(lines, end) !== "closing") return { ambiguous: i };
-      }
+      const own = opening(line)!;
+      const end = lines.findIndex((l, j) => j > i && closes(l, own));
+      if (look === "closing") return heading || (lines[end + 1] ?? "").trim() === "" ? { ambiguous: i } : i;
+      if (!heading && (look !== "opening" || spacing(lines, end) !== "closing")) return { ambiguous: i };
     }
     const o = opening(line);
     if (o) inner = o;
