@@ -202,6 +202,8 @@ export interface RepoHost {
   firstParent(repo: string, sha: string): Promise<string | null>;
 }
 
-/** One check run on a commit (PBI 255). `pending` is one that hasn't finished. */
-/** A check run on a commit. `cancelled`: it ended cancelled, as when a later push cancelled it, so it proves nothing either way. */
+/**
+ * One check run on a commit (PBI 255). `pending`: it hasn't finished. `cancelled`: it ended cancelled, as when a later
+ * push cancelled it, so it proves nothing either way.
+ */
 export type CheckRun = { name: string; status: "pending" | "success" | "failure" | "cancelled"; url: string };
