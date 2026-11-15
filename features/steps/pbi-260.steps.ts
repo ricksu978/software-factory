@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { tick, type TickResult } from "../../src/scheduler/scheduler.ts";
 import { nextUp } from "../../src/store/items.ts";
 import { setOverride } from "../../src/store/overrides.ts";
-import { REQUEUED_FOR_ADDRESS } from "../../src/watcher/poller.ts";
+import { REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, REPO, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { runTheCell, type Ctx as CellCtx } from "./pbi-18.steps.ts";
@@ -54,16 +54,13 @@ export type Ctx = {
   operator?: string;
   /** The cells each scheduler tick started, by the env the launcher got. */
   started: Record<string, string>[];
+  /** The scheduler's clock, when a scenario dates its question; the real clock otherwise. */
+  clock?: Date;
   /** Whether "the scheduler claims the item and its cell runs" got a cell to run. */
   cellRan?: boolean;
   /** The cell harness's real commits, by the feature's names for them. */
   shas: Map<string, string>;
   npmLog?: string;
-  /**
-   * The scheduler's clock, when a scenario pins it. A question asked at a fixed time would otherwise grow older than
-   * the 5-day timeout as the real date moves on, and the tick would abandon its item.
-   */
-  now?: Date;
 };
 
 /** PBI 305's steps put their items here too, so this file's question, Hold and event steps find them. */
@@ -328,7 +325,7 @@ async function schedulerTick(world: object): Promise<{ result: TickResult; error
   };
   try {
     const result = await tick({
-      pool: pool(), now: m.now ?? new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
+      pool: pool(), now: m.clock ?? new Date(), killFlag: false, repoHost: c.host!, backlogFor: () => adapter,
       secret: "pbi-260-secret", controlUrl: "http://control.test:7400", sopVersion: "default@1",
       launcher: { start: async (env) => (m.started.push(env), `exec-${m.started.length}`), stop: async () => {} },
     });
@@ -473,13 +470,13 @@ Then("item {int} has a system event recording its re-queue after CI passed on ba
 
 Then("the event's actor is the system, not a person", long, async function () {
   const m = ctx(this);
-  // PBI 305's re-queue for address is logged under its own kind, and this step reads it too.
+  // PBI 305's re-queue for address and PBI 317's for Green are logged under kinds of their own, and this step reads them too.
   polled(pollCtx(this));
   const all = (await pool().query<EventRow>(
     "select actor, actor_id, payload from event where item_id = $1 and kind = any($2) order by at, id",
-    [m.items.get([...m.items.keys()][0])!.id, [REQUEUED, REQUEUED_FOR_ADDRESS]],
+    [m.items.get([...m.items.keys()][0])!.id, [REQUEUED, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN]],
   )).rows;
-  assert.ok(all.length > 0, `no ${REQUEUED} or ${REQUEUED_FOR_ADDRESS} event was logged`);
+  assert.ok(all.length > 0, `no ${REQUEUED}, ${REQUEUED_FOR_ADDRESS} or ${REQUEUED_FOR_GREEN} event was logged`);
   for (const e of all) assert.equal(e.actor, "system", `the event's actor is ${e.actor} ${e.actor_id}`);
 });
 

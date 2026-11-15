@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { decide } from "../../src/control/decisions.ts";
 import { withTx } from "../../src/store/db.ts";
-import { REQUEUED_FOR_ADDRESS } from "../../src/watcher/poller.ts";
+import { REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { ctx as dashCtx } from "./pbi-175.steps.ts";
@@ -83,7 +83,8 @@ async function harness(world: object): Promise<PollCtx> {
 
 type BaseFailure = { sha: string; tests: string[]; base: string };
 
-async function waits(world: object, n: number, body: string, opts: { askedAt?: string; pr?: number; repo?: string; baseFailure?: BaseFailure } = {}): Promise<void> {
+/** PBI 317's items wait on their questions here too, with `poll: false`. */
+export async function waits(world: object, n: number, body: string, opts: { askedAt?: string; pr?: number; repo?: string; baseFailure?: BaseFailure; poll?: boolean } = {}): Promise<void> {
   const repo = opts.repo ?? REPO;
   assert.equal(repo, REPO, `the scenarios' PRs are all in ${REPO}`);
   const prNumber = opts.pr ?? 57;
@@ -103,8 +104,9 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
   // A run stopped at address has been claimed before, so its repo and config commit are already pinned.
   await pool().query(
     `insert into run (item_id, run_number, next_stage, branch, pr_number, pr_url, reviews_seen_at, repo_id, config_sha)
-     values ($1, 1, 'address', $2, $3, $4, now() - interval '7 days', (select id from repo where lower(url) = lower($5)), 'c1')`,
-    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`, `https://github.com/${repo}`],
+     values ($1, 1, 'address', $2, $3, $4, coalesce($6::timestamptz, now()) - interval '7 days', (select id from repo where lower(url) = lower($5)), 'c1')`,
+    // Dated from the question when it has a date, so a fixed date never falls behind the real clock.
+    [id, branch, prNumber, `https://github.com/${repo}/pull/${prNumber}`, `https://github.com/${repo}`, opts.askedAt ?? null],
   );
   const question = (await pool().query<{ id: string }>(
     `insert into question (item_id, kind, body, asked_at, base_failure)
@@ -117,15 +119,14 @@ async function waits(world: object, n: number, body: string, opts: { askedAt?: s
     if (!list.includes(opts.baseFailure.sha)) list.push(opts.baseFailure.sha);
     c.host!.branches.set(key, list);
   }
-  // A question asked at a fixed time pins the scheduler's clock an hour after the scenario's last moment, the day it
-  // was asked, so the 5-day timeout and the 2-day reminder never fire as the real date moves on.
-  if (opts.askedAt) m.now = new Date(Date.parse(opts.askedAt) + 3 * 60 * 60 * 1000);
   c.extIds.push(ext);
   m.items.set(n, { id, question });
   ctx(world).prs.set(n, prNumber);
   baseFailDb(world).items.set(n, id);
   dashCtx(world).sourceId ??= c.sourceId;
-  // The factory has been polling all along, so the item has seen a poll before the scenario's own.
+  // The factory has been polling all along, so the item has seen a poll before the scenario's own. PBI 317's question
+  // is answered on the poll that first sees it, so its items leave the first poll to the scenario.
+  if (opts.poll === false) return;
   await poll(c);
   polled(c);
 }
@@ -136,6 +137,9 @@ Given("item {int} waits in NeedsInput on the question {string}", long, async fun
 
 Given("item {int} waits in NeedsInput on the question {string}, asked at {string}", long, async function (n: number, body: string, at: string) {
   await waits(this, n, body, { askedAt: at });
+  // The scheduler runs a day after the question was asked: past the scenario's reviews, and inside the 2-day reminder
+  // and 5-day timeout windows, whatever today's date.
+  base260(this).clock = new Date(Date.parse(at) + 24 * 60 * 60 * 1000);
 });
 
 Given(
@@ -243,7 +247,7 @@ async function owner(world: object): Promise<string> {
   return m.owner;
 }
 
-async function answer(world: object, n: number, text: string): Promise<void> {
+export async function answer(world: object, n: number, text: string): Promise<void> {
   const item = base260(world).items.get(n);
   assert.ok(item, `no item ${n} was set up`);
   const userId = await owner(world);
@@ -363,8 +367,14 @@ Then("item {int} has a system event recording its re-queue for address after a r
 });
 
 Then("the event names item {int}'s question", long, async function (n: number) {
-  const all = await requeues(this, n);
-  assert.ok(all.length > 0, `item ${n} has no ${REQUEUED_FOR_ADDRESS} event`);
+  // PBI 317's re-queue for Green names its question too, and this step reads it as well.
+  polled(pollCtx(this));
+  const id = base260(this).items.get(n)?.id;
+  assert.ok(id, `no item ${n} was set up`);
+  const all = (await pool().query<EventRow>(
+    "select actor, actor_id, payload from event where item_id = $1 and kind = any($2) order by at, id", [id, [REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN]],
+  )).rows;
+  assert.ok(all.length > 0, `item ${n} has no ${REQUEUED_FOR_ADDRESS} or ${REQUEUED_FOR_GREEN} event`);
   const question = base260(this).items.get(n)!.question;
   for (const e of all) assert.equal(e.payload?.questionId, question, `the event names question ${e.payload?.questionId}`);
 });

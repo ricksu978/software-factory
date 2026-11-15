@@ -92,3 +92,11 @@ export function isJwt(token: string): boolean {
   const header = decodeObject(parts[0]);
   return !!header && !!decodeObject(parts[1]) && typeof header.alg === "string" && header.alg !== "none";
 }
+
+export type Refreshed = { accessToken: string; refreshToken?: string; expiresIn?: number };
+
+/** Trades a refresh token for a new access token, and a new refresh token when the provider rotates it. */
+export async function refresh(p: Provider, refreshToken: string): Promise<Refreshed> {
+  const t = await client.refreshTokenGrant(p, refreshToken);
+  return { accessToken: t.access_token, refreshToken: t.refresh_token, expiresIn: t.expires_in };
+}

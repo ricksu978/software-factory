@@ -69,7 +69,7 @@ export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; 
   return { sha: cut(f.sha)!, checks: checks.slice(0, 20) };
 }
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
-const BASE = "main";
+export const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
@@ -320,8 +320,16 @@ const routes: Record<string, Route> = {
     );
     const status = await deps.repoHost.checksOnSha(repo, sha);
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
-    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending" };
-    return { status };
+    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending", failedChecks: [] };
+    // PBI 232: why CI failed, read here on the control plane's token, so the cell needs no GitHub access to learn it.
+    // The detail is extra: an error reading it still answers the failure, and the finding falls back to "CI failed on <sha>".
+    if (status !== "failure") return { status, failedChecks: [] };
+    try {
+      return { status, failedChecks: await deps.repoHost.failedChecksOnSha(repo, sha) };
+    } catch (e) {
+      console.error(`checks: reading why CI failed on ${sha} in ${repo} failed:`, e);
+      return { status, failedChecks: [] };
+    }
   },
 
   // PBI 234: the names of the checks still pending on one of the run's own commits, for the question a cell asks when

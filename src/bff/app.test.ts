@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import { startProvider, type Provider } from "../../features/fixtures/pbi-288-provider.ts";
+import { startApi, type StandInApi } from "../../features/fixtures/pbi-289-api.ts";
 import { createBff, SIGNIN_COOKIE } from "./app.ts";
-import { hashSessionId, openRefreshToken, SESSION_COOKIE, type NewSession, type SessionStore, type Who } from "./session.ts";
+import { hashSessionId, openRefreshToken, SESSION_COOKIE, type NewSession, type Session, type SessionStore } from "./session.ts";
 
 const ORIGIN = "http://localhost:7403";
 const KEY = randomBytes(32).toString("base64");
@@ -17,9 +18,13 @@ function memory(): SessionStore & { rows: Map<string, NewSession>; failing?: boo
       if (store.failing) throw new Error("permission denied for table session");
       rows.set(s.cookieHash, s);
     },
-    async find(h: string): Promise<Who | null> {
+    async find(h: string): Promise<Session | null> {
       const s = rows.get(h);
-      return s ? { issuer: s.issuer, subject: s.subject } : null;
+      return s ? { ...s } : null;
+    },
+    async updateTokens(h: string, t: Pick<Session, "accessToken" | "accessTokenExpiresAt" | "refreshTokenEncrypted">) {
+      const s = rows.get(h);
+      if (s) rows.set(h, { ...s, ...t });
     },
     async remove(h: string) {
       rows.delete(h);
@@ -29,16 +34,26 @@ function memory(): SessionStore & { rows: Map<string, NewSession>; failing?: boo
 }
 
 let provider: Provider;
+let api: StandInApi;
 let store: ReturnType<typeof memory>;
 let app: ReturnType<typeof createBff>;
 
 before(async () => {
   provider = await startProvider("alice");
+  api = await startApi();
 });
-after(async () => provider.stop());
+after(async () => {
+  await provider.stop();
+  await api.stop();
+});
 beforeEach(() => {
   store = memory();
-  app = createBff({ issuer: provider.issuer, clientId: "dashboard", clientSecret: "s", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"), sessions: store });
+  api.calls.length = 0;
+  provider.tokenRequests.length = 0;
+  app = createBff({
+    issuer: provider.issuer, clientId: "dashboard", clientSecret: "s", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+    sessions: store, apiUrl: api.url,
+  });
 });
 
 type Jar = Map<string, string>;
@@ -180,4 +195,126 @@ test("a callback whose provider discovery fails answers 502 and clears the sign-
   absorb(jar, r);
   assert.ok(!jar.has(SIGNIN_COOKIE));
   assert.equal(store.rows.size, 0);
+});
+
+// ---- /bff: the Origin guard, the session check, the refresh and the forward to the API (step 7b) ----
+
+/** A signed-in jar, and the hash its session row is stored under. */
+async function signedIn(): Promise<{ jar: Jar; hash: string }> {
+  const jar: Jar = new Map();
+  assert.equal((await signIn(jar)).status, 302);
+  api.calls.length = 0;
+  provider.tokenRequests.length = 0;
+  return { jar, hash: hashSessionId(jar.get(SESSION_COOKIE)!) };
+}
+
+const refreshes = () => provider.tokenRequests.filter((t) => t.form.grant_type === "refresh_token");
+
+test("a /bff/v1 call without a session, or with one never issued, gets 401 and doesn't reach the API", async () => {
+  assert.equal((await get(new Map(), "/bff/v1/floor")).status, 401);
+  assert.equal((await get(new Map([[SESSION_COOKIE, "made-up"]]), "/bff/v1/floor")).status, 401);
+  assert.equal((await get(new Map(), "/bff/v1/items/1/hold", { method: "POST", headers: { origin: ORIGIN } })).status, 401);
+  assert.equal(api.calls.length, 0);
+});
+
+test("a signed-in call goes to the API's /v1 with its query and the session's bearer token, and no cookie", async () => {
+  const { jar, hash } = await signedIn();
+  api.answer("GET", "/v1/items?state=Green&page=2", { status: 403, body: '{"error":"no access"}' });
+  const r = await get(jar, "/bff/v1/items?state=Green&page=2", { headers: { authorization: "Bearer forged" } });
+  assert.equal(r.status, 403);
+  assert.equal(await r.text(), '{"error":"no access"}');
+  assert.equal(r.headers.get("content-type"), "application/json");
+  assert.equal(api.calls.length, 1);
+  const k = api.calls[0];
+  assert.equal(`${k.method} ${k.url}`, "GET /v1/items?state=Green&page=2");
+  assert.equal(k.headers.authorization, `Bearer ${store.rows.get(hash)!.accessToken}`);
+  assert.equal(k.headers.cookie, undefined);
+  assert.equal(refreshes().length, 0);
+});
+
+test("a state-changing call from the BFF's own origin goes to the API with its method and body", async () => {
+  const { jar } = await signedIn();
+  const r = await get(jar, "/bff/v1/items/482/hold", {
+    method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: '{"reason":"x"}',
+  });
+  assert.equal(r.status, 200);
+  const k = api.calls[0];
+  assert.equal(`${k.method} ${k.url}`, "POST /v1/items/482/hold");
+  assert.equal(k.body, '{"reason":"x"}');
+  assert.equal(k.headers["content-type"], "application/json");
+  assert.equal(k.headers.origin, undefined);
+});
+
+test("a state-changing /bff call from another origin, or with none, gets 403, while a read from another origin goes through", async () => {
+  const { jar } = await signedIn();
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    assert.equal((await get(jar, "/bff/v1/items/1/hold", { method, headers: { origin: "https://evil.example" } })).status, 403, method);
+  }
+  assert.equal((await get(jar, "/bff/v1/items/1/hold", { method: "POST" })).status, 403);
+  assert.equal((await get(jar, "/bff/v1/items/1/hold", { method: "POST", headers: { origin: "http://localhost:7400" } })).status, 403);
+  assert.equal((await get(jar, "/bff/v2/anything", { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal((await get(new Map(), "/bff/v1/x", { method: "POST", headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal(api.calls.length, 0);
+  assert.equal((await get(jar, "/bff/v1/floor", { headers: { origin: "https://evil.example" } })).status, 200);
+  assert.equal(api.calls.length, 1);
+});
+
+for (const left of [30, -10]) {
+  test(`a token with ${left} seconds left is refreshed, kept with the new sealed refresh token, and the call carries the new one`, async () => {
+    const { jar, hash } = await signedIn();
+    const row = store.rows.get(hash)!;
+    const old = openRefreshToken(KEY, row.refreshTokenEncrypted!);
+    row.accessTokenExpiresAt = new Date(Date.now() + left * 1000);
+    provider.nextRefresh.accessToken = "at-2";
+    provider.nextRefresh.refreshToken = "rt-2";
+    provider.nextRefresh.expiresIn = 300;
+    assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+    assert.equal(refreshes().length, 1);
+    assert.equal(refreshes()[0].form.refresh_token, old);
+    assert.equal(api.calls[0].headers.authorization, "Bearer at-2");
+    const now = store.rows.get(hash)!;
+    assert.equal(now.accessToken, "at-2");
+    assert.equal(openRefreshToken(KEY, now.refreshTokenEncrypted!), "rt-2");
+    assert.ok(Math.abs(now.accessTokenExpiresAt.getTime() - (Date.now() + 300_000)) < 5_000);
+    assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+    assert.equal(refreshes().length, 1);
+    assert.equal(api.calls[1].headers.authorization, "Bearer at-2");
+  });
+}
+
+test("a token with more than 60 seconds left isn't refreshed", async () => {
+  const { jar, hash } = await signedIn();
+  store.rows.get(hash)!.accessTokenExpiresAt = new Date(Date.now() + 61_000);
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+  assert.equal(refreshes().length, 0);
+});
+
+test("two calls at once with a token about to expire share one refresh", async () => {
+  const { jar, hash } = await signedIn();
+  store.rows.get(hash)!.accessTokenExpiresAt = new Date(Date.now() + 10_000);
+  const [a, b] = await Promise.all([get(new Map(jar), "/bff/v1/floor"), get(new Map(jar), "/bff/v1/floor")]);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  assert.equal(refreshes().length, 1);
+});
+
+test("a refused refresh, or no refresh token with a token about to expire, gets 401 and isn't forwarded", async () => {
+  const { jar, hash } = await signedIn();
+  store.rows.get(hash)!.accessTokenExpiresAt = new Date(Date.now() + 30_000);
+  provider.nextRefresh.refuse = true;
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 401);
+  store.rows.get(hash)!.refreshTokenEncrypted = null;
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 401);
+  assert.equal(api.calls.length, 0);
+});
+
+test("a call the API doesn't answer gets 502, and a BFF with no API answers 502 too", async () => {
+  const { jar } = await signedIn();
+  const down = createBff({
+    issuer: provider.issuer, clientId: "dashboard", clientSecret: "s", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+    sessions: store, apiUrl: "http://127.0.0.1:1",
+  });
+  const r = await down.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } });
+  assert.equal(r.status, 502);
+  const none = createBff({ issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"), sessions: store });
+  assert.equal((await none.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } })).status, 502);
 });

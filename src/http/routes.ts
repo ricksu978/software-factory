@@ -9,6 +9,7 @@ import type { ItemState } from "../core/states.ts";
 import type { CiFailure } from "../cell/api-client.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
+import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
 import { LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
@@ -18,7 +19,7 @@ import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
 import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
-import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
+import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type MainBreakRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -124,6 +125,12 @@ async function floor(pool: pg.Pool) {
      from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
+  // PBI 255: each break on main that still stands, with the item it charged and its bug item, for Floor's notice.
+  const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state: string | null }>(
+    `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title, bug.state as bug_state
+     from main_break b join repo on repo.id = b.repo_id left join item charged on charged.id = b.item_id left join item bug on bug.id = b.bug_item_id
+     where b.cleared_at is null order by b.at`,
+  )).rows.map(({ repo_url, ...b }): MainBreakRow => ({ ...b, repo: repoName(repo_url) }));
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
   // PBI 292: an item In progress whose run's newest attempt is a Green attempt sent back to fix a CI failure is fixing
@@ -157,7 +164,7 @@ async function floor(pool: pg.Pool) {
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
-    baseFails: withRepo(baseFails),
+    baseFails: withRepo(baseFails), mainBreaks,
     restart, cellImage: await readCellImage(pool),
   };
 }

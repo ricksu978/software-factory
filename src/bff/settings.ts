@@ -13,6 +13,8 @@ export type BffSettings = {
   clientSecret?: string;
   scopes: string;
   key: Buffer;
+  /** The API's base address, which /bff/v1/* goes to as /v1/*. Without it the BFF answers those calls 502. */
+  apiUrl?: string;
 };
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -26,6 +28,11 @@ export function readSettings(env: NodeJS.ProcessEnv): BffSettings {
   const key = readSessionKey(env.BFF_SESSION_KEY);
   const port = env.PORT ? Number(env.PORT) : BFF_PORT;
   if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error(`PORT ${env.PORT} isn't a port`);
+  let apiUrl: string | undefined;
+  if (env.API_URL) {
+    if (!URL.canParse(env.API_URL)) throw new Error(`API_URL ${env.API_URL} isn't an address`);
+    apiUrl = env.API_URL.replace(/\/+$/, "");
+  }
   return {
     port,
     origin: new URL(env.BFF_ORIGIN || `http://localhost:${port}`).origin,
@@ -35,5 +42,6 @@ export function readSettings(env: NodeJS.ProcessEnv): BffSettings {
     clientSecret: env.OIDC_CLIENT_SECRET || undefined,
     scopes: env.OIDC_SCOPES || "openid",
     key,
+    apiUrl,
   };
 }
