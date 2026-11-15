@@ -4,6 +4,7 @@ import type pg from "pg";
 import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
+import { NO_REVIEW_TEXT } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
@@ -251,7 +252,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
   //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
-  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
+  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10). A NeedsInput
+  //    item that waits on "no trusted review text to address" goes back too, once the factory answers it (PBI 305).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
@@ -268,9 +270,13 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
+    } else if (row.state === "NeedsInput" && !row.held && (await requeueForAddress(pool, row, pr))) {
+      // The factory answered the item's "no trusted review text to address" question, and the scheduler claims it
+      // again at address (PBI 305).
     } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
       // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
-      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262).
+      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
+      // unless the question is the one PBI 305 answers above.
       if (row.state === "InReview") {
         await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
       }
@@ -373,6 +379,13 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 
 /** The kind of the event that logs a re-queue after CI passed on the base (PBI 260). */
 export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
+/**
+ * The kind of the event that logs a re-queue for address of an item that waited on "no trusted review text to
+ * address", once its PR conflicts with its base or a newer trusted review asks for changes (PBI 305). Its payload holds
+ * `questionId`, `prNumber`, `reason` ("conflict" or "review"), `base` for a conflict and `at`, the review's time, for a
+ * review.
+ */
+export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
@@ -431,6 +444,47 @@ async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: s
       await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [w.question_id, answer]);
       await appendEvent(c, { ...system, itemId: w.id, kind: REQUEUED_AFTER_BASE_PASSED, payload: { sha: green, base, failedSha: w.sha, questionId: w.question_id } });
     });
+  });
+}
+
+/**
+ * PBI 305: answers the question "no trusted review text to address" that a NeedsInput item which isn't held waits on,
+ * once its PR conflicts with its base or a trusted review or open-thread comment newer than the question asks for
+ * changes. A PR whose mergeability GitHub hasn't worked out yet doesn't count as conflicting. The answer names what
+ * changed and leaves `answered_by` null, as PBI 260's does, and the re-queue is a system event. The run's next stage
+ * is address, where the scheduler claims the answered item. The item and question are re-read under a lock after the
+ * PR was read, so a person's answer, a Hold or another poll that came first wins and nothing is logged twice. Returns
+ * whether it answered.
+ */
+async function requeueForAddress(
+  pool: pg.Pool, row: Row, pr: { mergeable: boolean | null; lastChangesRequestedAt: string | null },
+): Promise<boolean> {
+  const conflict = pr.mergeable === false;
+  if (!conflict && !pr.lastChangesRequestedAt) return false;
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; asked_at: Date }>(
+      `select q.id, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.body = $2 and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id, NO_REVIEW_TEXT],
+    )).rows[0];
+    if (!q) return false;
+    const review = newer(pr.lastChangesRequestedAt, q.asked_at) ? new Date(pr.lastChangesRequestedAt!).toISOString() : null;
+    if (!conflict && !review) return false;
+    const prNumber = row.pr_number!;
+    const base = DEFAULT_BASE;
+    const what = [
+      ...(conflict ? [`PR #${prNumber} conflicts with its base ${base}.`] : []),
+      ...(review ? [`A trusted review asked for changes on PR #${prNumber} at ${review}, after this question.`] : []),
+    ];
+    const answer = `${what.join(" ")} The factory picks the item up again at address.`;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, answer]);
+    await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
+    const payload = conflict ? { questionId: q.id, prNumber, reason: "conflict", base, ...(review ? { at: review } : {}) } : { questionId: q.id, prNumber, reason: "review", at: review };
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_ADDRESS, payload });
+    return true;
   });
 }
 

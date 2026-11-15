@@ -33,6 +33,7 @@ import { join } from "node:path";
 import { tick, type TickResult } from "../../src/scheduler/scheduler.ts";
 import { nextUp } from "../../src/store/items.ts";
 import { setOverride } from "../../src/store/overrides.ts";
+import { REQUEUED_FOR_ADDRESS } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, REPO, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { runTheCell, type Ctx as CellCtx } from "./pbi-18.steps.ts";
@@ -45,7 +46,7 @@ const BRANCH = "factory/pbi-482-r1";
 /** The commits of main, oldest first, as the feature's background gives them. */
 const MAIN = ["b4se000", "b4se001", "b4se002"];
 
-type Ctx = {
+export type Ctx = {
   /** Each item's id and the id of the question it waits on, by item number. */
   items: Map<number, { id: string; question: string }>;
   /** The item the last "item N's question" step named, which "the answer" means. */
@@ -60,7 +61,8 @@ type Ctx = {
   npmLog?: string;
 };
 
-function ctx(world: object): Ctx {
+/** PBI 305's steps put their items here too, so this file's question, Hold and event steps find them. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi260?: Ctx };
   w.pbi260 ??= { items: new Map(), started: [], shas: new Map() };
   return w.pbi260;
@@ -165,9 +167,18 @@ Given(/^the item stopped at the (green|address) stage$/, long, async function (s
   const c = pollCtx(this);
   const { n, id } = theItem(this);
   let pr: number | null = null;
-  if (stage === "address") {
+  // An item whose run already has its PR, as PBI 305's do, keeps it.
+  const kept = (await pool().query<{ pr_number: number | null; pr_url: string | null }>(
+    "select pr_number, pr_url from run where item_id = $1 and ended_at is null", [id],
+  )).rows[0];
+  let url: string | null = null;
+  if (stage === "address" && kept?.pr_number) {
+    pr = kept.pr_number;
+    url = kept.pr_url;
+  } else if (stage === "address") {
     // An item stopped at address has its PR open.
     pr = c.host!.prs.length + 1;
+    url = `https://github.com/${REPO}/pull/${pr}`;
     c.host!.prs.push({
       number: pr, repo: REPO, branch: `factory/pbi-${n}-r1`, base: "main", title: "t", body: "b", headSha: null, open: true, merged: false,
       mergeSha: null, mergeable: true, reviewers: [], comments: [], reviews: [],
@@ -175,7 +186,7 @@ Given(/^the item stopped at the (green|address) stage$/, long, async function (s
   }
   await pool().query(
     "update run set next_stage = $2, pr_number = $3, pr_url = $4 where item_id = $1 and ended_at is null",
-    [id, stage, pr, pr ? `https://github.com/${REPO}/pull/${pr}` : null],
+    [id, stage, pr, url],
   );
   // The cell behind the item. Its main starts at the commit the cell failed on, then gains b4se002.
   prepare(this, stage, "main");
@@ -457,8 +468,13 @@ Then("item {int} has a system event recording its re-queue after CI passed on ba
 
 Then("the event's actor is the system, not a person", long, async function () {
   const m = ctx(this);
-  const all = await requeues(this, [...m.items.keys()][0]);
-  assert.ok(all.length > 0, `no ${REQUEUED} event was logged`);
+  // PBI 305's re-queue for address is logged under its own kind, and this step reads it too.
+  polled(pollCtx(this));
+  const all = (await pool().query<EventRow>(
+    "select actor, actor_id, payload from event where item_id = $1 and kind = any($2) order by at, id",
+    [m.items.get([...m.items.keys()][0])!.id, [REQUEUED, REQUEUED_FOR_ADDRESS]],
+  )).rows;
+  assert.ok(all.length > 0, `no ${REQUEUED} or ${REQUEUED_FOR_ADDRESS} event was logged`);
   for (const e of all) assert.equal(e.actor, "system", `the event's actor is ${e.actor} ${e.actor_id}`);
 });
 
