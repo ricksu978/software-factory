@@ -18,6 +18,8 @@
 // records the role it ran as. "I read the AppHost" is PBI 169's step, and "{string} is up" is PBI 6's.
 // Every step asserts something. A Given asserts only what it arranges, such as that sign-in started or a cookie was
 // copied, so a scenario can't pass on a precondition that never held.
+// PBI 289's steps (features/steps/pbi-289.steps.ts) reuse the scripted browser, the BFF process and the sign-in steps
+// through the exports below, and share this file's context.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -34,8 +36,8 @@ const BFF_MAIN = join(repo, "src", "bff", "main.ts");
 const APPHOST_FILE = join(repo, "aspire-apphost", "apphost.mts");
 const REALM_DIR = join(repo, "aspire-apphost", "keycloak");
 const APPHOST = "--apphost . --non-interactive --nologo";
-const CLIENT_ID = "dashboard";
-const CLIENT_SECRET = "pbi-288-client-secret";
+export const CLIENT_ID = "dashboard";
+export const CLIENT_SECRET = "pbi-288-client-secret";
 /** The sign-in cookie the BFF sets at /auth/login, holding the state, nonce and PKCE verifier. */
 const SIGNIN_COOKIE = "factory_signin";
 const local = { timeout: 600_000 };
@@ -46,12 +48,12 @@ type SessionModule = {
 };
 
 type Cookie = { name: string; value: string; attrs: Record<string, string | true> };
-type Seen = { url: URL; method: string; status: number; headers: Headers; setCookies: Cookie[]; body: string };
+export type Seen = { url: URL; method: string; status: number; headers: Headers; setCookies: Cookie[]; body: string };
 type Check = { status: number; body: string };
 
 type Bff = { child: ChildProcess; out: string; exit?: { code: number | null; signal: string | null } };
 
-type Ctx = {
+export type Ctx = {
   provider?: Provider;
   bff?: Bff;
   env?: Record<string, string>;
@@ -76,7 +78,7 @@ type Ctx = {
   mainSource?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi288?: Ctx };
   w.pbi288 ??= { browsers: [], checks: [], issuedBefore: 0 };
   return w.pbi288;
@@ -123,7 +125,7 @@ function lifetime(c: Cookie): number | null {
   return null;
 }
 
-class Browser {
+export class Browser {
   /** Cookies by host name, as a browser keeps them: not per port. */
   jar = new Map<string, Map<string, string>>();
   seen: Seen[] = [];
@@ -166,7 +168,7 @@ class Browser {
 
 // ---- The BFF as a child process ----
 
-async function answers(port: number): Promise<boolean> {
+export async function answers(port: number): Promise<boolean> {
   const on = (host: string) => new Promise<boolean>((resolve) => {
     const s = connect({ host, port, timeout: 2_000 });
     s.once("connect", () => { s.destroy(); resolve(true); });
@@ -176,7 +178,7 @@ async function answers(port: number): Promise<boolean> {
   return (await on("127.0.0.1")) || (await on("::1"));
 }
 
-async function freePort(): Promise<number> {
+export async function freePort(): Promise<number> {
   const s = createServer();
   await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", () => resolve()));
   const port = (s.address() as { port: number }).port;
@@ -203,7 +205,7 @@ async function settle(b: Bff, port: number, ms = 30_000): Promise<void> {
   while (b.exit === undefined && !(await answers(port)) && Date.now() < end) await sleep(100);
 }
 
-async function stopBff(c: Ctx): Promise<void> {
+export async function stopBff(c: Ctx): Promise<void> {
   const b = c.bff;
   if (!b) return;
   c.bff = undefined;
@@ -217,19 +219,19 @@ async function stopBff(c: Ctx): Promise<void> {
   }
 }
 
-async function startBff(c: Ctx): Promise<void> {
+export async function startBff(c: Ctx): Promise<void> {
   const b = spawnBff(c, c.env!);
   await settle(b, c.port!);
   assert.ok(b.exit === undefined, `the BFF exited (${JSON.stringify(b.exit)}) before it answered: ${b.out}`);
   assert.ok(await answers(c.port!), `the BFF doesn't answer on port ${c.port} after 30 seconds`);
 }
 
-const bffUrl = (c: Ctx, path: string) => new URL(path, `http://localhost:${c.port}`);
-const bffHost = "localhost";
+export const bffUrl = (c: Ctx, path: string) => new URL(path, `http://localhost:${c.port}`);
+export const bffHost = "localhost";
 
 // ---- The database ----
 
-async function dbUrl(): Promise<string> {
+export async function dbUrl(): Promise<string> {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   return (d as unknown as { url: string }).url;
@@ -241,7 +243,7 @@ async function sessions(): Promise<SessionRow[]> {
   return (await pool().query<SessionRow>("select * from session order by cookie_hash")).rows;
 }
 
-async function sessionsOf(c: Ctx, user: string): Promise<SessionRow[]> {
+export async function sessionsOf(c: Ctx, user: string): Promise<SessionRow[]> {
   const p = c.provider!;
   return (await sessions()).filter((r) => r.issuer === p.issuer && r.subject === p.subjectOf(user));
 }
@@ -398,7 +400,7 @@ Then("its log names the missing session key", function () {
 
 // ---- Signing in ----
 
-function browser(c: Ctx, n: number): Browser {
+export function browser(c: Ctx, n: number): Browser {
   while (c.browsers.length < n) c.browsers.push(new Browser());
   return c.browsers[n - 1];
 }
@@ -538,7 +540,7 @@ When("a browser arrives at {string} with a code for {string} and no sign-in cook
 });
 
 /** The running test provider. A step that arranges it fails here when none is running. */
-function providerOf(c: Ctx): Provider {
+export function providerOf(c: Ctx): Provider {
   assert.ok(c.provider, "the test sign-in provider isn't running");
   assert.equal(typeof c.provider.next, "object", "the test sign-in provider takes no next sign-in settings");
   return c.provider;
@@ -733,7 +735,7 @@ Then("two sessions for {string} exist", long, async function (user: string) {
 
 // ---- The session cookie ----
 
-async function sessionCookie(): Promise<string> {
+export async function sessionCookie(): Promise<string> {
   return (await sessionModule()).SESSION_COOKIE;
 }
 
@@ -774,7 +776,7 @@ Then("the browser holds a session cookie", long, async function () {
 function tokensOf(c: Ctx, user: string): string[] {
   const issued = c.provider!.issued.slice(c.issuedBefore).filter((i) => i.user === user);
   assert.ok(issued.length > 0, `the provider issued ${user} no tokens`);
-  return issued.flatMap((i) => [i.accessToken, i.idToken, ...(i.refreshToken ? [i.refreshToken] : [])]);
+  return issued.flatMap((i) => [i.accessToken, ...(i.idToken ? [i.idToken] : []), ...(i.refreshToken ? [i.refreshToken] : [])]);
 }
 
 Then("nothing the BFF sent the browser during sign-in holds alice's access token, ID token or refresh token", function () {
@@ -895,7 +897,7 @@ Then("the BFF doesn't treat the browser as signed in", function () {
 
 // ---- Signing out ----
 
-async function signOut(c: Ctx, b: Browser, path: string): Promise<void> {
+export async function signOut(c: Ctx, b: Browser, path: string): Promise<void> {
   c.logout = await b.request(bffUrl(c, path), { method: "POST", headers: { origin: bffUrl(c, "/").origin } });
   assert.notEqual(c.logout.status, 0, `the BFF didn't answer ${path}: ${c.logout.body}`);
 }
