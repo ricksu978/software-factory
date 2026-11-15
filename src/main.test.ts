@@ -8,7 +8,7 @@ import { after, before, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "./adapters/fake.ts";
 import { createAuth } from "./http/auth.ts";
 import { startServer } from "./http/server.ts";
-import { controlHandlers } from "./main.ts";
+import { controlHandlers, dashboardOrigin } from "./main.ts";
 import { dbTest, startTestDb } from "./store/test-db.ts";
 
 /** Starts src/main.ts with only `env` (and PATH, so node runs), and returns how it ended. */
@@ -125,5 +125,15 @@ describe("control plane handlers", dbTest, () => {
     const model = await fetch(`http://127.0.0.1:${port}/internal/model/v1/messages`, { method: "POST", body: "{}" });
     assert.equal(model.status, 404);
     assert.equal((await fetch(`http://127.0.0.1:${port}/internal/cells/ping`, { method: "POST" })).status, 204);
+  });
+});
+
+describe("dashboardOrigin", () => {
+  test("takes DASHBOARD_ORIGIN over PORT, since PORT is the port behind Aspire's proxy", () => {
+    assert.equal(dashboardOrigin({ DASHBOARD_ORIGIN: "http://localhost:7400/", PORT: "18463" }), "http://localhost:7400");
+  });
+  test("falls back to PORT, then to CELL_CONTROL_URL's port", () => {
+    assert.equal(dashboardOrigin({ PORT: "7400", CELL_CONTROL_URL: "http://host.docker.internal:7401" }), "http://localhost:7400");
+    assert.equal(dashboardOrigin({ CELL_CONTROL_URL: "http://host.docker.internal:7999" }), "http://localhost:7999");
   });
 });
