@@ -18,7 +18,8 @@ import type { Sop, SopStage, StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
 import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckStatus, type TransitionBody } from "./api-client.ts";
-import { baseQuestion, failingTests, runOnBase, sharedWithBase } from "./base-run.ts";
+import { baseQuestion, failingTests, runOnBase, sharedWithBase, type BaseLine } from "./base-run.ts";
+import { ciFailureOf, ciFindings, ciQuestion, sharedCiLines, type CiFailure } from "./ci-failure.ts";
 import type { Git } from "./git.ts";
 
 /** The body of GET /context (Run contract 5). */
@@ -70,12 +71,15 @@ const run = promisify(execFile);
 // How a run leaves runCell early. Each maps to one exit in `finish`.
 class Stop extends Error {}
 class Blocked extends Error {}
-/** PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item. */
+/**
+ * PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item.
+ * PBI 292: so does a CI failure on the item's commit whose failing tests CI fails on the base commit too.
+ */
 class BaseFails extends Blocked {
   readonly baseFailure: { sha: string; tests: string[]; base: string };
   readonly base: string;
-  readonly lines: { criterion: string; tests: string[] }[];
-  constructor(base: string, sha: string, lines: { criterion: string; tests: string[] }[]) {
+  readonly lines: BaseLine[];
+  constructor(base: string, sha: string, lines: BaseLine[]) {
     super(baseQuestion(base, sha, lines, false));
     this.base = base;
     this.lines = lines;
@@ -483,7 +487,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     lastAttempt.set(stageId, attempt);
     current = { stageId, attempt, report: null };
     meter.open(stageId, attempt);
-    await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0 });
+    await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0,
+      ...(stageId === "green" && fixing ? { ciFailure: fixing } : {}) });
     return attempt;
   };
   // Run contract 9: /stage, then every upload. The caller sends /pr and the transition after. A stopped attempt is
@@ -706,6 +711,44 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
   };
 
+  // PBI 292: every CI failure on the run's own commits in this cell, oldest first, by the commit it failed on. A head
+  // CI failed on is never read again, so no attempt is charged for the same failure twice.
+  const ciFailures: CiFailure[] = [];
+  const failedHeads = new Set<string>();
+  // The CI failure the next Green pass is sent back to fix, and the one the pass in flight fixes, for its reports.
+  let toFix: CiFailure | null = null;
+  let fixing: CiFailure | null = null;
+  const orNull = <T>(p: Promise<T>) => p.catch((e: unknown) => {
+    if (e instanceof LeaseLost) throw e;
+    console.error("reading CI's checks failed, so the CI failure names none:", e);
+    return null;
+  });
+
+  // Reads CI on a head a stage pushed. A head CI failed on before is never read again: nothing changed for CI to judge,
+  // so the factory gives up and asks a person instead.
+  const readCi = async (sha: string): Promise<CheckStatus> => {
+    if (failedHeads.has(sha)) throw new Blocked(ciQuestion(ciFailures, { unchanged: true }));
+    return waitForChecks(sha);
+  };
+
+  // A CI failure on `sha`, the head a stage pushed: each failed check with its URL and failing tests, kept for Green to
+  // fix. When the base commit's CI fails every test the item's checks fail, the base is at fault (PBI 215), and the
+  // stage asks about the base instead. Returns Green's findings, which the open attempt's message names first.
+  const ciFailed = async (sha: string, what?: string): Promise<string[]> => {
+    const f = ciFailureOf(sha, api.ciChecks ? await orNull(api.ciChecks(sha)) : null);
+    failedHeads.add(sha);
+    if (api.ciChecks && f.checks.some((c) => c.failingTests.length)) {
+      const baseSha = await run("git", ["rev-parse", `origin/${ctx.base}^{commit}`], { cwd: dir }).then((r) => r.stdout.trim(), () => "");
+      const shared = baseSha ? sharedCiLines(f, await orNull(api.ciChecks(baseSha, "base"))) : null;
+      if (shared) throw new BaseFails(ctx.base, baseSha, shared);
+    }
+    ciFailures.push(f);
+    toFix = f;
+    const findings = ciFindings(f, what);
+    if (current) current.notes = [...(current.notes ?? []), ...findings];
+    return findings;
+  };
+
   // ---- the stages ----
 
   const understand = async () => {
@@ -795,12 +838,21 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const green = async (carried: string[]) => {
     const max = retriesOf("green") + 1;
     const dodText = `## The team's Definition of Done\n\n${fenced(policies.dod.text, "markdown")}`;
-    if (greenTries >= max) throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
+    // PBI 292: a pass sent back to fix a CI failure is reported as fixing CI, and gives up and asks a person, instead of
+    // failing the item, when it has no attempt left or leaves the commit CI failed on unchanged.
+    const fix = toFix;
+    toFix = null;
+    if (greenTries >= max) {
+      if (fix) throw new Blocked(ciQuestion(ciFailures, { attempts: max }));
+      throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
+    }
+    fixing = fix;
     const findings = await attempts("green", max - greenTries, async (attempt, last) => {
       greenTries++;
       await say("green", brief(await promptOf("green"), item(), lockedNote(), dodText, resumed("green"), retryNote(last.length ? last : carried)));
       const undone = await keepLock("green", `green(${tag}): implementation`);
       if (undone.length) return undone;
+      if (fix && (await git.head()) === fix.sha) throw new Blocked(ciQuestion(ciFailures, { unchanged: true }));
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(greenResults, run.report);
@@ -813,6 +865,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const dod = dodFindings(await checkDod("green", attempt));
       return dod.length ? dod : dodHeadHeld();
     });
+    fixing = null;
     if (findings.length) throw new Exhausted(`Green failed after ${max} attempts:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
     await end("passed");
@@ -962,9 +1015,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const pr = await d.repoHost.openOrUpdatePr({ repo: ctx.repo, branch: ctx.branch, base: ctx.base, title: ctx.title, body: prBody(text, risk) });
     await api.pr({ prNumber: pr.number, prUrl: pr.url });
     opened = { number: pr.number, url: pr.url, summary: text, risk };
-    const ci = await waitForChecks(head);
+    const ci = await readCi(head);
     if (ci === "none") throw new Blocked("no CI ran on the PR");
-    if (ci === "failure") { await end("failed"); return [`CI failed on ${head}`]; }
+    if (ci === "failure") {
+      const findings = await ciFailed(head);
+      await end("failed");
+      return findings;
+    }
     if (!reviews) await askReviewers();
     await end("passed");
     if (!reviews) await handOver();
@@ -1093,9 +1150,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       }
       // A fix the PR's CI fails on goes back to green, counted against green's retries, and is never reviewed.
       if (fixed !== head) {
-        const ci = await waitForChecks(fixed);
+        const ci = await readCi(fixed);
         if (ci === "none") throw new Blocked("no CI ran on the PR");
-        if (ci === "failure") { await end("failed"); return [`CI failed on ${fixed}, the PR addresser's fix for the PR review's findings`]; }
+        if (ci === "failure") {
+          const findings = await ciFailed(fixed, "the PR addresser's fix for the PR review's findings");
+          await end("failed");
+          return findings;
+        }
         const stale = await freshDod("pr-review", attempt);
         const moved = stale.length ? stale : await dodHeadHeld();
         if (moved.length) { await end("failed"); return moved; }
@@ -1109,6 +1170,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!comments.length && !mergedConflict) throw new Blocked("no trusted review text to address");
     const byThread = new Map(comments.map((c) => [c.threadId, c]));
     let replies: { threadId: string; body: string }[] = [];
+    // PBI 292: Green's findings when CI fails on what address pushed. Address has no agent work left to change that
+    // commit, so it doesn't retry on it: the run goes back to Green, as spec §6 rows 7 and 8 say.
+    let ciBack: string[] | null = null;
     const findings = await attempts("address", retriesOf("address") + 1, async (attempt, last) => {
       const replyFile = join(tmpdir(), `factory-replies-${process.pid}-${attempt}.jsonl`);
       // A summary has no path: it's the reviewer's top-level summary, not a line comment (Run contract 10).
@@ -1123,15 +1187,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (undone.length) return undone;
       await push();
       const head = await git.head();
-      const ci = await waitForChecks(head);
+      const ci = await readCi(head);
       if (ci === "none") throw new Blocked("no CI ran on the PR");
-      if (ci === "failure") return [`CI failed on ${head}`];
-      const stale = await freshDod("address", attempt);
-      if (stale.length) return stale;
       replies = existsSync(replyFile)
         ? jsonLines(await readFile(replyFile, "utf8")).filter((r): r is { threadId: string; body: string } =>
           typeof r.threadId === "string" && typeof r.body === "string" && byThread.has(r.threadId))
         : [];
+      if (ci === "failure") {
+        ciBack = await ciFailed(head);
+        return [];
+      }
+      const stale = await freshDod("address", attempt);
+      if (stale.length) return stale;
       return [];
     });
     if (findings.length) throw new Blocked(`Address failed:\n${findings.map((f) => `- ${f}`).join("\n")}`);
@@ -1143,6 +1210,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (target.path === null) await d.repoHost.commentOnPr(ctx.repo, ctx.prNumber!, `${target.body.replace(/^/gm, "> ")}\n\n${r.body}`);
       else await d.repoHost.replyToThread(ctx.repo, r.threadId, r.body);
     }
+    // The replies answer the reviewers whatever CI said, so they go out before the run goes back to Green.
+    if (ciBack) { await end("failed"); return ciBack; }
     await end("passed");
     // PBI 130: the factory's own PR review looks at what address pushed, once CI passed on it, before people do again.
     // The PR already holds its body and its reviewers, so a clean review only hands it back to them.

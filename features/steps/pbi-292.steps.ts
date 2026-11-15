@@ -12,7 +12,8 @@
 //     address to push even though the PR addresser makes none.
 //   - Green's fix, named by "Green's fix makes the commit <label>": the next commit CI is asked about after the PR's
 //     first head.
-//   - the base commit, a label PBI 215's `"origin/main" is at commit <label>` gave.
+//   - the base commit, a label PBI 215's `"origin/main" is at commit <label>` gave. Origin's main never takes one of
+//     the roles above, labelled or not, since the cell reads CI there to tell a failure the base shares (#215).
 //   Each check the scenario names on a commit fails or passes, with its URL and the tests it names as failing. Any
 //   other commit has one check, "ci", which passes. The cell API's `checks` answers failure when any check failed, and
 //   success otherwise. Its `ciChecks` answers the checks, each a CiCheck with `failingTests`. The factory reads CI on
@@ -159,6 +160,8 @@ function addRule(world: object, role: Role, check: Check) {
 function classify(c: Ctx, run: CellCtx, sha: string): string {
   for (const [k, s] of c.shas) if (s === sha) return k;
   for (const role of c.roles.values()) if (role.kind === "sha" && role.sha === sha) { c.shas.set(keyOf(role), sha); return keyOf(role); }
+  // The base commit is never one of the run's own pushes, so it takes no role. Unlabelled, its CI passes.
+  if (sha === git(run.origin, "rev-parse", "main")) return `sha:${sha}`;
   const key = run.stage === "address" && !c.shas.has("address") ? "address" : !c.shas.has("head") ? "head" : `fix${++c.fixes}`;
   c.shas.set(key, sha);
   return key;

@@ -46,9 +46,10 @@ export type CellApi = {
   pendingChecks?(sha: string): Promise<string[]>;
   /**
    * The checks CI named on one of the run's own commits, or null when none has reported there (PBI 229). A cell API
-   * without it judges every dod.md line by its command or the judge, as before.
+   * without it judges every dod.md line by its command or the judge, as before. With `on: "base"` it reads a commit on
+   * the base branch instead, as PBI 292 does to tell a CI failure the base shares from the item's own.
    */
-  ciChecks?(sha: string): Promise<CiCheck[] | null>;
+  ciChecks?(sha: string, on?: "base"): Promise<CiCheck[] | null>;
   /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
@@ -85,7 +86,7 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     moveSop: async (b) => void (await call("POST", "/sop-move", b)),
     checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
-    ciChecks: async (sha) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}`)).checks,
+    ciChecks: async (sha, on) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}${on ? `&on=${on}` : ""}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });
       const res = await fetch(url, { method: "PUT", headers: { "x-ms-blob-type": "BlockBlob" }, body });
