@@ -56,6 +56,9 @@ export function seal(key: Buffer, purpose: string, text: string): string {
 /** Opens text sealed by seal() under the same key and purpose. Throws on any other key, purpose or a changed byte. */
 export function open(key: Buffer, purpose: string, sealed: string): string {
   const raw = Buffer.from(sealed, "base64url");
+  // Buffer.from ignores stray characters and the last character's spare bits, so text that isn't seal()'s exact
+  // base64url would otherwise open as if unchanged.
+  if (raw.toString("base64url") !== sealed) throw new Error("the sealed text isn't base64url");
   if (raw.length < 28) throw new Error("the sealed text is too short");
   const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
   decipher.setAAD(Buffer.from(purpose));

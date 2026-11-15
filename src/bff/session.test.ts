@@ -31,6 +31,17 @@ test("a tampered sealed refresh token doesn't open", () => {
   assert.throws(() => openRefreshToken(k, "not sealed"));
 });
 
+test("a sealed refresh token whose last character differs only in spare bits doesn't open", () => {
+  const k = key();
+  const sealed = sealRefreshToken(k, "rt-alice-1");
+  // 38 bytes make 51 characters, and the last one carries two bits that decode to nothing.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const i = alphabet.indexOf(sealed.at(-1)!);
+  const twin = sealed.slice(0, -1) + alphabet[i ^ 1];
+  assert.deepEqual(Buffer.from(twin, "base64url"), Buffer.from(sealed, "base64url"));
+  assert.throws(() => openRefreshToken(k, twin));
+});
+
 test("text sealed for one purpose doesn't open for another", () => {
   const k = readSessionKey(key());
   assert.equal(open(k, "signin", seal(k, "signin", "x")), "x");
