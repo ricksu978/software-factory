@@ -386,7 +386,7 @@ Given("the worker is running and has ticked once", long, async function () {
 // ---- When ----
 
 When("the worker starts", long, async function () {
-  // PBI 300's scenarios run the part of a worker's start that clears a prepared restart, through `workerStart`.
+  // PBI 300's scenarios start the real worker as a standby, so it runs no tick of its own, through `workerStart`.
   const own = (this as { workerStart?: () => Promise<void> }).workerStart;
   if (own) return own();
   const c = ctx(this);

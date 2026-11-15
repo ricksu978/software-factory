@@ -1,15 +1,18 @@
 // Step definitions for features/pbi-300-prepare-restart-stops-nothing.feature. They build on PBI 17's scheduler steps,
 // PBI 140's restart steps and PBI 177's live WIP steps, on PBI 4's test database. One clock, PBI 140's, drives the
 // scheduler, the leases and the cell API, so "N minutes ago" means the same to each. A cell renews its lease through
-// the real cell API. "The control plane starts" and "the worker starts" run clearRestartOnStart, the part of each
-// process's start that clears a prepared restart, in process, the same way PBI 140's scenarios start the control plane.
+// the real cell API. "The control plane starts" runs src/main.ts's serveControl and "the worker starts" runs
+// src/worker/main.ts's startWorker, in process, each with PBI 156's fakes, and stops it again once it has started. The
+// worker stands by, because the step holds the worker lock, so it runs no tick of its own: the scenario's scheduler
+// tick is the one that starts the cells, on PBI 140's clock.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import { clearRestartOnStart } from "../../src/store/overrides.ts";
+import { WORKER_LOCK_KEY } from "../../src/worker/main.ts";
 import { ctx as p140, prepare, renew } from "./pbi-140.steps.ts";
 import { ctx as p17, freshDb, newItem, tick } from "./pbi-17.steps.ts";
+import { fakes } from "./pbi-156.steps.ts";
 import { ctx as p175 } from "./pbi-175.steps.ts";
-import { long, need } from "./pbi-8.steps.ts";
+import { load, long, need } from "./pbi-8.steps.ts";
 
 const WAIT = "FACTORY_RESTART_WAIT_MINUTES";
 
@@ -31,9 +34,38 @@ Before({ tags: "@pbi-300" }, function () {
   c.restore.push(() => (wait === undefined ? delete process.env[WAIT] : (process.env[WAIT] = wait)));
   // The scheduler's clock and the leases' are PBI 140's, the one a prepared restart is dated from.
   p17(this).now = p140(this).clock;
-  const start = () => clearRestartOnStart(need().pool);
-  Object.assign(this, { controlStart: start, workerStart: start });
+  Object.assign(this, { controlStart: () => startControl(this), workerStart: () => startWorker(this) });
 });
+
+type Started = { stop(): Promise<void> };
+const quiet = { log() {}, error() {} };
+
+/** Starts the control plane through serveControl, the start src/main.ts runs once its settings are read, then stops it. */
+async function startControl(world: object): Promise<void> {
+  const mod = await load<{ serveControl(d: object, port: number): Promise<Started> }>("src/main.ts");
+  assert.ok(mod, "src/main.ts doesn't load");
+  const control = await mod.serveControl({ ...(await fakes(world)), pool: need().pool }, 0);
+  await control.stop();
+}
+
+/**
+ * Starts the worker through startWorker, the start src/worker/main.ts's main runs, then stops it. The step holds the
+ * worker lock meanwhile, so the worker stands by and ticks nothing of its own.
+ */
+async function startWorker(world: object): Promise<void> {
+  const mod = await load<{ startWorker(d: object): Promise<Started> }>("src/worker/main.ts");
+  assert.ok(mod, "src/worker/main.ts doesn't load");
+  const holder = await need().pool.connect();
+  try {
+    const got = await holder.query<{ locked: boolean }>("select pg_try_advisory_lock($1) as locked", [WORKER_LOCK_KEY]);
+    assert.ok(got.rows[0].locked, "another worker still holds the worker lock");
+    const worker = await mod.startWorker({ ...(await fakes(world)), pool: need().pool, log: quiet });
+    await worker.stop();
+    await holder.query("select pg_advisory_unlock($1)", [WORKER_LOCK_KEY]);
+  } finally {
+    holder.release();
+  }
+}
 
 After({ tags: "@pbi-300", ...long }, async function () {
   for (const r of ctx(this).restore.reverse()) r();
