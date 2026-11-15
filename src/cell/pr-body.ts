@@ -90,7 +90,7 @@ function unwrap(text: string): string | { finding: string } {
       let to = wrapperEnd(lines, from, o);
       if (typeof to !== "number") {
         return {
-          finding: `The fence-only line ${to.ambiguous + 1} of the reply could close the PR body's wrapper or open a code block inside it, and a \`## \` heading after it only counts in the second reading, so it's not clear where the PR body ends. ${ALONE}`,
+          finding: `The fence-only line ${to.ambiguous + 1} of the reply could close the PR body's wrapper or open a code block inside it, and the reply reads either way, so it's not clear where the PR body ends. ${ALONE}`,
         };
       }
       if (to < 0) to = lines.findLastIndex((l) => closes(l, o));
@@ -123,14 +123,14 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * line that would close the wrapper, or it sits right under a `## ` heading, whose section closing there would leave
  * empty. A `## ` line inside a note's code block is code, so it doesn't count.
  *
- * Otherwise the tail is read the other way too, with the line opening a block, from the wrapper's own fence state. When
- * that reading finds a `## ` heading outside a code block, the line might open a bare block in a body that goes on with
- * more sections, or close the wrapper before a note whose code block holds a `## ` line. When the line opening a block
- * still leaves a balanced body that a later fence-only line closes, it's taken as a bare block inside the body, so the
- * body reaches the PR whole as PBI 291 made it: agents often leave the language off a code block, and that's far likelier
- * than a note whose code block holds a `## ` line. When it doesn't, neither guess is safe, so that line is returned as
- * `ambiguous`, which gives a finding. With no such heading, a bare inner block followed by plain text closes the wrapper
- * early, and a note after the wrapper is left out however it's spaced.
+ * Otherwise, when the line opening a block still leaves a balanced body that a later fence-only line closes, both
+ * readings fit, and the spacing decides (see spacing). A line spaced as a closing fence closes the wrapper, so a note
+ * after it is left out. A line spaced as an opening fence, whose block's own closing fence is spaced as one too, opens a
+ * bare block inside the body, so the body reaches the PR whole as PBI 291 made it. When a `## ` heading outside a code
+ * block follows only in the second reading, the bare block is taken however it's spaced: agents often leave the
+ * language off a code block, and that's far likelier than a note whose code block holds a `## ` line. Any other line
+ * that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of the
+ * body or let a note in. A line that can't open a block that closes balanced closes the wrapper.
  */
 function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len: number }): number | { ambiguous: number } {
   let inner: { char: string; len: number } | null = null;
@@ -140,10 +140,15 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       if (closes(line, inner)) inner = null;
       continue;
     }
-    if (closes(line, wrapper)) {
-      if (!opensBareBlock(lines, from, i, wrapper)) {
-        if (!hasHeading(lines.slice(i))) return i;
-        if (!closesLater(lines, i, wrapper)) return { ambiguous: i };
+    if (closes(line, wrapper) && !opensBareBlock(lines, from, i, wrapper)) {
+      const heading = hasHeading(lines.slice(i));
+      if (!closesLater(lines, i, wrapper)) return heading ? { ambiguous: i } : i;
+      if (!heading) {
+        const look = spacing(lines, i);
+        if (look === "closing") return i;
+        const own = opening(line)!;
+        const end = lines.findIndex((l, j) => j > i && closes(l, own));
+        if (look !== "opening" || spacing(lines, end) !== "closing") return { ambiguous: i };
       }
     }
     const o = opening(line);
@@ -185,4 +190,18 @@ function closesLater(lines: string[], i: number, wrapper: { char: string; len: n
     inner = opening(line);
   }
   return false;
+}
+
+/**
+ * How the fence-only line `i` is spaced. An opening fence has a blank line, or nothing, before it and text right after
+ * it. A closing fence has text right before it and a blank line, or nothing, after it. A line spaced as neither, or as
+ * both, could be either.
+ */
+function spacing(lines: string[], i: number): "opening" | "closing" | "either" {
+  const blank = (j: number) => j < 0 || j >= lines.length || lines[j]!.trim() === "";
+  const before = blank(i - 1);
+  const after = blank(i + 1);
+  if (before && !after) return "opening";
+  if (!before && after) return "closing";
+  return "either";
 }

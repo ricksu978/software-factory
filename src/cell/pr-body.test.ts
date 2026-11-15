@@ -127,11 +127,32 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     assert.match(r.finding, /PR body alone, with nothing before or after it/);
   });
 
-  test("a bare code block inside the wrapper followed by plain text and no heading closes the wrapper", () => {
+  test("a bare code block in the last section of a wrapped body, with text after it, is kept whole", () => {
+    // The fence after "Run:" is spaced as an opening fence and its block's closing fence as a closing one, so it's a
+    // bare block inside the body, not the wrapper's end before a note whose code block holds "Then merge it.".
+    const bodies = [
+      "## Problem\n\nX.\n\n## What changes\n\nRun:\n\n```\nnpm run lint\n```\n\nThen merge it.",
+      "## Problem\n\nX.\n\n## What changes\n\nFirst:\n\n```\nnpm ci\n```\n\nThen:\n\n```\nnpm test\n```\n\nBoth pass.",
+      "## Problem\n\nX.\n\n## What changes\n\nY.\n\n```\nnpm run lint\n```\n\nThen merge it.",
+    ];
+    for (const open of ["```markdown", "```md", "```"]) {
+      for (const body of bodies) {
+        assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\``), { body }, `${open} / ${body}`);
+      }
+    }
+  });
+
+  test("a fence-only line spaced so it could close the wrapper or open a bare block gives a finding", () => {
+    // Text right before and right after the fence, or a block whose closing fence has text right after it, reads
+    // just as well as the wrapper's end before a note, so neither guess is safe.
     const body = "## Problem\n\nX.\n\n## What changes\n\nY.";
     for (const open of ["```markdown", "```md", "```"]) {
-      assert.deepEqual(cleanSummary(`${open}\n${body}\n\n\`\`\`\nnpm run lint\n\`\`\`\n\nThen merge it.\n\`\`\``), { body }, open);
-      assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\`\nnpm run lint\n\`\`\`\n\nDone.\n\`\`\``), { body }, `${open} no blank`);
+      for (const tail of ["```\nnpm run lint\n```\n\nDone.\n```", "```\nRun:\n```\nnpm test\n```", "```\nRun:\n\n```\nnpm test\n```", "\n```\nI also ran:\n```\nnpm test\n```"]) {
+        const r = cleanSummary(`${open}\n${body}\n${tail}`);
+        assert.ok("finding" in r, `${open} / ${tail}`);
+        assert.match(r.finding, /could close the PR body's wrapper or open a code block inside it/);
+        assert.match(r.finding, /not clear where the PR body ends/);
+      }
     }
   });
 
@@ -142,17 +163,10 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     }
   });
 
-  test("a blank line before the wrapper's closing fence and a note right under it leaves the note out", () => {
-    const body = "## Problem\n\nThe thing broke.\n\n## Change\n\nFixed it.";
-    for (const open of ["```markdown", "```md", "```"]) {
-      assert.deepEqual(cleanSummary(`${open}\n${body}\n\n\`\`\`\nI also ran:\n\`\`\`\nnpm test\n\`\`\``), { body }, open);
-    }
-  });
-
-  test("a note right under the wrapper's closing fence, with no blank line between, is left out", () => {
+  test("a note right under the wrapper's closing fence, with no blank line between, is left out when its block can't be the body's", () => {
     const body = "## Problem\n\nX.\n\n## What changes\n\nY.";
     for (const open of ["```markdown", "```md", "```"]) {
-      for (const note of ["Run:\n```\nnpm test\n```", "Run:\n```sh\nnpm test\n```", "Run:\n\n```\nnpm test\n```"]) {
+      for (const note of ["Run:\n```sh\nnpm test\n```", "Run:\n\n```sh\nnpm test\n```"]) {
         assert.deepEqual(cleanSummary(`${open}\n${body}\n\`\`\`\n${note}`), { body }, `${open} / ${note}`);
       }
     }
