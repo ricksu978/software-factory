@@ -390,6 +390,34 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from override where created_by = $1", [op])).rows[0].n, 2);
   });
 
+  // PBI 265: Start now, Move up and Move down are item overrides posted from the item's Controls, with a reason.
+  test("Start now is offered on an item that can still be picked up, logged with its reason, and shown on the item's page", async () => {
+    await person("op", "operator");
+    await person("viewer", "viewer");
+    const queued = await item("Queued", "next");
+    const busy = await item("InProgress", "busy");
+    const done = await item("Done", "shipped");
+    const buttons = (html: string) => [...html.matchAll(/<button name="kind" value="([a-z_]+)"/g)].map((m) => m[1]);
+    const q = buttons((await get(`/items/${queued.id}`, "op")).html);
+    for (const k of ["start_now", "move_up", "move_down"]) assert.ok(q.includes(k), `a Queued item offers no ${k}`);
+    for (const id of [busy.id, done.id]) {
+      const b = buttons((await get(`/items/${id}`, "op")).html);
+      for (const k of ["start_now", "move_up", "move_down"]) assert.ok(!b.includes(k), `a ${id === busy.id ? "busy" : "Done"} item offers ${k}`);
+    }
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=+&itemId=${queued.id}`)).status, 400);
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=demo&itemId=${busy.id}`)).status, 409);
+    assert.equal((await post("/overrides", "op", `kind=move_up&reason=demo&itemId=${busy.id}`)).status, 409);
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=demo&itemId=${queued.id}`)).status, 303);
+    assert.equal((await post("/overrides", "op", `kind=move_down&reason=later&itemId=${queued.id}`)).status, 303);
+    assert.deepEqual(await overrides(), [
+      { scope: "item", target_id: queued.id, kind: "start_now", reason: "demo" },
+      { scope: "item", target_id: queued.id, kind: "move_down", reason: "later" },
+    ]);
+    const page = (await get(`/items/${queued.id}`, "viewer")).html;
+    assert.match(page, /Marked Start now: demo, by op/);
+    assert.deepEqual(buttons(page), []);
+  });
+
   test("Re-queue needs a reason, only a Failed or Abandoned item takes it, and the next tick moves it back to Queued", async () => {
     await person("op", "operator");
     const failed = await item("Failed", "broke");
