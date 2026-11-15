@@ -227,6 +227,17 @@ flowchart LR
     <li>On each <code>/bff/v1/*</code> call, the BFF loads the session, refreshes the access token when it expires within 60 seconds, and forwards the call to the API with <code>Authorization: Bearer</code>. The API resolves the user from the token. If the person isn't in <code>user</code>, it answers 403 and the SPA shows a no-access page, as today's dashboard does (<code>src/http/routes.ts:287</code>).</li>
     <li><code>/auth/logout</code> deletes the session row and clears the cookie.</li>
   </ol>
+  <p>Step 7a builds steps 2, 3, 4 and 6 in <code>src/bff/</code>. <span class="tag call">My call</span></p>
+  <ul>
+    <li><b>Sign-in cookie.</b> <code>factory_signin</code> holds state, nonce and verifier as JSON sealed with AES-256-GCM under the session key, so the browser can neither read nor forge it. It has <code>Path=/auth</code> and <code>Max-Age=600</code>, and the callback clears it whether the sign-in succeeds or not.</li>
+    <li><b>Callback checks.</b> The callback refuses with 400 when the sign-in cookie is missing or the state differs, and with 401 when the provider sent an error, the code exchange fails, or the ID token fails a check: its signature against the issuer's JWKS, issuer, audience, expiry or nonce. It also refuses with 401 when the access token isn't three base64url parts with a JSON header that names an algorithm and a JSON payload, and the answer says the access token isn't a JWT. When the session row can't be written it answers 500 and sets no cookie.</li>
+    <li><b>Session cookie.</b> <code>factory_session</code> holds 32 random bytes in base64url. The row is keyed by its SHA-256, so the table never holds a live cookie. The cookie's <code>Max-Age</code> is the 30-day absolute expiry. A successful callback sends the browser to <code>/</code>.</li>
+    <li><b>Refresh token.</b> Sealed with AES-256-GCM under <code>BFF_SESSION_KEY</code>, 32 bytes in base64. The BFF exits 1, naming the setting, when the key is missing or isn't 32 bytes. Sealed text opens only in the exact base64url that sealing wrote, so a changed last character doesn't slip through in its spare bits.</li>
+    <li><b>Who is signed in.</b> <code>GET /auth/session</code> answers the session's <code>{ issuer, subject }</code>, or 401. It marks the session seen, and a session idle for seven days or past its 30 days counts as none.</li>
+    <li><b>Signing out.</b> <code>POST /auth/logout</code> answers 403 without an <code>Origin</code> equal to the BFF's own. Otherwise it deletes the row the cookie names, if any, clears the cookie on <code>Path=/</code>, and answers 204.</li>
+    <li><b>Database role.</b> Every BFF connection runs <code>set role factory_bff</code> before its first query, whatever login <code>FACTORY_DB_URI</code> or the managed identity carries.</li>
+    <li><b>Settings.</b> <code>BFF_ORIGIN</code> is the address the browser reaches the BFF on, and the base of the <code>redirect_uri</code>. It defaults to <code>http://localhost:&lt;PORT&gt;</code>. Over https both cookies are <code>Secure</code>. An empty <code>OIDC_CLIENT_SECRET</code> makes the BFF a public client, as for the local realm's <code>dashboard</code> client. <code>OIDC_SCOPES</code> defaults to <code>openid</code>. The issuer must be https, except on <code>localhost</code> or <code>127.0.0.1</code>, as for the local Keycloak on 7430. Discovery is read on the first sign-in and kept, so the BFF starts before its provider answers.</li>
+  </ul>
   <h3>Provider configuration</h3>
   <p>Any OIDC provider works, through the same settings. Keycloak is the local one. <span class="tag yours">Yours</span></p>
   <div class="tbl"><table>
@@ -357,7 +368,7 @@ flowchart LR
       <tr><td>Repo</td><td>One package with four entry points: <code>src/bff/main.ts</code>, <code>src/api/main.ts</code>, <code>src/cell-api/main.ts</code>, <code>src/worker/main.ts</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>BFF and API HTTP</td><td>Hono 4.13 with <code>@hono/node-server</code> 2.1</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Cell API HTTP</td><td>Plain <code>node:http</code>, as today</td><td><span class="tag yours">Yours</span></td></tr>
-      <tr><td>Sign-in</td><td><code>openid-client</code> 6.8 in the BFF</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Sign-in</td><td><code>openid-client</code> 6.8 in the BFF, wrapped by <code>src/bff/oidc.ts</code>, with its non-repudiation checks on so the ID token's signature is checked against the issuer's JWKS</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Token check</td><td><code>jose</code> 6.2 in the API, already a dependency of <code>openid-client</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>UI</td><td>React SPA built with Vite, served as static files by the BFF</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Data</td><td>Postgres through <code>pg</code>, raw SQL, SQL migrations, as today</td><td><span class="tag call">My call</span></td></tr>
@@ -428,7 +439,7 @@ flowchart LR
       <tr><td>Can a Container Apps job reach an internal-ingress app in the same environment, and how are cells kept from reaching the API?</td><td>The Container Apps networking docs, then one job in Azure</td><td>Azure</td></tr>
       <tr><td>Which broker lets Google and Microsoft accounts in through one issuer in Azure?</td><td>A choice between running Keycloak and a managed broker, once the accounts that must sign in are known</td><td>Azure</td></tr>
       <tr><td>Does a server-sent event stream pass cleanly through a Hono proxy in the BFF?</td><td>A one-route prototype</td><td>7</td></tr>
-      <tr><td>Does <code>openid-client</code> run on Node 26? Its package declares no Node range.</td><td>One sign-in round trip against local Keycloak</td><td>7</td></tr>
+      <tr><td>Does <code>openid-client</code> run on Node 26? Its package declares no Node range.</td><td>One sign-in round trip against local Keycloak. Step 7a: <code>openid-client</code> 6.8.9 runs on Node 26.13 through every BFF unit test and every non-<code>@local</code> PBI 288 scenario, against the test provider. The Keycloak round trip is the <code>@local</code> scenario in <code>features/pbi-288-bff-sign-in-sessions.feature</code>, and closes this once it passes under <code>aspire run</code>.</td><td>7</td></tr>
     </tbody>
   </table></div>
 </section>
