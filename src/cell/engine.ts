@@ -235,8 +235,10 @@ const STILL_OPEN = /^Still open(?: at [0-9a-f]{7,40})?: /;
 /**
  * The factory's own threads still open on the PR, from openReviewComments' answer, so a claim takes up those an earlier
  * claim left (PBI 318). A thread is the factory's when the trusted bot wrote its first comment, which is the finding.
- * Every reply in it is the bot's too, as replyToThread posts them: the PR reviewer's starts "Still open", and any other is
- * the author's. A review's summary has no thread, and the addresser's reply count starts again in each claim.
+ * Only the bot's replies in it are kept, as replyToThread posts them: the PR reviewer's starts "Still open", and any other
+ * is the author's. Anyone who can comment on the PR can reply inside the thread too, and such a reply is dropped, as
+ * address drops people's replies in the factory's threads, so no untrusted text reaches a brief (Run contract 10). A
+ * review's summary has no thread, and the addresser's reply count starts again in each claim.
  */
 export function factoryThreadsOnPr(comments: ReviewComment[], trustedBot: string | null | undefined): ReviewThread[] {
   const byThread = new Map<string, ReviewComment[]>();
@@ -244,7 +246,7 @@ export function factoryThreadsOnPr(comments: ReviewComment[], trustedBot: string
   const threads: ReviewThread[] = [];
   for (const [threadId, [first, ...rest]] of byThread) {
     if (first.path === null || !factoryThread(first.author, trustedBot)) continue;
-    const conversation = rest.map((c): ReviewThread["conversation"][number] => STILL_OPEN.test(c.body)
+    const conversation = rest.filter((c) => factoryThread(c.author, trustedBot)).map((c): ReviewThread["conversation"][number] => STILL_OPEN.test(c.body)
       ? { from: "you", body: c.body.replace(STILL_OPEN, "") }
       : { from: "author", body: c.body });
     const reason = conversation.filter((c) => c.from === "you").at(-1)?.body ?? null;
