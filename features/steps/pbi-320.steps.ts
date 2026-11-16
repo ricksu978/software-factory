@@ -407,9 +407,13 @@ Then(re(`item "([^"]+)"'s page doesn't show it as final-stage`), async function 
 
 // ---- Floor ----
 
+function floorHtml(world: object): Promise<string> {
+  return fetchPage(world, "/", p89(world).login!);
+}
+
 /** The text of each list entry and table row on Floor that links to the item's page. */
-async function floorEntries(world: object, name: string): Promise<string[]> {
-  const html = await fetchPage(world, "/", p89(world).login!);
+async function floorEntries(world: object, name: string, page?: string): Promise<string[]> {
+  const html = page ?? (await floorHtml(world));
   const link = `href="/items/${itemOf(world, name).id}"`;
   return [...html.matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)].filter((m) => m[2].includes(link)).map((m) => text(m[2]));
 }
@@ -434,8 +438,8 @@ Then(re(`Floor doesn't show item "([^"]+)" as final-stage`), async function (nam
   assert.ok(!entries.some(finalStageIn), `Floor shows item "${name}" as final-stage: ${entries.join(" | ")}`);
 });
 
-async function floorShowsPriority(world: object, name: string, value: number, from: string | null): Promise<void> {
-  const entries = await floorEntries(world, name);
+async function floorShowsPriority(world: object, name: string, value: number, from: string | null, page?: string): Promise<void> {
+  const entries = await floorEntries(world, name, page);
   assert.ok(entries.length > 0, `Floor doesn't list item "${name}"`);
   const found = entries.flatMap(priorities);
   assert.ok(found.length > 0, `Floor shows no priority for item "${name}": ${entries.join(" | ")}`);
@@ -451,10 +455,12 @@ Then(re(`Floor shows item "([^"]+)"'s priority as (\\d+), from item "([^"]+)"`),
   await floorShowsPriority(this, name, Number(p), ref(this, from));
 });
 
-Then(re(`Floor shows these items:`), async function (table: { hashes(): Record<string, string>[] }) {
+// One Floor fetch for the whole table: a fetch per assertion overran the step timeout on CI.
+Then(re(`Floor shows these items:`), long, async function (table: { hashes(): Record<string, string>[] }) {
+  const page = await floorHtml(this);
   for (const row of table.hashes()) {
-    await floorShowsPriority(this, row.item, Number(row.priority), null);
-    const entries = await floorEntries(this, row.item);
+    await floorShowsPriority(this, row.item, Number(row.priority), null, page);
+    const entries = await floorEntries(this, row.item, page);
     const shown = entries.some(finalStageIn);
     assert.equal(shown, row["final-stage"] === "yes", `item "${row.item}" ${shown ? "shows" : "doesn't show"} as final-stage on Floor: ${entries.join(" | ")}`);
   }
