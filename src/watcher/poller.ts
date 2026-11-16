@@ -73,7 +73,21 @@ export function criteriaHash(criteria: string[]): string {
  * it. Its open dependencies aren't judged (PBI 237): the scheduler skips a Queued item whose `blocked_by` isn't empty.
  */
 export function readinessItemHash(fi: FactoryItem): string {
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo });
+  // The Priority field orders the claims (PBI 320) and isn't judged, so a new priority doesn't re-gate the item.
+  const { [PRIORITY_FIELD]: _priority, ...fields } = fi.fields;
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields, repo: fi.repo });
+}
+
+/** The board field an item's priority is read from (PBI 320). */
+export const PRIORITY_FIELD = "Priority";
+
+/**
+ * An item's own priority from its board fields (PBI 320): the Priority field's value when it's a whole number from 1
+ * to 5, where 1 is the highest, and 3 when it's missing or anything else.
+ */
+export function boardPriority(fields: Record<string, string>): number {
+  const raw = String(fields[PRIORITY_FIELD] ?? "").trim();
+  return /^[1-5]$/.test(raw) ? Number(raw) : 3;
 }
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
@@ -231,7 +245,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       const fi = await adapter.getItem(ext);
       fetched.set(ext, fi);
       if (fi) {
-        await pool.query("update item set repo = $3 where source_id = $1 and external_id = $2 and repo is distinct from $3", [sourceId, ext, fi.repo]);
+        await pool.query(
+          "update item set repo = $3, board_priority = $4 where source_id = $1 and external_id = $2 and (repo is distinct from $3 or board_priority is distinct from $4)",
+          [sourceId, ext, fi.repo, boardPriority(fi.fields)],
+        );
       }
     }
     return fetched.get(ext)!;
@@ -244,6 +261,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
+    await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
     await returnWithdrawn(pool, id);
   });
 
@@ -309,9 +327,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
-    if (row.state === "Queued" || row.state === "SignOff" || row.state === "NeedsInput") {
-      await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
-    }
+    // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
+    // lends its group and priority to the items it depends on (PBI 320).
+    await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
   });
 
   w.step("re-queuing items stopped by a red base");

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { withTx } from "./db.ts";
-import { claimNext, moveInQueue, nextUp } from "./items.ts";
+import { claimKeys, claimNext, moveInQueue, nextUp } from "./items.ts";
 import { setOverride, type OverrideKind } from "./overrides.ts";
 import { dbTest, startTestDb } from "./test-db.ts";
 
@@ -175,5 +175,111 @@ describe("queue order", dbTest, () => {
     // An issue above them leaves the board, and every rank shrinks by two.
     for (const [id, rank] of [[a, 2], [b, 3], [c, 4]] as const) await db.pool.query("update item set backlog_rank = $2 where id = $1", [id, rank]);
     assert.deepEqual(await order(), ["A", "C", "B"]);
+  });
+});
+
+describe("claim keys (PBI 320)", dbTest, () => {
+  let db: Awaited<ReturnType<typeof startTestDb>>;
+  let source: string;
+
+  before(async () => {
+    db = await startTestDb();
+  });
+  after(async () => {
+    await db?.stop();
+  });
+  beforeEach(async () => {
+    await db.pool.query(`truncate item, backlog_source, override, "user" cascade`);
+    source = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
+  });
+
+  async function item(name: string, state: string, rank: number, priority: number | null, deps: string[] = []): Promise<string> {
+    return (await db.pool.query<{ id: string }>(
+      "insert into item (source_id, external_id, title, state, backlog_rank, board_priority, blocked_by) values ($1, $2, $2, $3, $4, $5, $6) returning id",
+      [source, name, state, rank, priority, deps],
+    )).rows[0].id;
+  }
+  /** An open run at `stage`, with an open PR, and the stages before it passed. */
+  async function inLoop(id: string, stage: string, passed: string[] = []): Promise<void> {
+    const run = (await db.pool.query<{ id: string }>(
+      "insert into run (item_id, run_number, next_stage, pr_number, pr_url) values ($1, 1, $2, 7, 'https://github.com/o/r/pull/7') returning id", [id, stage],
+    )).rows[0].id;
+    for (const s of passed) await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, $2, 1, 'passed')", [run, s]);
+  }
+  const order = async (resumeOnly = false) => (await nextUp(db.pool, 10, { resumeOnly })).map((r) => r.external_id);
+
+  test("an item with no priority read yet counts as 3, and priority comes before the board order", async () => {
+    await item("A", "Queued", 1, 4);
+    await item("B", "Queued", 2, null);
+    await item("C", "Queued", 3, 2);
+    assert.deepEqual(await order(), ["C", "B", "A"]);
+  });
+
+  test("the final-stage group comes first, ordered by its own priority", async () => {
+    await item("A", "Queued", 1, 1);
+    await inLoop(await item("F", "Queued", 2, 5), "address", ["pr-review"]);
+    await inLoop(await item("G", "Queued", 3, 2), "address", ["pr-review"]);
+    assert.deepEqual(await order(), ["G", "F", "A"]);
+    const keys = await claimKeys(db.pool);
+    assert.equal([...keys.values()].filter((k) => k.finalStage).length, 2);
+  });
+
+  test("only the review loop with an open PR is final-stage", async () => {
+    const first = await item("P", "InProgress", 1, 3);
+    await inLoop(first, "pr-review");
+    const second = await item("Q", "InProgress", 2, 3);
+    await inLoop(second, "pr-review", ["address"]);
+    const green = await item("G", "InProgress", 3, 3);
+    await inLoop(green, "green");
+    const merged = await item("M", "Accepted", 4, 3);
+    await inLoop(merged, "address");
+    const keys = await claimKeys(db.pool);
+    assert.equal(keys.get(first)?.finalStage, false);
+    assert.equal(keys.get(second)?.finalStage, true);
+    assert.equal(keys.get(green)?.finalStage, false);
+    assert.equal(keys.get(merged)?.finalStage, false);
+  });
+
+  test("an item a final-stage item depends on, through another, joins the group with its priority", async () => {
+    const a = await item("A", "InReview", 1, 2, ["E"]);
+    await inLoop(a, "address");
+    await item("E", "Queued", 2, 5, ["D"]);
+    const d = await item("D", "Queued", 3, 5);
+    await item("X", "Queued", 4, 1);
+    assert.deepEqual(await order(), ["D", "X"]);
+    assert.deepEqual(await claimKeys(db.pool, [d]), new Map([[d, {
+      own: 5, priority: 2, finalStage: true, priorityFrom: { id: a, externalId: "A" }, finalStageFrom: { id: a, externalId: "A" },
+    }]]));
+  });
+
+  test("outside the group an item takes the highest priority of the items that depend on it, never a lower one", async () => {
+    const h = await item("H", "Queued", 1, 1, ["D"]);
+    await item("L", "Queued", 2, 5, ["D", "K"]);
+    await item("X", "Queued", 3, 2);
+    const d = await item("D", "Queued", 4, 4);
+    const k = await item("K", "Queued", 5, 3);
+    assert.deepEqual(await order(), ["D", "X", "K"]);
+    const keys = await claimKeys(db.pool, [d, k]);
+    assert.deepEqual(keys.get(d), { own: 4, priority: 1, finalStage: false, priorityFrom: { id: h, externalId: "H" }, finalStageFrom: null });
+    assert.deepEqual(keys.get(k), { own: 3, priority: 3, finalStage: false, priorityFrom: null, finalStageFrom: null });
+  });
+
+  test("a Done dependent lends nothing, and a cycle of dependencies ends", async () => {
+    const a = await item("A", "Done", 1, 1, ["D"]);
+    await inLoop(a, "address");
+    await item("B", "Queued", 2, 2, ["C"]);
+    const c = await item("C", "Queued", 3, 4, ["B"]);
+    const d = await item("D", "Queued", 4, 5);
+    const keys = await claimKeys(db.pool);
+    assert.deepEqual(keys.get(d), { own: 5, priority: 5, finalStage: false, priorityFrom: null, finalStageFrom: null });
+    assert.equal(keys.get(c)?.priority, 2);
+  });
+
+  test("a priority-1 item gets past the waiting brake, and new work at another priority doesn't", async () => {
+    await item("B", "Queued", 1, 2);
+    await item("P", "Queued", 2, 1);
+    await item("H", "Queued", 3, 1, ["D"]);
+    await item("D", "Queued", 4, 4);
+    assert.deepEqual(await order(true), ["P", "D"]);
   });
 });

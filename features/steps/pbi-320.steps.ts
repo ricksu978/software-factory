@@ -12,7 +12,8 @@
 //   1 to 5, and 3 otherwise. Null means no poll has read it yet, and counts as 3. A step that gives an item a priority
 //   sets the board's field and the column alike, as a poll would.
 // - "Depends on" is the board's open dependency: the fake board's `openDependencies`, by external id. A step that
-//   names a dependency before both items exist has it set on the board before the next poll.
+//   names a dependency before both items exist has it set on the board before the next poll. A dependent whose
+//   dependency a step removes still waits on an open issue outside the scenario, #999, so it isn't claimed itself.
 // - A final-stage item has an open PR on the repo host and is InReview, Queued with its open run at address, or
 //   InProgress at address or at the pr-review that follows address.
 // - An item's page says `Priority N`. When the priority comes from an item that depends on it, it says
@@ -35,13 +36,15 @@ const REPO = "octo/repo";
 type Ctx = {
   /** Each item's open dependencies on the board, by the feature's names, set on the board before each poll. */
   deps: Map<string, string[]>;
+  /** The dependents whose dependency a step removed, which still wait on an issue outside the scenario. */
+  outside: Set<string>;
   /** The kind of the step running: "Context" for a Given. */
   stepType?: string;
 };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi320?: Ctx };
-  w.pbi320 ??= { deps: new Map() };
+  w.pbi320 ??= { deps: new Map(), outside: new Set() };
   return w.pbi320;
 }
 
@@ -283,16 +286,24 @@ Given(re(`items "([^"]+)" and "([^"]+)" each depend on item "([^"]+)" on the boa
   depend(this, b, on);
 });
 
+// The dependent stays blocked by an open issue outside the scenario, so the scenario sees only what the removed
+// dependency lent the item it named. Otherwise a Queued dependent, such as the priority-1 "H" of the @ac-6 scenarios,
+// would be claimable at its own priority and take the slot the scenario expects the other item to get.
 When(re(`someone removes item "([^"]+)"'s dependency on item "([^"]+)" on the board`), function (dependent: string, on: string) {
   const deps = ctx(this).deps;
   deps.set(dependent, (deps.get(dependent) ?? []).filter((n) => n !== on));
+  ctx(this).outside.add(dependent);
 });
+
+/** The open issue outside the scenario that a dependent whose dependency was removed still waits on. */
+const OUTSIDE = "999";
 
 /** Puts every dependency the scenario named on the board, by external id, so the next poll reads them. */
 function syncDependencies(world: object): void {
   const fake = p89(world).fake!;
-  for (const [dependent, on] of ctx(world).deps) {
-    fake.setDependencies(itemOf(world, dependent).ext, on.map((n) => itemOf(world, n).ext));
+  const c = ctx(world);
+  for (const [dependent, on] of c.deps) {
+    fake.setDependencies(itemOf(world, dependent).ext, [...on.map((n) => itemOf(world, n).ext), ...(c.outside.has(dependent) ? [OUTSIDE] : [])]);
   }
 }
 

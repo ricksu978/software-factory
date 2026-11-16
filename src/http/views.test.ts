@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { activityPage, blockedReason, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, type RunDetail } from "./views.ts";
+import { activityPage, blockedReason, claimLines, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, standing, type RunDetail } from "./views.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -515,5 +515,23 @@ describe("runDetailPage fixing CI", () => {
     const html = runDetailPage(detail({ sha: "abc1234def", checks: [{ name: "lint", url: "", failingTests: [] }] }), null);
     assert.match(html, /<li>lint <span class="muted">named no failing test<\/span><\/li>/);
     assert.doesNotMatch(html, /<a href="">/);
+  });
+});
+
+describe("an item's priority and group (PBI 320)", () => {
+  const own = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null };
+  const lent = { own: 5, priority: 1, priorityFrom: { id: "a", externalId: "12" }, finalStage: true, finalStageFrom: { id: "a", externalId: "12" } };
+
+  test("Floor names the priority, and the item it comes from", () => {
+    assert.equal(standing(own), ` <span class="muted">priority 3</span>`);
+    assert.equal(standing({ ...own, finalStage: true }), ` <span class="muted">priority 3, final-stage</span>`);
+    assert.equal(standing(lent), ` <span class="muted">priority 1, from #12, final-stage because of #12</span>`);
+    assert.equal(standing(undefined), "");
+  });
+
+  test("the item page says why it's final-stage, and has no word of it when it isn't", () => {
+    assert.match(claimLines(lent), /Priority 1, from #12, which depends on it\. Its own priority on the board is 5\. Final-stage because #12 depends on it/);
+    assert.match(claimLines({ ...own, finalStage: true }), /^<p>Priority 3\. Final-stage: its PR is open/);
+    assert.equal(claimLines(own), "<p>Priority 3.</p>");
   });
 });

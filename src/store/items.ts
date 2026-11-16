@@ -114,16 +114,97 @@ const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
            and not exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))`;
 // The bug item of a break on main that still stands (PBI 255), ahead of everything else, Start now included.
 const MAIN_BREAK_BUG = `exists (select from main_break b where b.bug_item_id = i.id and b.cleared_at is null)`;
-const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
+// PBI 320: an item is final-stage on its own while its open run's PR is open and it's in the review loop: InReview,
+// Queued or InProgress at address, or InProgress at the pr-review that follows an address.
+const OWN_FINAL_STAGE = `exists (select from run r where r.item_id = i.id and r.ended_at is null and r.pr_number is not null and r.merge_sha is null
+         and (i.state = 'InReview'
+           or (i.state in ('Queued', 'InProgress') and r.next_stage = 'address')
+           or (i.state = 'InProgress' and r.next_stage = 'pr-review'
+             and exists (select from stage_run s where s.run_id = r.id and s.stage_id = 'address'))))`;
+// The states in which an item's dependencies stand. A Done, Accepted, Failed, Abandoned or Split item lends no one its
+// group or priority, and a dependency isn't followed through it.
+const LIVE = `i.state in ('Eligible', 'NotReady', 'Queued', 'InProgress', 'SignOff', 'NeedsInput', 'InReview')`;
+/**
+ * PBI 320: every item's claim key, as the CTE `claim_key`: its group and priority, and the item it inherits each from.
+ * An item's own priority is the board's, 3 until a poll reads it. A dependency is the board's open one, which the
+ * poller copies into `blocked_by` by external id. An item is in the final-stage group when it's final-stage itself, or
+ * when a final-stage item depends on it, directly or through other live items. Its priority is the highest of its own
+ * and those of the items in its group that depend on it: in the final-stage group the final-stage dependents, outside
+ * it every dependent. `fs_from` names the dependent the group comes from, and `p_from` the one the priority comes from,
+ * only when it's higher than the item's own; the higher priority wins, then the lower board rank, then the id.
+ */
+export const CLAIM_KEYS = `with recursive
+  own as (
+    select i.id, i.source_id, i.external_id, i.blocked_by, i.backlog_rank, ${LIVE} as live,
+      coalesce(i.board_priority, 3)::int as p, ${OWN_FINAL_STAGE} as fs
+    from item i
+  ),
+  reach (root, id) as (
+    select o.id, o.id from own o where o.live
+    union
+    select r.root, d.id from reach r join own a on a.id = r.id and a.live
+      join own d on d.source_id = a.source_id and d.external_id = any(a.blocked_by)
+  ),
+  lent as (
+    select r.id, l.id as from_id, l.external_id as from_ext, l.p, l.fs, l.backlog_rank
+    from reach r join own l on l.id = r.root where r.root <> r.id
+  ),
+  grouped as (
+    select o.id, o.p as own_p, o.fs as own_fs, o.fs or coalesce(bool_or(l.fs), false) as fs,
+      min(l.p) filter (where l.fs) as fs_p,
+      (array_agg(l.from_id order by l.p, l.backlog_rank nulls last, l.from_id) filter (where l.fs))[1] as fs_id,
+      (array_agg(l.from_ext order by l.p, l.backlog_rank nulls last, l.from_id) filter (where l.fs))[1] as fs_ext,
+      min(l.p) as any_p,
+      (array_agg(l.from_id order by l.p, l.backlog_rank nulls last, l.from_id))[1] as any_id,
+      (array_agg(l.from_ext order by l.p, l.backlog_rank nulls last, l.from_id))[1] as any_ext
+    from own o left join lent l on l.id = o.id group by o.id, o.p, o.fs
+  ),
+  claim_key as (
+    select g.id, g.own_p, g.fs,
+      case when g.fs and not g.own_fs then g.fs_id end as fs_from, case when g.fs and not g.own_fs then g.fs_ext end as fs_from_ext,
+      least(g.own_p, case when g.fs then g.fs_p else g.any_p end) as p,
+      case when (case when g.fs then g.fs_p else g.any_p end) < g.own_p then (case when g.fs then g.fs_id else g.any_id end) end as p_from,
+      case when (case when g.fs then g.fs_p else g.any_p end) < g.own_p then (case when g.fs then g.fs_ext else g.any_ext end) end as p_from_ext
+    from grouped g
+  )`;
+
+/** An item's claim key (PBI 320): its priority from 1 to 5 and whether it's final-stage, each with the item it comes from. */
+export type ClaimKey = {
+  /** The item's own priority, from the board. */
+  own: number;
+  /** The priority it's claimed at: its own, or a higher one from an item that depends on it. */
+  priority: number;
+  priorityFrom: { id: string; externalId: string } | null;
+  finalStage: boolean;
+  /** The final-stage item that depends on it, when it's in the group only because of that item. */
+  finalStageFrom: { id: string; externalId: string } | null;
+};
+
+/** The claim keys of the given items, or of every item, by id. */
+export async function claimKeys(c: pg.Pool | pg.PoolClient, ids?: string[]): Promise<Map<string, ClaimKey>> {
+  const rows = (await c.query<{ id: string; own_p: number; p: number; fs: boolean; fs_from: string | null; fs_from_ext: string | null; p_from: string | null; p_from_ext: string | null }>(
+    `${CLAIM_KEYS} select * from claim_key k where $1::uuid[] is null or k.id = any($1::uuid[])`, [ids ?? null],
+  )).rows;
+  return new Map(rows.map((r) => [r.id, {
+    own: r.own_p, priority: r.p, finalStage: r.fs,
+    priorityFrom: r.p_from ? { id: r.p_from, externalId: r.p_from_ext! } : null,
+    finalStageFrom: r.fs_from ? { id: r.fs_from, externalId: r.fs_from_ext! } : null,
+  }]));
+}
+
+// PBI 320: the final-stage group comes after Start now and before everything else, then the claim priority, 1 first.
+// Within one priority today's order holds: answered items, the older priority column, then the queue rank.
+const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, k.fs desc, k.p asc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
 
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
 // `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
 // main before it builds anything else (PBI 255). None of the overrides above gets an item past a hold, an open blocker
 // or the readiness gate: they only order the items that are claimable anyway.
-const CLAIMABLE = `from item i
+// A priority-1 item, its own or inherited, gets past the brake (PBI 320), though never past a hold or a blocker.
+const CLAIMABLE = `from item i join claim_key k on k.id = i.id
      where not i.held and cardinality(i.blocked_by) = 0
        and ((i.state = 'Queued'
-           and (not $1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
+           and (not $1 or k.p = 1 or exists (select from run r join stage_run s on s.run_id = r.id where r.item_id = i.id and r.ended_at is null)))
          or ${ANSWERED})
      ${ORDER}`;
 
@@ -131,7 +212,8 @@ const CLAIMABLE = `from item i
  * Moves an item one place up or down the factory queue (PBI 265) and logs it as a move_up or move_down override with
  * the person and the reason. The queue here is every Queued or answered item in the claim order, held and blocked ones
  * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
- * ordered with: those that match it on being a standing break's bug item, Start now, Queued or answered, and priority.
+ * ordered with: those that match it on being a standing break's bug item, Start now, the final-stage group, the claim
+ * priority (PBI 320), Queued or answered, and the older priority column.
  * The item's new queue key, strictly between the two items it lands between even when their board ranks tie, is kept
  * on the override, so it ends when the override does. Its rank is kept as an offset from the item's board rank where it
  * has one, so a board reorder that shifts the item and its neighbours alike leaves the moved order as it was. An item
@@ -144,14 +226,14 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
-    `select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, i.state = 'Queued' as queued, i.priority,
+  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
+    `${CLAIM_KEYS} select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
        ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
-     from item i where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
+     from item i join claim_key k on k.id = i.id where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
   const me = rows.find((r) => r.id === itemId);
   if (!me) throw new Error(`item ${itemId} isn't in the factory queue`);
-  const group = rows.filter((r) => r.bug === me.bug && r.first === me.first && r.queued === me.queued && r.priority === me.priority);
+  const group = rows.filter((r) => r.bug === me.bug && r.first === me.first && r.fs === me.fs && r.p === me.p && r.queued === me.queued && r.priority === me.priority);
   const at = group.indexOf(me);
   const last = group.length - 1;
   // The two items the move lands between, either of them missing at an end of the queue. An item already at the end
@@ -222,23 +304,24 @@ function decMid(a: string, b: string): string {
 export async function nextUp(
   c: pg.Pool | pg.PoolClient, limit: number, opts: { resumeOnly?: boolean } = {},
 ): Promise<{ id: string; external_id: string; title: string; state: ItemState }[]> {
-  return (await c.query<{ id: string; external_id: string; title: string; state: ItemState }>(`select i.id, i.external_id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
+  return (await c.query<{ id: string; external_id: string; title: string; state: ItemState }>(`${CLAIM_KEYS} select i.id, i.external_id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
 }
 
 /**
  * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. The bug item of a standing break on main
- * comes first (PBI 255), then an item marked Start now, then answered SignOff and NeedsInput items before Queued ones,
- * then highest priority, then lowest queue rank: the latest Move up or Move down's, or else the backlog rank (PBI 265).
- * Held items and items with an open
- * dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
+ * comes first (PBI 255), then an item marked Start now, then the final-stage group, then by claim priority, 1 first
+ * (PBI 320, see CLAIM_KEYS), then answered SignOff and NeedsInput items before Queued ones, then highest priority
+ * column, then lowest queue rank: the latest Move up or Move down's, or else the backlog rank (PBI 265). Held items and
+ * items with an open dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
  * With `resumeOnly`, the waiting-count brake is on, so a Queued item counts only when its open run already has a
- * stage behind it, such as one back from changes_requested. Answered items always count (Run contract 3).
+ * stage behind it, such as one back from changes_requested. Answered items always count (Run contract 3), and so does
+ * a Queued item at claim priority 1 (PBI 320).
  */
 export async function claimNext(
   c: pg.PoolClient, owner: string, now: Date, opts: { resumeOnly?: boolean } = {},
 ): Promise<{ itemId: string; runId: string; generation: number } | null> {
-  const pick = await c.query<{ id: string }>(`select i.id ${CLAIMABLE} limit 1 for update of i skip locked`, [opts.resumeOnly ?? false]);
+  const pick = await c.query<{ id: string }>(`${CLAIM_KEYS} select i.id ${CLAIMABLE} limit 1 for update of i skip locked`, [opts.resumeOnly ?? false]);
   if (pick.rowCount === 0) return null;
   const itemId = pick.rows[0].id;
   await transitionItem(c, itemId, "claimed", system(owner));
