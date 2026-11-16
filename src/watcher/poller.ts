@@ -10,7 +10,8 @@ import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
-import { doneChildren, filedChildren, keepSplit, keptSplit } from "../store/splits.ts";
+import { doneChildren, filedChildren, keepSplit, keptSplit, keptSplits } from "../store/splits.ts";
+import { filedFromMarkers, type ChildIssue } from "../gate/file-split.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -374,12 +375,24 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     });
   });
 
+  // A parent whose move to Split recorded no children, as one split before PBI 226 did, has them found again by the
+  // split markers they carry among its sub-issues, for a split kept for it. Without a board to look on, it stays Split.
+  const recoveredChildren = async (row: Row): Promise<ChildIssue[] | null> => {
+    const board = split?.file?.board;
+    if (!board) return null;
+    const kept = await keptSplits(pool, row.id);
+    if (kept.length === 0) return null;
+    const repo = (await itemOf(row.external_id))?.repo;
+    if (!repo) return null;
+    return filedFromMarkers(row.external_id, repo, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+  };
+
   w.step("closing split parents");
   // 5. A Split parent whose filed children are all Done moves to Done (PBI 226). A sub-issue added by hand isn't one
   //    of them. The comment, keyed on the parent, and the close as completed both go before the move, so the next
   //    poll retries a failed one, and the move is last, so a Done parent is never read again.
   await each(await items(pool, sourceId, ["Split"]), (row) => `closing split parent ${row.external_id}`, async (row) => {
-    const filed = await filedChildren(pool, row.id);
+    const filed = (await filedChildren(pool, row.id)) ?? (await recoveredChildren(row));
     const done = filed && (await doneChildren(pool, sourceId, filed));
     if (!done) return;
     await adapter.comment(row.external_id, splitDoneComment(done), splitDoneKey(row.external_id));

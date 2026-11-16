@@ -21,9 +21,17 @@ export async function keepSplit(c: pg.Pool | pg.PoolClient, itemId: string, text
   return (await keptSplit(c, itemId, textHash))!;
 }
 
+/** Every split kept for the item, newest first, each with the text hash it was kept for (PBI 226). */
+export async function keptSplits(c: pg.Pool | pg.PoolClient, itemId: string): Promise<{ textHash: string; children: SplitChild[] }[]> {
+  const r = await c.query<{ text_hash: string; children: SplitChild[] }>(
+    "select text_hash, children from item_split where item_id = $1 order by created_at desc", [itemId]);
+  return r.rows.map((x) => ({ textHash: x.text_hash, children: x.children }));
+}
+
 /**
  * The children the factory filed for a Split parent, in filing order, as its move to Split recorded them (PBI 226).
- * Null when that move recorded none, as a parent split before PBI 226 did, so nothing can tell when they're done.
+ * Null when that move recorded none, as a parent split before PBI 226 did: the poller then finds them by their split
+ * markers (`filedFromMarkers`).
  */
 export async function filedChildren(c: pg.Pool | pg.PoolClient, itemId: string): Promise<ChildIssue[] | null> {
   const r = await c.query<{ children: ChildIssue[] | null }>(

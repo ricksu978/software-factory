@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeBacklog } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
-import { childBody, factoryFiled, fileSplit, filedComment, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
-import type { SplitChild } from "./split.ts";
+import { childBody, factoryFiled, fileSplit, filedComment, filedFromMarkers, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
+import { itemTextHash, type SplitChild } from "./split.ts";
 
 const parent: FactoryItem = {
   sourceId: "s", externalId: "12", title: "Checkout", body: "b", acceptanceCriteria: ["card", "bank", "receipt"], labels: ["factory"],
@@ -202,5 +202,17 @@ describe("fileSplit", () => {
     assert.notEqual(splitKey(parent), splitKey({ ...parent, externalId: "13" }));
     assert.notEqual(splitKey(parent), splitKey({ ...parent, title: "other" }));
     assert.equal(splitKey(parent), splitKey({ ...parent, labels: [], updatedAt: "later" }));
+  });
+
+  test("a parent's filed children are found again by their split markers among its sub-issues, and a hand-added one isn't (PBI 226)", async () => {
+    const { s, run } = await setup();
+    const filed = await run();
+    s.subs.push("999");
+    const board = memoryBoard(s);
+    const kept = [{ textHash: "older", count: 2 }, { textHash: itemTextHash(parent), count: 3 }];
+    assert.deepEqual(await filedFromMarkers("12", "o/r", kept, board), filed);
+    s.subs = s.subs.filter((id) => id !== filed![2].externalId);
+    assert.equal(await filedFromMarkers("12", "o/r", kept, board), null);
+    assert.equal(await filedFromMarkers("12", "o/r", [], board), null);
   });
 });

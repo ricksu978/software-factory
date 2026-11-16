@@ -52,7 +52,35 @@ export type FileSplitDeps = { board: SplitBoard; optInLabel: string; backlogStat
 
 /** Filing's key for this parent and its text: a new text is a new split, and a parent's children never match another's. */
 export function splitKey(parent: FactoryItem): string {
-  return createHash("sha256").update(`${parent.externalId}\n${itemTextHash(parent)}`).digest("hex").slice(0, 16);
+  return keyFor(parent.externalId, itemTextHash(parent));
+}
+
+/** The split key for a parent's id and the text hash its split was kept for. */
+function keyFor(externalId: string, textHash: string): string {
+  return createHash("sha256").update(`${externalId}\n${textHash}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * The children the factory filed for a parent whose move to Split recorded none, as a parent split before PBI 226
+ * did (PBI 226). They're the parent's sub-issues that carry its split marker, for one of the splits kept for it
+ * (`kept`, newest first, each by its text hash and child count). A sub-issue added by hand carries no marker, so it
+ * isn't one. Null when no kept split has every child found among the parent's sub-issues.
+ */
+export async function filedFromMarkers(parentId: string, repo: string, kept: { textHash: string; count: number }[],
+  board: Pick<SplitBoard, "subIssues" | "findIssues">): Promise<ChildIssue[] | null> {
+  if (kept.length === 0) return null;
+  const subs = new Set((await board.subIssues(parentId)).map((s) => s.externalId));
+  for (const { textHash, count } of kept) {
+    const key = keyFor(parentId, textHash);
+    const filed: ChildIssue[] = [];
+    for (let n = 1; n <= count; n++) {
+      const found = (await board.findIssues(repo, splitMarker(key, n))).find((f) => subs.has(f.externalId));
+      if (!found) break;
+      filed.push(found);
+    }
+    if (count > 0 && filed.length === count) return filed;
+  }
+  return null;
 }
 
 /** The token a filed child's body carries, so a child filed but not yet linked is found again instead of filed twice. */
