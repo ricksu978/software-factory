@@ -23,7 +23,7 @@
 // - Floor lists each item it shows in a list entry or a table row that links to the item's page. That entry shows
 //   `priority N`, or `priority N, from #E`, and `final-stage`, or `final-stage because of #E`, in the same way. Floor
 //   lists every final-stage item, an item that joins the group through a dependent included, wherever it is.
-import { After, Before, BeforeStep, Given, Then, When } from "@cucumber/cucumber";
+import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as p89 } from "./pbi-89.steps.ts";
@@ -38,8 +38,6 @@ type Ctx = {
   deps: Map<string, string[]>;
   /** The dependents whose dependency a step removed, which still wait on an issue outside the scenario. */
   outside: Set<string>;
-  /** The kind of the step running: "Context" for a Given. */
-  stepType?: string;
 };
 
 function ctx(world: object): Ctx {
@@ -70,10 +68,6 @@ Before({ tags: "@pbi-320", ...long }, async function () {
   p17(this).ticked = true;
   // PBI 17's waiting items ask their questions an hour before this, so none times out on a tick.
   p17(this).now = new Date();
-});
-
-BeforeStep({ tags: "@pbi-320" }, function ({ pickleStep }) {
-  ctx(this).stepType = pickleStep.type;
 });
 
 After({ tags: "@pbi-320", ...long }, async function () {
@@ -377,11 +371,8 @@ Then(re(`item "([^"]+)"'s page shows priority (\\d+), its own`), async function 
   showsPriority(await pageOf(this, name), `item "${name}"'s page`, Number(p), "own");
 });
 
-// As a Given this sets the scene, so a page that shows no priority at all, before the factory shows any, isn't held
-// against it. Once the page shows a priority, it's checked as the Then is.
 Then(re(`item "([^"]+)"'s page shows priority (\\d+), from item "([^"]+)"`), async function (name: string, p: string, from: string) {
   const t = await pageOf(this, name);
-  if (ctx(this).stepType === "Context" && priorities(t).length === 0) return;
   showsPriority(t, `item "${name}"'s page`, Number(p), ref(this, from));
 });
 
