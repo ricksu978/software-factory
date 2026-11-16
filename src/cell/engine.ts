@@ -1078,7 +1078,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const rows = [...greenResults].map(([name, green]) => `| ${cell(name)} | ${redResults.get(name) ?? "in the run's red report"} | ${green} |`);
     const scenarios = rows.length ? `## Scenarios\n\n| Scenario | Red | Green |\n|---|---|---|\n${rows.join("\n")}` : "";
     const rounds = (stage: string, n: number) => n ? `${stage} took ${n} round${n === 1 ? "" : "s"}.` : "";
-    const review = brief(rounds("Self-review", reviewRounds), rounds("PR review", prRounds));
+    const review = brief(rounds("Self-review", reviewRounds), rounds("PR review", (earlierRounds ?? 0) + prRounds));
     const notes = scenarioNotes.length
       ? `## Scenario notes for the person who merges\n\nThe self-reviewer thinks these scenarios may be wrong. The feature files stay as the owner signed them off, so any change to one is for the person who merges to raise.\n\n${scenarioNotes.map((n) => `- ${n}`).join("\n")}`
       : "";
@@ -1454,21 +1454,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       await specify();
       return "waiting";
     }
-    if (start === "pr-review") {
-      // PBI 318: a claim that resumes at the PR review reviews the PR an earlier claim opened, at its head as it is now.
-      // A clean review asks people to look and hands the PR to them, as one after open-pr does.
-      if (ctx.prNumber === null || !reviews) throw new Blocked("a cell can't resume at pr-review without a PR and a repo host that reviews it");
-      const n = ctx.prNumber;
-      const back = await prReview({ number: n, url: `https://github.com/${ctx.repo}/pull/${n}` }, async () => {
-        await d.repoHost.requestReviewers(ctx.repo, n, config.reviewers);
-        await end("passed");
-        await transition({ event: "pr_opened", prNumber: n });
-      });
-      if (!back) return "done";
-      carried = back;
-    }
     const order = ["red", "green", "self-review", "open-pr"];
-    const resumed = start === "address" || start === "pr-review";
+    const resumed = start === "address";
     if (!resumed && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
     if (start === "red") await red();
     let from = resumed ? 1 : Math.max(order.indexOf(start), 1);

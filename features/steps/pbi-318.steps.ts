@@ -1,8 +1,9 @@
 // Step definitions for features/pbi-318-pr-review-earlier-claim-threads.feature.
 //
 // Every scenario runs the engine through PBI 18's harness, with PBI 128's fake repo host, CI, scripted PR reviewer and
-// scripted PR addresser. The run's PR is #57 on acme/app, and the run resumes at "pr-review", as a run does once
-// open-pr has passed (the cell API's stageAfter). The context names the repo's trusted bot as `trustedBot`, so the
+// scripted PR addresser. The run's PR is #57 on acme/app, and the run resumes at "open-pr", as a claim cut short in
+// pr-review does (the cell API's stageAfter leaves the resume pointer there): open-pr updates the open PR, then the PR
+// review runs in the same cell. The context names the repo's trusted bot as `trustedBot`, so the
 // stage can tell the factory's threads from people's.
 //
 // - A thread from an earlier claim is one the fake repo host already holds on the PR when the cell starts: an `ET-<n>`
@@ -146,7 +147,7 @@ function replyInThread(world: object, body: string) {
 // ---- Background ----
 
 Given("a run for item {int} whose scenarios were signed off and whose PR is open", function (_item: number) {
-  const run = setUp(this, "pr-review", true);
+  const run = setUp(this, "open-pr", true);
   run.prNumber = PR;
 });
 
@@ -402,7 +403,7 @@ When("the next claim's cell runs from the PR review", LONG, async function () {
   execFileSync("git", ["config", "user.email", "cell@example.com"], { cwd: dir });
   execFileSync("git", ["config", "user.name", "cell"], { cwd: dir });
   Object.assign(run, {
-    dir, nextStage: "pr-review", decision: o.nextDecision, calls: [], agentCalls: [], stage: "", prBodies: [], result: null, error: null,
+    dir, nextStage: "open-pr", decision: o.nextDecision, calls: [], agentCalls: [], stage: "", prBodies: [], result: null, error: null,
     startHead: execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(),
   });
   run.context = { ...run.context, stageAttempts: attempts };

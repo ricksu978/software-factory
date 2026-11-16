@@ -1633,6 +1633,17 @@ describe("the PR review stage", () => {
     assert.equal(h.transitions()[0].tier, "Low");
   });
 
+  test("a claim resumed after an earlier claim's round 1 posts round 2, and the PR body states 2 rounds (PBI 318)", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { trustedBot: "factory[bot]" }, script: reviewer([]) });
+    h.deps.repoHost.prReviews = async () => [{ id: "r1", author: "factory[bot]", state: "commented" as const,
+      body: reviewBody({ round: 1, head: "a", findings: 1, held: 0, inSummary: [], why: "diff" }) }];
+    assert.equal(await h.run(), "done");
+    const posts = h.calls.filter((c) => c.route === "/repo/postReview").map((c) => c.body);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].body, /round 2,/);
+    assert.match(h.prs.at(-1)!.body, /PR review took 2 rounds\./);
+  });
+
   test("a held thread gets the reviewer's reason as a reply, and a reply from the addresser goes on its thread", async () => {
     const answers = [() => '{"finding":"Rename it.","path":"app.txt","line":1}\nOPEN: 1',
       (p: string) => `{"thread":"${threadIn(p)}","settled":false,"reason":"The name still hides the VAT."}\nOPEN: 1`,
