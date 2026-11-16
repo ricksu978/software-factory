@@ -212,6 +212,11 @@ export interface RepoHost {
   defaultBranchSha(repo: string): Promise<string>;
   /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
+  /**
+   * The PR's submitted reviews, oldest first, each with its author's login, its state and its body. The PR review stage
+   * reads the factory's own among them for the last round an earlier claim posted (PBI 318).
+   */
+  prReviews(repo: string, prNumber: number): Promise<Review[]>;
   /** Adds a reply to one review thread, as the address stage does when it answers a comment instead of changing code. */
   replyToThread(repo: string, threadId: string, body: string): Promise<void>;
   /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */

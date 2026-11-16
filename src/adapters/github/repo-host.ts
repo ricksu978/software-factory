@@ -73,7 +73,7 @@ const split = (repo: string) => {
 const notFound = (e: unknown) => (e as { status?: number }).status === 404;
 
 type PrMethods = Pick<RepoHost, "openOrUpdatePr" | "requestReviewers" | "replyToThread" | "commentOnPr" | "prState"
-  | "openReviewComments" | "postReview" | "resolveThread" | "diffLines">;
+  | "openReviewComments" | "prReviews" | "postReview" | "resolveThread" | "diffLines">;
 
 const REPLY = `mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }`;
@@ -100,6 +100,14 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
         .filter((v) => v.state !== "PENDING")
         .map((v): Review => ({ id: v.id, author: authorLogin(v.author), state: v.state.toLowerCase() as Review["state"], body: v.body }));
       return [...comments, ...standingSummaries(reviews)];
+    },
+
+    async prReviews(repo, prNumber) {
+      // ponytail: one page of 100 reviews, oldest first, as in prState; past that the newest rounds go uncounted.
+      const reviews = (await (await client()).request("GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews", { ...split(repo), pull_number: prNumber, per_page: 100 }))
+        .data as { id: number; state: string; body: string | null; user: { login: string } | null }[];
+      return reviews.filter((v) => v.state !== "PENDING")
+        .map((v): Review => ({ id: String(v.id), author: v.user?.login ?? "", state: v.state.toLowerCase() as Review["state"], body: v.body ?? "" }));
     },
 
     async postReview({ repo, prNumber, commitSha, body, comments }) {
