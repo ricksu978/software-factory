@@ -273,6 +273,7 @@ const routes: Record<string, Route> = {
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       scenarioNotes: run.scenario_notes ?? [],
       trustedComments,
+      trustedBot: run.trusted_bot,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       resume,
     };
