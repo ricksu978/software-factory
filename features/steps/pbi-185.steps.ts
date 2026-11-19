@@ -200,7 +200,7 @@ async function runCell(c: Ctx, nextStage: "red" | "specify", decision: { kind: s
     async transition(b: Record<string, any>) { record("/transition", b); },
     async policyResults(b: Record<string, any>) { record("/policy-results", b); },
     async pr(b: Record<string, any>) { record("/pr", b); },
-    async checks() { return "success"; },
+    async checks() { return { status: "success", failedChecks: [] }; },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
     async release() { record("/release"); },
   };

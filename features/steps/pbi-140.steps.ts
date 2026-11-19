@@ -88,7 +88,7 @@ const minutesFrom = (at: Date, n: number) => new Date(at.getTime() + n * 60_000)
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const unescape = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
-Before({ tags: "@pbi-140" }, function ({ pickle }) {
+Before({ tags: "@pbi-140 or @pbi-302" }, function ({ pickle }) {
   const c = ctx(this);
   c.steps = pickle.steps.map((s) => s.text);
   const originals = { log: console.log, warn: console.warn, error: console.error };
@@ -106,7 +106,7 @@ Before({ tags: "@pbi-140" }, function ({ pickle }) {
   (this as { controlStart?: () => Promise<void> }).controlStart = () => clearRestartOnStart(need().pool);
 });
 
-Before({ tags: "@pbi-140 and @db", ...long }, async function () {
+Before({ tags: "(@pbi-140 or @pbi-302) and @db", ...long }, async function () {
   await testDb();
   const pool = need().pool;
   await pool.query(`truncate item, "user", backlog_source, repo, webhook_delivery, override cascade`);
@@ -120,7 +120,7 @@ Before({ tags: "@pbi-140 and @db", ...long }, async function () {
   s.repoHost = host as never;
 });
 
-After({ tags: "@pbi-140", ...long }, async function () {
+After({ tags: "@pbi-140 or @pbi-302", ...long }, async function () {
   const c = ctx(this);
   mock.timers.reset();
   for (const r of c.restore.reverse()) r();
@@ -704,7 +704,7 @@ async function runEngine(world: object): Promise<void> {
     async transition(b: Record<string, any>) { e.calls.push({ route: "/transition", body: b }); },
     async policyResults(b: Record<string, any>) { e.calls.push({ route: "/policy-results", body: b }); },
     async pr(b: Record<string, any>) { e.calls.push({ route: "/pr", body: b }); },
-    async checks() { return "success"; },
+    async checks() { return { status: "success", failedChecks: [] }; },
     async upload() {},
   };
   const agent = async (a: { prompt: string; cwd: string; model: string }) => {

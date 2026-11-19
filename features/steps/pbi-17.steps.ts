@@ -162,10 +162,11 @@ Given("item {string} is queued to address requested changes", long, async functi
   await need().pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'open-pr', 1, 'passed')", [run]);
 });
 
+// Asked an hour before the scenario's clock, so a scenario on a clock of its own, such as PBI 320's, keeps it waiting.
 Given("item {string} waits for an unanswered sign-off", long, async function (name: string) {
   const id = await newItem(ctx(this), name, "SignOff");
   await openRun(id, "sign-off");
-  await question(id, "sign_off", false);
+  await question(id, "sign_off", false, at(ctx(this), -60));
 });
 
 Given("item {string} waits for an unanswered sign-off asked {int} days ago", long, async function (name: string, days: number) {
@@ -183,7 +184,7 @@ Given("item {string} waits for a sign-off that has been answered", long, async f
 Given("item {string} waits for an unanswered question", long, async function (name: string) {
   const id = await newItem(ctx(this), name, "NeedsInput");
   await openRun(id, "green");
-  await question(id, "needs_input", false);
+  await question(id, "needs_input", false, at(ctx(this), -60));
 });
 
 Given("item {string} is in review", long, async function (name: string) {

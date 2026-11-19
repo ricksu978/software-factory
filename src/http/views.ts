@@ -1,6 +1,7 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import type { ClaimKey } from "../store/items.ts";
 import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
@@ -50,13 +51,23 @@ export type Issue = { external_id: string; repo: string | null };
 /** The PR an item's open run holds (PBI 145). A row with no open run, or a run with no PR yet, leaves these null. */
 export type OpenPr = { pr_number?: number | null; pr_url?: string | null };
 
-export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null };
+export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null;
+  /** PBI 292: the CI failure the item's Green attempt is fixing, or null when it fixes none. */
+  ci_failure?: CiFailure | null };
+/** PBI 292: a CI failure on a commit one of the run's stages pushed, as the cell reported it for Green to fix. */
+export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null };
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
 /** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
 export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
 /** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
 export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
+/**
+ * A break on main that still stands (PBI 255): the merge commit that broke the branch, the PR and the item it came
+ * from, and its bug item, which is null until the factory has filed it, with the factory's own row once it holds one.
+ */
+export type MainBreakRow = { branch: string; sha: string; repo: string; pr_number: number | null; charged: string | null;
+  bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state?: string | null };
 
 export function age(since: Date | null, now = Date.now()): string {
   if (!since) return "";
@@ -102,6 +113,28 @@ const withPr = (r: OpenPr & { state: string }) => {
 /** An item as a page names it: "#N", then its title linking to Run detail. */
 const named = (r: Issue & { id: string; title: string }) => `${issueRef(r.external_id, r.repo)} ${link(r.id, r.title)}`;
 
+/**
+ * Floor's note on an item's claim key (PBI 320): its priority, and whether it's final-stage, each naming the item that
+ * depends on it where the priority or the group comes from that item.
+ */
+export function standing(k: ClaimKey | undefined): string {
+  if (!k) return "";
+  const from = k.priorityFrom ? `, from #${escapeHtml(k.priorityFrom.externalId)}` : "";
+  const group = k.finalStage ? `, final-stage${k.finalStageFrom ? ` because of #${escapeHtml(k.finalStageFrom.externalId)}` : ""}` : "";
+  return ` <span class="muted">priority ${k.priority}${from}${group}</span>`;
+}
+
+/** The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page. */
+export function claimLines(k: ClaimKey): string {
+  const priority = k.priorityFrom
+    ? `Priority ${k.priority}, from #${escapeHtml(k.priorityFrom.externalId)}, which depends on it. Its own priority on the board is ${k.own}.`
+    : `Priority ${k.priority}.`;
+  const group = !k.finalStage ? ""
+    : k.finalStageFrom ? ` Final-stage because #${escapeHtml(k.finalStageFrom.externalId)} depends on it, so it's claimed ahead of other work while that dependency stands.`
+    : " Final-stage: its PR is open and it's in the review loop, so it's claimed ahead of other work.";
+  return `<p>${priority}${group}</p>`;
+}
+
 /** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */
 function overrideForm(kinds: [kind: string, label: string][], itemId: string | null): string {
   const id = itemId ? `-${escapeHtml(itemId)}` : "";
@@ -117,11 +150,17 @@ export type Restart = { minutesLeft: number; running: number; reason?: string };
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** Floor's line for a restart being prepared: a countdown while a cell still runs, then that it's safe to restart. */
+/**
+ * Floor's line for a restart being prepared (PBI 140, PBI 302): how many cells still run and the minutes left in the
+ * wrap-up, or that it has run out while a cell whose stop failed still runs. Once none runs, that it's safe to restart.
+ */
 function restartStatus(r: Restart): string {
   const why = r.reason ? ` Reason: ${escapeHtml(r.reason)}.` : "";
+  const left = r.minutesLeft > 0
+    ? `${plural(r.minutesLeft, "minute", "minutes")} left in the wrap-up.`
+    : `The wrap-up has run out, and the factory keeps trying to stop ${r.running === 1 ? "it" : "them"}.`;
   const text = r.running > 0
-    ? `Preparing to restart: ${plural(r.running, "cell is", "cells are")} wrapping up, with ${plural(r.minutesLeft, "minute", "minutes")} left before the factory stops ${r.running === 1 ? "it" : "them"}.`
+    ? `Preparing to restart: ${plural(r.running, "cell", "cells")} still running. ${left}`
     : "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker.";
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
 }
@@ -150,10 +189,51 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
+/**
+ * A failed check's name, linked to its URL. POST /stage takes only https URLs under the run's repo, and any other
+ * stored URL shows the name as plain text, so a link a cell sent can't run script on the dashboard.
+ */
+const checkLink = (c: CiFailure["checks"][number]) => /^https:\/\//.test(c.url)
+  ? `<a href="${escapeHtml(c.url)}">${escapeHtml(c.name)}</a>`
+  : escapeHtml(c.name);
+
+/** The failed checks of a CI failure, each linked to its run, as in "ci and e2e". */
+const checkLinks = (f: CiFailure) => f.checks.length
+  ? f.checks.map(checkLink).join(", ")
+  : "no check the factory could read";
+
+/** Floor's Stage cell for an item fixing CI (PBI 292): that it is, the checks that failed and the commit, in place of "green". */
+const fixingCiStage = (f: CiFailure) => `fixing CI <span class="muted">${checkLinks(f)} failed on <code>${shortSha(f.sha)}</code></span>`;
+
+/** Run detail's line for an item fixing CI (PBI 292): the commit and each failed check, with its URL and failing tests. */
+function fixingCiSection(f: CiFailure): string {
+  const items = f.checks.map((c) => `<li>${checkLink(c)}${c.url ? ` ${escapeHtml(c.url)}` : ""}${c.failingTests.length
+    ? `<ul>${c.failingTests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
+    : ` <span class="muted">named no failing test</span>`}</li>`);
+  return `<section id="fixing-ci" class="banner" role="status"><p>Fixing CI: Green is fixing the CI failure on commit <code>${shortSha(f.sha)}</code>. The checks that failed:</p>${
+    items.length ? `<ul>${items.join("")}</ul>` : `<p class="muted">CI named no failed check the factory could read.</p>`}</section>`;
+}
+
 /** Floor's notice that the base fails in cells (PBI 215), naming each item blocked by it and the tests that fail. */
 function baseFailsNotice(rows: BaseFailRow[]): string {
   const items = rows.map((r) => `<li>${named(r)} <span class="muted">at base commit ${escapeHtml(r.sha.slice(0, 7))}</span><ul>${r.tests.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul></li>`);
-  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
+  return `<section id="base-fails" class="banner" role="status"><p>The base fails in cells. These items wait on it, since their Definition of Done or their CI fails the same tests on the base commit. Fix the base, then answer each item's question.</p><ul>${items.join("")}</ul></section>`;
+}
+
+/** Floor's notice that main is red (PBI 255), naming each commit that broke it, where it came from and its bug item. */
+function mainRedNotice(rows: MainBreakRow[]): string {
+  const branches = [...new Set(rows.map((r) => r.branch))].map((b) => `<code>${escapeHtml(b)}</code>`).join(" and ");
+  const items = rows.map((r) => {
+    const from = [r.pr_number !== null ? `PR #${r.pr_number}` : null, r.charged !== null ? `item ${issueRef(r.charged, r.repo)}` : null].filter(Boolean).join(" for ");
+    const bug = r.bug_external_id === null
+      ? "The factory is filing its bug item."
+      : `Its bug item ${r.bug_id && r.bug_title ? named({ id: r.bug_id, title: r.bug_title, external_id: r.bug_external_id, repo: r.repo }) : issueRef(r.bug_external_id, r.repo)} ${r.bug_state === "Failed" ? `failed to make ${escapeHtml(r.branch)} pass, so ${escapeHtml(r.branch)} stays red until it's re-queued or someone fixes it` : "is claimed first"}.`;
+    // A break with no item charged came from outside the factory, which files no bug item for it.
+    if (r.charged === null) return `<li><code>${escapeHtml(r.branch)}</code> was already red at commit <code>${escapeHtml(r.sha.slice(0, 7))}</code>, which the factory didn't merge, so it filed no bug item. Someone needs to fix <code>${escapeHtml(r.branch)}</code>.</li>`;
+    return `<li>Commit <code>${escapeHtml(r.sha.slice(0, 7))}</code> broke <code>${escapeHtml(r.branch)}</code>${from ? `, the merge of ${from}` : ""}. ${bug}</li>`;
+  });
+  const fixes = rows.some((r) => r.charged !== null) ? "The factory fixes it before it builds anything else, and an" : "An";
+  return `<section id="main-red" class="banner" role="status"><p>${branches} is red. ${fixes} item merged onto it meanwhile waits for it to pass again.</p><ul>${items.join("")}</ul></section>`;
 }
 
 /**
@@ -163,9 +243,13 @@ function baseFailsNotice(rows: BaseFailRow[]): string {
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
+  /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
+  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
+  const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
-  const status = f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
+  const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
+    + f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
@@ -174,16 +258,18 @@ export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waiti
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a> <a href="/configuration">Configuration</a></p>
 <h2>Waiting on you</h2>
-${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
+${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span>${st(w.id)}</li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
-${list(f.next.map((n) => `<li>${named(n)}</li>`), "Nothing is ready to start.")}
+${list(f.next.map((n) => `<li>${named(n)}${st(n.id)}</li>`), "Nothing is ready to start.")}
+<h2>Final stage</h2>
+${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${escapeHtml(n.state)}</span>${st(n.id)}</li>`), "No item is in the review loop, and none is depended on by one that is.")}
 <h2>Not ready</h2>
-${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>Blocked</h2>
-${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span></li>`), "No ready item waits on another.")}
+${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
+${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
 ${controls}
 <script>
@@ -225,8 +311,14 @@ export type RunDetail = {
   verdicts: { name: string; red: string; green: string }[];
   /** True when the stored transcripts can be served, so each one is a link. */
   linkBlobs: boolean;
+  /** PBI 292: the CI failure the item is fixing at Green, or null when it fixes none. */
+  fixingCi?: CiFailure | null;
   /** An operator's override buttons for this item, or null for anyone else. */
-  controls: { held: boolean; stoppable: boolean; requeueable: boolean } | null;
+  controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
+  /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
+  startNow?: { reason: string; by: string | null } | null;
+  /** The item's claim key (PBI 320): its priority and whether it's final-stage, and the items they come from. */
+  claim?: ClaimKey | null;
   /** The viewer's IANA time zone, from their browser's `tz` cookie (PBI 189). Defaults to UTC. */
   zone?: string;
   /** The time now, for how long a running attempt has taken so far (PBI 189). Defaults to the real time. */
@@ -330,11 +422,13 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         ...(c.held ? [["unhold", "Release the hold"]] : [["hold", "Hold"]]),
         ...(c.stoppable ? [["stop_run", "Stop the run"]] : []),
         ...(c.requeueable ? [["requeue", "Re-queue"]] : []),
+        ...(c.startable ? [["start_now", "Start now"]] : []),
+        ...(c.movable ? [["move_up", "Move up"], ["move_down", "Move down"]] : []),
       ] as [string, string][], d.item.id)}`
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
 ${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${

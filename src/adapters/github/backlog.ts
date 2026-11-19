@@ -163,7 +163,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       acceptanceCriteria: acceptanceCriteria(c.body ?? "", cfg.fieldMap.acceptanceCriteriaHeading),
       labels: (c.labels?.nodes ?? []).map((l) => l.name), status: values.get(cfg.fieldMap.statusField) ?? "", rank,
       repo: c.repository.nameWithOwner,
-      fields: Object.fromEntries(cfg.fieldMap.readinessFields.filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      // The Priority field orders the claims (PBI 320), so it comes through beside the readiness fields. It's judged only
+      // when the repo lists it as a readiness field too.
+      fields: Object.fromEntries([...new Set([...cfg.fieldMap.readinessFields, "Priority"])].filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      ...(cfg.fieldMap.readinessFields.includes("Priority") ? {} : { orderOnly: ["Priority"] }),
       closed: c.state !== "OPEN", updatedAt: [raw.updatedAt, c.updatedAt ?? ""].sort().at(-1)!,
       ...(c.createdAt ? { createdAt: c.createdAt } : {}),
     };
@@ -232,7 +235,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
     async subIssues(parentId) {
       const p = await ref(parentId);
       const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...p, per_page: 100 })).data as RestIssue[];
-      return list.map((i) => child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i));
+      // Each sub-issue comes with its body and who opened it, so a filed child is found by its split marker here,
+      // however old it is, and only one this App opened counts (PBI 226).
+      const own = await ownLogin();
+      return list.map((i) => ({ ...child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i), body: i.body ?? "",
+        openedByApp: i.user?.type === "Bot" && i.user.login === own }));
     },
     async findIssues(repo, text) {
       const [owner, name] = repo.split("/");
@@ -355,6 +362,23 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
 
     async close(externalId) {
       await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await issue(externalId)), state: "closed", state_reason: "completed" });
+    },
+
+    // PBI 255: a filed issue carries the dedupe key as a marker, so a retry finds the App's own issue and files no
+    // second one, since findIssues trusts only the App's own issues. It gets the board's opt-in label along with the caller's, and goes on the board where the factory
+    // reads new work, so the poller takes it in as it does any item.
+    async fileItem({ title, body, labels, repo }, dedupeKey) {
+      if (!repo) throw new Error("filing an item needs a repo to open its issue in");
+      const marker = `<!-- factory:${dedupeKey} -->`;
+      // A retry after a lost answer finds the issue and still puts it on the board, which a second add leaves as it is.
+      const [owner, name] = repo.split("/");
+      const filed = (await splitBoard.findIssues(repo, marker))[0] ?? child(repo, (await (await app()).request("POST /repos/{owner}/{repo}/issues", {
+        owner, repo: name, title, body: `${marker}\n${body}`, labels: [...new Set([...labels, cfg.fieldMap.optInLabel])],
+      })).data as RestIssue);
+      const status = cfg.fieldMap.statusFor.Eligible ?? cfg.fieldMap.statusFor.NotReady;
+      if (status) await splitBoard.addToBoard(filed.externalId, status);
+      else await (await board()).graphql(ADD_TO_PROJECT, { project: (await resolve()).id, content: (await rest(filed.externalId)).node_id });
+      return filed.externalId;
     },
 
     parseWebhook: parseGitHubWebhook,

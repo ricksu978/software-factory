@@ -1,14 +1,17 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
+import { judgedFields, loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
-import { keepSplit, keptSplit } from "../store/splits.ts";
+import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
+import { doneChildren, filedChildren, keepSplit, keptSplit, keptSplits } from "../store/splits.ts";
+import { filedFromMarkers, type ChildIssue } from "../gate/file-split.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -72,7 +75,20 @@ export function criteriaHash(criteria: string[]): string {
  * it. Its open dependencies aren't judged (PBI 237): the scheduler skips a Queued item whose `blocked_by` isn't empty.
  */
 export function readinessItemHash(fi: FactoryItem): string {
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo });
+  // A field that only orders the claims, such as Priority when the repo doesn't judge it (PBI 320), doesn't re-gate.
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: judgedFields(fi), repo: fi.repo });
+}
+
+/** The board field an item's priority is read from (PBI 320). */
+export const PRIORITY_FIELD = "Priority";
+
+/**
+ * An item's own priority from its board fields (PBI 320): the Priority field's value when it's a whole number from 1
+ * to 5, where 1 is the highest, and 3 when it's missing or anything else.
+ */
+export function boardPriority(fields: Record<string, string>): number {
+  const raw = String(fields[PRIORITY_FIELD] ?? "").trim();
+  return /^[1-5]$/.test(raw) ? Number(raw) : 3;
 }
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
@@ -199,7 +215,7 @@ export async function readinessFingerprint(d: {
 /**
  * One pass over a backlog source. In order: new and edited items; the PRs of InReview, InProgress and NeedsInput items;
  * withdrawals, criteria changes and dependencies of the other items the factory holds; re-gates after a readiness
- * input changed; and the gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or
+ * input changed; the gate on every Eligible item; and Split parents whose children are all Done. Each item's failure is its own, so a judge on a usage limit or
  * one unreachable PR never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
@@ -230,7 +246,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       const fi = await adapter.getItem(ext);
       fetched.set(ext, fi);
       if (fi) {
-        await pool.query("update item set repo = $3 where source_id = $1 and external_id = $2 and repo is distinct from $3", [sourceId, ext, fi.repo]);
+        await pool.query(
+          "update item set repo = $3, board_priority = $4 where source_id = $1 and external_id = $2 and (repo is distinct from $3 or board_priority is distinct from $4)",
+          [sourceId, ext, fi.repo, boardPriority(fi.fields)],
+        );
       }
     }
     return fetched.get(ext)!;
@@ -243,6 +262,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
+    await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
     await returnWithdrawn(pool, id);
   });
 
@@ -251,7 +271,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
   //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
-  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10).
+  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10). A NeedsInput
+  //    item that waits on "no trusted review text to address" goes back too, once the factory answers it (PBI 305).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
@@ -268,9 +289,14 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
+    } else if (row.state === "NeedsInput" && !row.held && ((await requeueForAddress(pool, row, pr)) || (await requeueForGreen(pool, row)))) {
+      // The factory answered the item's "no trusted review text to address" question, and the scheduler claims it
+      // again at address (PBI 305). Or it answered an older "Address failed" question naming only CI failures, and the
+      // scheduler claims it again at green (PBI 317).
     } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
       // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
-      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262).
+      // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
+      // unless the question is the one PBI 305 answers above.
       if (row.state === "InReview") {
         await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
       }
@@ -302,9 +328,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
-    if (row.state === "Queued" || row.state === "SignOff" || row.state === "NeedsInput") {
-      await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
-    }
+    // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
+    // lends its group and priority to the items it depends on (PBI 320).
+    await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
   });
 
   w.step("re-queuing items stopped by a red base");
@@ -361,8 +387,32 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       }
       // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
       // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
-      if (out.filed) await transitionItem(c, row.id, "split_filed", system);
+      // The move keeps the children filed, so step 5 knows which of the parent's sub-issues are the split's (PBI 226).
+      if (out.filed) await transitionItem(c, row.id, "split_filed", system, { children: out.children ?? [] });
     });
+  });
+
+  // A parent whose move to Split recorded no children, as one split before PBI 226 did, has them found again by the
+  // split markers they carry among its sub-issues, for a split kept for it. Without a board to look on, it stays Split.
+  const recoveredChildren = async (row: Row): Promise<ChildIssue[] | null> => {
+    const board = split?.file?.board;
+    if (!board) return null;
+    const kept = await keptSplits(pool, row.id);
+    if (kept.length === 0) return null;
+    return filedFromMarkers(row.external_id, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+  };
+
+  w.step("closing split parents");
+  // 5. A Split parent whose filed children are all Done moves to Done (PBI 226). A sub-issue added by hand isn't one
+  //    of them. The comment, keyed on the parent, and the close as completed both go before the move, so the next
+  //    poll retries a failed one, and the move is last, so a Done parent is never read again.
+  await each(await items(pool, sourceId, ["Split"]), (row) => `closing split parent ${row.external_id}`, async (row) => {
+    const filed = (await filedChildren(pool, row.id)) ?? (await recoveredChildren(row));
+    const done = filed && (await doneChildren(pool, sourceId, filed));
+    if (!done) return;
+    await adapter.comment(row.external_id, splitDoneComment(done), splitDoneKey(row.external_id));
+    await adapter.close(row.external_id);
+    await move(pool, row.id, "children_done");
   });
 
   w.step("saving the cursor");
@@ -373,6 +423,19 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
 
 /** The kind of the event that logs a re-queue after CI passed on the base (PBI 260). */
 export const REQUEUED_AFTER_BASE_PASSED = "requeued_after_base_passed";
+/**
+ * The kind of the event that logs a re-queue for address of an item that waited on "no trusted review text to
+ * address", once its PR conflicts with its base or a newer trusted review asks for changes (PBI 305). Its payload holds
+ * `questionId`, `prNumber`, `reason` ("conflict" or "review"), `base` for a conflict and `at`, the review's time, for a
+ * review.
+ */
+export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
+/**
+ * The kind of the event that logs a re-queue for Green of an item that waited on an older "Address failed" question
+ * naming only CI failures, asked before #292 sent a CI failure back to Green (PBI 317). Its payload holds `questionId`
+ * and `prNumber`.
+ */
+export const REQUEUED_FOR_GREEN = "requeued_for_green";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
@@ -431,6 +494,76 @@ async function requeueAfterBasePassed(pool: pg.Pool, host: RepoHost, sourceId: s
       await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [w.question_id, answer]);
       await appendEvent(c, { ...system, itemId: w.id, kind: REQUEUED_AFTER_BASE_PASSED, payload: { sha: green, base, failedSha: w.sha, questionId: w.question_id } });
     });
+  });
+}
+
+/**
+ * PBI 305: answers the question "no trusted review text to address" that a NeedsInput item which isn't held waits on,
+ * once its PR conflicts with its base or a trusted review or open-thread comment newer than the question asks for
+ * changes. A PR whose mergeability GitHub hasn't worked out yet doesn't count as conflicting. The answer names what
+ * changed and leaves `answered_by` null, as PBI 260's does, and the re-queue is a system event. The run's next stage
+ * is address, where the scheduler claims the answered item. The item and question are re-read under a lock after the
+ * PR was read, so a person's answer, a Hold or another poll that came first wins and nothing is logged twice. Returns
+ * whether it answered.
+ */
+async function requeueForAddress(
+  pool: pg.Pool, row: Row, pr: { mergeable: boolean | null; lastChangesRequestedAt: string | null },
+): Promise<boolean> {
+  const conflict = pr.mergeable === false;
+  if (!conflict && !pr.lastChangesRequestedAt) return false;
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; asked_at: Date }>(
+      `select q.id, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.body = $2 and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id, NO_REVIEW_TEXT],
+    )).rows[0];
+    if (!q) return false;
+    const review = newer(pr.lastChangesRequestedAt, q.asked_at) ? new Date(pr.lastChangesRequestedAt!).toISOString() : null;
+    if (!conflict && !review) return false;
+    const prNumber = row.pr_number!;
+    const base = DEFAULT_BASE;
+    const what = [
+      ...(conflict ? [`PR #${prNumber} conflicts with its base ${base}.`] : []),
+      ...(review ? [`A trusted review asked for changes on PR #${prNumber} at ${review}, after this question.`] : []),
+    ];
+    const answer = `${what.join(" ")} The factory picks the item up again at address.`;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, answer]);
+    await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
+    const payload = conflict ? { questionId: q.id, prNumber, reason: "conflict", base, ...(review ? { at: review } : {}) } : { questionId: q.id, prNumber, reason: "review", at: review };
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_ADDRESS, payload });
+    return true;
+  });
+}
+
+/**
+ * PBI 317: answers the older "Address failed" question that a NeedsInput item which isn't held waits on, asked before
+ * #292 sent a CI failure back to Green (CI_TO_GREEN_SINCE), when every finding it names is a CI failure. The same
+ * question asked since then is address giving up on fixes CI failed on, and waits for a person, whose answer reruns
+ * address so its thread replies go out. The answer is CI_BACK_TO_GREEN and
+ * leaves `answered_by` null, as PBI 260's and 305's do, and the re-queue is a system event. The run's next stage is
+ * green, where the scheduler claims the answered item, and the cell reads the failed checks of the PR's head as Green's
+ * findings. The item and question are re-read under a lock after the PR was read, so a person's answer, a Hold or
+ * another poll that came first wins and nothing is logged twice. Returns whether it answered.
+ */
+async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
+  return withTx(pool, async (c) => {
+    const q = (await c.query<{ id: string; body: string; asked_at: Date }>(
+      `select q.id, q.body, q.asked_at from item i join question q on q.item_id = i.id
+       where i.id = $1 and i.state = 'NeedsInput' and not i.held
+         and q.kind = 'needs_input' and q.answer is null and q.closed_at is null
+       order by q.asked_at desc limit 1
+       for update of i, q`,
+      [row.id],
+    )).rows[0];
+    if (!q || !olderCiFailedQuestion(q.body, q.asked_at)) return false;
+    const prNumber = row.pr_number!;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, CI_BACK_TO_GREEN]);
+    await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_GREEN, payload: { questionId: q.id, prNumber } });
+    return true;
   });
 }
 

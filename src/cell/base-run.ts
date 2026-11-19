@@ -8,39 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { sh } from "./engine.ts";
+import { failingTests } from "../core/failing-tests.ts";
+
+export { failingTests };
 
 const run = promisify(execFile);
-
-/**
- * The names of the tests a command's output says failed, in the order first seen: TAP's `not ok` lines (TODO and SKIP
- * left out), node's spec reporter's `✖ name (1.2ms)` lines and the `N) name # path:line` entries of cucumber-js's
- * "Failed scenarios:" block, as the pinned 13.3.0 prints it. Output that
- * names no test, such as a type error, gives none.
- */
-export function failingTests(output: string): string[] {
-  const out = new Set<string>();
-  let cucumber = false;
-  for (const raw of output.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line === "Failed scenarios:") { cucumber = true; continue; }
-    if (cucumber) {
-      // Each scenario is `N) <name> # <path>:<line>`; the step, error and stack lines under it are skipped. The block
-      // ends at the summary, `N scenarios (...)`.
-      if (/^\d+ scenarios? \(/.test(line)) { cucumber = false; continue; }
-      const m = /^\d+\) (.+) # \S+:\d+$/.exec(line);
-      if (m) out.add(m[1].trim());
-      continue;
-    }
-    const tap = /^not ok \d+ - (.+?)(?: # (.*))?$/.exec(line);
-    if (tap) {
-      if (!/^(TODO|SKIP)\b/i.test(tap[2] ?? "")) out.add(tap[1].trim());
-      continue;
-    }
-    const spec = /^✖ (.+?) \([\d.]+m?s\)$/.exec(line);
-    if (spec) out.add(spec[1].trim());
-  }
-  return [...out];
-}
 
 /** Whether the base is at fault: every test that failed on the item's branch fails on the base too, and some did. */
 export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
@@ -49,11 +21,18 @@ export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
 }
 
 /**
- * The one question a stage asks when the base fails the same tests: it names the base commit, the lines and the tests.
- * It says the item's work is on its branch only when `pushed` is true, that is, when the cell pushed it before blocking.
+ * A Definition of Done line, or a CI check that failed on the item's commit (PBI 292), with the tests it fails that the
+ * base fails too. A CI check's `criterion` is its name.
  */
-export function baseQuestion(base: string, sha: string, lines: { criterion: string; tests: string[] }[], pushed: boolean): string {
-  const each = lines.map((l) => `The Definition of Done line "${l.criterion}" fails these tests on the base commit as on the item's branch:\n${l.tests.map((t) => `- ${t}`).join("\n")}`);
+export type BaseLine = { criterion: string; tests: string[]; check?: { name: string; url: string } };
+
+/**
+ * The one question a stage asks when the base fails the same tests: it names the base commit, the lines and the tests.
+ * A failed CI check is named with its URL in place of a line. It says the item's work is on its branch only when
+ * `pushed` is true, that is, when the cell pushed it before blocking.
+ */
+export function baseQuestion(base: string, sha: string, lines: BaseLine[], pushed: boolean): string {
+  const each = lines.map((l) => `${l.check ? `The CI check "${l.check.name}", ${l.check.url},` : `The Definition of Done line "${l.criterion}"`} fails these tests on the base commit as on the item's branch:\n${l.tests.map((t) => `- ${t}`).join("\n")}`);
   return [
     `The base fails in the cell. The base commit ${sha.slice(0, 7)}, \`origin/${base}\`, fails the same tests this item's branch fails, so the item isn't at fault and the factory stopped instead of retrying.`,
     ...each,
