@@ -1,5 +1,7 @@
 // Step definitions for features/pbi-312-local-run-asks-only-local-parameters.feature. They run the start's parameter
-// check, checkLocalParameters() in src/apphost/local-parameters.ts, against a fake checkout in a temp directory:
+// check in src/apphost/local-parameters.ts against a fake checkout in a temp directory, both ways the real start meets
+// it: checkLocalParameters() with a scripted owner, and the `--ask` and `--verdict` command line that
+// scripts/set-local-secrets.ps1 takes its parameters to ask for, its "Still missing" line and its exit code from.
 // - The checkout holds aspire-apphost/apphost.mts, either a copy of the factory's real one or that copy with the
 //   declarations a scenario adds. Each added declaration goes beside the BFF's parameters, using the AppHost's own
 //   runMode and secret() helper the way it declares oidc-issuer and oidc-client-secret.
@@ -14,7 +16,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkLocalParameters } from "../../src/apphost/local-parameters.ts";
+import { checkLocalParameters, runCli } from "../../src/apphost/local-parameters.ts";
 
 const REAL_APPHOST = join(import.meta.dirname, "..", "..", "aspire-apphost", "apphost.mts");
 /** What the factory's AppHost declares under `aspire run`, and only for a published run, as the feature lists them. */
@@ -197,6 +199,12 @@ Given("the owner will leave {string} empty when asked", function (name: string) 
 When("the owner runs {string}", async function (command: string) {
   assert.equal(command, "npm run factory");
   const c = ctx(this);
+  const cli = (mode: string) => {
+    const out: string[] = [];
+    return { code: runCli([c.checkout, mode, c.secretsFile], (l) => out.push(l)), out };
+  };
+  // What set-local-secrets.ps1 -MissingOnly would ask for, read before the owner answers.
+  const scriptAsks = cli("--ask").out.map((l) => l.slice(l.indexOf(" ") + 1));
   c.wentOn = await checkLocalParameters({
     checkout: c.checkout,
     secretsFile: c.secretsFile,
@@ -206,6 +214,11 @@ When("the owner runs {string}", async function (command: string) {
     },
     say: (line) => c.said.push(line),
   });
+  // The script asks for the same parameters, and stops or goes on the same way, with the same line.
+  assert.deepEqual(scriptAsks, c.asked, "set-local-secrets.ps1 would ask for different parameters");
+  const scriptVerdict = cli("--verdict");
+  assert.equal(scriptVerdict.code, c.wentOn ? 0 : 1, "set-local-secrets.ps1 would exit differently");
+  assert.equal(scriptVerdict.out.join("\n"), c.said.at(-1), "set-local-secrets.ps1 would say something different");
 });
 
 // ---- Then ----

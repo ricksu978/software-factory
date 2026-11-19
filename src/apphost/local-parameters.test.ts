@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { declaredParameters } from "./local-parameters.ts";
+import { declaredParameters, runCli } from "./local-parameters.ts";
 
 const names = (src: string) => declaredParameters(src).map((p) => p.name);
 const HEAD = "const runMode = await builder.executionContext().isRunMode();\nconst secret = (name: string) => builder.addParameter(name, { secret: true });\n";
@@ -65,4 +66,55 @@ test("adding a publish-only parameter leaves the list as it was", () => {
   const base = `${HEAD}const a = await secret('a');\nconst b = await builder.addParameter('b');\n`;
   const added = `${base}const c = runMode ? '' : await secret('publish-api-key');\nconst d = runMode ? '' : await builder.addParameter('publish-region');\n`;
   assert.deepEqual(declaredParameters(added), declaredParameters(base));
+});
+
+// The command line scripts/set-local-secrets.ps1 runs: --ask names what it asks for, --verdict whether the start stops.
+
+function fakeCheckout(saved: Record<string, string> | null) {
+  const root = mkdtempSync(join(tmpdir(), "local-parameters-"));
+  mkdirSync(join(root, "aspire-apphost"));
+  writeFileSync(
+    join(root, "aspire-apphost", "apphost.mts"),
+    `${HEAD}const a = await secret('a');\nconst b = await builder.addParameter('b');\nconst o = runMode ? '' : await secret('oidc-client-secret');\n`,
+  );
+  const secrets = join(root, "secrets.json");
+  if (saved) writeFileSync(secrets, JSON.stringify(saved));
+  const run = (...args: string[]) => {
+    const out: string[] = [];
+    return { code: runCli([root, ...args], (l) => out.push(l)), out };
+  };
+  return { run, secrets, done: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test("cli: with no secrets file, --ask names every local parameter and --verdict stops the start", () => {
+  const f = fakeCheckout(null);
+  try {
+    assert.deepEqual(f.run().out, ["secret a", "plain b"]);
+    assert.deepEqual(f.run("--ask", f.secrets).out, ["secret a", "plain b"]);
+    assert.deepEqual(f.run("--verdict", f.secrets), { code: 1, out: ["Still missing: a, b"] });
+  } finally { f.done(); }
+});
+
+test("cli: --ask leaves out what's saved, and --verdict names only the local parameter still missing", () => {
+  const f = fakeCheckout({ "Parameters:a": "x", Other: "y" });
+  try {
+    assert.deepEqual(f.run("--ask", f.secrets).out, ["plain b"]);
+    assert.deepEqual(f.run("--verdict", f.secrets), { code: 1, out: ["Still missing: b"] });
+  } finally { f.done(); }
+});
+
+test("cli: with every local parameter saved and no OIDC setting, --verdict lets the start go on", () => {
+  const f = fakeCheckout({ "Parameters:a": "x", "Parameters:b": "y" });
+  try {
+    assert.deepEqual(f.run("--ask", f.secrets).out, []);
+    assert.deepEqual(f.run("--verdict", f.secrets), { code: 0, out: ["All 2 parameters are set."] });
+  } finally { f.done(); }
+});
+
+test("cli: an unknown mode or a missing secrets path is refused", () => {
+  const f = fakeCheckout(null);
+  try {
+    assert.throws(() => f.run("--verdict"), /usage/);
+    assert.throws(() => f.run("--nope", f.secrets), /usage/);
+  } finally { f.done(); }
 });

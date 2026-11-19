@@ -7,34 +7,33 @@
 param([string]$AppHost = (Split-Path $PSScriptRoot -Parent), [switch]$MissingOnly)
 $ErrorActionPreference = 'Stop'
 
-# Only the parameters the AppHost declares under `aspire run`, so never the published BFF's oidc-issuer or
-# oidc-client-secret (PBI 312). src/apphost/local-parameters.ts reads them, and its scenarios hold what it reads.
-# Secrets are the ones declared through apphost.mts's secret() helper. @() keeps a single line a list.
-$declared = @(node (Join-Path $PSScriptRoot '../src/apphost/local-parameters.ts') $AppHost)
-if ($LASTEXITCODE) { throw "could not read the parameters $AppHost/aspire-apphost/apphost.mts declares" }
-$secret = @($declared | Where-Object { $_ -like 'secret *' } | ForEach-Object { $_.Substring(7) })
-$plain = @($declared | Where-Object { $_ -like 'plain *' } | ForEach-Object { $_.Substring(6) })
-if (-not ($secret + $plain)) { throw "no parameters found in $AppHost/aspire-apphost/apphost.mts" }
-
 $out = aspire secret path --apphost $AppHost --non-interactive --nologo
 if ($LASTEXITCODE) { throw "aspire secret path failed for $AppHost" }
 $file = "$($out | Select-Object -Last 1)".Trim()
 # Refuse anything but an absolute secrets.json, so a changed CLI output can't send the tokens into the working tree.
 if (-not ([IO.Path]::IsPathRooted($file) -and (Split-Path $file -Leaf) -eq 'secrets.json')) { throw "aspire secret path gave '$file', not a secrets.json path" }
+
+# src/apphost/local-parameters.ts decides which parameters to ask for and whether the start stops, so the PBI 312
+# scenarios hold the same decisions this script acts on. It checks only which keys secrets.json holds, and prints no
+# value. It takes only the parameters the AppHost declares under `aspire run`, so never the published BFF's oidc-issuer
+# or oidc-client-secret. Secrets are the ones declared through apphost.mts's secret() helper. @() keeps one line a list.
+$check = Join-Path $PSScriptRoot '../src/apphost/local-parameters.ts'
+$toAsk = if ($MissingOnly) { @(node $check $AppHost --ask $file) } else { @(node $check $AppHost) }
+if ($LASTEXITCODE) { throw "could not read the parameters $AppHost/aspire-apphost/apphost.mts declares" }
 $store = if (Test-Path $file) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable } else { @{} }
 if (-not $store) { $store = @{} }
 
 "Secrets file: $file"
 $changed = $false
-foreach ($name in $secret + $plain) {
+foreach ($line in $toAsk) {
+  $kind, $name = $line -split ' ', 2
   $key = "Parameters:$name"
-  if ($MissingOnly -and $store.ContainsKey($key)) { continue }
   $state = if ($store.ContainsKey($key)) { 'set' } else { 'missing' }
   if ($name -eq 'github-app-key') {
     # Trim the quotes that Explorer's "Copy as path" adds.
     $path = (Read-Host "$name ($state), path to the .pem file").Trim().Trim('"', "'")
     $value = if ($path) { (Get-Content -LiteralPath $path -Raw).Trim() } else { '' }
-  } elseif ($secret -contains $name) {
+  } elseif ($kind -eq 'secret') {
     # NetworkCredential, because ConvertFrom-SecureString throws on the empty input that Enter gives.
     $value = [Net.NetworkCredential]::new('', (Read-Host "$name ($state), hidden" -AsSecureString)).Password
   } else {
@@ -49,6 +48,6 @@ if ($changed) {
   # -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
   $store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
 }
-$missing = ($secret + $plain) | Where-Object { -not $store.ContainsKey("Parameters:$_") }
-if ($missing) { "Still missing: $($missing -join ', ')"; exit 1 }
-"All $(($secret + $plain).Count) parameters are set."
+# "Still missing: ..." and exit 1, or "All N parameters are set." and exit 0, as local-parameters.ts decides.
+node $check $AppHost --verdict $file
+exit $LASTEXITCODE

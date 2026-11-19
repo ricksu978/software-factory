@@ -1,9 +1,13 @@
-// The parameter check `npm run factory` runs before `aspire run` (scripts/factory.ps1 through
-// scripts/set-local-secrets.ps1 -MissingOnly), in Node so cells and CI can run it against a fake checkout (PBI 312).
-// It reads the parameters the checkout's AppHost (aspire-apphost/apphost.mts) declares, asks the owner for each one
-// not yet saved in that checkout's Aspire user secrets, and says whether the start can go on to `aspire run`.
-// It takes only the parameters the AppHost declares under `aspire run`. One declared only for a published run, such as
-// the BFF's oidc-issuer and oidc-client-secret, is never asked for and never stops the start.
+// The parameter check `npm run factory` runs before `aspire run` (PBI 312). It reads the parameters the checkout's
+// AppHost (aspire-apphost/apphost.mts) declares, decides which ones to ask the owner for, and decides whether the start
+// can go on to `aspire run`. It takes only the parameters the AppHost declares under `aspire run`. One declared only
+// for a published run, such as the BFF's oidc-issuer and oidc-client-secret, is never asked for and never stops the start.
+//
+// The real start reaches it through the command line at the bottom of this file: scripts/factory.ps1 runs
+// scripts/set-local-secrets.ps1 -MissingOnly, which takes the parameters to ask for from `--ask` and its "Still missing"
+// line and exit code from `--verdict`. The PowerShell only reads the owner's values (hidden input, .pem paths) and
+// saves them. checkLocalParameters() runs the same parametersToAsk() and verdict() around a scripted owner, which is
+// what the PBI 312 scenarios drive. The one thing the two copies share by hand is "an empty answer keeps the value".
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -122,6 +126,36 @@ export function declaredParameters(appHostSource: string): DeclaredParameter[] {
   ];
 }
 
+export type SecretsStore = Record<string, unknown>;
+
+/** A checkout's Aspire user secrets, or an empty store if the file doesn't exist yet or is empty. */
+export function readSecretsStore(secretsFile: string): SecretsStore {
+  if (!existsSync(secretsFile)) return {};
+  return (JSON.parse(readFileSync(secretsFile, "utf8").replace(/^\uFEFF/, "") || "null") as SecretsStore | null) ?? {};
+}
+
+const isSaved = (store: SecretsStore, name: string) => Object.hasOwn(store, `Parameters:${name}`);
+
+/** The declared parameters the start asks for: with `missingOnly`, as `npm run factory` runs it, only the unsaved ones. */
+export function parametersToAsk(params: DeclaredParameter[], store: SecretsStore, missingOnly: boolean): DeclaredParameter[] {
+  return missingOnly ? params.filter((p) => !isSaved(store, p.name)) : params;
+}
+
+/** Whether the start can go on to `aspire run` once the owner has answered, and the line it says about it. */
+export function verdict(params: DeclaredParameter[], store: SecretsStore): { ok: boolean; line: string } {
+  const missing = params.map((p) => p.name).filter((n) => !isSaved(store, n));
+  return missing.length
+    ? { ok: false, line: `Still missing: ${missing.join(", ")}` }
+    : { ok: true, line: `All ${params.length} parameters are set.` };
+}
+
+/** The parameters the checkout's AppHost declares under `aspire run`. Throws if it declares none. */
+export function checkoutParameters(checkout: string): DeclaredParameter[] {
+  const params = declaredParameters(readFileSync(join(checkout, "aspire-apphost", "apphost.mts"), "utf8"));
+  if (params.length === 0) throw new Error(`no parameters found in ${checkout}/aspire-apphost/apphost.mts`);
+  return params;
+}
+
 export type ParameterCheckDeps = {
   /** The checkout whose aspire-apphost/apphost.mts declares the parameters. */
   checkout: string;
@@ -132,21 +166,18 @@ export type ParameterCheckDeps = {
   say(line: string): void;
 };
 
-/** Asks for each declared parameter not yet saved, saves the answers, and resolves to whether every one is set. */
+/**
+ * `npm run factory`'s check with the owner scripted: asks for each declared parameter not yet saved, saves the
+ * answers, and resolves to whether the start goes on. The decisions are parametersToAsk() and verdict(), the ones
+ * set-local-secrets.ps1 takes through the command line; only the asking and saving here stand in for its own.
+ */
 export async function checkLocalParameters(deps: ParameterCheckDeps): Promise<boolean> {
-  const src = readFileSync(join(deps.checkout, "aspire-apphost", "apphost.mts"), "utf8");
-  const params = declaredParameters(src);
-  if (params.length === 0) throw new Error(`no parameters found in ${deps.checkout}/aspire-apphost/apphost.mts`);
-
-  const store: Record<string, unknown> = existsSync(deps.secretsFile)
-    ? ((JSON.parse(readFileSync(deps.secretsFile, "utf8") || "null") as Record<string, unknown> | null) ?? {})
-    : {};
-  const has = (name: string) => Object.hasOwn(store, `Parameters:${name}`);
+  const params = checkoutParameters(deps.checkout);
+  const store = readSecretsStore(deps.secretsFile);
 
   deps.say(`Secrets file: ${deps.secretsFile}`);
   let changed = false;
-  for (const { name, kind } of params) {
-    if (has(name)) continue;
+  for (const { name, kind } of parametersToAsk(params, store, true)) {
     const value = await deps.ask(name, kind, "missing");
     if (value) {
       store[`Parameters:${name}`] = value;
@@ -160,21 +191,37 @@ export async function checkLocalParameters(deps: ParameterCheckDeps): Promise<bo
     mkdirSync(dirname(deps.secretsFile), { recursive: true });
     writeFileSync(deps.secretsFile, JSON.stringify(store, null, 2));
   }
-  const missing = params.map((p) => p.name).filter((n) => !has(n));
-  if (missing.length) {
-    deps.say(`Still missing: ${missing.join(", ")}`);
-    return false;
-  }
-  deps.say(`All ${params.length} parameters are set.`);
-  return true;
+  const { ok, line } = verdict(params, store);
+  deps.say(line);
+  return ok;
 }
 
-// `node src/apphost/local-parameters.ts <checkout>` prints a line `<kind> <name>` for each parameter the checkout's
-// AppHost declares under `aspire run`, in the order the start asks for them. scripts/set-local-secrets.ps1 reads it,
-// so `npm run factory` asks for the same parameters this check does.
-if (import.meta.main) {
-  const checkout = process.argv[2] ?? join(import.meta.dirname, "..", "..");
-  for (const { kind, name } of declaredParameters(readFileSync(join(checkout, "aspire-apphost", "apphost.mts"), "utf8"))) {
-    console.log(`${kind} ${name}`);
+// The command line scripts/set-local-secrets.ps1 runs. Each form prints one line `<kind> <name>` per parameter:
+//   node src/apphost/local-parameters.ts <checkout>                       every parameter declared under `aspire run`
+//   node src/apphost/local-parameters.ts <checkout> --ask <secrets.json>  only those not yet saved there
+//   node src/apphost/local-parameters.ts <checkout> --verdict <secrets.json>
+//     prints instead "Still missing: …" and exits 1, or "All N parameters are set." and exits 0.
+// The secrets path is read, never written, and no secret value goes onto the command line.
+export function runCli(argv: string[], out: (line: string) => void): number {
+  const [checkout = join(import.meta.dirname, "..", ".."), mode, secretsFile] = argv;
+  const params = checkoutParameters(checkout);
+  if (mode === undefined) {
+    for (const { kind, name } of params) out(`${kind} ${name}`);
+    return 0;
   }
+  if ((mode !== "--ask" && mode !== "--verdict") || !secretsFile) {
+    throw new Error("usage: local-parameters.ts <checkout> [--ask|--verdict <secrets.json>]");
+  }
+  const store = readSecretsStore(secretsFile);
+  if (mode === "--ask") {
+    for (const { kind, name } of parametersToAsk(params, store, true)) out(`${kind} ${name}`);
+    return 0;
+  }
+  const { ok, line } = verdict(params, store);
+  out(line);
+  return ok ? 0 : 1;
+}
+
+if (import.meta.main) {
+  process.exitCode = runCli(process.argv.slice(2), (line) => console.log(line));
 }
