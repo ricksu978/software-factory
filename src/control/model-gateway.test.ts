@@ -229,12 +229,13 @@ describe("model gateway request check", () => {
     await close(upstream);
   });
 
-  /** Sends a body as given, so a test can send bytes JSON.stringify would never produce. */
+  /** Sends a body as given, so a test can send bytes JSON.stringify would never produce. A fresh connection each time, so a
+   *  pooled keep-alive socket the server is closing can't reset a request under load. */
   function send(body: string | Buffer, headers: Record<string, string> = {}, chunked = false): Promise<number> {
     return new Promise((resolve, reject) => {
       const h: Record<string, string> = { authorization: "Bearer sk-ant-oat01-ok", "content-type": "application/json", ...headers };
       if (!chunked) h["content-length"] = String(Buffer.byteLength(body));
-      const req = request({ host: "127.0.0.1", port: port(gateway), method: "POST", path: "/v1/messages", headers: h }, (res) => {
+      const req = request({ host: "127.0.0.1", port: port(gateway), method: "POST", path: "/v1/messages", headers: h, agent: false }, (res) => {
         res.resume();
         res.on("end", () => resolve(res.statusCode ?? 0));
       });
