@@ -45,6 +45,7 @@ function fake(opts: { branch?: string; pull?: GitResult; diff?: GitResult; docke
     now: () => clock.now,
     say: (l) => void said.push(l),
     warn: (l) => void warned.push(l),
+    dockerBuild: async () => 0,
     async startResources() {
       log.push("start");
     },

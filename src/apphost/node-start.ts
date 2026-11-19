@@ -35,6 +35,9 @@ export function nodeStartDeps(repo: string): Omit<StartDeps, "startResources"> {
     launch(exe) {
       spawn(exe, [], { detached: true, stdio: "ignore" }).unref();
     },
+    async dockerBuild() {
+      throw new Error("dockerBuild isn't built yet (PBI 206)");
+    },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
     say: (line) => console.log(line),
@@ -43,7 +46,7 @@ export function nodeStartDeps(repo: string): Omit<StartDeps, "startResources"> {
 }
 
 /** Runs the start's checks in `repo`, then `startResources`. A check that fails shows why and exits the AppHost with 1. */
-export async function runAppHostStart(repo: string, startResources: () => Promise<void>): Promise<void> {
+export async function runAppHostStart(repo: string, startResources: StartDeps["startResources"]): Promise<void> {
   try {
     await startAppHost({ ...nodeStartDeps(repo), startResources });
   } catch (e) {
