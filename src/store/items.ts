@@ -51,7 +51,8 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
 /**
  * An operator's move to any state, such as a stopped run going to Failed (overrideTo, plan Task 3). It writes like
  * transitionItem, fences the old cell when leaving InProgress, and logs an override event with the reason and its board
- * mirror outbox row, so the worker mirrors it onto the board.
+ * mirror outbox row, so the worker mirrors it onto the board. An override into SignOff or NeedsInput records the open
+ * question of that kind in its payload, so the board's waiting comment quotes it.
  */
 export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemState, actor: Actor, reason: string): Promise<ItemState> {
   if (!inTx(c)) throw new Error("overrideItem needs a client inside withTx");
@@ -64,7 +65,16 @@ export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemSta
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, target]);
   }
-  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  // An override into a wait quotes the item's open question on the board, as a transition into one does, so the
+  // worker's board mirror reads it from the payload as it was when the override committed.
+  const waitKind = target === "SignOff" ? "sign_off" : target === "NeedsInput" ? "needs_input" : null;
+  const question = waitKind
+    ? (await c.query<{ body: string }>(
+        "select body from question where item_id = $1 and kind = $2 and answer is null and closed_at is null order by asked_at desc limit 1",
+        [itemId, waitKind],
+      )).rows[0]?.body
+    : undefined;
+  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason, ...(question ? { question } : {}) } });
   await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
   logAfterCommit(c, r.rows[0].external_id, from, target, "override");
   return target;

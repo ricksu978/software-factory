@@ -66,7 +66,7 @@ export async function workOutbox(deps: OutboxDeps): Promise<void> {
   }
 }
 
-type Event = { kind: string; payload: Record<string, unknown> };
+type Event = { kind: string; payload: Record<string, unknown>; at: Date };
 
 /**
  * Runs every effect of one row, without removing it. Running a row's effects again, as after a crash before its
@@ -75,7 +75,7 @@ type Event = { kind: string; payload: Record<string, unknown> };
  */
 export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<void> {
   if (!row.itemId) return;
-  const event = (await deps.pool.query<Event>("select kind, payload from event where id = $1", [row.eventId])).rows[0];
+  const event = (await deps.pool.query<Event>("select kind, payload, at from event where id = $1", [row.eventId])).rows[0];
   const item = (await deps.pool.query<{ source_id: string; external_id: string }>(
     "select source_id, external_id from item where id = $1", [row.itemId],
   )).rows[0];
@@ -91,8 +91,9 @@ export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<v
   } else if (row.consumer === CONSUMER.commentCommands) {
     const e = p.event as FactoryWebhookEvent;
     if (e?.kind !== "comment") return;
-    // Run for the row's own item alone: another board's item with the same number has a row of its own.
-    await applyComment({ pool: deps.pool, adapter: deps.backlogFor(item.source_id), sourceId: item.source_id }, { ...e, externalId: item.external_id });
+    // Run for the row's own item alone: another board's item with the same number has a row of its own. The event's
+    // time bounds which question it answers, so a retried row never answers one asked after the comment was posted.
+    await applyComment({ pool: deps.pool, adapter: deps.backlogFor(item.source_id), sourceId: item.source_id }, { ...e, externalId: item.external_id }, event.at);
   } else {
     throw new Error(`no handler for the outbox consumer ${String(row.consumer)}`);
   }

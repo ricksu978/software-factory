@@ -9,7 +9,11 @@ import { transitionItem } from "../store/items.ts";
 import { CONSUMER, writeOutboxRows } from "../store/outbox.ts";
 
 export type DecisionKind = "approve" | "changes" | "answer";
-export type Decision = { itemId: string; userId: string; kind: DecisionKind; text: string; via: "dashboard" | "comment" };
+/**
+ * `askedBy`, when given, is the latest time the question may have been asked: a comment command run late from a
+ * retried outbox row passes its webhook event's time, so it never answers a question asked after it was posted.
+ */
+export type Decision = { itemId: string; userId: string; kind: DecisionKind; text: string; via: "dashboard" | "comment"; askedBy?: Date };
 export type Outcome = "applied" | "ignored" | "forbidden";
 
 /** Reads only a leading /approve, /changes or /answer, with the rest of the comment as its text. */
@@ -47,12 +51,14 @@ export async function decide(c: pg.PoolClient, d: Decision): Promise<Outcome> {
   if (!user || !allowed(d.kind, user)) return "forbidden";
   const item = (await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [d.itemId])).rows[0];
   const kind = d.kind === "answer" ? "needs_input" : "sign_off";
-  const question = (await c.query<{ id: string }>(
-    "select id from question where item_id = $1 and kind = $2 and answer is null and closed_at is null order by asked_at desc limit 1",
+  const question = (await c.query<{ id: string; asked_at: Date }>(
+    "select id, asked_at from question where item_id = $1 and kind = $2 and answer is null and closed_at is null order by asked_at desc limit 1",
     [d.itemId, kind],
   )).rows[0];
   const waiting = d.kind === "answer" ? "NeedsInput" : "SignOff";
   if (!item || !question) return "ignored";
+  // The open question was asked after the command was posted, so its author never saw it: the command is dropped.
+  if (d.askedBy && question.asked_at.getTime() > d.askedBy.getTime()) return "ignored";
   if (item.state !== waiting && !(item.state === "Abandoned" && (await revivable(c, d.itemId)))) return "ignored";
 
   await c.query("update question set answer = $2, decision = $3, answered_by = $4, answered_at = now() where id = $1", [question.id, d.text, d.kind, d.userId]);
@@ -93,11 +99,13 @@ const refusal: Record<DecisionKind, string> = {
  * the same issue number exists in every repo. The author's GitHub login must map to an allowlisted user with the
  * right role. A refused command gets one reply naming who may decide, keyed on the comment, and changes nothing. An
  * applied one goes through `decide` alone, so its announcement comes from the decision's outbox row. The worker runs
- * it from the comment's outbox row (PBI 219).
+ * it from the comment's outbox row (PBI 219), passing the webhook event's time as `postedAt`, so a command handled
+ * late, as from a retried row, applies only to a question asked by the time it was posted.
  */
 export async function applyComment(
   deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string },
   e: { externalId: string; repo: string; login: string; body: string; commentId: string },
+  postedAt?: Date,
 ): Promise<Outcome> {
   const command = parseCommand(e.body);
   if (!command) return "ignored";
@@ -107,7 +115,7 @@ export async function applyComment(
   if (!fi?.repo || fi.repo.toLowerCase() !== e.repo.toLowerCase()) return "ignored";
   const user = (await deps.pool.query<{ id: string }>(`select id from "user" where lower(github_login) = lower($1)`, [e.login])).rows[0];
   const outcome = user
-    ? await withTx(deps.pool, (c) => decide(c, { itemId: item.id, userId: user.id, kind: command.kind, text: command.text, via: "comment" }))
+    ? await withTx(deps.pool, (c) => decide(c, { itemId: item.id, userId: user.id, kind: command.kind, text: command.text, via: "comment", askedBy: postedAt }))
     : "forbidden";
   if (outcome === "forbidden") await deps.adapter.comment(e.externalId, `@${e.login} ${refusal[command.kind]}`, `refused:${e.commentId}`);
   return outcome;

@@ -4,7 +4,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { BacklogAdapter } from "../adapters/types.ts";
 import { announcement, decide } from "../control/decisions.ts";
 import { withTx } from "../store/db.ts";
-import { transitionItem } from "../store/items.ts";
+import { overrideItem, transitionItem } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { backoffMs, runRowEffects, workOutbox, type OutboxRow } from "./outbox.ts";
 
@@ -122,5 +122,33 @@ describe("workOutbox", dbTest, () => {
     await workOutbox(deps());
     assert.deepEqual(await board.comments("1"), [announcement("approve", "")]);
     assert.deepEqual(await outbox(), []);
+  });
+
+  test("a comment command handled late leaves a question asked after the comment was posted alone", async () => {
+    const id = await item("1", "SignOff");
+    await board.seed({ externalId: "1", title: "item 1", repo: "acme/app" });
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role, product_owner) values ('dev', 'pat', 'pat', 'viewer', true)`);
+    await db.pool.query("insert into run (item_id, next_stage, scenarios_sha) values ($1, 'specify', 'abc')", [id]);
+    await withTx(db.pool, async (c) => {
+      const e = (await c.query<{ id: string }>(
+        "insert into event (actor, actor_id, kind, payload, at) values ('system', 'github', 'webhook', $1, now() - interval '1 hour') returning id",
+        [{ event: { kind: "comment", externalId: "1", repo: "acme/app", login: "pat", body: "/approve", commentId: "c1" } }],
+      )).rows[0].id;
+      await c.query("insert into outbox (consumer, event_id, item_id) values ('comment_commands', $1, $2)", [e, id]);
+    });
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Sign off the rewrite?')", [id]);
+    await workOutbox(deps());
+    assert.deepEqual(await board.comments("1"), []);
+    assert.equal((await db.pool.query("select answer from question where item_id = $1", [id])).rows[0].answer, null);
+    assert.deepEqual(await outbox(), []);
+  });
+
+  test("an override into SignOff quotes the item's open question on the board", async () => {
+    const id = await item("1", "Failed");
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Sign off?')", [id]);
+    await withTx(db.pool, (c) => overrideItem(c, id, "SignOff", system, "back to sign-off"));
+    await workOutbox(deps());
+    const [comment] = await board.comments("1");
+    assert.match(comment, /Waiting for sign-off[\s\S]*\n\nSign off\?$/);
   });
 });
