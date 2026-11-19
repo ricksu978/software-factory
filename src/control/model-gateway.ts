@@ -4,6 +4,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { pipeline } from "node:stream";
+import type { Slow } from "./slow-work.ts";
 
 // Claude Code sends CLAUDE_CODE_OAUTH_TOKEN as "Authorization: Bearer <token>", and the prefix marks it as a
 // subscription token, so the cell's own anthropic-beta carries the OAuth capability the upstream needs.
@@ -19,7 +20,11 @@ const MAX_BODY = 32 * 1024 * 1024;
 
 export type WebTool = "WebSearch" | "WebFetch";
 /** What a verified run may use: the web tools its pinned repo config allows. */
-export type Grant = { webTools: WebTool[] };
+export type Grant = {
+  webTools: WebTool[];
+  /** The run the stand-in credential belongs to, which the gateway's slow line names (PBI 154). */
+  runId?: string;
+};
 
 /** Thrown by `verify` when it can't decide right now, such as a failed config read. The cell gets 503, not 401. */
 export class GatewayUnavailable extends Error {
@@ -31,6 +36,12 @@ export type GatewayConfig = {
   ownerToken: () => string;
   /** The run's grant for a stand-in credential, or null to refuse it. */
   verify: (credential: string) => Grant | null | Promise<Grant | null>;
+  /**
+   * Where the gateway's slow line goes and the clock that times it (PBI 154). A request whose upstream hasn't sent
+   * its response headers SLOW_REQUEST_MS after the gateway forwarded it logs one line, in the format
+   * src/control/slow-work.ts documents. Not yet wired: Red stub.
+   */
+  slow?: Slow;
 };
 
 /** The model variables for a cell's environment: the gateway's URL and a stand-in token for the run, never the owner's. */
