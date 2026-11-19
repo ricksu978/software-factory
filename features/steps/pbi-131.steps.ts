@@ -39,6 +39,8 @@ export type Ctx = {
   viewerZone?: string;
   /** The dashboard's clock (PBI 189). Unset is the real time. */
   now?: () => Date;
+  /** The item a scenario's "the item" means when it isn't the last one made (PBI 263). Unset is the last one. */
+  the?: Item;
 };
 
 export function ctx(world: object): Ctx {

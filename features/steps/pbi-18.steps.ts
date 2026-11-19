@@ -16,7 +16,7 @@ const repo = process.cwd();
 const BRANCH = "factory/pbi-482-r1";
 const FEATURE = "features/pbi-482.feature";
 
-type Call = { route: string; body: Record<string, any> };
+type Call = { route: string; body: Record<string, any>; /** When the call came, by the run's clock. */ at?: number };
 type AgentCall = { stage: string; prompt: string; agent?: string; mode: string; webTools?: string[] };
 type Scenario = { name: string; tags: string[] };
 
@@ -42,6 +42,11 @@ export type Ctx = {
   wrapAgent?: (base: (a: any) => Promise<any>) => (a: any) => Promise<any>;
   /** Wraps the scripted agent, as PBI 152's steps do to script each stage's calls. `base` is the default agent. */
   agent?: (a: any, base: (a: any) => Promise<any>) => Promise<any>;
+  /** A fake clock for the engine, as PBI 234's steps use so an hour of CI polling passes at once. */
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  /** Extra cell API methods, as PBI 234's steps add to name the checks still pending. */
+  apiExtra?: Record<string, unknown>;
   /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
   editSop?: (sop: any) => void;
   /**
@@ -241,6 +246,9 @@ function agent(c: Ctx) {
     } else if (c.stage === "green") {
       writeFileSync(join(c.fixtures, "run.ndjson"), report(c.scenarios, () => "green"));
       writeFileSync(join(a.cwd, "app.txt"), "bar\n");
+    } else if (c.stage === "open-pr") {
+      // Open-pr's summary starts with "## Problem", as the PR body must (PBI 216).
+      text = "## Problem\n\nItem 482 asked for it.";
     } else if (c.stage === "address") {
       writeFileSync(join(a.cwd, "app.txt"), `fix ${c.agentCalls.length}\n`);
     }
@@ -255,7 +263,7 @@ function agent(c: Ctx) {
 }
 
 function cellApi(c: Ctx) {
-  const record = (route: string, body: Record<string, any> = {}) => c.calls.push({ route, body });
+  const record = (route: string, body: Record<string, any> = {}) => c.calls.push({ route, body, at: (c.now ?? (() => new Date()))().getTime() });
   return {
     async lease() { record("/lease"); return { stop: false }; },
     async stage(b: Record<string, any>) { record("/stage", b); if (b.status === "started") c.stage = b.stageId; },
@@ -264,11 +272,14 @@ function cellApi(c: Ctx) {
     async pr(b: Record<string, any>) { record("/pr", b); },
     async checks(sha: string) {
       record("/checks", { sha });
-      if (c.checks) return c.checks(sha);
-      if (c.ciOldOnly) return sha === c.startHead ? "success" : "failure";
-      return "success";
+      // A scenario's CI answers a status alone, or the cell API's whole answer with its failed checks (PBI 232).
+      const answer = (s: unknown) => (typeof s === "string" ? { status: s, failedChecks: [] } : s);
+      if (c.checks) return answer(await c.checks(sha));
+      if (c.ciOldOnly) return answer(sha === c.startHead ? "success" : "failure");
+      return answer("success");
     },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
+    ...c.apiExtra,
   };
 }
 

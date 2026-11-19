@@ -200,7 +200,7 @@ async function runCell(c: Ctx, nextStage: "red" | "specify", decision: { kind: s
     async transition(b: Record<string, any>) { record("/transition", b); },
     async policyResults(b: Record<string, any>) { record("/policy-results", b); },
     async pr(b: Record<string, any>) { record("/pr", b); },
-    async checks() { return "success"; },
+    async checks() { return { status: "success", failedChecks: [] }; },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
     async release() { record("/release"); },
   };
@@ -208,6 +208,7 @@ async function runCell(c: Ctx, nextStage: "red" | "specify", decision: { kind: s
   const agent = async (a: { prompt: string; cwd: string; model: string }) => {
     stage = [...c.calls].reverse().find((x) => x.route === "/stage" && x.body.status === "started")?.body.stageId ?? "";
     let text = "done";
+    if (stage === "open-pr") text = "## Problem\n\nThe item asked for it."; // PBI 216: the PR body starts with it
     if (stage === "understand") text = Array.from({ length: c.criteria }, (_, i) => `@ac-${i + 1}: criterion ${i + 1}`).join("\n");
     if (stage === "specify") {
       mkdirSync(join(a.cwd, "features"), { recursive: true });

@@ -47,8 +47,30 @@ const NONE_AFTER_MS = 600_000;
 const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
+/**
+ * Reads a `/stage` report's `ciFailure` (PBI 292): the commit CI failed on and each failed check, with its URL and
+ * failing tests. Each string is cut to 500 characters, and at most 20 checks and 20 tests a check are kept.
+ * Floor and Run detail link each check's `url`, so it must be an https link under the run's repo on GitHub, or under
+ * `https://github.com/` for a run with no repo yet. An empty `url` means GitHub gave the check none, and the views show
+ * its name unlinked. Any other URL, a `javascript:` one included, gets 400, as a `prUrl` that differs from the one the
+ * factory builds does.
+ */
+export function ciFailureOf(v: unknown, repoUrl: string | null): { sha: string; checks: { name: string; url: string; failingTests: string[] }[] } {
+  const base = repoUrl ? `${repoUrl.replace(/\/$/, "")}/` : "https://github.com/";
+  const f = v as { sha?: unknown; checks?: unknown } | null;
+  const isStr = (x: unknown): x is string => typeof x === "string";
+  if (!f || !isStr(f.sha) || !Array.isArray(f.checks)) throw new BadRequest("ciFailure must be { sha, checks }");
+  const checks = f.checks.map((c: { name?: unknown; url?: unknown; failingTests?: unknown }) => {
+    if (!isStr(c?.name) || !isStr(c?.url) || !(c.failingTests === undefined || (Array.isArray(c.failingTests) && c.failingTests.every(isStr)))) {
+      throw new BadRequest("each ciFailure check must be { name, url, failingTests }");
+    }
+    if (c.url !== "" && (!c.url.startsWith(base) || !/^https:\/\//.test(c.url))) throw new BadRequest(`each ciFailure check's url must start with ${base}`);
+    return { name: cut(c.name)!, url: cut(c.url)!, failingTests: ((c.failingTests ?? []) as string[]).slice(0, 20).map((t) => cut(t)!) };
+  });
+  return { sha: cut(f.sha)!, checks: checks.slice(0, 20) };
+}
 // ponytail: every Phase 0 repo builds on main. Add repo.default_branch when a target repo doesn't.
-const BASE = "main";
+export const BASE = "main";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Run = {
@@ -126,6 +148,14 @@ async function notOwnCommit(deps: CellApiDeps, run: Run, sha: string): Promise<s
   return null;
 }
 
+/** The `sha` a cell asks about, which must be one of its branch's own commits, with the run's repo. */
+async function ownCommit(deps: CellApiDeps, run: Run, query: URLSearchParams): Promise<{ repo: string; sha: string }> {
+  const sha = shaOf(query);
+  const notOwn = await notOwnCommit(deps, run, sha);
+  if (notOwn) throw new BadRequest(notOwn);
+  return { repo: repoOf(run), sha };
+}
+
 /**
  * The PR's URL, built from the run's repo, never taken from the cell, because the board links it from a public item.
  * A `prUrl` the cell sends must be that same URL.
@@ -143,10 +173,13 @@ function question(v: unknown, kind: "sign_off" | "needs_input"): string {
   return str(q?.body, "question.body");
 }
 
-/** A needs_input question's base failure (PBI 215): the base commit and the tests that fail on it, or null. */
-function baseFailure(v: unknown): { sha: string; tests: string[] } | null {
-  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown } | undefined | null;
-  return optional(f, () => ({ sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests") }));
+/** A blocked question's base failure: the base commit, its failing tests, and the base branch, which PBI 260 re-queues on. */
+function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string } | null {
+  const f = (v as { baseFailure?: unknown } | undefined)?.baseFailure as { sha?: unknown; tests?: unknown; base?: unknown } | undefined | null;
+  return optional(f, () => {
+    const base = optional(f!.base, (b) => str(b, "question.baseFailure.base"));
+    return { sha: str(f!.sha, "question.baseFailure.sha"), tests: strings(f!.tests, "question.baseFailure.tests"), ...(base === null ? {} : { base }) };
+  });
 }
 
 /** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
@@ -241,6 +274,7 @@ const routes: Record<string, Route> = {
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       scenarioNotes: run.scenario_notes ?? [],
       trustedComments,
+      trustedBot: run.trusted_bot,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       resume,
     };
@@ -280,10 +314,7 @@ const routes: Record<string, Route> = {
   },
 
   "GET checks": async (deps, { c, run, query, now }) => {
-    const sha = shaOf(query);
-    const repo = repoOf(run);
-    const notOwn = await notOwnCommit(deps, run, sha);
-    if (notOwn) throw new BadRequest(notOwn);
+    const { repo, sha } = await ownCommit(deps, run, query);
     const watch = await c.query<{ first_asked_at: Date }>(
       `insert into check_watch (run_id, sha, first_asked_at) values ($1, $2, $3)
        on conflict (run_id, sha) do update set sha = excluded.sha returning first_asked_at`,
@@ -291,15 +322,35 @@ const routes: Record<string, Route> = {
     );
     const status = await deps.repoHost.checksOnSha(repo, sha);
     // Run contract 6: a sha with no checks at all is `none` only once 10 minutes have passed since it was first asked about.
-    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending" };
-    return { status };
+    if (status === "none" && now.getTime() - watch.rows[0].first_asked_at.getTime() < NONE_AFTER_MS) return { status: "pending", failedChecks: [] };
+    // PBI 232: why CI failed, read here on the control plane's token, so the cell needs no GitHub access to learn it.
+    // The detail is extra: an error reading it still answers the failure, and the finding falls back to "CI failed on <sha>".
+    if (status !== "failure") return { status, failedChecks: [] };
+    try {
+      return { status, failedChecks: await deps.repoHost.failedChecksOnSha(repo, sha) };
+    } catch (e) {
+      console.error(`checks: reading why CI failed on ${sha} in ${repo} failed:`, e);
+      return { status, failedChecks: [] };
+    }
+  },
+
+  // PBI 234: the names of the checks still pending on one of the run's own commits, for the question a cell asks when
+  // CI stays pending for 60 minutes.
+  "GET pending-checks": async (deps, { run, query }) => {
+    const { repo, sha } = await ownCommit(deps, run, query);
+    return { checks: await deps.repoHost.pendingChecksOnSha(repo, sha) };
   },
 
   // PBI 229: the checks CI named on one of the run's own commits, for a dod.md line's `ci:` check. A commit the cell
   // hasn't pushed, or one of main's, gets null, as a commit CI hasn't reported on does, so its line's command runs.
+  // PBI 292: with `on=base`, the checks on a commit of the base instead, and null for any other commit, so a cell can
+  // tell a CI failure the base shares from the item's own.
   "GET ci-checks": async (deps, { run, query }) => {
     const sha = shaOf(query);
-    if (await notOwnCommit(deps, run, sha)) return { checks: null };
+    const on = query.get("on");
+    if (on !== null && on !== "base") throw new BadRequest("on must be base");
+    const refused = on === "base" ? !(await deps.repoHost.onBranch(repoOf(run), BASE, sha)) : await notOwnCommit(deps, run, sha);
+    if (refused) return { checks: null };
     return { checks: await deps.repoHost.ciChecksOnSha(repoOf(run), sha) };
   },
 
@@ -315,19 +366,20 @@ const routes: Record<string, Route> = {
       && body.restates.every((r) => Number.isInteger(r?.round) && typeof r?.reason === "string")
       ? JSON.stringify(body.restates.map((r: { round: number; reason: string }) => ({ round: r.round, reason: cut(r.reason) })))
       : (() => { throw new BadRequest("restates must be a list of { round, reason }"); })();
+    const ciFailure = body.ciFailure === undefined ? null : JSON.stringify(ciFailureOf(body.ciFailure, run.repo_url));
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
-         message = coalesce($12, message), restates = coalesce($13::jsonb, restates)
+         message = coalesce($12, message), restates = coalesce($13::jsonb, restates), ci_failure = coalesce($14::jsonb, ci_failure)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'))`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb)`,
         values,
       );
     }

@@ -130,6 +130,20 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!view.includes("engine rule"), view);
   });
 
+  test("Blocked lists a Queued item with open dependencies and names them, and Next up leaves it out (PBI 237)", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("Queued", "second child");
+    await db.pool.query("update item set blocked_by = '{40}' where id = $1", [id]);
+    await item("Queued", "free item");
+    const { html } = await get("/", "octo");
+    const view = html.slice(html.indexOf(">Blocked<"), html.indexOf("<h2", html.indexOf(">Blocked<")));
+    assert.ok(view.includes("second child<"), view);
+    assert.ok(view.includes("Waits on #40, which is still open."), view);
+    assert.ok(!view.includes("free item<"), view);
+    const next = html.slice(html.indexOf(">Next up<"), html.indexOf("<h2", html.indexOf(">Next up<")));
+    assert.ok(!next.includes("second child<"), next);
+  });
+
   test("an item with two open questions counts and lists once", async () => {
     await person("octo", "viewer");
     const { id } = await item("NeedsInput", "two questions");
@@ -376,6 +390,34 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from override where created_by = $1", [op])).rows[0].n, 2);
   });
 
+  // PBI 265: Start now, Move up and Move down are item overrides posted from the item's Controls, with a reason.
+  test("Start now is offered on an item that can still be picked up, logged with its reason, and shown on the item's page", async () => {
+    await person("op", "operator");
+    await person("viewer", "viewer");
+    const queued = await item("Queued", "next");
+    const busy = await item("InProgress", "busy");
+    const done = await item("Done", "shipped");
+    const buttons = (html: string) => [...html.matchAll(/<button name="kind" value="([a-z_]+)"/g)].map((m) => m[1]);
+    const q = buttons((await get(`/items/${queued.id}`, "op")).html);
+    for (const k of ["start_now", "move_up", "move_down"]) assert.ok(q.includes(k), `a Queued item offers no ${k}`);
+    for (const id of [busy.id, done.id]) {
+      const b = buttons((await get(`/items/${id}`, "op")).html);
+      for (const k of ["start_now", "move_up", "move_down"]) assert.ok(!b.includes(k), `a ${id === busy.id ? "busy" : "Done"} item offers ${k}`);
+    }
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=+&itemId=${queued.id}`)).status, 400);
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=demo&itemId=${busy.id}`)).status, 409);
+    assert.equal((await post("/overrides", "op", `kind=move_up&reason=demo&itemId=${busy.id}`)).status, 409);
+    assert.equal((await post("/overrides", "op", `kind=start_now&reason=demo&itemId=${queued.id}`)).status, 303);
+    assert.equal((await post("/overrides", "op", `kind=move_down&reason=later&itemId=${queued.id}`)).status, 303);
+    assert.deepEqual(await overrides(), [
+      { scope: "item", target_id: queued.id, kind: "start_now", reason: "demo" },
+      { scope: "item", target_id: queued.id, kind: "move_down", reason: "later" },
+    ]);
+    const page = (await get(`/items/${queued.id}`, "viewer")).html;
+    assert.match(page, /Marked Start now: demo, by op/);
+    assert.deepEqual(buttons(page), []);
+  });
+
   test("Re-queue needs a reason, only a Failed or Abandoned item takes it, and the next tick moves it back to Queued", async () => {
     await person("op", "operator");
     const failed = await item("Failed", "broke");
@@ -422,7 +464,7 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("update override set created_at = now() - interval '6 minutes' where kind = 'restart'");
     const busy = await item("InProgress", "busy");
     await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
-    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell is wrapping up, with 9 minutes left/);
+    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. 9 minutes left in the wrap-up/);
     await db.pool.query("update item set state = 'Queued', lease_expires = null where id = $1", [busy.id]);
     const ready = (await get("/", "op")).html;
     assert.match(ready, /Ready to restart\. No cell is running/);
