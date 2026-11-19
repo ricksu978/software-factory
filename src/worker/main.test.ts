@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { format } from "node:util";
-import { fakeRepoHost } from "../adapters/fake.ts";
+import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { createPool } from "../store/db.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { startWorker, type Worker, type WorkerDeps } from "./main.ts";
+
+const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
+const write = (dir: string, path: string, text: string) => {
+  mkdirSync(dirname(join(dir, path)), { recursive: true });
+  writeFileSync(join(dir, path), text);
+};
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -144,6 +155,65 @@ describe("the worker heartbeat", dbTest, () => {
     } finally {
       await w.stop();
       await pool.end();
+    }
+  });
+});
+
+// PBI 261.
+describe("the worker's default policies", dbTest, () => {
+  let db: Awaited<ReturnType<typeof startTestDb>>;
+  let root: string;
+  before(async () => {
+    db = await startTestDb();
+  });
+  after(async () => {
+    await db?.stop();
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  test("the gate checks the default dor.md on the fetched main, not the checkout's disk", async () => {
+    await db.pool.query('truncate item, backlog_source, repo, "user" cascade');
+    await db.pool.query("delete from cell_image");
+    root = mkdtempSync(join(tmpdir(), "worker-defaults-"));
+    const seed = join(root, "seed");
+    const checkout = join(root, "checkout");
+    git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
+    git(root, "init", "-q", "-b", "main", seed);
+    for (const n of ["dor", "scenarios", "pr-review", "risk"]) write(seed, `policy/${n}.md`, n === "dor" ? "- [ ] Size is 5 or less\n" : `${n}\n`);
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "a");
+    git(seed, "remote", "add", "origin", join(root, "origin.git"));
+    git(seed, "push", "-q", "origin", "main");
+    git(root, "clone", "-q", join(root, "origin.git"), checkout);
+    write(checkout, "policy/dor.md", "- [ ] Has a designer's sign-off\n");
+
+    const repo = "acme/web";
+    const host = fakeRepoHost();
+    host.files.set(`${repo}@w1:.factory/dod.md`, "- [ ] Tests pass\n");
+    host.files.set(`${repo}@w1:.factory/config.yml`, "bdd:\n  parse: p\n  run: r\n  report: x.ndjson\ncommands:\n  test: t\n  lint: l\n");
+    host.heads.set(repo, "w1");
+    await db.pool.query("insert into repo (host_adapter, url) values ('fake', $1)", [`https://github.com/${repo}`]);
+    const board = fakeBacklog();
+    const id = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
+    await board.seed({ labels: ["factory"], repo });
+    const asked: string[] = [];
+    const judge = async (_item: unknown, dor: { criteria: { index: number; text: string }[] }) => {
+      asked.push(...dor.criteria.map((c) => c.text));
+      return [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "passed", reason: "ok" })), JSON.stringify({ flags: [] })].join("\n");
+    };
+    const builder = { build: async () => {}, revision: async () => null };
+    const quiet = () => {};
+    const w = await startWorker({
+      pool: db.pool, sources: [{ id, adapter: board.adapter }], repoHost: host, launcher: { start: async () => "cell", stop: async () => {} },
+      egress: async () => {}, image: "i", controlUrl: "http://c", blob: "b", judge: judge as never, killFlag: false, secret: "s",
+      sopVersion: "default@1", tickMs: 20, pollMs: 20, lockRetryMs: 50, log: { log: quiet, warn: quiet, error: quiet },
+      cellImage: { checkout, builder },
+    });
+    try {
+      await until("the judge is asked", () => asked.length > 0);
+      assert.deepEqual([...new Set(asked)], ["Size is 5 or less"]);
+    } finally {
+      await w.stop();
     }
   });
 });

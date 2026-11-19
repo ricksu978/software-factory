@@ -14,9 +14,11 @@ const migrationsDir = join(import.meta.dirname, "..", "..", "db", "migrations");
  * migrate, the webhook) would still emit an unhandled `error` on the client. Each client therefore gets its own
  * listener when it connects. It logs only while the client is checked out, since the pool logs idle losses. The query in
  * flight still rejects, and on release the pool drops the dead client because it is no longer queryable.
+ * Every connection runs with JIT off. The factory's queries are small, and the claim order's recursive CTE (PBI 320)
+ * crosses the JIT cost threshold on any table, so compiling it cost tens of milliseconds on every scheduler tick.
  */
-export function createPool(url?: string): pg.Pool {
-  const pool = url ? new pg.Pool({ connectionString: url }) : azurePool();
+export function createPool(url?: string, opts: PoolOptions = {}): pg.Pool {
+  const pool = url ? new pg.Pool({ connectionString: url, options: NO_JIT, onConnect: opts.onConnect }) : azurePool(opts);
   pool.on("error", (e) => console.error("database connection lost, the pool will open a fresh one:", e.message));
   const checkedOut = new WeakSet<pg.PoolClient>();
   pool.on("acquire", (c) => checkedOut.add(c));
@@ -29,7 +31,18 @@ export function createPool(url?: string): pg.Pool {
   return pool;
 }
 
-function azurePool(): pg.Pool {
+/** The startup option each connection sends, so a session's queries are never JIT-compiled. */
+const NO_JIT = "-c jit=off";
+
+export type PoolOptions = {
+  /**
+   * Runs on each new connection before the pool hands it out. pg-pool waits for it, and when it rejects, the pool ends
+   * that connection and the checkout, or the query that asked for it, fails with its error. Nothing runs on that client.
+   */
+  onConnect?: (client: pg.ClientBase) => Promise<void>;
+};
+
+function azurePool(opts: PoolOptions): pg.Pool {
   const credential = new DefaultAzureCredential();
   return new pg.Pool({
     host: process.env.PGHOST,
@@ -37,6 +50,8 @@ function azurePool(): pg.Pool {
     database: process.env.PGDATABASE,
     ssl: true,
     password: async () => (await credential.getToken("https://ossrdbms-aad.database.windows.net/.default")).token,
+    options: NO_JIT,
+    onConnect: opts.onConnect,
   });
 }
 

@@ -16,7 +16,7 @@ describe("githubBacklog", () => {
   });
 
   // An org-owned board goes through the installation client, so one stub serves both the board and the issues.
-  function orgBoard(comments: { body: string; user: { type: string } }[], failFirstLookup = false) {
+  function orgBoard(comments: { body: string; user: { type: string } }[], failFirstLookup = false, map: FieldMap = fieldMap) {
     const posted: string[] = [];
     let lookups = 0;
     const client = {
@@ -31,12 +31,12 @@ describe("githubBacklog", () => {
           return { organization: { projectV2: { id: "P1", fields: { nodes: [] } } } };
         }
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
-          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
+          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [{ field: { name: "Size" }, text: "3" }, { field: { name: "Priority" }, number: 1 }] },
           content: { number: 7, title: "t", body: "", state: "OPEN", createdAt: "2026-11-05T08:00:00Z", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
         }] } } };
       },
     };
-    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap: map });
     return { adapter, posted };
   }
 
@@ -55,6 +55,15 @@ describe("githubBacklog", () => {
     assert.equal((await adapter.getItem("7"))?.externalId, "7");
   });
 
+  test("Priority comes through to order the claims, and is judged only when it's a readiness field (PBI 320)", async () => {
+    const own = await orgBoard([]).adapter.getItem("7");
+    assert.deepEqual(own?.fields, { Size: "3", Priority: "1" });
+    assert.deepEqual(own?.orderOnly, ["Priority"]);
+    const judged = await orgBoard([], false, { ...fieldMap, readinessFields: ["Size", "Priority"] }).adapter.getItem("7");
+    assert.deepEqual(judged?.fields, { Size: "3", Priority: "1" });
+    assert.equal(judged?.orderOnly, undefined);
+  });
+
   test("an item carries its issue's creation time (PBI 187)", async () => {
     const { adapter } = orgBoard([]);
     assert.equal((await adapter.getItem("7"))?.createdAt, "2026-11-05T08:00:00Z");
@@ -70,19 +79,24 @@ describe("githubBacklog", () => {
 describe("githubBacklog: the split board (PBI 144)", () => {
   function splitClient() {
     const calls: { route: string; params: Record<string, any> }[] = [];
+    const edits = new Map<number, ({ __typename: string; login: string } | null)[]>();
     const recent: any[] = [
       { id: 900, node_id: "N9", number: 9, title: "planted", body: "factory-split-k-1", html_url: "u9", user: { type: "User" } },
       { id: 800, node_id: "N8", number: 8, title: "a PR", body: "factory-split-k-1", html_url: "u8", user: { type: "Bot", login: "factory[bot]" }, pull_request: {} },
       { id: 700, node_id: "N7", number: 70, title: "other bot", body: "factory-split-k-1", html_url: "u70", user: { type: "Bot", login: "github-actions[bot]" } },
-      { id: 300, node_id: "N3", number: 3, title: "Card", body: "x factory-split-k-1", html_url: "u3", user: { type: "Bot", login: "factory[bot]" } },
+      { id: 300, node_id: "N3", number: 3, title: "Card", body: "x factory-split-k-1 <!-- factory:split-k-1 -->", html_url: "u3", user: { type: "Bot", login: "factory[bot]" } },
     ];
     const client = {
       async request(route: string, params: Record<string, any> = {}) {
         calls.push({ route, params });
         if (route === "GET /app") return { data: { id: 42, slug: "factory" } };
         if (route === "GET /repos/{owner}/{repo}/issues") return { data: recent };
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues") return { data: [recent[3], recent[0]] };
         if (route === "POST /repos/{owner}/{repo}/issues") return { data: { id: 500, node_id: "N5", number: 5, title: params.title, html_url: "u5" } };
-        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number } };
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") {
+          const user = params.issue_number === 3 ? { type: "Bot", login: "factory[bot]" } : { type: "User", login: "ann" };
+          return { data: { id: params.issue_number * 100, node_id: `N${params.issue_number}`, number: params.issue_number, user } };
+        }
         if (route.startsWith("DELETE")) throw Object.assign(new Error("Label does not exist"), { status: 404 });
         return { data: [] };
       },
@@ -93,6 +107,7 @@ describe("githubBacklog: the split board (PBI 144)", () => {
         }
         if (query.includes("addProjectV2ItemById")) return { addProjectV2ItemById: { item: { id: "I5" } } };
         if (query.includes("updateProjectV2ItemFieldValue")) return {};
+        if (query.includes("userContentEdits")) return { repository: { issue: { userContentEdits: { nodes: (edits.get(vars.number) ?? []).map((e) => ({ editor: e })) } } } };
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
           id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
           content: { number: 7, title: "parent", body: "", state: "OPEN", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
@@ -100,12 +115,19 @@ describe("githubBacklog: the split board (PBI 144)", () => {
       },
     };
     const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
-    return { board: adapter.splitBoard, calls };
+    return { board: adapter.splitBoard, calls, client, edits };
   }
 
   test("findIssues counts only the factory App's own issues, never a person's, another bot's or a PR", async () => {
     const { board } = splitClient();
     assert.deepEqual(await board.findIssues("o/r", "factory-split-k-1"), [{ externalId: "3", title: "Card", url: "u3" }]);
+  });
+
+  test("subIssues carries each sub-issue's body and whether the factory App opened it, so recovery needs no repo search (PBI 226)", async () => {
+    const { board, calls } = splitClient();
+    const subs = await board.subIssues("7");
+    assert.deepEqual(subs.map((x) => [x.externalId, x.body, x.openedByApp]), [["3", "x factory-split-k-1 <!-- factory:split-k-1 -->", true], ["9", "factory-split-k-1", false]]);
+    assert.ok(!calls.some((c) => c.route === "GET /repos/{owner}/{repo}/issues"));
   });
 
   test("a filed child is linked by its id, put on the board in the status and blocked by its blocker's id, off the board", async () => {
@@ -122,6 +144,59 @@ describe("githubBacklog: the split board (PBI 144)", () => {
     assert.ok(gql.some((v) => v.query.includes("updateProjectV2ItemFieldValue") && v.item === "I5" && v.option === "O1"));
     await board.addBlockedBy(c.externalId, "3");
     assert.deepEqual(calls.at(-1), { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", params: { owner: "o", repo: "r", issue_number: 5, issue_id: 300 } });
+  });
+
+  test("fileItem files an issue with the labels and its dedupe marker, and puts it on the board in the Eligible status (PBI 255)", async () => {
+    const { client, calls } = splitClient();
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1,
+      fieldMap: { ...fieldMap, optInLabel: "factory-work", statusFor: { ...fieldMap.statusFor, Eligible: "Backlog" } } });
+    assert.equal(await adapter.fileItem({ title: "main is red", body: "the body", labels: ["factory"], repo: "o/r" }, "main-break:abc"), "5");
+    const created = calls.find((c) => c.route === "POST /repos/{owner}/{repo}/issues")!.params;
+    assert.deepEqual([created.title, created.body, created.labels], ["main is red", "<!-- factory:main-break:abc -->\nthe body", ["factory", "factory-work"]]);
+    const gql = calls.filter((x) => x.route === "graphql").map((x) => x.params);
+    assert.ok(gql.some((v) => v.query.includes("addProjectV2ItemById") && v.content === "N5"));
+    assert.ok(gql.some((v) => v.query.includes("updateProjectV2ItemFieldValue") && v.option === "O1"));
+  });
+
+  test("fileItem files nothing when the App already filed an issue with the dedupe marker, and answers that one, put on the board (PBI 255)", async () => {
+    const { client, calls } = splitClient();
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    assert.equal(await adapter.fileItem({ title: "t", body: "b", labels: ["factory"], repo: "o/r" }, "split-k-1"), "3");
+    assert.ok(!calls.some((c) => c.route === "POST /repos/{owner}/{repo}/issues"));
+    assert.ok(calls.some((c) => c.route === "graphql" && c.params.query.includes("addProjectV2ItemById") && c.params.content === "N3"));
+  });
+
+  test("fileItem refuses an item with no repo, since an issue needs one (PBI 255)", async () => {
+    const { client } = splitClient();
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    await assert.rejects(adapter.fileItem({ title: "t", body: "b", labels: [], repo: null }, "k"), /repo/);
+  });
+
+  test("authorship says whether this App opened the issue and who has edited its body since (PBI 264)", async () => {
+    const { board, edits } = splitClient();
+    await board.findIssues("o/r", "factory-split-k-1");
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: false, editedByApp: false });
+    edits.set(3, [{ __typename: "Bot", login: "factory" }]);
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: false, editedByApp: true });
+    edits.set(3, [{ __typename: "Bot", login: "factory" }, { __typename: "User", login: "ann" }, null]);
+    assert.deepEqual(await board.authorship!("3"), { openedByApp: true, editedByOthers: true, editedByApp: true });
+    edits.set(3, [{ __typename: "Bot", login: "github-actions" }]);
+    assert.equal((await board.authorship!("3")).editedByOthers, true);
+  });
+
+  test("an issue a person opened isn't the App's, and editBody writes the body over the issue (PBI 264)", async () => {
+    const { board, calls } = splitClient();
+    await board.findIssues("o/r", "factory-split-k-1");
+    const c = await board.createIssue("o/r", "Bank", "body");
+    assert.equal((await board.authorship!(c.externalId)).openedByApp, false);
+    await board.editBody!("3", "new body");
+    assert.deepEqual(calls.at(-1), { route: "PATCH /repos/{owner}/{repo}/issues/{issue_number}", params: { owner: "o", repo: "r", issue_number: 3, body: "new body" } });
+  });
+
+  test("a child filed with labels carries them from the moment it's filed (PBI 237)", async () => {
+    const { board, calls } = splitClient();
+    await board.createIssue("o/r", "Bank", "body", ["factory"]);
+    assert.deepEqual(calls.at(-1)!.params, { owner: "o", repo: "r", title: "Bank", body: "body", labels: ["factory"] });
   });
 
   test("taking off a label the parent lacks succeeds", async () => {

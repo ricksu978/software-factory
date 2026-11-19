@@ -9,7 +9,7 @@ export type ItemEvent =
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
-  | "returned" | "split_filed";
+  | "returned" | "split_filed" | "children_done";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -50,8 +50,10 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "withdrawn", "Abandoned"],
   ["Abandoned", "returned", "Eligible"],
   // A parent whose split is filed as child issues, its opt-in label off, rests in Split (PBI 225). The work goes on in
-  // the children, so Split has no edge out: its label coming back or a policy change never gates it again.
+  // the children, so its label coming back or a policy change never gates it again.
   ["NotReady", "split_filed", "Split"],
+  // Split's one way out: every child the factory filed for the parent reached Done (PBI 226).
+  ["Split", "children_done", "Done"],
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));

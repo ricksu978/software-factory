@@ -51,6 +51,10 @@ const ITEMS = `query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV
 const SET_STATUS = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } } }`;
 
+// PBI 264: who has edited an issue's body. Each node names an editor, the App's own bot included; a deleted
+// account's is null. An issue nobody has edited has none.
+const BODY_EDITS = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) {
+  userContentEdits(first: 100) { nodes { editor { __typename login } } } } } }`;
 const ADD_TO_PROJECT = `mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } } }`;
 
@@ -159,7 +163,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       acceptanceCriteria: acceptanceCriteria(c.body ?? "", cfg.fieldMap.acceptanceCriteriaHeading),
       labels: (c.labels?.nodes ?? []).map((l) => l.name), status: values.get(cfg.fieldMap.statusField) ?? "", rank,
       repo: c.repository.nameWithOwner,
-      fields: Object.fromEntries(cfg.fieldMap.readinessFields.filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      // The Priority field orders the claims (PBI 320), so it comes through beside the readiness fields. It's judged only
+      // when the repo lists it as a readiness field too.
+      fields: Object.fromEntries([...new Set([...cfg.fieldMap.readinessFields, "Priority"])].filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      ...(cfg.fieldMap.readinessFields.includes("Priority") ? {} : { orderOnly: ["Priority"] }),
       closed: c.state !== "OPEN", updatedAt: [raw.updatedAt, c.updatedAt ?? ""].sort().at(-1)!,
       ...(c.createdAt ? { createdAt: c.createdAt } : {}),
     };
@@ -228,7 +235,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
     async subIssues(parentId) {
       const p = await ref(parentId);
       const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...p, per_page: 100 })).data as RestIssue[];
-      return list.map((i) => child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i));
+      // Each sub-issue comes with its body and who opened it, so a filed child is found by its split marker here,
+      // however old it is, and only one this App opened counts (PBI 226).
+      const own = await ownLogin();
+      return list.map((i) => ({ ...child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i), body: i.body ?? "",
+        openedByApp: i.user?.type === "Bot" && i.user.login === own }));
     },
     async findIssues(repo, text) {
       const [owner, name] = repo.split("/");
@@ -240,9 +251,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       const own = await ownLogin();
       return list.filter((i) => !i.pull_request && i.user?.type === "Bot" && i.user.login === own && (i.title.includes(text) || (i.body ?? "").includes(text))).reverse().map((i) => child(repo, i));
     },
-    async createIssue(repo, title, body) {
+    async createIssue(repo, title, body, labels = []) {
       const [owner, name] = repo.split("/");
-      const created = (await (await app()).request("POST /repos/{owner}/{repo}/issues", { owner, repo: name, title, body })).data as RestIssue;
+      // Labels go on in the same request, so a child never exists without the label it was filed with (PBI 237).
+      const params = { owner, repo: name, title, body, ...(labels.length > 0 ? { labels } : {}) };
+      const created = (await (await app()).request("POST /repos/{owner}/{repo}/issues", params)).data as RestIssue;
       return child(repo, created);
     },
     async addSubIssue(parentId, childId) {
@@ -274,6 +287,20 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       } catch (e) {
         if ((e as { status?: number }).status !== 404) throw e;
       }
+    },
+    async authorship(externalId) {
+      // GraphQL names a bot by its slug, REST by `<slug>[bot]`, so both are compared without the suffix.
+      const own = (await ownLogin()).replace(/\[bot\]$/, "");
+      const ours = (u: { __typename?: string; type?: string; login?: string } | null | undefined) =>
+        !!u && (u.__typename ?? u.type) === "Bot" && (u.login ?? "").replace(/\[bot\]$/, "") === own;
+      const opened = await rest(externalId);
+      const { owner, repo, issue_number } = await ref(externalId);
+      const res: any = await (await app()).graphql(BODY_EDITS, { owner, name: repo, number: issue_number });
+      const editors = ((res.repository?.issue?.userContentEdits?.nodes ?? []) as { editor: { __typename?: string; login?: string } | null }[]).map((n) => n.editor);
+      return { openedByApp: ours(opened.user), editedByOthers: editors.some((e) => !ours(e)), editedByApp: editors.some(ours) };
+    },
+    async editBody(externalId, body) {
+      await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await ref(externalId)), body });
     },
   };
 
@@ -335,6 +362,23 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
 
     async close(externalId) {
       await (await app()).request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", { ...(await issue(externalId)), state: "closed", state_reason: "completed" });
+    },
+
+    // PBI 255: a filed issue carries the dedupe key as a marker, so a retry finds the App's own issue and files no
+    // second one, since findIssues trusts only the App's own issues. It gets the board's opt-in label along with the caller's, and goes on the board where the factory
+    // reads new work, so the poller takes it in as it does any item.
+    async fileItem({ title, body, labels, repo }, dedupeKey) {
+      if (!repo) throw new Error("filing an item needs a repo to open its issue in");
+      const marker = `<!-- factory:${dedupeKey} -->`;
+      // A retry after a lost answer finds the issue and still puts it on the board, which a second add leaves as it is.
+      const [owner, name] = repo.split("/");
+      const filed = (await splitBoard.findIssues(repo, marker))[0] ?? child(repo, (await (await app()).request("POST /repos/{owner}/{repo}/issues", {
+        owner, repo: name, title, body: `${marker}\n${body}`, labels: [...new Set([...labels, cfg.fieldMap.optInLabel])],
+      })).data as RestIssue);
+      const status = cfg.fieldMap.statusFor.Eligible ?? cfg.fieldMap.statusFor.NotReady;
+      if (status) await splitBoard.addToBoard(filed.externalId, status);
+      else await (await board()).graphql(ADD_TO_PROJECT, { project: (await resolve()).id, content: (await rest(filed.externalId)).node_id });
+      return filed.externalId;
     },
 
     parseWebhook: parseGitHubWebhook,

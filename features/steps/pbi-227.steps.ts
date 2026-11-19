@@ -109,8 +109,9 @@ Before({ tags: "@pbi-227 and @db", ...long }, async function () {
   }, d.pool));
   k.off.push(mirrorBoard({ pool: d.pool, backlogFor, repoHost: k.host }));
   const world = this;
-  c.driver = async () => {
+  c.driver = async (c) => {
     await realPoll(world, main(world));
+    c.polls++;
     countPass(world);
   };
 });
@@ -140,6 +141,16 @@ async function knowRepo(k: Ctx, repo: string): Promise<void> {
   await pool().query("insert into repo (host_adapter, url) values ('fake', $1) on conflict (url) do nothing", [`https://github.com/${repo}`]);
 }
 
+/**
+ * The scripted board, filing each child without the labels the factory asks for. Since PBI 237 the factory files a
+ * split's children with the opt-in label, so they enter at once. This feature's children wait for the owner to label
+ * them, as a child filed before PBI 237 or a child of a factory-filed parent does, so a child can be "Not in the factory".
+ */
+function unlabelledBoard(c: Ctx144): ReturnType<typeof scriptedBoard> {
+  const board = scriptedBoard(c);
+  return { ...board, createIssue: (repo: string, title: string, body: string) => board.createIssue(repo, title, body, []) };
+}
+
 /** One pass of the real poller over one board, filing splits on that board with its scripted repo writes. */
 async function realPoll(world: object, b: Board): Promise<void> {
   const k = ctx(world);
@@ -160,7 +171,7 @@ async function realPoll(world: object, b: Board): Promise<void> {
     pool: pool(), adapter, repoHost: k.host, judge, sourceId: b.sourceId,
     split: {
       sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen,
-      file: { board: scriptedBoard(c), optInLabel: c.label, backlogStatus: c.backlogStatus, criteriaHeading: HEADING },
+      file: { board: unlabelledBoard(c), optInLabel: c.label, backlogStatus: c.backlogStatus, criteriaHeading: HEADING },
     },
   });
   assert.ok(out && typeof out.seen === "number", "pollOnce returned no result for the source");

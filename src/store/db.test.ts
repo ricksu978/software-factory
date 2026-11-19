@@ -87,3 +87,18 @@ describe("a connection lost while checked out", () => {
     }
   });
 });
+
+// PBI 320's claim query is a recursive CTE whose row estimate crosses Postgres's JIT threshold even on a near-empty
+// table, and compiling it took tens of milliseconds on every scheduler tick. The factory's queries are all small.
+describe("a pool's connections", () => {
+  test("run with JIT off", async () => {
+    const db = await startTestDb();
+    const pool = createPool(db.url);
+    try {
+      assert.equal((await pool.query<{ jit: string }>("show jit")).rows[0].jit, "off");
+    } finally {
+      await pool.end();
+      await db.stop();
+    }
+  });
+});

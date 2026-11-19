@@ -141,6 +141,23 @@ describe("handleWebhook", dbTest, () => {
       assert.deepEqual(logged, [{ repo: "o/r", prNumber: pr, mergeSha: "abc1234", approvers: ["Reviewer"] }]);
     });
 
+    test("a merge after a NeedsInput item's unanswered merge attempt notes the question and names it in factory_merged (PBI 262)", async () => {
+      const { item, pr } = await inReview(null, "NeedsInput");
+      const qid = (await db.pool.query<{ id: string }>(
+        "insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'Address failed', now()) returning id", [item],
+      )).rows[0].id;
+      const attempt = { repo: "o/r", prNumber: pr, headSha: "h1", approvers: ["Reviewer"], waitingIn: "NeedsInput", question: "Address failed", questionId: qid };
+      await db.pool.query("insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'poller', $1, 'factory_merge_attempt', $2)", [item, attempt]);
+      await send({ kind: "pr_merged", prNumber: pr, repo: "o/r", mergeSha: "abc1234" });
+      assert.equal(await state(item), "Accepted");
+      const q = (await db.pool.query("select closed_at, answer, closed_note from question where id = $1", [qid])).rows[0];
+      assert.ok(q.closed_at);
+      assert.equal(q.answer, null);
+      assert.equal(q.closed_note, `The factory merged PR #${pr} as commit abc1234.`);
+      const logged = (await db.pool.query("select payload from event where item_id = $1 and kind = 'factory_merged'", [item])).rows.map((r) => r.payload);
+      assert.deepEqual(logged, [{ repo: "o/r", prNumber: pr, mergeSha: "abc1234", approvers: ["Reviewer"], waitingIn: "NeedsInput", question: "Address failed" }]);
+    });
+
     test("a person closing the PR unmerged withdraws the item", async () => {
       const { item, pr } = await inReview(null);
       await send({ kind: "pr_closed", prNumber: pr, repo: "o/r", by: "dev" });

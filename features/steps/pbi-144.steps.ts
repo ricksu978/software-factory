@@ -9,7 +9,7 @@ import { acceptanceCriteria } from "../../src/adapters/github/backlog.ts";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../src/gate/file-split.ts";
-import { gate } from "../../src/gate/readiness.ts";
+import { gate, type GateContext } from "../../src/gate/readiness.ts";
 import { itemTextHash, SPLIT_HEADING, type SplitChild, type SplitOutcome } from "../../src/gate/split.ts";
 import { loadPolicy, type Policy } from "../../src/policy/policy.ts";
 
@@ -56,10 +56,35 @@ export type Ctx = {
   errors: unknown[];
   polls: number;
   /**
-   * PBI 225: a poll by the real poller over Postgres, which replaces this harness's in-memory pass for the scenarios
-   * that set it. Unset, a poll is the in-memory pass below.
+   * What a poll runs instead of this file's in-memory pass, for the scenarios that set it; unset, a poll is the
+   * in-memory pass below. PBI 237's and PBI 225's scenarios poll with the real poller, store and scheduler, on this
+   * file's board, repo and refusals, so the steps the features share read the same context. A driver counts its own
+   * poll in `polls`.
    */
-  driver?: () => Promise<void>;
+  driver?: (c: Ctx) => Promise<void>;
+  /** PBI 226: other parents, by external id, the judge also finds oversized. */
+  alsoOversized?: Set<string>;
+  /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
+  replies?: { title: string; reply: string }[];
+  /**
+   * PBI 226: titles of children the board files without the labels the factory asks for, as every child was filed
+   * before PBI 237 gave children the opt-in label, so a child can still be one that never entered the factory.
+   */
+  unlabelled?: Set<string>;
+  /** PBI 264: a scripted judge that replaces this harness's, which passes every line. */
+  judgeOverride?: (item: FactoryItem, dor: Policy) => Promise<string>;
+  /** PBI 264: a scripted coding model that replaces this harness's, which always answers `reply`. */
+  agentOverride?: (a: AgentArgs) => Promise<AgentResult>;
+  /** PBI 264: more of the gate's context, such as the App's missing permissions. */
+  gateExtras?: Partial<GateContext>;
+  /** PBI 264: every body the factory wrote over an issue, in order. */
+  edits: { externalId: string; body: string }[];
+  /** PBI 264: issues the factory's App opened other than through filing a split. */
+  appOpened: Set<string>;
+  /** PBI 264: issues whose body a person edited. */
+  personEdited: Set<string>;
+  /** PBI 264: the in-memory pass takes up a Queued child even while an earlier child it needs is open. */
+  ignoreBlockers?: boolean;
   /** PBI 227: the issue numbers the repo gives the next filed children, in order. Empty, the fake board numbers them. */
   ids: string[];
 };
@@ -69,7 +94,7 @@ export function ctx(world: object): Ctx {
   w.pbi144 ??= {
     fake: fakeBacklog(), dor: DOR, repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
     requests: [], states: new Map(), seen: new Map(), runs: new Set(), filed: [], subIssues: new Map(), board: new Map(),
-    blocks: new Map(), refusals: [], errors: [], polls: 0, ids: [],
+    blocks: new Map(), refusals: [], errors: [], polls: 0, edits: [], appOpened: new Set(), personEdited: new Set(), ids: [],
   };
   return w.pbi144;
 }
@@ -115,11 +140,11 @@ export function scriptedBoard(c: Ctx): SplitBoard {
       }
       return out;
     },
-    async createIssue(repo, title, body) {
+    async createIssue(repo, title, body, labels = []) {
       refuse(c, "file", title);
       const next = c.ids.shift();
       const externalId = await c.fake.seed({
-        ...(next ? { externalId: next } : {}), title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [], repo, status: "", fields: {},
+        ...(next ? { externalId: next } : {}), title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: c.unlabelled?.has(title) ? [] : [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
       c.filed.push({ externalId, title, url, repo });
@@ -151,13 +176,27 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     async removeLabel(id, label) {
       await replaceItem(c, id, (fi) => ({ labels: fi.labels.filter((l) => l !== label) }));
     },
+    async authorship(id) {
+      return {
+        openedByApp: c.filed.some((i) => i.externalId === id) || c.appOpened.has(id),
+        editedByOthers: c.personEdited.has(id),
+        editedByApp: c.edits.some((e) => e.externalId === id),
+      };
+    },
+    async editBody(id, body) {
+      c.edits.push({ externalId: id, body });
+      await replaceItem(c, id, (fi) => ({
+        body, acceptanceCriteria: acceptanceCriteria(body, HEADING), updatedAt: new Date(Date.parse(fi.updatedAt) + 1000).toISOString(),
+      }));
+    },
   };
 }
 
 export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
-    return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+    const text = c.replies?.find((r) => a.prompt.includes(JSON.stringify(r.title)))?.reply ?? c.reply;
+    return { ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
 }
 
@@ -165,7 +204,7 @@ export function agent(c: Ctx) {
 export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
-    JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
+    JSON.stringify({ flags: [], oversized: (c.oversized && item.externalId === c.parentId) || (c.alsoOversized?.has(item.externalId) ?? false) }),
   ].join("\n");
 }
 
@@ -175,11 +214,7 @@ export function judge(c: Ctx) {
  * gated. A gate that throws leaves its item Eligible for the next poll, as the poller's `each` does.
  */
 export async function poll(c: Ctx): Promise<void> {
-  if (c.driver) {
-    await c.driver();
-    c.polls++;
-    return;
-  }
+  if (c.driver) return c.driver(c);
   const dor = await loadPolicy(async (p) => (p === ".factory/dor.md" ? c.dor : null), "dor");
   const listed = (await c.fake.adapter.listEligible(null)).items.filter((fi) => !fi.closed && fi.labels.includes(c.label));
   const ids = new Set(listed.map((fi) => fi.externalId));
@@ -204,13 +239,16 @@ export async function poll(c: Ctx): Promise<void> {
       const openDeps: string[] = [];
       for (const b of c.blocks.get(fi.externalId) ?? []) if (!(await c.fake.adapter.getItem(b))?.closed) openDeps.push(b);
       const out = await gate(fi, {
-        readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true, openDeps,
-        judge: judge(c), adapter, split: { sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, file },
+        readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true,
+        judge: c.judgeOverride ?? judge(c), adapter,
+        split: { sop: { models: { coding: "coding-model" } }, agent: c.agentOverride ?? agent(c), seen: c.seen, file },
         ...(c.kept ? { splits: keptStore(c.kept) } : {}),
+        ...c.gateExtras,
       });
       st.state = out.ready ? "Queued" : "NotReady";
       st.hash = itemTextHash(fi);
-      if (out.ready) c.runs.add(fi.externalId);
+      // The scheduler takes up a Queued item only once nothing blocks it (PBI 237: the gate no longer judges blockers).
+      if (out.ready && (openDeps.length === 0 || c.ignoreBlockers)) c.runs.add(fi.externalId);
     } catch (e) {
       c.errors.push(e);
     }
@@ -436,21 +474,6 @@ Then("child {string} is blocked by {string} and {string} only", async function (
 });
 
 // --- Labels and runs -----------------------------------------------------------------------------------------------
-
-Then("none of the parent's sub-issues carries the label {string}", async function (label: string) {
-  const c = ctx(this);
-  polled(c);
-  for (const id of c.subIssues.get(c.parentId!) ?? []) {
-    assert.ok(!(await item(c, id)).labels.includes(label), `child "${titleOf(c, id)}" carries "${label}"`);
-  }
-});
-
-Then("the factory has started no run for any of the parent's sub-issues", function () {
-  const c = ctx(this);
-  polled(c);
-  const started = (c.subIssues.get(c.parentId!) ?? []).filter((id) => c.runs.has(id));
-  assert.deepEqual(started.map((id) => titleOf(c, id)), []);
-});
 
 Then("the factory takes up child {string}", function (title: string) {
   const c = ctx(this);
