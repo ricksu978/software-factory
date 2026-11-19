@@ -4,6 +4,8 @@
 // comment_commands row per item, on any board, that the comment names. The API never runs a comment's commands. The
 // worker does that from the outbox.
 import type pg from "pg";
+import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
+import { handleWebhook } from "../watcher/webhook.ts";
 
 export type WebhookIntakeDeps = {
   pool: pg.Pool;
@@ -16,9 +18,11 @@ export type WebhookRequest = { headers: Record<string, string | undefined>; rawB
 
 /**
  * 401 for a delivery not signed with the secret, 400 for a signed one with no delivery id or a body that isn't JSON,
- * 204 for a new delivery once it's recorded and 200 for a redelivery, which records nothing.
+ * 204 for a new delivery once it's recorded and 200 for a redelivery, which records nothing. A database error throws,
+ * with nothing of the delivery kept, so the caller answers 500 and GitHub's retry gets in.
  */
-export async function webhookIntake(_deps: WebhookIntakeDeps, _req: WebhookRequest): Promise<{ status: 200 | 204 | 400 | 401 }> {
-  // Red stub (PBI 287): no behaviour yet.
-  return { status: 204 };
+export function webhookIntake(deps: WebhookIntakeDeps, req: WebhookRequest): Promise<{ status: 200 | 204 | 400 | 401 }> {
+  // handleWebhook stays as it is (design §05), with no onComment: comment commands reach the worker through the
+  // outbox rows written with the event.
+  return handleWebhook({ pool: deps.pool, secret: deps.secret, parse: parseGitHubWebhook }, req);
 }
