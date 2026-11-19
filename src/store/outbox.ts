@@ -1,6 +1,6 @@
 // The outbox (2026-11-07 design, §07 "An outbox in place of hooks"). Each row names its consumer, the event that caused
 // it and the item it's for, and is written in the same transaction as that event, so both commit or neither does.
-// This first part only writes the rows; nothing handles them yet.
+// The worker (src/worker/outbox.ts) handles each row and deletes it once its effect is done.
 import type pg from "pg";
 
 /** The consumers an outbox row can name. */
