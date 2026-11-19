@@ -54,7 +54,6 @@ export function gitNetworkFault(e: unknown): boolean {
 export type GitDeps = {
   exec?: GitExec;
   sleep?: (ms: number) => Promise<void>;
-  now?: () => Date;
 };
 
 const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, timeout: opts.timeout, signal: opts.signal, maxBuffer: 64 * 1024 * 1024 });

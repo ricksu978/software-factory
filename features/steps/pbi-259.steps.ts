@@ -732,5 +732,5 @@ Then("the cell asked again", function () {
 Then("the cell got the commit's checks", function () {
   const d = db(this);
   assert.equal(d.error, undefined, `the cell's ask failed: ${String(d.error)}`);
-  assert.equal(d.result, "success");
+  assert.equal((d.result as { status?: unknown } | undefined)?.status, "success");
 });

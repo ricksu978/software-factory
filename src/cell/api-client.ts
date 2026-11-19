@@ -82,7 +82,6 @@ export type HttpCellApi = CellApi & {
 export type HttpDeps = {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
-  now?: () => Date;
 };
 
 export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: string; generation: number }, deps: HttpDeps = {}): HttpCellApi {

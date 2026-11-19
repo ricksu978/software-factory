@@ -22,7 +22,7 @@ function scripted(answers: (number | Error)[]) {
 for (const status of [500, 502, 503, 504]) {
   test(`a ${status} is tried again after a wait`, async () => {
     const s = scripted([status, 200]);
-    assert.equal(await s.api.checks("abc"), "success");
+    assert.equal((await s.api.checks("abc")).status, "success");
     assert.equal(s.tries.length, 2);
     assert.equal(s.slept.length, 1);
   });
