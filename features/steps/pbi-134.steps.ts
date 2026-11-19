@@ -78,7 +78,7 @@ type Holder = { client: pg.PoolClient; pid: number; done: boolean };
 
 type Work = { done: boolean; error?: unknown; promise: Promise<void> };
 type Board = { name: string; sourceId: string; backlog: ReturnType<typeof fakeBacklog> };
-type Ctx = {
+export type Ctx = {
   clock: FakeClock;
   lines: string[];
   holders: Holder[];
@@ -89,12 +89,14 @@ type Ctx = {
   polls: Work[];
   boards: Map<string, Board>;
   server?: Server;
-  runs: Map<string, { runId: string; token: string; itemId: string }>;
+  runs: Map<string, { runId: string; token: string; itemId: string; generation: number }>;
   requests: Work[];
   seq: number;
+  /** The model gateway's upstream. PBI 154's steps point it at a fake upstream before the cell API starts. */
+  upstream?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi134?: Ctx };
   w.pbi134 ??= {
     clock: new FakeClock(), lines: [], holders: [], repoHost: fakeRepoHost(), backlog: fakeBacklog(),
@@ -104,9 +106,10 @@ function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const slow = (c: Ctx): Slow => ({ clock: c.clock, log: (line) => c.lines.push(line) });
+export const slow = (c: Ctx): Slow => ({ clock: c.clock, log: (line) => c.lines.push(line) });
 
-Before({ tags: "@pbi-134 and @db", ...long }, async function () {
+// PBI 154's steps share this database, the cell API and its clock.
+Before({ tags: "(@pbi-134 and @db) or @pbi-154", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
@@ -115,7 +118,7 @@ Before({ tags: "@pbi-134 and @db", ...long }, async function () {
   ctx(this).repoHost.heads.set(REPO, "c0ffee0");
 });
 
-After({ tags: "@pbi-134", ...long }, async function () {
+After({ tags: "@pbi-134 or @pbi-154", ...long }, async function () {
   const c = ctx(this);
   for (const h of c.holders) await finish(h, "rollback").catch(() => undefined);
   await Promise.race([
@@ -378,7 +381,7 @@ async function cellServer(c: Ctx): Promise<string> {
     const api = cellApi({
       pool: pool(), secret: SECRET, repoHost: c.repoHost, backlogFor: () => backlog,
       stageAfter: () => null, uploadUrl: async (path: string) => `http://blob.test/${path}`,
-      gateway: { upstream: "http://127.0.0.1:9", ownerToken: () => "owner" }, webToolsOf: () => [],
+      gateway: { upstream: c.upstream ?? "http://127.0.0.1:9", ownerToken: () => "owner" }, webToolsOf: () => [],
       killSwitch: () => false, now: () => NOW, slow: slow(c),
     });
     c.server = await startServer([api], { port: 0 });
@@ -400,7 +403,7 @@ async function runInProgress(c: Ctx, ext: string): Promise<void> {
     [claim.runId, REPO_URL],
   );
   await pool().query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'understand', 1, 'started')", [claim.runId]);
-  c.runs.set(ext, { runId: claim.runId, itemId, token: runToken(SECRET, claim.runId, claim.generation) });
+  c.runs.set(ext, { runId: claim.runId, itemId, token: runToken(SECRET, claim.runId, claim.generation), generation: claim.generation });
 }
 
 const ROUTES: Record<string, { method: string; path: string; body?: unknown }> = {
