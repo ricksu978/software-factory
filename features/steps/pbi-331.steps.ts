@@ -23,7 +23,7 @@
 // stage the poller left the run at.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { next, type ItemEvent, type ItemState } from "../../src/core/states.ts";
@@ -103,6 +103,7 @@ function claimed(world: object, stage: string): Ctx {
   git(pusher, "config", "user.name", "someone");
   const b1 = commit(pusher, { "src/app.ts": "export const side = 'base';\n" }, "b4se001");
   git(pusher, "push", "-q", "origin", "main");
+  assertConflicts(cell.root, cell.origin, b1);
   const fetchLog = join(cell.root, "fetches.log");
   countFetches(cell.dir, fetchLog);
   cell.prNumber = stage === "address" ? PR : null;
@@ -122,6 +123,19 @@ function claimed(world: object, stage: string): Ctx {
     return base(a);
   };
   return m;
+}
+
+/**
+ * The background's premise: the pushed branch doesn't hold b4se001 and conflicts with it in src/app.ts, and only
+ * there, so the claim's merge needs the `merge` agent pass.
+ */
+function assertConflicts(root: string, origin: string, b1: string): void {
+  assert.ok(!isAncestor(origin, b1, BRANCH), "the branch already holds b4se001");
+  const r = spawnSync("git", ["--git-dir", origin, "merge-tree", "--write-tree", "--name-only", "--no-messages", BRANCH, b1], { cwd: root, encoding: "utf8" });
+  assert.equal(r.status, 1, `the branch doesn't conflict with b4se001 (merge-tree exited ${r.status}: ${r.stderr})`);
+  // The first line is the merged tree; the rest are the conflicted paths.
+  const paths = r.stdout.split("\n").slice(1).filter(Boolean);
+  assert.deepEqual(paths, ["src/app.ts"], `the branch conflicts with b4se001 in ${JSON.stringify(paths)}`);
 }
 
 /** What lands on main while the merge agent works. */
