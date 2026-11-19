@@ -318,3 +318,66 @@ test("a call the API doesn't answer gets 502, and a BFF with no API answers 502 
   const none = createBff({ issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"), sessions: store });
   assert.equal((await none.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } })).status, 502);
 });
+
+// ---- /webhooks/github and the event stream (step 7c) ----
+
+test("a webhook reaches the API's /webhooks/github with its bytes and headers, and no cookie or bearer token of the BFF's", async () => {
+  const { jar } = await signedIn();
+  api.answer("POST", "/webhooks/github", { status: 202, body: "accepted" });
+  const body = Buffer.concat([Buffer.from('{"a": 1,  "z":"'), Buffer.from([0xff, 0xfe, 0xc3, 0x28]), Buffer.from('"}\n')]);
+  const headers = {
+    "content-type": "application/json", "user-agent": "GitHub-Hookshot/abc", "x-github-event": "push",
+    "x-github-delivery": "d-1", "x-hub-signature-256": "sha256=00", "x-github-future": "kept-as-is",
+  };
+  const r = await get(jar, "/webhooks/github", { method: "POST", headers, body });
+  assert.equal(r.status, 202);
+  assert.equal(await r.text(), "accepted");
+  assert.equal(api.calls.length, 1);
+  const k = api.calls[0];
+  assert.equal(`${k.method} ${k.url}`, "POST /webhooks/github");
+  assert.ok(k.raw.equals(body));
+  for (const [h, v] of Object.entries(headers)) assert.equal(k.headers[h], v, h);
+  assert.equal(k.headers.authorization, undefined);
+  assert.equal(k.headers.cookie, undefined);
+});
+
+test("a webhook the API doesn't answer gets 502", async () => {
+  const down = createBff({
+    issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+    sessions: store, apiUrl: "http://127.0.0.1:1",
+  });
+  const r = await down.request(new URL("/webhooks/github", ORIGIN).href, { method: "POST", body: "{}" });
+  assert.equal(r.status, 502);
+});
+
+/** A BFF that gives an ordinary call `ms` to answer. */
+const withTimeout = (ms: number) => createBff({
+  issuer: provider.issuer, clientId: "dashboard", clientSecret: "s", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+  sessions: store, apiUrl: api.url, apiTimeoutMs: ms,
+});
+
+test("an event stream outlasts the time an ordinary call gets, and ends when the API ends it", async () => {
+  const { jar } = await signedIn();
+  api.streams.length = 0;
+  api.stream("/v1/events", { events: [{ afterMs: 400, event: "item-moved" }], endAfterMs: 600 });
+  const r = await withTimeout(150).request(new URL("/bff/v1/events", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("content-type"), "text/event-stream");
+  assert.match(await r.text(), /event: item-moved\n/);
+  assert.equal(api.streams[0].closedBy, "api");
+});
+
+test("an event stream to the API closes when the browser leaves", async () => {
+  const { jar } = await signedIn();
+  api.streams.length = 0;
+  api.stream("/v1/events", { events: [] });
+  const leave = new AbortController();
+  const r = await withTimeout(150).request(new URL("/bff/v1/events", ORIGIN).href, { headers: { cookie: cookieHeader(jar) }, signal: leave.signal });
+  assert.equal(r.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(api.streams[0].closedAt, undefined);
+  leave.abort();
+  await r.body?.cancel().catch(() => {});
+  for (let i = 0; i < 40 && api.streams[0].closedAt === undefined; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(api.streams[0].closedBy, "caller");
+});
