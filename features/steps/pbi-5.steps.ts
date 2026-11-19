@@ -18,9 +18,12 @@ function ctx(world: object): Ctx {
 }
 
 // These nested runs check that the scripts work, such as npm test finding a test file. FACTORY_DB_TESTS=skip keeps them
-// from also running the DB suites, which the outer npm test already runs, in CI and in a cell alike.
+// from also running the DB suites, which the outer npm test already runs, in CI and in a cell alike. Leaving out
+// GITHUB_ACTIONS lets the nuget.org check skip when nuget.org can't be reached, since the outer npm test already makes
+// that check on GitHub Actions, and a nuget.org hiccup here would fail a scenario about finding test files.
 function run(command: string, cwd: string): Result {
-  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...process.env, FACTORY_DB_TESTS: "skip" } });
+  const { GITHUB_ACTIONS: _, ...env } = process.env;
+  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...env, FACTORY_DB_TESTS: "skip" } });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 

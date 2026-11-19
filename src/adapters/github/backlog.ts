@@ -1,6 +1,6 @@
 // A GitHub Projects (v2) board as a BacklogAdapter. Board reads and writes use the project token on a user-owned
 // board and the App on an org one. Issue comments, labels and closing always go through the App.
-import { Octokit } from "@octokit/core";
+import { TimedOctokit } from "./timed.ts";
 import type { ItemState } from "../../core/states.ts";
 import { CLAIM_MARKER } from "../contract.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../gate/file-split.ts";
@@ -138,7 +138,7 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
   }
   let installation: Promise<GitHubClient> | undefined;
   const app = () => (installation ??= cfg.app.getInstallationOctokit(cfg.installationId) as Promise<GitHubClient>);
-  const userBoard = cfg.projectToken ? (new Octokit({ auth: cfg.projectToken }) as unknown as GitHubClient) : null;
+  const userBoard = cfg.projectToken ? (new TimedOctokit({ auth: cfg.projectToken }) as unknown as GitHubClient) : null;
   const board = async () => (cfg.owner.type === "user" && userBoard ? userBoard : app());
 
   let project: Promise<Project> | undefined;

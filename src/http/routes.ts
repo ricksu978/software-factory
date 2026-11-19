@@ -15,6 +15,7 @@ import { claimKeys, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
+import { splitChildren } from "../store/splits.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
@@ -125,6 +126,15 @@ async function floor(pool: pg.Pool) {
      from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
+  // PBI 227: Split parents with a child still to follow, one the factory doesn't hold or holds short of an end state.
+  const splitParents = (await pool.query<{ id: string; external_id: string; title: string }>(
+    `select p.id, p.external_id, p.title from item p where p.state = 'Split' and exists (
+       select 1 from split_child sc left join item ci on ci.source_id = p.source_id and ci.external_id = sc.external_id
+       where sc.parent_id = p.id and (ci.state is null or ci.state not in ('Done', 'Abandoned', 'Split')))
+     order by p.title`,
+  )).rows;
+  const children = await splitChildren(pool, splitParents.map((p) => p.id));
+  const split = splitParents.map((p) => ({ ...p, children: children.get(p.id) ?? [] }));
   // PBI 255: each break on main that still stands, with the item it charged and its bug item, for Floor's notice.
   const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state: string | null }>(
     `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title, bug.state as bug_state
@@ -168,12 +178,12 @@ async function floor(pool: pg.Pool) {
     "select id, external_id, title, state from item where id = any($1::uuid[])", [finalIds],
   )).rows;
   const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage].map((r) => r.id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
     keys, finalStage: withRepo(finalStage),
-    baseFails: withRepo(baseFails), mainBreaks,
+    baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split),
     restart, cellImage: await readCellImage(pool),
   };
 }
@@ -327,6 +337,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
     startNow,
     claim,
     durations,
+    splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
   };
 }
 

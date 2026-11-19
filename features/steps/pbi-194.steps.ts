@@ -16,6 +16,7 @@ import { ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { lastAttempt } from "./pbi-142.steps.ts";
 import { cellPr } from "./pbi-212.steps.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
+import { isPbi259, reportsNoMove } from "./pbi-259.steps.ts";
 
 type Host = ReturnType<typeof fakeRepoHost>;
 type Ctx = { replies: unknown[]; server?: Server; close?: () => Promise<void>; origin?: string; stepType?: string };
@@ -232,6 +233,7 @@ Then("no reply is posted on PR {int}", function (n: number) {
 });
 
 Then("the cell reports no move for the item", function () {
+  if (isPbi259(this)) return reportsNoMove(this);
   const c = cell(this);
   assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);
   assert.deepEqual(transitions(c).map((t) => t.event), [], "the cell reported a move for the item");

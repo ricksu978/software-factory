@@ -3,6 +3,7 @@
 // src/main.ts, no longer serves them. Until the outbox lands (step 3), it registers mirrorBoard and the console log
 // for the transitions its routes commit, as the control plane did for them.
 import { App } from "@octokit/app";
+import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { Server } from "node:http";
 import type pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
@@ -74,7 +75,7 @@ export async function main(env: Record<string, string | undefined>): Promise<{ s
 
   const pool = createPool(dbUri);
   try {
-    const app = new App({ appId, privateKey: appKey });
+    const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
     const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
     const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
     const served = await serveCellApi({

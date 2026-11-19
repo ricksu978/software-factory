@@ -15,7 +15,7 @@ import { fenced } from "../core/fence.ts";
 import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
 import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
-import type { Sop, SopStage, StageId } from "../config/sop.ts";
+import { STAGE_IDS, type Sop, type SopStage, type StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
 import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckAnswer, type TransitionBody } from "./api-client.ts";
@@ -515,16 +515,24 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const started = d.now().getTime();
   const abort = new AbortController();
+  // Aborted only when the lease is lost or can't be renewed, never by a stop: a stopped cell still pushes its work in
+  // progress, but a fenced-off one pushes nothing. It ends a push's or fetch's network retries and kills the git
+  // child, since another cell may own the branch by the time a retry would run (PBI 259).
+  const fence = new AbortController();
 
   // The lease renewal loop. stop:true aborts the agent, and a 409 or 3 failed renewals in a row end the run.
   let failedRenewals = 0;
   let lost = false;
   const renew = setInterval(() => {
-    api.lease().then(
+    api.lease({ once: true }).then(
       (r) => { failedRenewals = 0; if (r.stop) abort.abort(new Stop("stopped by the control plane")); },
       (e) => {
-        if (e instanceof LeaseLost) { lost = true; abort.abort(e); }
-        else if (++failedRenewals >= RENEW_GIVE_UP) abort.abort(new RenewalFailed("lease renewal failed for 3 minutes"));
+        if (e instanceof LeaseLost) { lost = true; fence.abort(e); abort.abort(e); }
+        else if (++failedRenewals >= RENEW_GIVE_UP) {
+          const failed = new RenewalFailed("lease renewal failed for 3 minutes");
+          fence.abort(failed);
+          abort.abort(failed);
+        }
       },
     );
   }, RENEW_MS);
@@ -577,9 +585,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     await guard();
     await api.transition(b);
   };
+  // Each retry of the push checks the lease again, as the first try does, so the gap between a lease check and a
+  // push stays one command however long the retries run (PBI 259).
   const push = async () => {
     await guard();
-    await git.push();
+    await git.push({ signal: fence.signal, beforeRetry: guard });
   };
 
   /** Starts the stage's next attempt and returns its number. */
@@ -1417,7 +1427,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
     // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
-    const conflict = await git.mergeBase(ctx.base);
+    // A merge that fails, not on a conflict, such as a fetch still failing on the network after its retries, ends an
+    // attempt of the stage the run resumes at, so the attempt's message says why (PBI 259). A fenced cell opens no
+    // attempt: the lease is lost or can't be renewed, so it rethrows the fence's reason for finish to act on.
+    const conflict = await git.mergeBase(ctx.base, { signal: fence.signal }).catch(async (e: unknown) => {
+      if (fence.signal.aborted) throw fence.signal.reason ?? e;
+      if ((STAGE_IDS as readonly string[]).includes(ctx.nextStage)) await begin(ctx.nextStage as StageId);
+      throw e;
+    });
     if (conflict.length) {
       await begin("merge");
       await say("merge", brief("# Resolve a merge conflict",
@@ -1428,7 +1445,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       for (const p of conflict) if (existsSync(join(dir, p)) && marked.test(await readFile(join(dir, p), "utf8"))) left.push(p);
       if (left.length) throw new Blocked(`Merging ${ctx.base} left conflicts in: ${left.join(", ")}`);
       await git.commitAll(`merge ${ctx.base}`);
-      const again = await git.mergeBase(ctx.base);
+      const again = await git.mergeBase(ctx.base, { signal: fence.signal });
       if (again.length) throw new Blocked(`Merging ${ctx.base} left conflicts in: ${again.join(", ")}`);
       await end("passed");
     }
@@ -1510,7 +1527,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       console.error(`not pushing the work in progress: a locked feature file differs from the lock commit: ${ctx.lockedFiles.join(", ")}`);
       return { leased: true, pushed: false };
     }
-    const pushed = await git.push().then(() => true, (e) => { console.error("pushing the work in progress failed:", e); return false; });
+    // A retry checks the lease again, and a lease lost meanwhile ends the retries, as before the first try.
+    const leased = async () => { await api.lease(); };
+    const pushed = await git.push({ signal: fence.signal, beforeRetry: leased }).then(() => true, (e) => { console.error("pushing the work in progress failed:", e); return false; });
     return { leased: true, pushed };
   }
 
