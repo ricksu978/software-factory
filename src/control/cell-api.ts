@@ -516,9 +516,10 @@ export function cellApi(deps: CellApiDeps): Handler {
       }
       grants.set(key, grant);
     }
-    return grant;
+    // The run id lets the gateway's slow line name the same run as this API's own (PBI 154).
+    return { ...grant, runId: m[1] };
   };
-  const gateway = { upstream: deps.gateway.upstream, ownerToken: deps.gateway.ownerToken, verify };
+  const gateway = { upstream: deps.gateway.upstream, ownerToken: deps.gateway.ownerToken, verify, slow: deps.slow };
 
   return async (req, res) => {
     const url = new URL(req.url ?? "/", "http://cell-api");
