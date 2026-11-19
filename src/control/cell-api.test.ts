@@ -332,16 +332,31 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(await lease(), { ok: true, stop: true });
   });
 
-  // PBI 140: a restart being prepared tells every live cell to stop at its next renewal, and the cell API keeps
-  // answering it, so it can push and report its attempt stopped. That report ends the claim, so the restarted factory
-  // can start the item again at once, at the stage it was in.
-  test("lease says stop while a restart is being prepared, and carry on again once it's cleared", async () => {
+  // PBI 301: a restart being prepared tells a live cell to carry on and finish its stage, and says it's restarting, so
+  // the cell starts no further stage. A pause still tells it to stop. Once the restart is cleared, `restarting` goes.
+  test("lease says carry on and restarting while a restart is being prepared, and stop under a pause as well", async () => {
     const cell = await claimed();
     const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.deepEqual(await lease(), { ok: true, stop: false, restarting: true });
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'maintenance')");
     assert.deepEqual(await lease(), { ok: true, stop: true });
-    await db.pool.query("update override set cleared_at = now() where kind = 'restart'");
+    await db.pool.query("update override set cleared_at = now()");
     assert.deepEqual(await lease(), { ok: true, stop: false });
+  });
+
+  test("a release while a restart is being prepared ends the claim at the run's next stage, with no attempt stopped (PBI 301)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    const post = (route: string, body: unknown) => send(cell.runId, cell.token, "POST", route, body);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "passed" })).status, 200);
+    assert.equal((await post("/release", {})).status, 200);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    const run = await db.pool.query("select next_stage from run where id = $1", [cell.runId]);
+    assert.equal(run.rows[0].next_stage, "self-review");
+    const statuses = await db.pool.query("select status from stage_run where run_id = $1", [cell.runId]);
+    assert.deepEqual(statuses.rows.map((r) => r.status), ["passed"]);
   });
 
   test("a stopped attempt reported while a restart is being prepared ends the claim and keeps the stage", async () => {

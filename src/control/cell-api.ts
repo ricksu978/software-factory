@@ -186,20 +186,22 @@ function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string 
 export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean };
 
 /**
- * What a lease renewal tells a running cell. `stop` cuts the cell's stage short now. `restarting` says a restart is
- * being prepared, so the cell finishes the stage it's in, starts no further stage and ends its claim at that stage
- * boundary (PBI 301).
- *
- * PBI 301 stub: this still answers as PBI 140 did, telling the cell to stop under a restart, and never says restarting.
+ * What a lease renewal tells a running cell. `stop` cuts the cell's stage short now: a pause, the kill switch or an
+ * operator's stop on its run. A restart being prepared doesn't (PBI 301): `restarting` tells the cell to finish the
+ * stage it's in, start no further stage and end its claim at that stage boundary. A stop outranks it.
  */
 export function leaseAnswer(set: LeaseOverrides): { stop: boolean; restarting: boolean } {
-  return { stop: set.kill || set.pause || set.restart || set.stopRun, restarting: false };
+  const stop = set.kill || set.pause || set.stopRun;
+  return { stop, restarting: set.restart && !stop };
 }
 
 /** The lease route's reply. It names `restarting` only while a restart is being prepared, so it's `{ ok, stop }` otherwise. */
 const leaseReply = (a: { stop: boolean; restarting: boolean }) => ({ ok: true, stop: a.stop, ...(a.restarting ? { restarting: true } : {}) });
 
-/** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
+/**
+ * Under a restart being prepared, ends the claim of a cell that stopped (PBI 140) or that ended at a stage boundary
+ * (PBI 301): the item goes back to Queued at its run's next stage.
+ */
 async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
   const restart = await c.query(
     "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
@@ -430,8 +432,8 @@ const routes: Record<string, Route> = {
     return { ok: true };
   },
 
-  // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would.
-  // Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
+  // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would. So
+  // does one that finished its stage while a restart was being prepared and starts no further stage (PBI 301). Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
   "POST release": async (_deps, { c, run, now }) => {
     await releaseForRestart(c, run, now);
     return { ok: true };

@@ -46,7 +46,7 @@ type Script = (a: AgentArgs, stage: string) => Partial<AgentResult> | undefined 
 
 /** A signed-off run (or a fresh one) in a real repo, with every dependency recorded. */
 function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; ctx?: Partial<CellContext>; deps?: Partial<CellDeps>;
-  lease?: () => Promise<{ stop: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
+  lease?: () => Promise<{ stop: boolean; restarting?: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "engine-"));
   roots.push(root);
   const origin = join(root, "origin.git");
@@ -1561,6 +1561,56 @@ describe("runCell", () => {
     for (const a of green) assert.match(a.prompt, /already on the branch[\s\S]*carry on/i);
     assert.doesNotMatch(h.agentCalls.find((a) => a.stage === "self-review")!.prompt, /already on the branch/);
     assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.attempt), [2]);
+  });
+
+  // PBI 301: a restart being prepared lets the cell finish its stage. At the stage boundary it starts no further stage
+  // and ends its claim, with no attempt stopped and no work-in-progress commit.
+  for (const [stage, next] of [["red", "green"], ["green", "self-review"], ["self-review", "open-pr"]] as const) {
+    test(`a cell told restarting finishes ${stage}, starts no ${next} and releases its claim`, async () => {
+      const h = harness({ nextStage: stage, lease: async () => ({ stop: false, restarting: true }) });
+      assert.equal(await h.run(), "restarting");
+      assert.deepEqual(h.started(), [stage]);
+      assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => c.body.status), ["started", "passed"]);
+      assert.equal(h.routes().at(-1), "/release");
+      assert.ok(!h.transitions().length);
+      assert.ok(!git(h.root, "--git-dir", h.origin, "log", "--format=%s", BRANCH).split("\n").some((m) => m.startsWith("work in progress")));
+    });
+  }
+
+  test("a restart cleared before the stage ends lets the cell go on to the next stage (PBI 301)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let restarting = true;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: false, restarting }),
+      script: async (_a, stage) => {
+        if (stage !== "green" || !restarting) return;
+        mock.timers.tick(60_000);
+        await new Promise((r) => setImmediate(r));
+        restarting = false;
+      },
+    });
+    assert.equal(await h.run(), "done");
+    assert.ok(h.started().includes("self-review"));
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+  });
+
+  test("a stop outranks restarting: the cell still wraps up its stage as stopped (PBI 301)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let armed = false;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: armed, restarting: true }),
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+    assert.equal(await h.run(), "stopped");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status), ["started", "stopped"]);
   });
 
   test("a 409 from the cell API stops the run at once, with no push and no further calls", async () => {
