@@ -264,7 +264,7 @@ ${list(f.next.map((n) => `<li>${named(n)}${st(n.id)}</li>`), "Nothing is ready t
 <h2>Final stage</h2>
 ${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${escapeHtml(n.state)}</span>${st(n.id)}</li>`), "No item is in the review loop, and none is depended on by one that is.")}
 <h2>Not ready</h2>
-${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>Blocked</h2>
 ${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
 <h2>In flight</h2>

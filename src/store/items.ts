@@ -115,12 +115,11 @@ const ANSWERED = `(i.state in ('SignOff', 'NeedsInput')
 // The bug item of a break on main that still stands (PBI 255), ahead of everything else, Start now included.
 const MAIN_BREAK_BUG = `exists (select from main_break b where b.bug_item_id = i.id and b.cleared_at is null)`;
 // PBI 320: an item is final-stage on its own while its open run's PR is open and it's in the review loop: InReview,
-// Queued or InProgress at address, or InProgress at the pr-review that follows an address.
+// or Queued or InProgress with next_stage at address. A passed address leaves next_stage there (stageAfter), so the
+// pr-review the same claim runs after it counts too.
 const OWN_FINAL_STAGE = `exists (select from run r where r.item_id = i.id and r.ended_at is null and r.pr_number is not null and r.merge_sha is null
          and (i.state = 'InReview'
-           or (i.state in ('Queued', 'InProgress') and r.next_stage = 'address')
-           or (i.state = 'InProgress' and r.next_stage = 'pr-review'
-             and exists (select from stage_run s where s.run_id = r.id and s.stage_id = 'address'))))`;
+           or (i.state in ('Queued', 'InProgress') and r.next_stage = 'address')))`;
 // The states in which an item's dependencies stand. A Done, Accepted, Failed, Abandoned or Split item lends no one its
 // group or priority, and a dependency isn't followed through it.
 const LIVE = `i.state in ('Eligible', 'NotReady', 'Queued', 'InProgress', 'SignOff', 'NeedsInput', 'InReview')`;

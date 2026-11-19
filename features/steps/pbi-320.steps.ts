@@ -237,7 +237,8 @@ async function finalStage(world: object, name: string, stage: string): Promise<v
     case "in the PR review that follows address": {
       const id = await newItem(world, name, "InProgress");
       await lease(id);
-      const runId = await run(id, "pr-review");
+      // Address passing leaves next_stage at address (stageAfter, src/config/sop.ts), and the same claim runs pr-review.
+      const runId = await run(id, "address");
       await stages(runId, [...SO_FAR, "address"], "pr-review");
       await openPr(world, name, runId);
       return;

@@ -228,7 +228,8 @@ describe("claim keys (PBI 320)", dbTest, () => {
     const first = await item("P", "InProgress", 1, 3);
     await inLoop(first, "pr-review");
     const second = await item("Q", "InProgress", 2, 3);
-    await inLoop(second, "pr-review", ["address"]);
+    // A passed address leaves next_stage at address (stageAfter), and the same claim runs the pr-review after it.
+    await inLoop(second, "address", ["pr-review", "address"]);
     const green = await item("G", "InProgress", 3, 3);
     await inLoop(green, "green");
     const merged = await item("M", "Accepted", 4, 3);
