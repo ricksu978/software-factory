@@ -50,13 +50,12 @@ export type Ctx = {
   /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
   editSop?: (sop: any) => void;
   /**
-   * PBI 259: the cell's own HTTP client against a fake cell API, its git's command runner and the clock both wait on.
-   * `prelude` runs first, as src/cell/main.ts asks for its context and its git asks for a token before the engine runs.
+   * PBI 259: the cell's own HTTP client against a fake cell API and its git's command runner, which wait on `now` and
+   * `sleep` above. `prelude` runs first, as src/cell/main.ts asks for its context and its git asks for a token before
+   * the engine runs.
    */
   api?: object;
   gitDeps?: object;
-  now?: () => Date;
-  sleep?: (ms: number) => Promise<void>;
   prelude?: () => Promise<void>;
 };
 
