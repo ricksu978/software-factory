@@ -91,6 +91,7 @@ describe("githubBacklog: the split board (PBI 144)", () => {
         calls.push({ route, params });
         if (route === "GET /app") return { data: { id: 42, slug: "factory" } };
         if (route === "GET /repos/{owner}/{repo}/issues") return { data: recent };
+        if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues") return { data: [recent[3], recent[0]] };
         if (route === "POST /repos/{owner}/{repo}/issues") return { data: { id: 500, node_id: "N5", number: 5, title: params.title, html_url: "u5" } };
         if (route === "GET /repos/{owner}/{repo}/issues/{issue_number}") {
           const user = params.issue_number === 3 ? { type: "Bot", login: "factory[bot]" } : { type: "User", login: "ann" };
@@ -120,6 +121,13 @@ describe("githubBacklog: the split board (PBI 144)", () => {
   test("findIssues counts only the factory App's own issues, never a person's, another bot's or a PR", async () => {
     const { board } = splitClient();
     assert.deepEqual(await board.findIssues("o/r", "factory-split-k-1"), [{ externalId: "3", title: "Card", url: "u3" }]);
+  });
+
+  test("subIssues carries each sub-issue's body and whether the factory App opened it, so recovery needs no repo search (PBI 226)", async () => {
+    const { board, calls } = splitClient();
+    const subs = await board.subIssues("7");
+    assert.deepEqual(subs.map((x) => [x.externalId, x.body, x.openedByApp]), [["3", "x factory-split-k-1 <!-- factory:split-k-1 -->", true], ["9", "factory-split-k-1", false]]);
+    assert.ok(!calls.some((c) => c.route === "GET /repos/{owner}/{repo}/issues"));
   });
 
   test("a filed child is linked by its id, put on the board in the status and blocked by its blocker's id, off the board", async () => {

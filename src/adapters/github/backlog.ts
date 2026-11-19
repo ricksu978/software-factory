@@ -235,7 +235,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
     async subIssues(parentId) {
       const p = await ref(parentId);
       const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...p, per_page: 100 })).data as RestIssue[];
-      return list.map((i) => child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i));
+      // Each sub-issue comes with its body and who opened it, so a filed child is found by its split marker here,
+      // however old it is, and only one this App opened counts (PBI 226).
+      const own = await ownLogin();
+      return list.map((i) => ({ ...child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i), body: i.body ?? "",
+        openedByApp: i.user?.type === "Bot" && i.user.login === own }));
     },
     async findIssues(repo, text) {
       const [owner, name] = repo.split("/");
