@@ -1,7 +1,7 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
 import type { ItemEvent } from "../core/states.ts";
-import type { CiCheck } from "../adapters/types.ts";
+import type { CiCheck, FailedCheck } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
 
@@ -10,6 +10,11 @@ export class LeaseLost extends Error {
 }
 
 export type CheckStatus = "pending" | "success" | "failure" | "none";
+/**
+ * The cell API's answer about CI on a commit. On failure it names each failed check with its URL and the last 100
+ * lines of its log, or a null log when the repo host couldn't give it (PBI 232). Otherwise `failedChecks` is empty.
+ */
+export type CheckAnswer = { status: CheckStatus; failedChecks: FailedCheck[] };
 export type StageReport = {
   stageId: string; attempt: number; status: "started" | "passed" | "failed" | "stopped"; model: string;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
@@ -41,7 +46,7 @@ export type CellApi = {
   transition(b: TransitionBody): Promise<void>;
   policyResults(b: PolicyResults): Promise<void>;
   pr(b: { prNumber: number; prUrl: string }): Promise<void>;
-  checks(sha: string): Promise<CheckStatus>;
+  checks(sha: string): Promise<CheckAnswer>;
   /** PBI 234: the names of the checks still pending on `sha`, for the question when CI stays pending for 60 minutes. */
   pendingChecks?(sha: string): Promise<string[]>;
   /**
@@ -84,7 +89,10 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
     pr: async (b) => void (await call("POST", "/pr", b)),
     release: async () => void (await call("POST", "/release", {})),
     moveSop: async (b) => void (await call("POST", "/sop-move", b)),
-    checks: async (sha) => (await call("GET", `/checks?sha=${encodeURIComponent(sha)}`)).status,
+    checks: async (sha) => {
+      const a = await call("GET", `/checks?sha=${encodeURIComponent(sha)}`);
+      return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
+    },
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
     ciChecks: async (sha, on) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}${on ? `&on=${on}` : ""}`)).checks,
     async upload({ kind, stageId, attempt, body }) {

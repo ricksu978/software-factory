@@ -58,6 +58,15 @@ describe("fakeRepoHost", () => {
 
   const repo = "octo/repo";
 
+  test("a posted review is one of the PR's reviews, by the factory's bot, and prReviews lists them oldest first (PBI 318)", async () => {
+    const host = fakeRepoHost();
+    host.prs.push({ number: 5, repo: "a/b", branch: "x", base: "main", title: "t", body: "", headSha: null, open: true, merged: false,
+      mergeSha: null, mergeable: true, reviewers: [], comments: [], reviews: [{ state: "commented", submittedAt: "2026-01-01T00:00:00Z", author: "owner", body: "Nice." }] });
+    await host.postReview({ repo: "a/b", prNumber: 5, commitSha: "abc", body: "The factory's PR review, round 1", comments: [] });
+    const reviews = await host.prReviews("a/b", 5);
+    assert.deepEqual(reviews.map((r) => [r.author, r.state, r.body]), [["owner", "commented", "Nice."], ["factory[bot]", "commented", "The factory's PR review, round 1"]]);
+  });
+
   test("openOrUpdatePr updates the open PR for a branch, and opens a new one once that closes", async () => {
     const host = fakeRepoHost();
     const pr = { repo, branch: "factory/pbi-1-r1", base: "main", title: "t", body: "b" };

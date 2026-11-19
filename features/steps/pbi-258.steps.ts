@@ -25,6 +25,7 @@ import type pg from "pg";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { ctx as pr128, done, reviewerCall, type Ctx as PrCtx } from "./pbi-128.steps.ts";
 import { ctx as pbi12, polled, REPO as REPO12 } from "./pbi-12.steps.ts";
+import { factoryResolvedThread } from "./pbi-318.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // ---- the poller and the webhook ----
@@ -446,7 +447,10 @@ Then("the factory resolved the thread {string} after posting that reply", functi
   assert.ok(at > replied, "the factory resolved the thread before posting its reply");
 });
 
+// PBI 318 uses the same phrase for a thread of the factory's own PR review, so a world with no PBI 258 cell goes to
+// its check.
 Then("the factory resolved the thread {string}", function (body: string) {
+  if (!(this as { pbi258cell?: Track }).pbi258cell) return factoryResolvedThread(this, body);
   done(this);
   const p = personByBody(this, body);
   assert.ok(resolvedAt(track(this), p.threadId) >= 0 && resolvedNow(pr128(this), p.threadId), `the factory didn't resolve the thread "${body}"`);
