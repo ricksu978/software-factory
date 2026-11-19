@@ -1426,11 +1426,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
 
     // Every claim starts by merging the base. A conflict gets one agent pass, then blocks with its paths. The pass is
-    // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's.
+    // an attempt of its own, `merge`, so its cost and transcript are recorded like any stage's. The base is fetched once:
+    // the check after the pass merges the same commit again, so a base that moved while the agent worked doesn't block
+    // the item on a conflict the agent was never asked to resolve. Those newer commits reach the branch through the PR
+    // conflicting with its base, which sends the item back to Queued (PBI 331).
     // A merge that fails, not on a conflict, such as a fetch still failing on the network after its retries, ends an
     // attempt of the stage the run resumes at, so the attempt's message says why (PBI 259). A fenced cell opens no
     // attempt: the lease is lost or can't be renewed, so it rethrows the fence's reason for finish to act on.
-    const conflict = await git.mergeBase(ctx.base, { signal: fence.signal }).catch(async (e: unknown) => {
+    let baseAt = "";
+    const conflict = await (async () => {
+      baseAt = await git.fetchBase(ctx.base, { signal: fence.signal });
+      return git.mergeAt(ctx.base, baseAt);
+    })().catch(async (e: unknown) => {
       if (fence.signal.aborted) throw fence.signal.reason ?? e;
       if ((STAGE_IDS as readonly string[]).includes(ctx.nextStage)) await begin(ctx.nextStage as StageId);
       throw e;
@@ -1445,7 +1452,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       for (const p of conflict) if (existsSync(join(dir, p)) && marked.test(await readFile(join(dir, p), "utf8"))) left.push(p);
       if (left.length) throw new Blocked(`Merging ${ctx.base} left conflicts in: ${left.join(", ")}`);
       await git.commitAll(`merge ${ctx.base}`);
-      const again = await git.mergeBase(ctx.base, { signal: fence.signal });
+      const again = await git.mergeAt(ctx.base, baseAt);
       if (again.length) throw new Blocked(`Merging ${ctx.base} left conflicts in: ${again.join(", ")}`);
       await end("passed");
     }
