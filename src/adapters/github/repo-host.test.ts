@@ -96,7 +96,10 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => reviews,
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [] }, reviews: { nodes: [] } } } }));
-    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: "2026-11-06T01:00:00Z" });
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), {
+      merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: "2026-11-06T01:00:00Z",
+      lastChangesRequested: { kind: "review", author: "Owner", body: "Split it", submittedAt: "2026-11-06T01:00:00Z" },
+    });
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
   });
 
@@ -139,8 +142,26 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [{ id: 2, state: "CHANGES_REQUESTED", body: null, submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } }],
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
     assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, null, "its only text is a reply in the factory's thread");
-    threads.push({ id: "pt", isResolved: true, path: "b.ts", line: 2, comments: { nodes: [comment("User", "owner", 2)] } });
+    threads.push({ id: "pt", isResolved: false, path: "b.ts", line: 2, comments: { nodes: [comment("User", "owner", 2)] } });
     assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, "2026-11-06T03:00:00Z", "it also opened a thread of its own");
+  });
+
+  test("prState doesn't count a changes-requested review whose only text sits in a resolved thread (PBI 258)", async () => {
+    const comment = (login: string, databaseId: number, submittedAt: string, body: string) => ({ author: { __typename: "User", login }, body, pullRequestReview: { databaseId, submittedAt } });
+    const threads = [
+      { id: "done", isResolved: true, path: "a.ts", line: 1, comments: { nodes: [comment("owner", 1, "2026-11-06T01:00:00Z", "Use the table."), comment("owner", 2, "2026-11-06T03:00:00Z", "Verified, fixed.")] } },
+    ];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: null, state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [{ id: 2, state: "CHANGES_REQUESTED", body: "", submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } }],
+    }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
+    const resolved = await host.prState("o/r", 3, ["owner"]);
+    assert.equal(resolved.lastChangesRequestedAt, null);
+    assert.equal(resolved.lastChangesRequested, null);
+    threads[0].isResolved = false;
+    assert.deepEqual((await host.prState("o/r", 3, ["owner"])).lastChangesRequested,
+      { kind: "thread_comment", threadId: "done", author: "owner", body: "Verified, fixed.", submittedAt: "2026-11-06T03:00:00Z" },
+      "unresolved, the reply is the cause, whatever it says");
   });
 
   test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {
@@ -148,7 +169,7 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: true, merge_commit_sha: "m1", state: "closed", mergeable: null }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
     }, () => { throw new Error("502 Bad Gateway"); });
-    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, lastChangesRequestedAt: null });
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, lastChangesRequestedAt: null, lastChangesRequested: null });
   });
 
   test("openReviewComments returns every comment in unresolved threads and none from resolved ones", async () => {

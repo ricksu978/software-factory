@@ -277,6 +277,7 @@ describe("cell API", dbTest, () => {
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       scenarioNotes: [],
       trustedComments: [],
+      threadCommentCounts: {},
       trustedBot: "factory[bot]",
       stageAttempts: { specify: 2 },
       resume: null,
@@ -295,6 +296,7 @@ describe("cell API", dbTest, () => {
     ]);
     const { body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
+    assert.deepEqual(body.threadCommentCounts, { t1: 3 }, "every author's comment counts, so address can tell one that came later (PBI 258)");
   });
 
   test("an address run's context holds none of a thread the factory's own review opened, a person's reply included (PBI 130)", async () => {

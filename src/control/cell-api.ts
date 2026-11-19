@@ -232,12 +232,13 @@ const routes: Record<string, Route> = {
       "select stage_id, max(attempt) as attempt from stage_run where run_id = $1 group by stage_id",
       [run.run_id],
     );
-    // PBI 140: when the next stage's last attempt was stopped, by a restart's wrap-up or the launcher, the cell resumes
-    // it from the work in progress on the branch instead of starting the stage over. The factory also closes as stopped,
-    // with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may have pushed nothing,
-    // or a broken half-commit, so the next cell starts that stage fresh, as it did when such an attempt stayed started.
-    // A lease-message attempt resumes only when the lease_expired that ended its own claim, the first one at or after the
-    // attempt started, was a restart's: the launcher stopped that cell, as stopForRestart does once the wrap-up runs out.
+    // PBI 140: when the next stage's last attempt was stopped, by a cell wrapping up for a restart or by the launcher,
+    // the cell resumes it from the work in progress on the branch instead of starting the stage over. The factory also
+    // closes as stopped, with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may
+    // have pushed nothing, or a broken half-commit, so the next cell starts that stage fresh, as it did when such an
+    // attempt stayed started. A lease-message attempt resumes only when the lease_expired that ended its own claim, the
+    // first one at or after the attempt started, was a restart's: releaseForRestart's, or that of an older factory's
+    // wrap-up, which stopped the cells still running once it ran out (PBI 300 took that stop away).
     // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
     // event.at and stage_run.started_at both come from the database's clock, so they compare.
     const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean }>(
@@ -253,14 +254,18 @@ const routes: Record<string, Route> = {
     const stopped = l?.status === "stopped" && (l.message !== LEASE_RAN_OUT || l.restarted);
     const resume = stopped ? { stageId: run.next_stage, attempt: l.attempt } : null;
     let trustedComments: ReviewComment[] = [];
+    // Each open thread's comment count at the claim, every author's. Before it resolves a thread it answered, address
+    // reads the threads again and leaves open one that gained a comment it never read (PBI 258).
+    let threadCommentCounts: Record<string, number> = {};
     // Run contract 10: only comments by allowlisted users or the App's own bot reach an address run's brief. A thread the
     // factory's own review opened belongs to the PR review stage, so none of it does, a person's reply included (PBI 130).
     if (run.next_stage === "address" && run.pr_number !== null) {
       const users = await c.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`);
       const trusted = new Set(users.rows.map((u) => loginKey(u.github_login)));
       if (run.trusted_bot) trusted.add(botKey(run.trusted_bot));
-      trustedComments = withoutFactoryThreads(await deps.repoHost.openReviewComments(repo, run.pr_number), run.trusted_bot)
-        .filter((x) => trusted.has(loginKey(x.author)));
+      const all = await deps.repoHost.openReviewComments(repo, run.pr_number);
+      for (const x of all) if (x.path !== null) threadCommentCounts[x.threadId] = (threadCommentCounts[x.threadId] ?? 0) + 1;
+      trustedComments = withoutFactoryThreads(all, run.trusted_bot).filter((x) => trusted.has(loginKey(x.author)));
     }
     return {
       externalId: run.external_id, title: item?.title ?? run.title, acceptanceCriteria: item?.acceptanceCriteria ?? [],
@@ -274,6 +279,7 @@ const routes: Record<string, Route> = {
       dodCheckedSha: dod.rows[0]?.checked_sha ?? null,
       scenarioNotes: run.scenario_notes ?? [],
       trustedComments,
+      threadCommentCounts,
       trustedBot: run.trusted_bot,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       resume,

@@ -13,7 +13,7 @@ import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
 import { claimKeys, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
-import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
 import { splitChildren } from "../store/splits.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
@@ -159,13 +159,12 @@ export async function floor(pool: pg.Pool) {
     [LEASE_RAN_OUT],
   )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
   const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
-  // A restart being prepared (PBI 140) counts down its wrap-up while any cell still holds a live lease.
+  // A restart being prepared (PBI 140) shows how many cells still hold a live lease. None is stopped (PBI 300).
   const prepared = overrides.find((o) => o.scope === "factory" && o.kind === "restart");
   let restart: Restart | null = null;
   if (prepared) {
     const running = (await pool.query<{ n: number }>("select count(*)::int as n from item where state = 'InProgress' and lease_expires > now()")).rows[0].n;
-    const left = prepared.createdAt.getTime() + restartWaitMs() - Date.now();
-    restart = { running, minutesLeft: Math.max(0, Math.ceil(left / 60_000)), reason: prepared.reason };
+    restart = { running, reason: prepared.reason };
   }
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
