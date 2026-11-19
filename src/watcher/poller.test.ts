@@ -7,8 +7,9 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { NO_REVIEW_TEXT } from "../core/questions.ts";
-import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS } from "./poller.ts";
+import { SPLIT_DONE_HEADING } from "../gate/split-done.ts";
+import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
+import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -134,7 +135,8 @@ describe("pollOnce", dbTest, () => {
     assert.ok(all.some((b) => b.startsWith("The factory can't start") && !b.includes("gave no answer")), "no corrected readiness comment");
   });
 
-  test("a parent whose split is filed moves NotReady to Split, and stays there with its label back and a new policy (PBI 225)", async () => {
+  /** A parent that an oversized verdict and a valid two-child split file as children 101 and 102, on a board in memory. */
+  async function splitting() {
     const big = async (item: FactoryItem, dor: Policy) => {
       judged.push(item.externalId);
       // A proposed child, judged before it's filed (PBI 264), carries a split marker and passes.
@@ -144,11 +146,22 @@ describe("pollOnce", dbTest, () => {
     const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
     const agent = async () => ({ ok: true, text: JSON.stringify({ children }) }) as never;
     const subs: string[] = [];
+    const filed: { externalId: string; title: string; url: string; body: string }[] = [];
     let n = 100;
+    // Once set, the filed children are older than the repo's newest issues, so a search of the repo no longer finds them.
+    let old = false;
     const board = {
-      subIssues: async () => subs.map((id) => ({ externalId: id, title: id, url: `u/${id}` })),
-      findIssues: async () => [],
-      createIssue: async (_repo: string, title: string) => ({ externalId: String(++n), title, url: `u/${n}` }),
+      subIssues: async () => subs.map((id) => {
+        const f = filed.find((x) => x.externalId === id);
+        return { externalId: id, title: f?.title ?? id, url: `u/${id}`, body: f?.body ?? "", openedByApp: !!f };
+      }),
+      findIssues: async (_repo: string, text: string) => old ? [] :
+        filed.filter((f) => f.body.includes(text)).map(({ externalId, title, url }) => ({ externalId, title, url })),
+      createIssue: async (_repo: string, title: string, body: string) => {
+        const issue = { externalId: String(++n), title, url: `u/${n}` };
+        filed.push({ ...issue, body });
+        return issue;
+      },
       addSubIssue: async (_p: string, c: string) => void subs.push(c),
       boardStatus: async () => "Backlog",
       addToBoard: async () => {},
@@ -159,6 +172,15 @@ describe("pollOnce", dbTest, () => {
     const split = { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "AC" } };
     const ext = await seed({ acceptanceCriteria: ["one", "two"] });
     const pollSplit = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
+    const moves = async () => (await db.pool.query(
+      "select payload->>'from' as from, payload->>'event' as event, payload->>'to' as to from event where item_id = $1 and kind = 'transition' order by at, id",
+      [(await row(ext)).id],
+    )).rows;
+    return { ext, subs, pollSplit, moves, age: () => void (old = true) };
+  }
+
+  test("a parent whose split is filed moves NotReady to Split, and stays there with its label back and a new policy (PBI 225)", async () => {
+    const { ext, subs, pollSplit, moves } = await splitting();
     await pollSplit();
     assert.equal(subs.length, 2);
     assert.equal((await row(ext)).state, "Split");
@@ -169,8 +191,173 @@ describe("pollOnce", dbTest, () => {
     await pollSplit();
     assert.equal((await row(ext)).state, "Split");
     assert.deepEqual(judged, []);
-    const moves = (await db.pool.query("select payload->>'from' as from, payload->>'event' as event, payload->>'to' as to from event where item_id = $1 and kind = 'transition' order by at, id", [(await row(ext)).id])).rows;
-    assert.deepEqual(moves, [{ from: "Eligible", event: "readiness_failed", to: "NotReady" }, { from: "NotReady", event: "split_filed", to: "Split" }]);
+    assert.deepEqual(await moves(), [{ from: "Eligible", event: "readiness_failed", to: "NotReady" }, { from: "NotReady", event: "split_filed", to: "Split" }]);
+  });
+
+  /** Has the factory hold split child `ext` in `state`, with a run whose PR `pr`, when given, merged. */
+  async function child(ext: string, state: string, pr?: number) {
+    const id = (await db.pool.query<{ id: string }>(
+      `insert into item (source_id, external_id, title, state) values ($1, $2, 't', $3)
+       on conflict (source_id, external_id) do update set state = excluded.state returning id`,
+      [sourceId, ext, state],
+    )).rows[0].id;
+    await db.pool.query("delete from run where item_id = $1", [id]);
+    await db.pool.query(
+      "insert into run (item_id, run_number, branch, pr_number, pr_url, merge_sha) values ($1, 1, $2, $3, $4, $5)",
+      [id, `factory/pbi-${ext}-r1`, pr ?? null, pr ? `https://github.com/${REPO}/pull/${pr}` : null, pr ? `m${pr}` : null],
+    );
+  }
+
+  test("a Split parent stays Split while a filed child isn't Done, then moves to Done, comments once and closes (PBI 226)", async () => {
+    const { ext, pollSplit, moves } = await splitting();
+    await pollSplit();
+    await child("101", "Done", 61);
+    await child("102", "Failed");
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    assert.equal((await fake.adapter.getItem(ext))!.closed, false);
+    assert.deepEqual((await fake.comments(ext)).filter((b) => b.startsWith(SPLIT_DONE_HEADING)), []);
+
+    await child("102", "Done", 62);
+    await pollSplit();
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Done");
+    assert.equal((await fake.adapter.getItem(ext))!.closed, true);
+    const done = (await fake.comments(ext)).filter((b) => b.startsWith(SPLIT_DONE_HEADING));
+    assert.equal(done.length, 1);
+    assert.match(done[0], /\[A\]\(u\/101\), closed by \[PR #61\]\(https:\/\/github\.com\/octo\/repo\/pull\/61\)/);
+    assert.match(done[0], /\[B\]\(u\/102\), closed by \[PR #62\]/);
+    assert.deepEqual((await moves()).slice(-1), [{ from: "Split", event: "children_done", to: "Done" }]);
+  });
+
+  test("a Split parent with a filed child the factory doesn't hold stays Split, and a sub-issue added by hand doesn't count (PBI 226)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    await child("101", "Done", 61);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    subs.push("999");
+    await child("102", "Done", 62);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Done");
+  });
+
+  test("a Split parent whose move to Split recorded no children finds them by their split markers, and moves to Done once they're Done (PBI 226)", async () => {
+    const { ext, subs, pollSplit, moves, age } = await splitting();
+    await pollSplit();
+    age();
+    await db.pool.query("delete from split_child where parent_id = $1", [(await row(ext)).id]);
+    await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [(await row(ext)).id]);
+    // A sub-issue added by hand carries no split marker, so it isn't a filed child and doesn't hold the parent back.
+    subs.push("999");
+    await child("101", "Done", 61);
+    await child("102", "Failed");
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    await child("102", "Done", 62);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Done");
+    const done = (await fake.comments(ext)).filter((b) => b.startsWith(SPLIT_DONE_HEADING));
+    assert.equal(done.length, 1);
+    assert.match(done[0], /\[A\]\(u\/101\), closed by \[PR #61\]/);
+    assert.match(done[0], /\[B\]\(u\/102\), closed by \[PR #62\]/);
+    assert.deepEqual((await moves()).slice(-1), [{ from: "Split", event: "children_done", to: "Done" }]);
+  });
+
+  test("a Split parent whose move to Split recorded no children stays Split while a filed child isn't among its sub-issues (PBI 226)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    // A parent split before PBI 226 has no "Split into" kept either (PBI 227).
+    await db.pool.query("delete from split_child where parent_id = $1", [(await row(ext)).id]);
+    await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [(await row(ext)).id]);
+    subs.splice(subs.indexOf("102"), 1);
+    await child("101", "Done", 61);
+    await child("102", "Done", 62);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+  });
+
+  /** Puts a parent split today back as one split before PBI 225 left it: no split_filed move, withdrawn from NotReady. */
+  async function abandonedBefore225(ext: string) {
+    const id = (await row(ext)).id;
+    const filed = "select id from event where item_id = $1 and payload->>'event' = 'split_filed'";
+    await db.pool.query(`delete from outbox where event_id in (${filed})`, [id]);
+    await db.pool.query(`delete from event where id in (${filed})`, [id]);
+    await db.pool.query("delete from split_child where parent_id = $1", [id]);
+    await db.pool.query("update item set state = 'NotReady' where id = $1", [id]);
+    await db.pool.query(
+      `insert into event (item_id, kind, actor, actor_id, payload) values ($1, 'transition', 'system', 'poller', '{"from":"NotReady","to":"Abandoned","event":"withdrawn"}')`, [id]);
+    await db.pool.query("update item set state = 'Abandoned' where id = $1", [id]);
+  }
+
+  test("an Abandoned parent whose split was filed moves to Split once, and on to Done once its children are (PBI 228)", async () => {
+    const { ext, pollSplit, moves } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    // Its label back, it still moves to Split rather than returning to the gate.
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, acceptanceCriteria: ["one", "two"] });
+    judged = [];
+    await pollSplit();
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    assert.deepEqual(judged, []);
+    assert.deepEqual((await moves()).slice(-2), [{ from: "NotReady", event: "withdrawn", to: "Abandoned" }, { from: "Abandoned", event: "split_filed", to: "Split" }]);
+    // Its move to Split keeps the children for its "Split into" (PBI 227).
+    const kept = await db.pool.query("select position, external_id from split_child where parent_id = $1 order by position", [(await row(ext)).id]);
+    assert.deepEqual(kept.rows, [{ position: 1, external_id: "101" }, { position: 2, external_id: "102" }]);
+    await child("101", "Done", 61);
+    await child("102", "Done", 62);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Done");
+    assert.equal((await fake.adapter.getItem(ext))!.closed, true);
+  });
+
+  test("an Abandoned parent whose kept split's children aren't all among its sub-issues stays Abandoned (PBI 228)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    subs.splice(subs.indexOf("102"), 1);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Abandoned");
+  });
+
+  test("an item abandoned on a timeout stays Abandoned, though a split is kept for it (PBI 228)", async () => {
+    const { ext, pollSplit } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    await db.pool.query(
+      `insert into event (item_id, kind, actor, actor_id, payload, at) values ($1, 'transition', 'system', 'poller', '{"from":"SignOff","to":"Abandoned","event":"timed_out"}', now() + interval '1 second')`,
+      [(await row(ext)).id]);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Abandoned");
+  });
+
+  test("a parent that moves to Split keeps the children its split filed, in order, for its \"Split into\" (PBI 227)", async () => {
+    const { ext, pollSplit } = await splitting();
+    await pollSplit();
+    const id = (await row(ext)).id;
+    assert.equal((await row(ext)).state, "Split");
+    const kept = (await db.pool.query("select position, external_id, title, url from split_child where parent_id = $1 order by position", [id])).rows;
+    assert.deepEqual(kept, [{ position: 1, external_id: "101", title: "A", url: "u/101" }, { position: 2, external_id: "102", title: "B", url: "u/102" }]);
+  });
+
+  test("a Split parent with no \"Split into\" kept, split before PBI 227, gets its filed children kept by the next poll (PBI 227)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    const id = (await row(ext)).id;
+    const kept = async () => (await db.pool.query("select position, external_id, title, url from split_child where parent_id = $1 order by position", [id])).rows;
+    const want = [{ position: 1, external_id: "101", title: "A", url: "u/101" }, { position: 2, external_id: "102", title: "B", url: "u/102" }];
+    // From the children its move to Split recorded.
+    await db.pool.query("delete from split_child where parent_id = $1", [id]);
+    await pollSplit();
+    assert.deepEqual(await kept(), want);
+    // From the split markers, when its move recorded none, leaving out a sub-issue added by hand.
+    await db.pool.query("delete from split_child where parent_id = $1", [id]);
+    await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [id]);
+    subs.push("999");
+    await pollSplit();
+    assert.deepEqual(await kept(), want);
+    assert.equal((await row(ext)).state, "Split");
   });
 
   test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
@@ -582,6 +769,58 @@ describe("pollOnce", dbTest, () => {
     await Promise.all([poll(), poll()]);
     assert.ok((await question(q)).answer);
     assert.equal((await requeues(id)).length, 1);
+  });
+
+  const greens = async (id: string) =>
+    (await db.pool.query<{ actor: string; payload: Record<string, unknown> }>("select actor, payload from event where item_id = $1 and kind = $2", [id, REQUEUED_FOR_GREEN])).rows;
+  const nextStage = async (id: string) => (await db.pool.query("select next_stage from run where item_id = $1", [id])).rows[0].next_stage;
+
+  test("an older \"Address failed\" question naming only CI failures is answered once, for Green, by the factory (PBI 317)", async () => {
+    const { id, q, pr } = await waiting("Address failed:\n- CI failed on m3rge01\n- CI failed on m3rge02, the PR addresser's fix");
+    await poll();
+    await poll();
+    const a = await question(q);
+    assert.equal(a.answer, CI_BACK_TO_GREEN);
+    assert.equal(a.answered_by, null);
+    assert.ok(a.answered_at);
+    const events = await greens(id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].actor, "system");
+    assert.deepEqual(events[0].payload, { questionId: q, prNumber: pr });
+    assert.equal(await nextStage(id), "green");
+  });
+
+  test("one naming something besides CI failures, a held item, or a person's answer keeps it as it was (PBI 317)", async () => {
+    const mixed = await waiting("Address failed:\n- CI failed on m3rge01\n- the locked scenario file \"a.feature\" changed");
+    const heldOne = await waiting("Address failed:\n- CI failed on m3rge01");
+    await db.pool.query("update item set held = true where id = $1", [heldOne.id]);
+    const answered = await waiting("Address failed:\n- CI failed on m3rge01");
+    await db.pool.query("update question set answer = 'Leave it', decision = 'answer', answered_at = now() where id = $1", [answered.q]);
+    await poll();
+    for (const w of [mixed, heldOne]) assert.equal((await question(w.q)).answer, null);
+    assert.equal((await question(answered.q)).answer, "Leave it");
+    for (const w of [mixed, heldOne, answered]) {
+      assert.equal((await greens(w.id)).length, 0);
+      assert.equal(await nextStage(w.id), "address");
+    }
+    await db.pool.query("update item set held = false where id = $1", [heldOne.id]);
+    await poll();
+    assert.equal((await question(heldOne.q)).answer, CI_BACK_TO_GREEN);
+  });
+
+  test("a CI-only \"Address failed\" question asked since #292 shipped waits for a person, its run still at address (PBI 317)", async () => {
+    const { id, q } = await waiting("Address failed:\n- CI failed on m3rge02, the PR addresser's fix", "2026-11-15T06:00:00Z");
+    await poll();
+    assert.equal((await question(q)).answer, null);
+    assert.equal((await greens(id)).length, 0);
+    assert.equal(await nextStage(id), "address");
+  });
+
+  test("two polls at once answer an older CI-failed question and log its re-queue once (PBI 317)", async () => {
+    const { id, q } = await waiting("Address failed:\n- CI failed on m3rge01");
+    await Promise.all([poll(), poll()]);
+    assert.equal((await question(q)).answer, CI_BACK_TO_GREEN);
+    assert.equal((await greens(id)).length, 1);
   });
 
   test("an InProgress item with an open PR and a newer review stays InProgress", async () => {

@@ -1,12 +1,15 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { loginKey, type CheckRun, type FailedCheck, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
- * last cursor. It has no webhooks, so parseWebhook ignores everything.
+ * last cursor. It has no webhooks, so parseWebhook ignores everything. Each item fileItem files is listed in `filed`,
+ * by external id, once, so a test can read what the factory filed (PBI 255).
  */
-export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void } {
+export function fakeBacklog(): ContractTarget & { setDependencies(externalId: string, open: string[]): void; filed: string[] } {
   const items = new Map<string, FactoryItem & { seq: number }>();
+  const filed: string[] = [];
+  const filedByKey = new Map<string, string>();
   const comments = new Map<string, { body: string; key: string }[]>();
   const dependencies = new Map<string, string[]>();
   let seq = 0;
@@ -81,10 +84,23 @@ export function fakeBacklog(): ContractTarget & { setDependencies(externalId: st
           i.closed = true;
         });
       },
+      async fileItem({ title, body, labels, repo }, key) {
+        const known = filedByKey.get(key);
+        if (known) return known;
+        const externalId = autoId();
+        items.set(externalId, {
+          sourceId: "fake", externalId, title, body, acceptanceCriteria: [], labels: [...new Set([...labels, OPT_IN_LABEL])], status: "Backlog", rank: items.size + 1,
+          repo, fields: {}, closed: false, updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(), seq: ++seq,
+        });
+        filedByKey.set(key, externalId);
+        filed.push(externalId);
+        return externalId;
+      },
       parseWebhook() {
         return { kind: "ignored" };
       },
     },
+    filed,
     async seed(partial) {
       // Seeding an explicit id that exists replaces that item, which is how a test edits one.
       const externalId = partial.externalId ?? autoId();
@@ -123,20 +139,23 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
 
 /**
  * An in-memory RepoHost for the tests in Tasks 7 to 17. Tests set its state directly: PRs, check results by
- * `repo@sha`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
+ * `repo@sha` and their failed checks' detail in `failedChecks`, files by `repo@ref:path`, default branch heads, each branch's commits by `repo@branch`, and review
  * comments by `repo#number`. A sha with no check result has no checks at all. A comment marked `resolved` sits in a
  * resolved thread, and openReviewComments leaves it out. An open one with a `submittedAt` counts in prState as
  * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS. A review that
  * requests changes counts when it has a body, or when a comment outside the factory's threads carries its author and
  * `submittedAt`, which is how the fake ties a comment to its review.
- * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
+ * It records each review postReview posts in `postedReviews`, and as a `commented` review by `factory[bot]` in the PR's `reviews`, and each thread resolveThread resolves in `resolvedThreads`,
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
  * `factory[bot]` in `reviewComments`, which postReview returns. diffLines answers from `diffs`, by `repo#number@sha`, and
  * with null for a commit it holds no diff for, as GitHub's does when it can't give the whole diff (PBI 266).
+ * PBI 255: each commit's check runs by `repo@sha` in `runs`, a check's log by `repo@sha:check` in `logs`, and each
+ * commit's first parent by `repo@sha` in `parents`.
  */
 export function fakeRepoHost(): RepoHost & {
   prs: FakePr[];
   checks: Map<string, Status>;
+  failedChecks: Map<string, FailedCheck[]>;
   /** The names of the checks still pending, by `repo@sha`. A sha with none set has none pending. */
   pendingChecks: Map<string, string[]>;
   /** The named checks CI reported, by `repo@sha` (PBI 229). */
@@ -149,6 +168,9 @@ export function fakeRepoHost(): RepoHost & {
   resolvedThreads: { repo: string; threadId: string }[];
   diffs: Map<string, DiffRange[]>;
   mergeCalls: MergeCall[];
+  runs: Map<string, CheckRun[]>;
+  logs: Map<string, string>;
+  parents: Map<string, string>;
   /** The permissions the App lacks, by repo (PBI 264). A repo not here lacks none. */
   permissionsMissing: Map<string, string[]>;
 } {
@@ -160,12 +182,16 @@ export function fakeRepoHost(): RepoHost & {
   let openedThreads = 0;
   const prs: FakePr[] = [];
   const checks = new Map<string, Status>();
+  const failedChecks = new Map<string, FailedCheck[]>();
   const pendingChecks = new Map<string, string[]>();
   const ciChecks = new Map<string, CiCheck[]>();
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
   const reviewComments = new Map<string, (ReviewComment & { resolved?: boolean; submittedAt?: string })[]>();
+  const runs = new Map<string, CheckRun[]>();
+  const logs = new Map<string, string>();
+  const parents = new Map<string, string>();
   const pr = (repo: string, n: number) => {
     const found = prs.find((p) => p.repo === repo && p.number === n);
     if (!found) throw new Error(`no PR ${repo}#${n}`);
@@ -174,8 +200,8 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
-    mergeCalls, permissionsMissing,
+    prs, checks, failedChecks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
+    mergeCalls, runs, logs, parents, permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -201,6 +227,9 @@ export function fakeRepoHost(): RepoHost & {
     },
     async checksOnSha(repo, sha) {
       return checks.get(`${repo}@${sha}`) ?? "none";
+    },
+    async failedChecksOnSha(repo, sha) {
+      return failedChecks.get(`${repo}@${sha}`) ?? [];
     },
     async pendingChecksOnSha(repo, sha) {
       return [...(pendingChecks.get(`${repo}@${sha}`) ?? [])];
@@ -261,8 +290,14 @@ export function fakeRepoHost(): RepoHost & {
     async commentOnPr(repo, n, body) {
       pr(repo, n).comments.push(body);
     },
+    async prReviews(repo, n) {
+      return [...pr(repo, n).reviews].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
+        .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));
+    },
     async postReview({ repo, prNumber, commitSha, body, comments }) {
       postedReviews.push({ repo, prNumber, commitSha, body, comments: comments.map(({ path, line, body }) => ({ path, line, body })), event: "COMMENT" });
+      // The review is one of the PR's, by the factory's bot, as on GitHub (PBI 318).
+      prs.find((p) => p.repo === repo && p.number === prNumber)?.reviews.push({ state: "commented", submittedAt: new Date().toISOString(), author: "factory[bot]", body });
       // Each line comment opens a thread by the factory's bot, as on GitHub.
       const key = `${repo}#${prNumber}`;
       const threads = comments.map(({ path, line, body }) => ({ threadId: `review-thread-${++openedThreads}`, path, line, body }));
@@ -298,6 +333,15 @@ export function fakeRepoHost(): RepoHost & {
       if (refusal !== null) return { merged: false, reason: refusal };
       Object.assign(p, { open: false, merged: true, mergeSha: p.mergeAs ?? `merge-${n}` });
       return { merged: true, sha: p.mergeSha! };
+    },
+    async checkRuns(repo, sha) {
+      return structuredClone(runs.get(`${repo}@${sha}`) ?? []);
+    },
+    async checkLog(repo, sha, check) {
+      return logs.get(`${repo}@${sha}:${check}`) ?? null;
+    },
+    async firstParent(repo, sha) {
+      return parents.get(`${repo}@${sha}`) ?? null;
     },
   };
 }

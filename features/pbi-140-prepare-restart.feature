@@ -67,7 +67,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And item "A" is running in cell "cell-a" with a live lease
       When the operator prepares a restart with the reason "upgrading Docker"
       And the operator opens Floor
-      Then Floor shows "Preparing to restart: 1 cell is still wrapping up. The factory won't stop it."
+      Then Floor shows "Preparing to restart: 1 cell still running. The factory won't stop it."
 
     @ac-2 @db
     Scenario: Floor names no deadline for the wrap-up, however long it runs
@@ -76,7 +76,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And item "A" is running in cell "cell-a" with a live lease
       And the operator prepared a restart 90 minutes ago
       When the operator opens Floor
-      Then Floor shows "Preparing to restart: 1 cell is still wrapping up. The factory won't stop it."
+      Then Floor shows "Preparing to restart: 1 cell still running. The factory won't stop it."
       And Floor doesn't show "minutes left"
 
   Rule: Every live cell is told to stop at its next lease renewal, and the cell API keeps answering it

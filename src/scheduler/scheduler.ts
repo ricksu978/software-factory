@@ -4,7 +4,7 @@
 // one stopped and never starts a second cell for an item with a live lease (Review Focus 5).
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
-import { runToken } from "../control/cell-api.ts";
+import { BASE, runToken } from "../control/cell-api.ts";
 import { minutes, SLOW_TICK_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
@@ -15,6 +15,7 @@ import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
 import { criteriaHash } from "../watcher/poller.ts";
 import type { Launcher } from "./launcher.ts";
+import { bugItem, compareWithParent, failingTests, type FailedCheck } from "./main-break.ts";
 
 export const TICK_MS = 15_000;
 const DAY_MS = 86_400_000;
@@ -38,6 +39,8 @@ export type TickDeps = {
   sopVersion: string;
   /** Where a tick that runs long warns, and the clock that times it (PBI 134). */
   slow?: Slow;
+  /** Failed CI reads kept across ticks, so a long red main doesn't re-read every commit each tick. Absent, each pass reads afresh. */
+  ciMemo?: CiMemo;
 };
 export type TickResult = { started: string[]; stopped: string[]; expired: string[] };
 
@@ -252,26 +255,235 @@ async function chaseQuestions(d: TickDeps) {
   }
 }
 
-/** An Accepted item is Done once CI on its merge commit passes, and Failed when it fails or never reports within an hour. */
-async function pollMergedCi(d: TickDeps) {
-  const r = await d.pool.query<{ item_id: string; merge_sha: string; repo_url: string; source_id: string; external_id: string; merged_at: Date | null }>(
-    `select i.id as item_id, r.merge_sha, repo.url as repo_url, i.source_id, i.external_id,
+/** The newest commits of a branch that a green one is looked for in, so a long red stretch costs a bounded number of reads. */
+const GREEN_LOOKBACK = 50;
+
+/**
+ * How long a failed CI read of a branch commit is trusted before it's read again. The green search on a red branch
+ * walks up to GREEN_LOOKBACK commits, and every one is red, so reading each afresh every 15-second tick would cost
+ * thousands of GitHub requests an hour. A failure rarely changes, but a re-run can turn it green, so it's re-read
+ * after this long. A commit not yet failed, a new head among them, is read every pass.
+ */
+export const FAILED_RECHECK_MS = 10 * 60_000;
+
+/** Failed CI reads of branch commits, keyed by repo and sha, with when each was read. One lives for the worker's life. */
+export type CiMemo = Map<string, number>;
+
+type MergedCiDeps = Pick<TickDeps, "pool" | "repoHost" | "backlogFor" | "now" | "ciMemo">;
+
+/**
+ * An Accepted item is Done once CI on its merge commit passes, and Failed when it never reports within an hour. A red
+ * merge commit is compared with its first parent (PBI 255). When a check failed that the first parent passed, the
+ * merge broke main: the item is Failed, the break is recorded and the factory files one bug item for it. When the first
+ * parent failed the same checks, main was already red: the item stays Accepted and waits on main, and is Done once CI
+ * passes on a later main commit, which also clears every break before it. The exception is the bug item of a standing
+ * break: its merge is the fix for main, so main still red after it fails the item. Exported for PBI 255's steps, which run it
+ * after each poll.
+ */
+export async function pollMergedCi(d: MergedCiDeps) {
+  // One read of each commit's status per pass, however many items and breaks ask about it.
+  const statuses = new Map<string, Promise<string>>();
+  const status = (repo: string, sha: string) => {
+    const key = `${repo}@${sha}`;
+    if (!statuses.has(key)) statuses.set(key, d.repoHost.checksOnSha(repo, sha));
+    return statuses.get(key)!;
+  };
+  await settleMerges(d, status);
+  await fileBugItems(d);
+  await d.pool.query(
+    `update main_break b set bug_item_id = i.id from item i, item charged
+     where b.bug_item_id is null and b.bug_external_id = i.external_id and charged.id = b.item_id and i.source_id = charged.source_id`,
+  );
+  await settleBranches(d, greenOn(d, remembered(d, status)));
+}
+
+/**
+ * The status of a branch commit for the green search, answered "failure" from the memo while the failure was read
+ * less than FAILED_RECHECK_MS ago. Only the green search uses it: an Accepted item's own merge commit is read afresh.
+ */
+function remembered(d: MergedCiDeps, status: Status): Status {
+  const memo = d.ciMemo;
+  if (!memo) return status;
+  const now = d.now.getTime();
+  for (const [key, at] of memo) if (now - at >= FAILED_RECHECK_MS) memo.delete(key);
+  return async (repo, sha) => {
+    const key = `${repo}@${sha}`;
+    if (memo.has(key)) return "failure";
+    const state = await status(repo, sha);
+    if (state === "failure") memo.set(key, now);
+    return state;
+  };
+}
+
+type Status = (repo: string, sha: string) => Promise<string>;
+/** The newest commit of `branch` that contains `sha`, `sha` itself included, on which CI passed, or null when none has. */
+type GreenSince = (repo: string, branch: string, sha: string) => Promise<string | null>;
+
+/**
+ * GreenSince for one pass. Each branch's first-parent line is read once, from the first sha asked about, and its newest
+ * green commit found once, so every waiting item and break on the branch is answered from that one read. Only a sha off
+ * every line read so far, older than the first or off the branch, reads the branch again, from that sha.
+ */
+function greenOn(d: MergedCiDeps, status: Status): GreenSince {
+  const lines = new Map<string, Promise<{ line: string[]; green: number }>[]>();
+  const read = async (repo: string, branch: string, sha: string) => {
+    const line = [sha, ...(await d.repoHost.commitsAfter(repo, branch, sha))];
+    for (let i = line.length - 1; i >= Math.max(0, line.length - GREEN_LOOKBACK); i--) if ((await status(repo, line[i])) === "success") return { line, green: i };
+    return { line, green: -1 };
+  };
+  return async (repo, branch, sha) => {
+    const key = `${repo}@${branch}`;
+    if (!lines.has(key)) lines.set(key, []);
+    for (const earlier of lines.get(key)!) {
+      // A read that failed answers nothing; the row that asked it already logged the failure.
+      const { line, green } = await earlier.catch(() => ({ line: [] as string[], green: -1 }));
+      const at = line.indexOf(sha);
+      if (at >= 0) return green >= at ? line[green] : null;
+    }
+    const mine = read(repo, branch, sha);
+    lines.get(key)!.push(mine);
+    const { line, green } = await mine;
+    return green >= 0 ? line[green] : null;
+  };
+}
+
+async function settleMerges(d: MergedCiDeps, status: Status) {
+  const r = await d.pool.query<{ item_id: string; run_id: string; repo_id: string; merge_sha: string; pr_number: number | null; repo_url: string; source_id: string; external_id: string; merged_at: Date | null }>(
+    `select i.id as item_id, r.id as run_id, r.repo_id, r.merge_sha, r.pr_number, repo.url as repo_url, i.source_id, i.external_id,
        (select max(e.at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'Accepted') as merged_at
      from item i join run r on r.item_id = i.id and r.ended_at is null and r.merge_sha is not null join repo on repo.id = r.repo_id
-     where i.state = 'Accepted'`,
+     where i.state = 'Accepted' and r.waits_on_branch is null
+     order by merged_at nulls last`,
   );
   for (const row of r.rows) {
     await isolated(`polling CI for item ${row.item_id}`, async () => {
-      const status = await d.repoHost.checksOnSha(repoName(row.repo_url), row.merge_sha);
-      const silent = status === "none" && row.merged_at !== null && d.now.getTime() - row.merged_at.getTime() > NO_CI_AFTER_MS;
-      if (status === "success") {
+      const repo = repoName(row.repo_url);
+      const state = await status(repo, row.merge_sha);
+      const late = row.merged_at !== null && d.now.getTime() - row.merged_at.getTime() > NO_CI_AFTER_MS;
+      if (state === "success") return void (await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_verified", system)));
+      if (state === "none" && late) return charge(d, row, `No CI ran on ${BASE} for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`);
+      if (state !== "failure") return;
+
+      const parent = await d.repoHost.firstParent(repo, row.merge_sha);
+      const parentRuns = parent ? await d.repoHost.checkRuns(repo, parent) : [];
+      const cmp = compareWithParent(await d.repoHost.checkRuns(repo, row.merge_sha), parentRuns);
+      // A failed check still running on the first parent can't be compared yet. After an hour it counts as passed there.
+      if (cmp.verdict === "undecided" && !late) return;
+      if (cmp.verdict === "cancelled") {
+        // No check failed on the merge: its only unpassed runs were cancelled, as when a later merge's push cancelled
+        // them under `cancel-in-progress`. It broke nothing, so it isn't charged and no break is recorded. It waits on
+        // main like a merge onto a main already red, and is Done once CI passes on a later main commit that contains it.
+        await d.pool.query("update run set waits_on_branch = $2 where id = $1", [row.run_id, BASE]);
+        const body = `CI on ${BASE} for the merge commit ${row.merge_sha} was cancelled before it finished, as when a later push to ${BASE} cancels it, and no check failed. The item stays Accepted and waits on ${BASE}, and it's Done once CI passes on a later ${BASE} commit.`;
+        await isolated(`commenting the wait on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci-wait:${row.merge_sha}`));
+        return;
+      }
+      if (cmp.verdict === "already red") {
+        // The bug item of a standing break is the fix for main. Its merge leaving main red fails it, rather than parking
+        // the one item that can make main green behind itself. No new break is recorded, so no second bug item is filed.
+        const fixes = await d.pool.query(
+          "select 1 from main_break where repo_id = $1 and branch = $2 and bug_item_id = $3 and cleared_at is null limit 1",
+          [row.repo_id, BASE, row.item_id],
+        );
+        if (fixes.rowCount) {
+          return charge(d, row, `CI failed on ${BASE} for the merge commit ${row.merge_sha}, the fix for ${BASE} being red, and ${BASE} is still red, so the item failed its Definition of Done. The failed run: https://github.com/${repo}/commit/${row.merge_sha}/checks`);
+        }
+        await withTx(d.pool, async (c) => {
+          await c.query("update run set waits_on_branch = $2 where id = $1", [row.run_id, BASE]);
+          // Main went red with no merge of the factory's to charge, by a push or a PR the factory doesn't hold. The
+          // break is recorded at the first parent, the oldest red commit the factory knows of, with no item and no bug
+          // item, so Floor shows main red until CI passes on it again. The factory files no bug item for a break it
+          // didn't make.
+          await c.query(
+            `insert into main_break (repo_id, branch, merge_sha, failed_checks, at)
+             select $1, $2, $3, $4, $5 where not exists (select from main_break where repo_id = $1 and branch = $2 and cleared_at is null)
+             on conflict (repo_id, merge_sha) do nothing`,
+            [row.repo_id, BASE, parent, JSON.stringify(parentRuns.filter((r) => r.status === "failure").map((r): FailedCheck => ({ name: r.name, url: r.url, tests: [] }))), d.now],
+          );
+        });
+        const body = `CI failed on ${BASE} for the merge commit ${row.merge_sha}, but its first parent ${parent} failed the same checks, so ${BASE} was already red. The item stays Accepted and waits on ${BASE}, and it's Done once CI passes on a later ${BASE} commit.`;
+        await isolated(`commenting the wait on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci-wait:${row.merge_sha}`));
+        return;
+      }
+      const checks: FailedCheck[] = [];
+      for (const run of cmp.failed) {
+        const log = await d.repoHost.checkLog(repo, row.merge_sha, run.name).catch((e) => {
+          console.error(`scheduler: reading the log of ${run.name} on ${row.merge_sha} failed, so its tests go unnamed:`, e);
+          return null;
+        });
+        checks.push({ name: run.name, url: run.url, tests: failingTests(log) });
+      }
+      const broke = cmp.verdict === "no checks" ? null : checks;
+      await charge(d, row, `CI failed on ${BASE} for the merge commit ${row.merge_sha}, so the item failed its Definition of Done. The failed run: https://github.com/${repo}/commit/${row.merge_sha}/checks`, broke);
+    });
+  }
+}
+
+/** Fails the item and comments why. With `broke`, the merge broke main: the break is recorded in the same transaction. */
+async function charge(d: MergedCiDeps, row: { item_id: string; repo_id: string; merge_sha: string; pr_number: number | null; source_id: string; external_id: string }, body: string, broke: FailedCheck[] | null = null) {
+  await withTx(d.pool, async (c) => {
+    await transitionItem(c, row.item_id, "dod_failed", system);
+    if (broke) {
+      // A later merge onto this one may have found main already red and recorded an uncharged break here while this
+      // merge was still undecided. This merge broke main, so it takes that row over, and its bug item gets filed.
+      await c.query(
+        `insert into main_break (repo_id, branch, merge_sha, item_id, pr_number, failed_checks, at) values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (repo_id, merge_sha) do update set item_id = excluded.item_id, pr_number = excluded.pr_number, failed_checks = excluded.failed_checks
+         where main_break.item_id is null`,
+        [row.repo_id, BASE, row.merge_sha, row.item_id, row.pr_number, JSON.stringify(broke), d.now],
+      );
+    }
+  });
+  await isolated(`commenting CI on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`));
+}
+
+/**
+ * Files the bug item of each standing break that has none yet. A break that cleared before its bug item was filed, as
+ * when filing failed for a few polls or a merge took over a cleared row, gets none: main is already green. The dedupe
+ * key keeps a retry after a lost answer from filing a second.
+ */
+async function fileBugItems(d: MergedCiDeps) {
+  const r = await d.pool.query<{ id: string; merge_sha: string; branch: string; pr_number: number | null; pr_url: string | null; failed_checks: FailedCheck[]; repo_url: string; source_id: string; external_id: string }>(
+    `select b.id, b.merge_sha, b.branch, b.pr_number, b.failed_checks, repo.url as repo_url, i.source_id, i.external_id,
+       (select r.pr_url from run r where r.item_id = b.item_id and r.merge_sha = b.merge_sha order by r.started_at desc limit 1) as pr_url
+     from main_break b join repo on repo.id = b.repo_id join item i on i.id = b.item_id
+     where b.bug_external_id is null and b.cleared_at is null order by b.at`,
+  );
+  for (const b of r.rows) {
+    await isolated(`filing the bug item for ${b.merge_sha}`, async () => {
+      const { title, body } = bugItem({ sha: b.merge_sha, branch: b.branch, prNumber: b.pr_number, prUrl: b.pr_url, itemExternalId: b.external_id, checks: b.failed_checks });
+      const externalId = await d.backlogFor(b.source_id).fileItem({ title, body, labels: [], repo: repoName(b.repo_url) }, `main-break:${b.merge_sha}`);
+      await d.pool.query("update main_break set bug_external_id = $2 where id = $1", [b.id, externalId]);
+    });
+  }
+}
+
+/**
+ * A break stands until CI passes on a commit of its branch that contains the merge commit that broke it, and an item
+ * waiting on a branch is Done once CI passes on a commit of it that contains the item's merge commit. Breaks are asked
+ * about first, oldest first, then waiting items in the order they merged, so the first sha asked about on a branch is
+ * usually its oldest and its one read of the branch answers every row.
+ */
+async function settleBranches(d: MergedCiDeps, greenSince: GreenSince) {
+  const breaks = await d.pool.query<{ id: string; merge_sha: string; branch: string; repo_url: string }>(
+    "select b.id, b.merge_sha, b.branch, repo.url as repo_url from main_break b join repo on repo.id = b.repo_id where b.cleared_at is null order by b.at",
+  );
+  for (const b of breaks.rows) {
+    await isolated(`checking whether ${b.merge_sha}'s break cleared`, async () => {
+      const green = await greenSince(repoName(b.repo_url), b.branch, b.merge_sha);
+      if (green) await d.pool.query("update main_break set cleared_at = $2, cleared_sha = $3 where id = $1", [b.id, d.now, green]);
+    });
+  }
+  const waiting = await d.pool.query<{ item_id: string; merge_sha: string; branch: string; repo_url: string }>(
+    `select i.id as item_id, r.merge_sha, r.waits_on_branch as branch, repo.url as repo_url
+     from item i join run r on r.item_id = i.id and r.ended_at is null and r.merge_sha is not null join repo on repo.id = r.repo_id
+     where i.state = 'Accepted' and r.waits_on_branch is not null
+     order by (select max(e.at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'Accepted') nulls last`,
+  );
+  for (const row of waiting.rows) {
+    await isolated(`checking the branch item ${row.item_id} waits on`, async () => {
+      if (await greenSince(repoName(row.repo_url), row.branch, row.merge_sha)) {
         await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_verified", system));
-      } else if (status === "failure" || silent) {
-        await withTx(d.pool, (c) => transitionItem(c, row.item_id, "dod_failed", system));
-        const body = silent
-          ? `No CI ran on main for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`
-          : `CI failed on main for the merge commit ${row.merge_sha}, so the item failed its Definition of Done. The failed run: https://github.com/${repoName(row.repo_url)}/commit/${row.merge_sha}/checks`;
-        await isolated(`commenting CI on item ${row.item_id}`, () => d.backlogFor(row.source_id).comment(row.external_id, body, `ci:${row.merge_sha}`));
       }
     });
   }

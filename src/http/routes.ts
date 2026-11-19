@@ -6,18 +6,21 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../adapters/types.ts
 import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
 import type { ItemState } from "../core/states.ts";
+import type { CiFailure } from "../cell/api-client.ts";
 import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
+import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
-import { LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
+import { claimKeys, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
+import { splitChildren } from "../store/splits.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
 import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
-import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
+import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type MainBreakRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -123,15 +126,34 @@ async function floor(pool: pg.Pool) {
      from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
+  // PBI 227: Split parents with a child still to follow, one the factory doesn't hold or holds short of an end state.
+  const splitParents = (await pool.query<{ id: string; external_id: string; title: string }>(
+    `select p.id, p.external_id, p.title from item p where p.state = 'Split' and exists (
+       select 1 from split_child sc left join item ci on ci.source_id = p.source_id and ci.external_id = sc.external_id
+       where sc.parent_id = p.id and (ci.state is null or ci.state not in ('Done', 'Abandoned', 'Split')))
+     order by p.title`,
+  )).rows;
+  const children = await splitChildren(pool, splitParents.map((p) => p.id));
+  const split = splitParents.map((p) => ({ ...p, children: children.get(p.id) ?? [] }));
+  // PBI 255: each break on main that still stands, with the item it charged and its bug item, for Floor's notice.
+  const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state: string | null }>(
+    `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title, bug.state as bug_state
+     from main_break b join repo on repo.id = b.repo_id left join item charged on charged.id = b.item_id left join item bug on bug.id = b.bug_item_id
+     where b.cleared_at is null order by b.at`,
+  )).rows.map(({ repo_url, ...b }): MainBreakRow => ({ ...b, repo: repoName(repo_url) }));
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
+  // PBI 292: an item In progress whose run's newest attempt is a Green attempt sent back to fix a CI failure is fixing
+  // CI, with the commit CI failed on and the failed checks.
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
   // factory's own note on an attempt it closed (PBI 239) isn't an agent message, so Floor skips it; Run detail shows it.
   const active = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, i.held, r.next_stage as stage, r.pr_number, r.pr_url,
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
-       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message
+       (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message,
+       (select case when i.state = 'InProgress' and s.stage_id = 'green' then s.ci_failure end from stage_run s
+         where s.run_id = r.id order by s.started_at desc, s.attempt desc limit 1) as ci_failure
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
     [LEASE_RAN_OUT],
@@ -147,11 +169,20 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails].map((r) => r.id));
+  // PBI 320: each item's priority and group, and every final-stage item, an item in the group through a dependent
+  // included, wherever it is, in the order the group is claimed.
+  const keys = await claimKeys(pool);
+  const finalIds = [...keys].filter(([, k]) => k.finalStage).sort(([, a], [, b]) => a.priority - b.priority).map(([id]) => id);
+  const finalRows = (await pool.query<{ id: string; external_id: string; title: string; state: string }>(
+    "select id, external_id, title, state from item where id = any($1::uuid[])", [finalIds],
+  )).rows;
+  const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
-    baseFails: withRepo(baseFails),
+    keys, finalStage: withRepo(finalStage),
+    baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split),
     restart, cellImage: await readCellImage(pool),
   };
 }
@@ -250,6 +281,17 @@ async function featuresAt(deps: DashboardDeps, fi: FactoryItem | null, sha: stri
   return out;
 }
 
+/**
+ * PBI 292: the CI failure the item is fixing, while it's In progress on an open run whose newest attempt is a Green
+ * attempt the cell reported as fixing one. Null otherwise.
+ */
+export function fixingCi(state: string, run: { open?: boolean } | null, stages: { stage_id: string; attempt: number; started_at?: Date; ci_failure?: CiFailure | null }[]): CiFailure | null {
+  if (state !== "InProgress" || !run?.open) return null;
+  const newest = stages.reduce<(typeof stages)[number] | null>((a, s) =>
+    !a || (s.started_at?.getTime() ?? 0) > (a.started_at?.getTime() ?? 0) || ((s.started_at?.getTime() ?? 0) === (a.started_at?.getTime() ?? 0) && s.attempt > a.attempt) ? s : a, null);
+  return newest?.stage_id === "green" ? newest.ci_failure ?? null : null;
+}
+
 async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
@@ -283,14 +325,18 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
      order by o.created_at desc limit 1`, [id],
   )).rows[0] ?? null;
   const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
+  const claim = (await claimKeys(pool, [id])).get(id) ?? null;
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
+    fixingCi: fixingCi(item.state, run, stages),
     controls: canOperate
       ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
       : null,
     startNow,
+    claim,
     durations,
+    splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
   };
 }
 

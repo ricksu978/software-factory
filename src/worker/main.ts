@@ -11,6 +11,7 @@ import { App } from "@octokit/app";
 import { join } from "node:path";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
+import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { haikuJudge, runAgent } from "../agent/run.ts";
 import { mirrorBoard } from "../control/board.ts";
@@ -18,7 +19,7 @@ import { logTransitions } from "../control/console-log.ts";
 import type { SplitDeps } from "../gate/split.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
-import { tick, TICK_MS } from "../scheduler/scheduler.ts";
+import { tick, TICK_MS, type CiMemo } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
@@ -263,12 +264,13 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
   const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   let ticked = false;
+  const ciMemo: CiMemo = new Map();
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
     const now = (d.now ?? (() => new Date()))();
     try {
       await tick({
         pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo,
       });
     } finally {
       // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,
@@ -315,7 +317,7 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
     ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CELL_IMAGE", "CELL_CONTROL_URL"].map(need);
 
   const pool = createPool(dbUri);
-  const app = new App({ appId, privateKey: appKey });
+  const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);

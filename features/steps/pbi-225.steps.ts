@@ -18,7 +18,7 @@ import { long, need, testDb } from "./pbi-8.steps.ts";
 const HEADING = "Acceptance criteria";
 
 type Host = ReturnType<typeof fakeRepoHost>;
-type Ctx = {
+export type Ctx = {
   host: Host;
   sourceId?: string;
   /** How often the readiness judge was asked about each item, by external id. */
@@ -28,11 +28,13 @@ type Ctx = {
   heads: number;
   /** The real poller's passes that returned a result for the source. */
   passes: number;
+  /** PBI 226: each comment and close the real poller made through the backlog adapter, in order. */
+  writes: { kind: "comment" | "close"; id: string; body?: string }[];
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi225?: Ctx };
-  w.pbi225 ??= { host: fakeRepoHost(), asked: new Map(), heads: 0, passes: 0 };
+  w.pbi225 ??= { host: fakeRepoHost(), asked: new Map(), heads: 0, passes: 0, writes: [] };
   return w.pbi225;
 }
 
@@ -56,7 +58,12 @@ async function realPoll(world: object): Promise<void> {
     ...c.fake.adapter,
     async comment(id: string, body: string, key: string) {
       if (id === c.parentId && !body.startsWith(SPLIT_HEADING)) refuse(c, "comment", "parent");
+      k.writes.push({ kind: "comment", id, body });
       return c.fake.adapter.comment(id, body, key);
+    },
+    async close(id: string) {
+      k.writes.push({ kind: "close", id });
+      return c.fake.adapter.close(id);
     },
   };
   const scripted = judge144(c);
@@ -77,7 +84,13 @@ async function realPoll(world: object): Promise<void> {
   k.passes++;
 }
 
-Before({ tags: "@pbi-225 and @db", ...long }, async function () {
+/** Counts one pass of a real poller another feature drives over PBI 144's board, so "polls ... more times" counts it (PBI 227). */
+export function countPass(world: object): void {
+  ctx(world).passes++;
+}
+
+// PBI 226 and PBI 228 run their scenarios on this same harness.
+Before({ tags: "(@pbi-225 or @pbi-226 or @pbi-228) and @db", ...long }, async function () {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   await d.pool.query('truncate item, event, backlog_source, repo, "user" cascade');
@@ -103,7 +116,7 @@ async function pollTimes(world: object, n: number): Promise<void> {
   for (let i = 0; i < n; i++) await poll(c);
 }
 
-async function parentId(world: object): Promise<string> {
+export async function parentId(world: object): Promise<string> {
   const c = ctx144(world);
   polled(c);
   const k = ctx(world);
@@ -115,7 +128,7 @@ async function parentId(world: object): Promise<string> {
 type Move = { id: string; from: string; to: string; event: string };
 
 /** The parent's moves, oldest first, transitions and overrides both. */
-async function moves(world: object): Promise<Move[]> {
+export async function moves(world: object): Promise<Move[]> {
   const id = await parentId(world);
   const r = await need().pool.query<Move>(
     `select id::text, payload->>'from' as from, payload->>'to' as to, payload->>'event' as event from event
@@ -125,7 +138,7 @@ async function moves(world: object): Promise<Move[]> {
   return r.rows;
 }
 
-const show = (ms: Move[]) => ms.map((m) => `${m.from} -${m.event}-> ${m.to}`).join(", ") || "none";
+export const show = (ms: Move[]) => ms.map((m) => `${m.from} -${m.event}-> ${m.to}`).join(", ") || "none";
 
 // ---- the Background ----
 
@@ -156,7 +169,7 @@ Given("the factory has polled the backlog twice, filing every child and taking t
 });
 
 /** Polls `n` more times and checks that `n` passes ran, each of the real poller's returning a result for the source. */
-async function pollMore(world: object, n: number): Promise<void> {
+export async function pollMore(world: object, n: number): Promise<void> {
   const c = ctx144(world);
   const k = ctx(world);
   const polls = c.polls;

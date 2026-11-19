@@ -383,9 +383,10 @@ Then("the factory holds child {string} as an item", long, async function (title:
   await held(this, title);
 });
 
-Then("the factory holds child {string} in state {string}", long, async function (title: string, state: string) {
-  assert.equal((await held(this, title)).state, state, `child "${title}"'s state`);
-});
+/** Checks the factory holds child `title` in `state`. PBI 226's steps define the step, which in PBI 237 checks this. */
+export async function heldIn(world: object, title: string, state: string): Promise<void> {
+  assert.equal((await held(world, title)).state, state, `child "${title}"'s state`);
+}
 
 Then("the factory holds child {string} in a state other than {string}", long, async function (title: string, state: string) {
   assert.notEqual((await held(this, title)).state, state, `child "${title}"'s state`);

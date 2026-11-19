@@ -49,6 +49,14 @@ export type Ctx = {
   apiExtra?: Record<string, unknown>;
   /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
   editSop?: (sop: any) => void;
+  /**
+   * PBI 259: the cell's own HTTP client against a fake cell API and its git's command runner, which wait on `now` and
+   * `sleep` above. `prelude` runs first, as src/cell/main.ts asks for its context and its git asks for a token before
+   * the engine runs.
+   */
+  api?: object;
+  gitDeps?: object;
+  prelude?: () => Promise<void>;
 };
 
 function ctx(world: object): Ctx {
@@ -263,9 +271,11 @@ function cellApi(c: Ctx) {
     async pr(b: Record<string, any>) { record("/pr", b); },
     async checks(sha: string) {
       record("/checks", { sha });
-      if (c.checks) return c.checks(sha);
-      if (c.ciOldOnly) return sha === c.startHead ? "success" : "failure";
-      return "success";
+      // A scenario's CI answers a status alone, or the cell API's whole answer with its failed checks (PBI 232).
+      const answer = (s: unknown) => (typeof s === "string" ? { status: s, failedChecks: [] } : s);
+      if (c.checks) return answer(await c.checks(sha));
+      if (c.ciOldOnly) return answer(sha === c.startHead ? "success" : "failure");
+      return answer("success");
     },
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
     ...c.apiExtra,
@@ -299,8 +309,9 @@ export async function runTheCell(world: object): Promise<void> {
     const { shellGit } = await import(pathToFileURL(gitFile).href);
     const { loadSop } = await import(pathToFileURL(join(repo, "src/config/sop.ts")).href);
     const comments = [...c.trusted, ...c.stranger].map((x, i) => ({ threadId: `t${i}`, path: "app.txt", line: 1, ...x }));
+    await c.prelude?.();
     c.result = await engine.runCell({
-      api: cellApi(c),
+      api: c.api ?? cellApi(c),
       ctx: {
         externalId: "482", title: "Item 482", acceptanceCriteria: Array.from({ length: c.criteria }, (_, i) => `Criterion ${i + 1} holds`),
         nextStage: c.nextStage, decision: c.decision, lockSha: c.lockSha, lockedFiles: c.lockedFiles, prNumber: c.prNumber,
@@ -312,7 +323,7 @@ export async function runTheCell(world: object): Promise<void> {
         ...c.context,
       },
       agent: ((base) => c.agent ? (a: any) => c.agent!(a, base) : base)(c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c)),
-      git: shellGit(c.dir, BRANCH),
+      git: shellGit(c.dir, BRANCH, c.gitDeps),
       dir: c.dir,
       repoHost: c.repoHost ?? {
         async openOrUpdatePr(p: { body: string }) { c.prBodies.push(p.body); return { number: 7, url: "https://github.com/acme/app/pull/7" }; },

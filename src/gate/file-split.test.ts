@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeBacklog } from "../adapters/fake.ts";
 import type { FactoryItem } from "../adapters/types.ts";
-import { childBody, factoryFiled, fileSplit, filedComment, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
-import type { SplitChild } from "./split.ts";
+import { childBody, factoryFiled, fileSplit, filedComment, filedFromMarkers, splitKey, splitMarker, type ChildIssue, type SplitBoard } from "./file-split.ts";
+import { itemTextHash, type SplitChild } from "./split.ts";
 
 const parent: FactoryItem = {
   sourceId: "s", externalId: "12", title: "Checkout", body: "b", acceptanceCriteria: ["card", "bank", "receipt"], labels: ["factory"],
@@ -24,7 +24,10 @@ function memoryBoard(s: Store): SplitBoard {
   const strip = ({ body: _, labels: _l, ...i }: ChildIssue & { body: string; labels?: string[] }) => i;
   return {
     async subIssues() {
-      return s.subs.map((id) => strip(s.issues.find((i) => i.externalId === id) ?? { externalId: id, title: "by hand", url: "", body: "" }));
+      return s.subs.map((id) => {
+        const i = s.issues.find((x) => x.externalId === id);
+        return i ? { ...strip(i), body: i.body, openedByApp: true } : { externalId: id, title: "by hand", url: "", body: "", openedByApp: false };
+      });
     },
     async findIssues(_repo, text) {
       return s.issues.filter((i) => i.body.includes(text) || i.title.includes(text)).map(strip);
@@ -71,7 +74,10 @@ async function setup(fail: string[] = [], p: FactoryItem = parent) {
 describe("fileSplit", () => {
   test("files each child, links it, places it, blocks it, then comments on the parent and takes its label off", async () => {
     const { s, fake, run } = await setup();
-    assert.equal(await run(), true);
+    const filed = await run();
+    assert.deepEqual(filed, s.issues.map(({ body: _, labels: _l, ...i }) => i));
+    // The filed children, in the order of the split, for the parent's "Split into" (PBI 227).
+    assert.deepEqual(filed?.map((i) => [i.externalId, i.title]), [["100", "Card"], ["101", "Bank"], ["102", "Receipt"]]);
     assert.deepEqual(s.issues.map((i) => i.title), ["Card", "Bank", "Receipt"]);
     assert.deepEqual(s.subs, ["100", "101", "102"]);
     assert.deepEqual([...s.board.values()], ["Backlog", "Backlog", "Backlog"]);
@@ -86,8 +92,9 @@ describe("fileSplit", () => {
 
   test("a second run files nothing more and posts no second comment", async () => {
     const { s, fake, run } = await setup();
-    await run();
-    assert.equal(await run(), true);
+    const first = await run();
+    // The second run returns the same children, in order, so the parent's record of them is the same (PBI 226).
+    assert.deepEqual(await run(), first);
     assert.equal(s.issues.length, 3);
     assert.equal(s.subs.length, 3);
     assert.equal((await fake.comments("12")).length, 1);
@@ -118,7 +125,7 @@ describe("fileSplit", () => {
   test("a parent with a sub-issue the factory didn't file for this split is never split", async () => {
     const { s, fake, run } = await setup();
     s.subs.push("7");
-    assert.equal(await run(), false);
+    assert.equal(await run(), null);
     assert.equal(s.issues.length, 0);
     assert.deepEqual(s.labels, ["factory"]);
     assert.deepEqual(await fake.comments("12"), []);
@@ -129,7 +136,7 @@ describe("fileSplit", () => {
     await run();
     const changed = { ...parent, body: "new text" };
     const deps = { board: memoryBoard(s), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" };
-    assert.equal(await fileSplit(changed, children, fake.adapter, deps), false);
+    assert.equal(await fileSplit(changed, children, fake.adapter, deps), null);
     assert.equal(s.issues.length, 3);
   });
 
@@ -200,5 +207,35 @@ describe("fileSplit", () => {
     assert.notEqual(splitKey(parent), splitKey({ ...parent, externalId: "13" }));
     assert.notEqual(splitKey(parent), splitKey({ ...parent, title: "other" }));
     assert.equal(splitKey(parent), splitKey({ ...parent, labels: [], updatedAt: "later" }));
+  });
+
+  test("a parent's filed children are found again by their split markers among its sub-issues, and a hand-added one isn't (PBI 226)", async () => {
+    const { s, run } = await setup();
+    const filed = await run();
+    s.subs.push("999");
+    // The children are older than any repo search reaches: they're found on the parent's sub-issues alone.
+    const board = { ...memoryBoard(s), findIssues: async () => [] };
+    const kept = [{ textHash: "older", count: 2 }, { textHash: itemTextHash(parent), count: 3 }];
+    assert.deepEqual(await filedFromMarkers("12", kept, board), filed);
+    s.subs = s.subs.filter((id) => id !== filed![2].externalId);
+    assert.equal(await filedFromMarkers("12", kept, board), null);
+    assert.equal(await filedFromMarkers("12", [], board), null);
+  });
+
+  test("a sub-issue carrying a split marker that the factory's App didn't open isn't a filed child (PBI 226)", async () => {
+    const { s, run } = await setup();
+    const filed = await run();
+    const real = memoryBoard(s);
+    const board = { subIssues: async (id: string) => (await real.subIssues(id)).map((x, i) => (i === 1 ? { ...x, openedByApp: false } : x)) };
+    assert.equal(await filedFromMarkers("12", [{ textHash: itemTextHash(parent), count: 3 }], board), null);
+    assert.ok(filed);
+  });
+
+  test("child 1's split marker doesn't match child 10's (PBI 226)", async () => {
+    const key = splitKey(parent);
+    const sub = (n: number) => ({ externalId: String(n), title: `c${n}`, url: `u${n}`, body: `(${splitMarker(key, n)})`, openedByApp: true });
+    const board = { subIssues: async () => [sub(10), ...Array.from({ length: 9 }, (_, i) => sub(i + 1))] };
+    const found = await filedFromMarkers("12", [{ textHash: itemTextHash(parent), count: 10 }], board);
+    assert.deepEqual(found?.map((f) => f.externalId), ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
   });
 });

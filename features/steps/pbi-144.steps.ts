@@ -62,6 +62,15 @@ export type Ctx = {
    * poll in `polls`.
    */
   driver?: (c: Ctx) => Promise<void>;
+  /** PBI 226: other parents, by external id, the judge also finds oversized. */
+  alsoOversized?: Set<string>;
+  /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
+  replies?: { title: string; reply: string }[];
+  /**
+   * PBI 226: titles of children the board files without the labels the factory asks for, as every child was filed
+   * before PBI 237 gave children the opt-in label, so a child can still be one that never entered the factory.
+   */
+  unlabelled?: Set<string>;
   /** PBI 264: a scripted judge that replaces this harness's, which passes every line. */
   judgeOverride?: (item: FactoryItem, dor: Policy) => Promise<string>;
   /** PBI 264: a scripted coding model that replaces this harness's, which always answers `reply`. */
@@ -76,6 +85,8 @@ export type Ctx = {
   personEdited: Set<string>;
   /** PBI 264: the in-memory pass takes up a Queued child even while an earlier child it needs is open. */
   ignoreBlockers?: boolean;
+  /** PBI 227: the issue numbers the repo gives the next filed children, in order. Empty, the fake board numbers them. */
+  ids: string[];
 };
 
 export function ctx(world: object): Ctx {
@@ -83,7 +94,7 @@ export function ctx(world: object): Ctx {
   w.pbi144 ??= {
     fake: fakeBacklog(), dor: DOR, repo: "", label: "factory", backlogStatus: "Backlog", criteria: [], oversized: false, reply: "",
     requests: [], states: new Map(), seen: new Map(), runs: new Set(), filed: [], subIssues: new Map(), board: new Map(),
-    blocks: new Map(), refusals: [], errors: [], polls: 0, edits: [], appOpened: new Set(), personEdited: new Set(),
+    blocks: new Map(), refusals: [], errors: [], polls: 0, edits: [], appOpened: new Set(), personEdited: new Set(), ids: [],
   };
   return w.pbi144;
 }
@@ -118,8 +129,12 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     return { externalId: found.externalId, title: found.title, url: found.url };
   };
   return {
+    // As GitHub's adapter does, each sub-issue comes with its body and whether the App opened it, so a child filed
+    // before its parent's move to Split recorded it is found by its split marker (PBI 226, PBI 228).
     async subIssues(parentId) {
-      return (c.subIssues.get(parentId) ?? []).map(issue);
+      return Promise.all((c.subIssues.get(parentId) ?? []).map(async (id) => ({
+        ...issue(id), body: (await c.fake.adapter.getItem(id))?.body ?? "", openedByApp: true,
+      })));
     },
     async findIssues(repo, text) {
       const out: ChildIssue[] = [];
@@ -131,8 +146,9 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     },
     async createIssue(repo, title, body, labels = []) {
       refuse(c, "file", title);
+      const next = c.ids.shift();
       const externalId = await c.fake.seed({
-        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [...labels], repo, status: "", fields: {},
+        ...(next ? { externalId: next } : {}), title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: c.unlabelled?.has(title) ? [] : [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
       c.filed.push({ externalId, title, url, repo });
@@ -183,7 +199,8 @@ export function scriptedBoard(c: Ctx): SplitBoard {
 export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
-    return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+    const text = c.replies?.find((r) => a.prompt.includes(JSON.stringify(r.title)))?.reply ?? c.reply;
+    return { ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
 }
 
@@ -191,7 +208,7 @@ export function agent(c: Ctx) {
 export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
-    JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
+    JSON.stringify({ flags: [], oversized: (c.oversized && item.externalId === c.parentId) || (c.alsoOversized?.has(item.externalId) ?? false) }),
   ].join("\n");
 }
 
@@ -303,10 +320,15 @@ Given("a repo {string} whose board's backlog status is {string} and whose opt-in
   c.label = label;
 });
 
-Given("a parent issue {string} in {string} on that board, carrying the label {string}", async function (title: string, repo: string, label: string) {
+Given("a parent issue {string} in {string} on that board, carrying the label {string}", async function (named: string, repo: string, label: string) {
   const c = ctx(this);
+  // A name that starts "#N " gives the issue its number too (PBI 227).
+  const m = /^#(\d+) (.+)$/.exec(named);
+  const title = m ? m[2] : named;
   c.parentTitle = title;
-  c.parentId = await c.fake.seed({ title, body: `Redesign the checkout so a shopper can pay more ways.`, acceptanceCriteria: [], labels: [label], repo, status: c.backlogStatus });
+  c.parentId = await c.fake.seed({
+    ...(m ? { externalId: m[1] } : {}), title, body: `Redesign the checkout so a shopper can pay more ways.`, acceptanceCriteria: [], labels: [label], repo, status: c.backlogStatus,
+  });
   c.board.set(c.parentId, c.backlogStatus);
 });
 
