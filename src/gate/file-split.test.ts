@@ -76,6 +76,8 @@ describe("fileSplit", () => {
     const { s, fake, run } = await setup();
     const filed = await run();
     assert.deepEqual(filed, s.issues.map(({ body: _, labels: _l, ...i }) => i));
+    // The filed children, in the order of the split, for the parent's "Split into" (PBI 227).
+    assert.deepEqual(filed?.map((i) => [i.externalId, i.title]), [["100", "Card"], ["101", "Bank"], ["102", "Receipt"]]);
     assert.deepEqual(s.issues.map((i) => i.title), ["Card", "Bank", "Receipt"]);
     assert.deepEqual(s.subs, ["100", "101", "102"]);
     assert.deepEqual([...s.board.values()], ["Backlog", "Backlog", "Backlog"]);

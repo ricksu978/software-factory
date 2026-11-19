@@ -46,7 +46,8 @@ export type GateContext = {
 /**
  * `oversized` is the judge's reading of the item's size, false when its last line doesn't say true. `split` is null
  * when the item isn't oversized or the judge was never asked. `filed` is true when the split was filed as child issues
- * (PBI 144), which leaves the item not ready whatever its verdicts. `children` are then the issues it filed, in order.
+ * (PBI 144), which leaves the item not ready whatever its verdicts. `children` are then the issues it filed, in the order
+ * of the split (PBI 227).
  */
 export type GateResult = {
   ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean; children?: ChildIssue[];
