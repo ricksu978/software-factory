@@ -135,8 +135,8 @@ async function build(d: CellImageDeps, from: string | null, commit: string, anno
 
 /**
  * Records the commit the image the tag names now was built from, read from its label, so Floor never names a commit
- * from an earlier run. scripts/factory.ps1 builds the tag from the checkout before the worker starts, and labels it only
- * when the working tree is clean, so an image with uncommitted edits records no commit (null).
+ * from an earlier run. The AppHost's cell-image resource (PBI 206) builds the tag from the checkout before the worker
+ * starts, and labels it only when the working tree is clean, so an image with uncommitted edits records no commit (null).
  */
 async function recordTagged(d: CellImageDeps): Promise<void> {
   await writeCellImage(d.pool, { built: await taggedRevision(d) });
