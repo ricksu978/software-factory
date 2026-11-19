@@ -14,13 +14,15 @@ export type Consumer = (typeof CONSUMER)[keyof typeof CONSUMER];
 
 /**
  * Writes one `consumer` row for `eventId` per item in `itemIds`, in that order, on the caller's transaction, so the rows
- * commit or roll back with the event. No items writes no row. Each row is marked `worker_handles`, which sets it apart
- * from a row a pre-219 process writes while old and new revisions overlap (db/migrations/016_outbox_cutover.sql).
+ * commit or roll back with the event. No items writes no row. Each row's seq is also recorded in `outbox_worker_row`,
+ * which sets it apart from a row a pre-219 process writes while old and new revisions overlap
+ * (db/migrations/016_outbox_cutover.sql).
  */
 export async function writeOutboxRows(c: pg.ClientBase, consumer: Consumer, eventId: string, itemIds: string[]): Promise<void> {
   if (itemIds.length === 0) return;
   await c.query(
-    "insert into outbox (consumer, event_id, item_id, worker_handles) select $1, $2, i.id, true from unnest($3::uuid[]) with ordinality as i (id, n) order by i.n",
+    `with o as (insert into outbox (consumer, event_id, item_id) select $1, $2, i.id from unnest($3::uuid[]) with ordinality as i (id, n) order by i.n returning seq)
+     insert into outbox_worker_row (seq) select seq from o`,
     [consumer, eventId, itemIds],
   );
 }

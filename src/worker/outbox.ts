@@ -26,12 +26,13 @@ export function backoffMs(attempts: number): number {
  * the same item and consumer is still in the outbox, so one item's rows run in the order they were written, and a
  * failed one holds back only its own item's later rows. A row written while it works, such as the announcement of a
  * decision a comment command made, is handled in the same pass. Each row is taken with `for update skip locked`. A
- * row not marked `worker_handles` came from a pre-219 process that already acted on it, and is deleted unhandled.
+ * row whose seq isn't in `outbox_worker_row` came from a pre-219 process that already acted on it, and is deleted
+ * unhandled.
  */
 export async function workOutbox(deps: OutboxDeps): Promise<void> {
   // A row a pre-219 process wrote, as one still running while old and new revisions overlap in a swap (§07), was
   // already acted on by that process's own hooks, so it's removed unhandled (db/migrations/016_outbox_cutover.sql).
-  await deps.pool.query("delete from outbox where not worker_handles");
+  await deps.pool.query("delete from outbox o where not exists (select from outbox_worker_row w where w.seq = o.seq)");
   const tried: string[] = [];
   for (;;) {
     const c = await deps.pool.connect();
@@ -40,7 +41,8 @@ export async function workOutbox(deps: OutboxDeps): Promise<void> {
       await c.query("begin");
       const r = await c.query<{ seq: string; consumer: Consumer; event_id: string; item_id: string | null; attempts: number }>(
         `select o.seq, o.consumer, o.event_id, o.item_id, o.attempts from outbox o
-         where o.worker_handles and o.failed_at is null and o.next_attempt_at <= now() and o.seq <> all($1::bigint[])
+         where o.failed_at is null and o.next_attempt_at <= now() and o.seq <> all($1::bigint[])
+           and exists (select from outbox_worker_row w where w.seq = o.seq)
            and not exists (select from outbox p where p.item_id = o.item_id and p.consumer = o.consumer and p.seq < o.seq and p.failed_at is null)
          order by o.seq limit 1 for update skip locked`,
         [tried],

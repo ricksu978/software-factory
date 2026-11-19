@@ -5,6 +5,7 @@ import type { BacklogAdapter } from "../adapters/types.ts";
 import { announcement, decide } from "../control/decisions.ts";
 import { withTx } from "../store/db.ts";
 import { overrideItem, transitionItem } from "../store/items.ts";
+import { writeOutboxRows } from "../store/outbox.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { backoffMs, runRowEffects, workOutbox, type OutboxRow } from "./outbox.ts";
 
@@ -74,7 +75,7 @@ describe("workOutbox", dbTest, () => {
 
   test("a row a pre-219 process wrote is removed unhandled, and holds back none of its item's later rows", async () => {
     const id = await item("1", "Queued");
-    // An old revision still running in a swap writes its row as PBI 218's code did, naming no worker_handles, and its
+    // An old revision still running in a swap writes its row as PBI 218's code did, recording no outbox_worker_row, and its
     // own hook has already mirrored the change.
     await withTx(db.pool, async (c) => {
       const e = (await c.query<{ id: string }>(
@@ -135,7 +136,7 @@ describe("workOutbox", dbTest, () => {
         "insert into event (actor, actor_id, kind, payload) values ('system', 'github', 'webhook', $1) returning id",
         [{ event: { kind: "comment", externalId: "1", repo: "acme/app", login: "pat", body: "/approve", commentId: "c1" } }],
       )).rows[0].id;
-      await c.query("insert into outbox (consumer, event_id, item_id, worker_handles) values ('comment_commands', $1, $2, true)", [e, id]);
+      await writeOutboxRows(c, "comment_commands", e, [id]);
     });
     await workOutbox(deps());
     assert.deepEqual(await board.comments("1"), [announcement("approve", "")]);
@@ -152,7 +153,7 @@ describe("workOutbox", dbTest, () => {
         "insert into event (actor, actor_id, kind, payload, at) values ('system', 'github', 'webhook', $1, now() - interval '1 hour') returning id",
         [{ event: { kind: "comment", externalId: "1", repo: "acme/app", login: "pat", body: "/approve", commentId: "c1" } }],
       )).rows[0].id;
-      await c.query("insert into outbox (consumer, event_id, item_id, worker_handles) values ('comment_commands', $1, $2, true)", [e, id]);
+      await writeOutboxRows(c, "comment_commands", e, [id]);
     });
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Sign off the rewrite?')", [id]);
     await workOutbox(deps());
