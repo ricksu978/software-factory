@@ -8,6 +8,10 @@
 //   delay the scenario names, or never.
 // - The clock is fake: sleep() moves it on at once.
 // - The resources are fakes: starting them records, for migrate, control and the worker, the checkout's HEAD.
+// PBI 206's scenarios share these fakes, and pbi-206.steps.ts reads them through appHostCtx(). For PBI 206 the fake
+// Aspire starts the resources the start hands it as Aspire does: each starts once everything it waits for has
+// finished, several at once, and one whose wait failed never starts. A fake Docker records each build, and takes the
+// time the scenario gives it on the fake clock.
 // Commits are named in the scenarios ("aaa111"), and the steps map each name to its real sha.
 // The @local scenarios run the owner's real `aspire run`, Docker Desktop and secrets, so the owner runs them.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
@@ -16,19 +20,48 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_pr
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { StartStopped, startAppHost, type GitResult, type StartDeps } from "../../src/apphost/start.ts";
+import { StartStopped, startAppHost, type AppHostResource, type GitResult, type StartDeps } from "../../src/apphost/start.ts";
+import type { DockerBuild } from "../../src/apphost/cell-image.ts";
 
 const RESOURCES = ["migrate", "control", "worker"] as const;
 type Resource = (typeof RESOURCES)[number];
 const DESKTOP = "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe";
 
-type Event =
+/** What the fake Docker saw of one build, as it began. */
+export type BuildSeen = {
+  build: DockerBuild;
+  /** The context and Dockerfile, resolved against the checkout. */
+  context: string;
+  dockerfile: string;
+  /** The Dockerfile's text, and the files the context held, as the build read them. */
+  dockerfileText: string | null;
+  files: Record<string, string>;
+  head: string;
+  /** `git status --porcelain` in the checkout as the build began. */
+  status: string;
+  /** The status the build ended with, once it has. */
+  exit: number | null;
+};
+
+/** An image in the fake Docker. */
+export type Image = { labels: Record<string, string>; files: Record<string, string> };
+
+export type Event =
   | { kind: "git"; args: string[]; status: number; stderr: string }
   | { kind: "docker"; answered: boolean }
   | { kind: "launch"; exe: string; at: number }
-  | { kind: "start"; resource: Resource; commit: string };
+  | { kind: "start"; resource: string; commit: string; at: number }
+  | { kind: "build-start"; seen: BuildSeen; at: number }
+  | { kind: "build-end"; seen: BuildSeen; at: number }
+  | { kind: "resource-end"; resource: string; state: string; at: number };
 
-type Ctx = {
+/** A resource as the fake Aspire's dashboard shows it. */
+export type Shown = { state: "Waiting" | "Running" | "Finished" | "Failed"; log: string[] };
+
+/** The files the fake Docker copies into an image from the build's context. */
+const IMAGE_FILES = ["sop/sop.yml", "src/main.ts"];
+
+export type Ctx = {
   root: string;
   origin: string;
   seed: string;
@@ -48,7 +81,17 @@ type Ctx = {
   stopped: StartStopped | null;
   stoppedAt: number | null;
   ran: boolean;
+  /** Docker answers the start's check, then stops answering before any build. */
+  dockerStopsAfterCheck: boolean;
+  /** How long a build takes on the fake clock, and the error it fails with, if it fails. */
+  build: { ms: number; failure: string | null };
+  images: Map<string, Image>;
+  dashboard: Map<string, Shown>;
 };
+
+export function appHostCtx(world: object): Ctx {
+  return ctx(world);
+}
 
 function ctx(world: object): Ctx {
   const c = (world as { pbi205?: Ctx }).pbi205;
@@ -69,7 +112,7 @@ function write(dir: string, path: string, text: string) {
 }
 
 /** Commits a change to each of `paths` in `dir`, named `name`, and records its sha. */
-function commit(c: Ctx, dir: string, name: string, paths = [`notes/${name}.txt`]): string {
+export function commit(c: Ctx, dir: string, name: string, paths = [`notes/${name}.txt`]): string {
   for (const p of paths) {
     const file = join(dir, p);
     write(dir, p, `${existsSync(file) ? readFileSync(file, "utf8") : ""}${name} changed ${p}\n`);
@@ -81,12 +124,13 @@ function commit(c: Ctx, dir: string, name: string, paths = [`notes/${name}.txt`]
   return sha;
 }
 
-const sha = (c: Ctx, name: string) => {
+export const sha = (c: Ctx, name: string) => {
   const s = c.shas.get(name);
   assert.ok(s, `no commit named ${name}`);
   return s;
 };
-const head = (c: Ctx) => git(c.checkout, "rev-parse", "HEAD");
+export const head = (c: Ctx) => git(c.checkout, "rev-parse", "HEAD");
+export { git };
 /** Brings the seed clone to `origin`'s `main`, commits `name` there and pushes it. */
 function pushToRemote(c: Ctx, name: string, paths?: string[]) {
   git(c.seed, "fetch", "-q", "origin");
@@ -95,7 +139,7 @@ function pushToRemote(c: Ctx, name: string, paths?: string[]) {
   git(c.seed, "push", "-q", "origin", "HEAD:main");
 }
 
-Before({ tags: "@pbi-205 and not @local" }, function () {
+Before({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
   const root = mkdtempSync(join(tmpdir(), "pbi-205-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -108,14 +152,15 @@ Before({ tags: "@pbi-205 and not @local" }, function () {
     docker: { answers: "always", installed: true, delayMs: null },
     clock: Date.UTC(2026, 10, 15, 9, 0, 0), launchedAt: null, events: [], said: [], warned: [],
     stopped: null, stoppedAt: null, ran: false,
+    dockerStopsAfterCheck: false, build: { ms: 30_000, failure: null }, images: new Map(), dashboard: new Map(),
   };
-  commit(c, seed, "base", ["sop/sop.yml", "src/main.ts"]);
+  commit(c, seed, "base", ["sop/sop.yml", "src/main.ts", "cell/Dockerfile"]);
   git(seed, "push", "-q", "-u", "origin", "main");
   git(root, "clone", "-q", origin, checkout);
   (this as { pbi205?: Ctx }).pbi205 = c;
 });
 
-After({ tags: "@pbi-205 and not @local" }, function () {
+After({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
   const c = (this as { pbi205?: Ctx }).pbi205;
   if (c) rmSync(c.root, { recursive: true, force: true });
 });
@@ -228,6 +273,11 @@ function deps(c: Ctx): StartDeps {
     },
     async dockerAnswers() {
       const d = c.docker;
+      const checked = c.events.some((e) => e.kind === "docker");
+      if (checked && c.dockerStopsAfterCheck) {
+        c.events.push({ kind: "docker", answered: false });
+        return false;
+      }
       const answered = d.answers === "always"
         || (c.launchedAt !== null && d.delayMs !== null && c.clock >= c.launchedAt + d.delayMs);
       c.events.push({ kind: "docker", answered });
@@ -246,10 +296,87 @@ function deps(c: Ctx): StartDeps {
     now: () => c.clock,
     say: (line) => void c.said.push(line),
     warn: (line) => void c.warned.push(line),
-    async startResources() {
-      for (const resource of RESOURCES) c.events.push({ kind: "start", resource, commit: head(c) });
-    },
+    dockerBuild: (build, log) => fakeDockerBuild(c, build, log),
+    startResources: (resources) => fakeAspire(c, resources),
   };
+}
+
+const read = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : null);
+
+/** The fake Docker's build: it reads the context as it begins, takes the scenario's time, then tags the image. */
+async function fakeDockerBuild(c: Ctx, build: DockerBuild, log: (line: string) => void): Promise<number> {
+  const context = join(c.checkout, build.context);
+  const files: Record<string, string> = {};
+  for (const f of IMAGE_FILES) {
+    const text = read(join(context, f));
+    if (text !== null) files[f] = text;
+  }
+  const seen: BuildSeen = {
+    build: structuredClone(build), context, dockerfile: join(c.checkout, build.dockerfile),
+    dockerfileText: read(join(c.checkout, build.dockerfile)), files, head: head(c),
+    status: git(c.checkout, "status", "--porcelain"), exit: null,
+  };
+  c.events.push({ kind: "build-start", seen, at: c.clock });
+  // Lets whatever else is starting go first, as a real build would, before the fake clock moves on.
+  await new Promise((r) => setImmediate(r));
+  if (c.dockerStopsAfterCheck) {
+    log("ERROR: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?");
+    seen.exit = 1;
+  } else {
+    c.clock += c.build.ms;
+    if (c.build.failure !== null) {
+      log(`ERROR: ${c.build.failure}`);
+      seen.exit = 1;
+    } else {
+      c.images.set(build.tag, { labels: { ...build.labels }, files });
+      seen.exit = 0;
+    }
+  }
+  c.events.push({ kind: "build-end", seen, at: c.clock });
+  return seen.exit;
+}
+
+/**
+ * The fake Aspire. A resource starts once every resource it waits for has finished, and never when one of them failed.
+ * Several start at once. One with work of its own finishes or fails with it. migrate finishes once started, and the
+ * rest run. 205's resources come from the same graph, so it records each one's start with the checkout's HEAD.
+ */
+async function fakeAspire(c: Ctx, resources: AppHostResource[]): Promise<void> {
+  for (const r of resources) c.dashboard.set(r.name, { state: "Waiting", log: [] });
+  const shown = (name: string) => c.dashboard.get(name);
+  const running = new Set<Promise<void>>();
+  /** Starts one resource whose waits have all finished, and says whether there was one. */
+  const startOne = (): boolean => {
+    const r = resources.find((x) => shown(x.name)!.state === "Waiting" && x.waitsFor.every((w) => shown(w)?.state === "Finished"));
+    if (!r) return false;
+    const s = shown(r.name)!;
+    s.state = "Running";
+    c.events.push({ kind: "start", resource: r.name, commit: head(c), at: c.clock });
+    if (!r.run) {
+      if (r.name === "migrate") s.state = "Finished";
+      return true;
+    }
+    const p: Promise<void> = r.run((line) => void s.log.push(line)).then(
+      () => void (s.state = "Finished"),
+      (e: unknown) => {
+        s.state = "Failed";
+        s.log.push(e instanceof Error ? e.message : String(e));
+      },
+    ).finally(() => {
+      c.events.push({ kind: "resource-end", resource: r.name, state: s.state, at: c.clock });
+      running.delete(p);
+    });
+    running.add(p);
+    return true;
+  };
+  const startReady = () => {
+    while (startOne());
+  };
+  startReady();
+  while (running.size > 0) {
+    await Promise.race(running);
+    startReady();
+  }
 }
 
 When("the AppHost starts", async function () {
@@ -464,14 +591,14 @@ function resources(): Map<string, string> {
   }
 }
 
-type Local = { branch: string; behind: number; remote: string; dockerUp: boolean; run: ChildProcess | null; headAtFirstResource: string | null };
-const lctx = (world: object): Local => {
+export type Local = { branch: string; behind: number; remote: string; dockerUp: boolean; run: ChildProcess | null; headAtFirstResource: string | null };
+export const lctx = (world: object): Local => {
   const w = world as { pbi205local?: Local };
   w.pbi205local ??= { branch: "", behind: -1, remote: "", dockerUp: false, run: null, headAtFirstResource: null };
   return w.pbi205local;
 };
 
-After({ tags: "@pbi-205 and @local" }, function () {
+After({ tags: "(@pbi-205 or @pbi-206) and @local" }, function () {
   const l = (this as { pbi205local?: Local }).pbi205local;
   if (l?.run) {
     sh(`aspire stop ${APPHOST}`);

@@ -3,7 +3,10 @@
 // and a pull that fails stops the start with git's own message. On any other branch, or on no branch, it warns that it
 // runs the checkout as it is and pulls nothing. Then, when Docker doesn't answer, it launches Docker Desktop and waits
 // up to 3 minutes for it. aspire-apphost/apphost.mts calls startAppHost() with the real git, Docker and clock, and
-// passes the resources' start as startResources.
+// passes the resources' start as startResources. The resources it hands over include "cell-image" (PBI 206), which
+// builds factory-cell:local from the pulled checkout, and the worker waits for it.
+
+import { buildCellImage, CELL_IMAGE_RESOURCE, type CellImageDeps, type DockerBuild } from "./cell-image.ts";
 
 /** What one git command in the checkout returned. */
 export type GitResult = { status: number; stdout: string; stderr: string };
@@ -24,9 +27,37 @@ export type StartDeps = {
   say(line: string): void;
   /** Shows a warning on the AppHost's console. */
   warn(line: string): void;
-  /** Starts migrate, control, the worker and the rest. Called only once the checks above have passed. */
-  startResources(): Promise<void>;
+  /** Runs `docker build` in the checkout, passing each line of its output to `log`. Resolves to its exit status. */
+  dockerBuild(build: DockerBuild, log: (line: string) => void): Promise<number>;
+  /**
+   * Starts migrate, control, the worker and the rest. Called only once the checks above have passed, with the resources
+   * whose order the start decides: each starts only once every resource it waits for has finished.
+   */
+  startResources(resources: AppHostResource[]): Promise<void>;
 };
+
+/**
+ * A resource in the AppHost's dashboard. It starts once every resource in `waitsFor` has finished, and never when one
+ * of them failed. `run`, when there is one, is the work the AppHost does for it: it finishes when `run` resolves, and
+ * fails, with the error in its log, when `run` throws.
+ */
+export type AppHostResource = { name: string; waitsFor: string[]; run?: (log: (line: string) => void) => Promise<void> };
+
+/**
+ * The resources whose order the start decides, and what each waits for. aspire-apphost/apphost.mts wires the same waits
+ * itself, and apphost-graph.test.ts fails when they differ. Under `aspire run` the cell-image resource is
+ * cell-image-main.ts, which runs the same buildCellImage() through runCellImageResource().
+ */
+export function appHostResources(deps: CellImageDeps): AppHostResource[] {
+  return [
+    { name: "migrate", waitsFor: [] },
+    // The egress proxy and every cell run factory-cell:local, so the worker waits for it to be built from this checkout
+    // (PBI 206). The pull has finished by the time any resource starts, so it builds the pulled commit.
+    { name: CELL_IMAGE_RESOURCE, waitsFor: [], run: (log) => buildCellImage(deps, log) },
+    { name: "control", waitsFor: ["migrate"] },
+    { name: "worker", waitsFor: ["migrate", CELL_IMAGE_RESOURCE] },
+  ];
+}
 
 /** How long a start waits for Docker Desktop to answer once it has launched it. */
 export const DOCKER_WAIT_MS = 3 * 60_000;
@@ -45,7 +76,7 @@ export const DOCKER_POLL_MS = 3_000;
 export async function startAppHost(deps: StartDeps): Promise<void> {
   pullMain(deps);
   await ensureDocker(deps);
-  await deps.startResources();
+  await deps.startResources(appHostResources(deps));
 }
 
 /** Git's own words for a failed command, stderr first, as it printed them. */

@@ -4,9 +4,11 @@
 //   slow: the scheduler tick has run for 5 minutes, in step "expiring leases"
 //   slow: the poll of board <backlog_source.url> has run for 10 minutes, in step "listing new and changed items"
 //   slow: the cell API request POST /stage for run <run id> has been open for 60 seconds
+//   slow: the model gateway request POST /v1/messages for run <run id> has had no upstream answer for 60 seconds
 //
 // A tick or a poll warns at 5 minutes and every 5 minutes after, naming the step it is in at that moment. A cell API
-// request warns at 60 seconds. Every warning stops once the work ends, whether it ended well or with an error.
+// request warns at 60 seconds. A model gateway request warns once, at 60 seconds, if its upstream hasn't sent its
+// response headers by then (PBI 154). Every warning stops once the work ends, whether it ended well or with an error.
 //
 // The tick's steps: "applying overrides", "stopping every cell", "expiring leases", "chasing questions", "polling
 // merged CI" and "starting the next item". The poll's steps: "reading the board", "listing new and changed items",

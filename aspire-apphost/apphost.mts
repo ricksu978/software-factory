@@ -102,6 +102,17 @@ await control.withEnvironment('CELL_CONTROL_URL', cellControlUrl);
 const controlPort = await control.getEndpoint('http').property(EndpointProperty.Port);
 await control.withEnvironment('DASHBOARD_ORIGIN', refExpr`http://localhost:${controlPort}`);
 
+// The cell image (PBI 206): the egress proxy and every cell run factory-cell:local, so under `aspire run` the AppHost
+// builds it from this checkout, with the checkout's cell/Dockerfile, as a resource of its own that the worker waits for.
+// It starts, like every resource, only after the start checks' pull, so it builds the pulled checkout. It labels the
+// image with HEAD's commit only when the checkout has no uncommitted edits. A build that fails exits 1, so the
+// dashboard shows it as failed with Docker's error in its console, and the worker never starts. src/apphost/start.ts's
+// appHostResources() holds the same order, which the scenarios run, and src/apphost/apphost-graph.test.ts runs this
+// file against a fake Aspire to check its waits match that list. `aspire publish` builds nothing.
+const cellImage = runMode
+  ? await builder.addNodeApp('cell-image', repo, 'src/apphost/cell-image-main.ts').withNpm({ install: false })
+  : null;
+
 // The worker (redesign step 2): the egress proxy, the scheduler's tick, and the board poller with its judge. It has no
 // endpoint. It hands cells the cell API's address and lets that port through the egress proxy.
 const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
@@ -117,6 +128,7 @@ const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withEnvironment('CELL_IMAGE', 'factory-cell:local')
   .withEnvironment('CELL_CONTROL_URL', cellControlUrl)
   .waitForCompletion(migrate, { exitCode: 0 });
+if (cellImage) await worker.waitForCompletion(cellImage, { exitCode: 0 });
 
 // The BFF (redesign step 7a, src/bff/main.ts): signs people in and keeps sessions in Postgres as factory_bff. It runs
 // on 7403 beside today's dashboard on 7400 until the cut-over moves it, and floats with the others under
