@@ -4,7 +4,7 @@ import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { tmpdir } from "node:os";
-import { childBody, factoryFiled, fileSplit, priorFiling } from "./file-split.ts";
+import { childBody, factoryFiled, fileSplit, priorFiling, type ChildIssue } from "./file-split.ts";
 import { keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, rewritePrompt } from "./repair.ts";
 import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
@@ -46,10 +46,10 @@ export type GateContext = {
 /**
  * `oversized` is the judge's reading of the item's size, false when its last line doesn't say true. `split` is null
  * when the item isn't oversized or the judge was never asked. `filed` is true when the split was filed as child issues
- * (PBI 144), which leaves the item not ready whatever its verdicts.
+ * (PBI 144), which leaves the item not ready whatever its verdicts. `children` are then the issues it filed, in order.
  */
 export type GateResult = {
-  ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean;
+  ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean; children?: ChildIssue[];
   /** The item as it was last gated, when the gate rewrote its body and gated it again (PBI 264). */
   item?: FactoryItem;
 };
@@ -271,8 +271,8 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
       blocked ? `${proposalKey}:unfiled:${ctx.readinessSha}` : proposalKey);
   }
   // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
-  const filed = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : false;
-  if (filed) return { ready: false, results, oversized, split, filed };
+  const children = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : null;
+  if (children) return { ready: false, results, oversized, split, filed: true, children };
   const failed = results.filter((r) => r.status !== "passed");
   // PBI 264: a child the factory filed that fails dor.md lines is rewritten once and gated again, its result standing.
   if (mayRepair && failed.length > 0 && !split?.proposed) {
