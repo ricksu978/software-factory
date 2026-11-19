@@ -43,7 +43,11 @@ export type StartDeps = {
  */
 export type AppHostResource = { name: string; waitsFor: string[]; run?: (log: (line: string) => void) => Promise<void> };
 
-/** The resources whose order the start decides, and what each waits for. */
+/**
+ * The resources whose order the start decides, and what each waits for. aspire-apphost/apphost.mts wires the same waits
+ * itself, and apphost-graph.test.ts fails when they differ. Under `aspire run` the cell-image resource is
+ * cell-image-main.ts, which runs the same buildCellImage() through runCellImageResource().
+ */
 export function appHostResources(deps: CellImageDeps): AppHostResource[] {
   return [
     { name: "migrate", waitsFor: [] },

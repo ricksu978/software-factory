@@ -107,7 +107,8 @@ await control.withEnvironment('DASHBOARD_ORIGIN', refExpr`http://localhost:${con
 // It starts, like every resource, only after the start checks' pull, so it builds the pulled checkout. It labels the
 // image with HEAD's commit only when the checkout has no uncommitted edits. A build that fails exits 1, so the
 // dashboard shows it as failed with Docker's error in its console, and the worker never starts. src/apphost/start.ts's
-// appHostResources() holds the same order, which the scenarios run. `aspire publish` builds nothing.
+// appHostResources() holds the same order, which the scenarios run, and src/apphost/apphost-graph.test.ts runs this
+// file against a fake Aspire to check its waits match that list. `aspire publish` builds nothing.
 const cellImage = runMode
   ? await builder.addNodeApp('cell-image', repo, 'src/apphost/cell-image-main.ts').withNpm({ install: false })
   : null;
