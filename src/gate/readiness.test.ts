@@ -177,8 +177,8 @@ describe("gate: an oversized item (PBI 143)", () => {
     const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
     assert.equal(out.ready, false);
     assert.equal(out.filed, true);
-    // The filed children, in order, which the poller keeps on the parent (PBI 226).
-    assert.deepEqual(out.children?.map((c) => c.externalId), ["100", "101"]);
+    // The filed children, in order, which the poller keeps on the parent (PBI 226) and shows under "Split into" (PBI 227).
+    assert.deepEqual(out.children?.map((c) => [c.externalId, c.url]), [["100", "u0"], ["101", "u1"]]);
     const all = await s.fake.comments(s.id);
     assert.equal(all.filter((b) => b.startsWith("The factory can't start")).length, 0);
     assert.match(all.find((b) => b.startsWith("The factory proposes splitting"))!, /files each child as a sub-issue/);

@@ -609,6 +609,24 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/ci-checks?sha=0ff0ff0")).body, { checks: null });
   });
 
+  test("GitHub answering 5xx or not answering gets the cell 503, saying GitHub failed, and a bug of its own still gets 500 (PBI 259)", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    const fail = (e: Error) => { host.checksOnSha = async () => { throw e; }; };
+    fail(Object.assign(new Error("Bad Gateway"), { name: "HttpError", status: 502 }));
+    let r = await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234");
+    assert.equal(r.status, 503);
+    assert.match(JSON.stringify(r.body), /GitHub failed/);
+    fail(Object.assign(new Error("connect ECONNREFUSED"), { name: "HttpError", status: 500, cause: new TypeError("fetch failed") }));
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).status, 503);
+    fail(Object.assign(new Error("Not Found"), { name: "HttpError", status: 404 }));
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).status, 500);
+    fail(new Error("a bug"));
+    assert.equal((await send(cell.runId, cell.token, "GET", "/checks?sha=abc1234")).status, 500);
+  });
+
   test("policy results: dod rows are stored, and a person verdict outside dod.md gets 400", async () => {
     const cell = await claimed();
     const results = (file: string, status: string) => ({ file, source: "repo", stageId: "green", attempt: 1, checkedSha: "abc1234", verdicts: [{ index: 1, criterion: "Tests pass", status, reason: "r" }] });

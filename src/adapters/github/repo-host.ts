@@ -1,6 +1,6 @@
 // GitHub as a RepoHost. The control plane runs it on the App's installation token; a cell gets only the PR methods
 // it needs, on the short-lived token from /github-token (Run contract 6).
-import { Octokit } from "@octokit/core";
+import { TimedOctokit } from "./timed.ts";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
 import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
@@ -544,5 +544,5 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
 /** What a cell may do on GitHub, on the token the control plane minted for its run. Checks come through the cell API. */
 export function cellRepoHost(getToken: () => Promise<string>): PrMethods {
-  return prMethods(async () => new Octokit({ auth: await getToken() }) as unknown as GitHubClient);
+  return prMethods(async () => new TimedOctokit({ auth: await getToken() }) as unknown as GitHubClient);
 }

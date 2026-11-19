@@ -4,6 +4,7 @@
 import { BlobSASPermissions, BlobServiceClient } from "@azure/storage-blob";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
+import { githubFailed } from "../adapters/github/errors.ts";
 import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
 import { SOP_MOVED } from "../cell/sop-move.ts";
 import type { ItemEvent } from "../core/states.ts";
@@ -549,7 +550,12 @@ export function cellApi(deps: CellApiDeps): Handler {
         json(res, 200, result);
       } catch (e) {
         if (e instanceof Fenced) json(res, 409, { error: "this run's lease generation has moved on" });
-        else throw e;
+        // GitHub failing or out of reach behind the cell API is 503, so the cell retries it, and 500 stays for the
+        // cell API's own faults (PBI 259).
+        else if (githubFailed(e)) {
+          console.error(`the cell API request ${name} for run ${m[1]}: GitHub failed:`, e);
+          json(res, 503, { error: `GitHub failed: ${e instanceof Error ? e.message : String(e)}` });
+        } else throw e;
       }
       return true;
     });
