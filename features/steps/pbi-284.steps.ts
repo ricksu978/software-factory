@@ -315,7 +315,9 @@ async function call(world: object, method: string, path: string, opts: { auth?: 
       method, headers, redirect: "manual",
       body: opts.raw ? new Uint8Array(opts.raw) : (opts.body === undefined ? undefined : JSON.stringify(opts.body)),
     });
-    const text = await r.text();
+    // An event stream stays open for minutes, so only its first chunk is read.
+    const stream = (r.headers.get("content-type") ?? "").includes("text/event-stream");
+    const text = stream ? await firstChunk(r) : await r.text();
     let json: unknown;
     try {
       json = JSON.parse(text);
@@ -327,6 +329,13 @@ async function call(world: object, method: string, path: string, opts: { auth?: 
     // Nothing answered. The Then that reads the reply fails on it.
     c.reply = { status: null, text: "", error: String((e as Error).cause ?? e) };
   }
+}
+
+async function firstChunk(r: Response): Promise<string> {
+  const reader = r.body!.getReader();
+  const { value } = await reader.read();
+  await reader.cancel();
+  return new TextDecoder().decode(value);
 }
 
 const bearer = (token: string) => `Bearer ${token}`;

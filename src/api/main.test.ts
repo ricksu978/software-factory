@@ -100,9 +100,7 @@ describe("the API", dbTest, () => {
     assert.equal((await as("vera", "/v1/blobs/secrets/key.txt")).status, 404);
   });
 
-  test("/v1/events gives the activity log as JSON, and a stream to a caller that asks for one", async () => {
-    const log = await (await as("vera", "/v1/events")).json();
-    assert.ok(Array.isArray(log.events));
+  test("/v1/events streams server-sent events", async () => {
     const ctl = new AbortController();
     const r = await as("vera", "/v1/events", { headers: { accept: "text/event-stream" }, signal: ctl.signal });
     assert.equal(r.status, 200);

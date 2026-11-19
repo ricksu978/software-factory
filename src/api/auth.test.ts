@@ -33,7 +33,6 @@ describe("the API's bearer tokens", () => {
   test("discovery finds the issuer's key set", async () => {
     fullDiscovery();
     assert.equal(String(await discoverJwks(issuer)), `${issuer}/certs`);
-    assert.equal(String(await discoverJwks(`${issuer}/`)), `${issuer}/certs`, "a trailing slash on the issuer changes nothing");
   });
 
   test("discovery with no jwks_uri refuses, naming jwks_uri", async () => {
@@ -43,6 +42,18 @@ describe("the API's bearer tokens", () => {
 
   test("discovery naming another issuer refuses", async () => {
     discovery = { issuer: "http://elsewhere.test", jwks_uri: `${issuer}/certs` };
+    await assert.rejects(discoverJwks(issuer), /issuer/);
+  });
+
+  test("discovery naming the issuer with a different trailing slash refuses, since tokens are checked exactly", async () => {
+    fullDiscovery();
+    await assert.rejects(discoverJwks(`${issuer}/`), /issuer/);
+    discovery = { issuer: `${issuer}/`, jwks_uri: `${issuer}/certs` };
+    await assert.rejects(discoverJwks(issuer), /issuer/);
+  });
+
+  test("discovery naming no issuer refuses", async () => {
+    discovery = { jwks_uri: `${issuer}/certs` };
     await assert.rejects(discoverJwks(issuer), /issuer/);
   });
 

@@ -12,8 +12,8 @@ export type VerifyBearer = (authorization: string | undefined) => Promise<Caller
 const ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"];
 
 /**
- * Reads `issuer`'s discovery document and returns its jwks_uri. Throws when the document can't be read, names another
- * issuer, or has no jwks_uri. A provider that publishes no keys issues tokens the API can't check (design §04).
+ * Reads `issuer`'s discovery document and returns its jwks_uri. Throws when the document can't be read, names an issuer
+ * that isn't exactly `issuer` (not even by a trailing slash), or has no jwks_uri. A provider that publishes no keys issues tokens the API can't check (design §04).
  */
 export async function discoverJwks(issuer: string): Promise<URL> {
   const url = `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
@@ -25,8 +25,10 @@ export async function discoverJwks(issuer: string): Promise<URL> {
   } catch (e) {
     throw new Error(`refusing to start the API: the issuer's discovery document at ${url} can't be read (${(e as Error).message})`);
   }
-  if (typeof doc.issuer === "string" && doc.issuer.replace(/\/+$/, "") !== issuer.replace(/\/+$/, "")) {
-    throw new Error(`refusing to start the API: the discovery document at ${url} names the issuer ${doc.issuer}, not ${issuer}`);
+  // Exactly, as jwtVerify compares each token's iss: an issuer off by a trailing slash would start, then refuse every
+  // valid token.
+  if (doc.issuer !== issuer) {
+    throw new Error(`refusing to start the API: the discovery document at ${url} names the issuer ${JSON.stringify(doc.issuer)}, not ${JSON.stringify(issuer)}, and every token's issuer must match the configured one exactly`);
   }
   if (typeof doc.jwks_uri !== "string" || !doc.jwks_uri) {
     throw new Error(`refusing to start the API: the issuer's discovery document at ${url} has no jwks_uri, so its tokens can't be checked`);

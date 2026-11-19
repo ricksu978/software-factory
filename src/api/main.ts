@@ -12,7 +12,7 @@ import type pg from "pg";
 import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
 import { decide, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
-import { activity, BLOB_PATH, floor, phase0, tokenBanner } from "../http/routes.ts";
+import { BLOB_PATH, floor, phase0, tokenBanner } from "../http/routes.ts";
 import { blobReader } from "../main.ts";
 import { createPool, withTx } from "../store/db.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
@@ -162,10 +162,8 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     return c.body(stored, 200, { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
   });
 
-  // Server-sent events for a caller that asks for them, each stream ended after five minutes. Anyone else gets the
-  // activity log: the 100 newest events as JSON.
+  // Server-sent events, each stream ended after five minutes. The activity log's read endpoint is PBI 286's.
   app.get("/v1/events", async (c) => {
-    if (!(c.req.header("accept") ?? "").includes("text/event-stream")) return c.json({ events: await activity(d.pool) });
     // Listen first, so no event is missed between the stream opening and the LISTEN taking effect.
     await feed.listen();
     return streamSSE(c, async (stream) => {
