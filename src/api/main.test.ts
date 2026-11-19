@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { main, MAX_JSON, MAX_WEBHOOK, startApi, type Api } from "./main.ts";
+import { cleanPath, main, MAX_JSON, MAX_WEBHOOK, startApi, type Api } from "./main.ts";
 
 describe("the API at startup", () => {
   test("names every setting it lacks, before it connects or listens", async () => {
@@ -14,6 +14,22 @@ describe("the API at startup", () => {
   test("refuses a PORT that isn't a port", async () => {
     const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", PORT: "web" };
     await assert.rejects(main(env), /PORT web isn't a port/);
+  });
+});
+
+describe("the API's raw-path guard", () => {
+  test("refuses the dashboard routing test's dot-segment paths, encoded separators in either case, and spelled-out routes", () => {
+    for (const path of [
+      "/webhooks/github/%2e%2e/%2e%2e/v1/items/x/decisions", "/v1/items/%2e/x/decisions", "/x/../v1/items/x/decisions", "/v1/./items",
+      "/v1/items%2fx", "/v1/items%2Fx", "/v1/items%5cx", "/v1/items%5Cx", "/v1/%2E%2E/floor", "/v1//../floor",
+      "/%761/floor", "/v1/items/x/decisi%6fns", "/v1/overrid%65s", "/webhooks/githu%62", "/v1/%", "/v1/%E2",
+    ]) assert.equal(cleanPath(path), false, path);
+  });
+
+  test("takes a path that is already its normalised form", () => {
+    for (const path of ["/", "/v1/floor", "/v1/items/00000000-0000-4000-8000-000000000001/decisions", "/webhooks/github"]) {
+      assert.equal(cleanPath(path), true, path);
+    }
   });
 });
 
@@ -76,6 +92,13 @@ describe("the API", dbTest, () => {
     assert.equal(await raw("/v1/items%2fx"), 400);
     assert.equal(await raw("/v1/%2e%2e/floor"), 400);
     assert.equal(await raw("/v1/floor"), 401, "a clean path reaches the bearer check");
+  });
+
+  test("a path that spells part of a route in percent-encoding is refused, as is one with a broken escape", async () => {
+    for (const path of ["/%761/floor", "/v1/flo%6fr", "/v1/item%73/x", "/%77ebhooks/github", "/v1/items/%E2%82%AC", "/v1/items/%zz", "/v1/items/%E2"]) {
+      assert.equal(await raw(path), 400, path);
+    }
+    assert.equal(await raw("/v1/floor?x=%2e%2e%2f"), 401, "the query string doesn't count");
   });
 
   test("a 401 tells the caller to bring a bearer token", async () => {
