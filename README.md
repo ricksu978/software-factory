@@ -40,6 +40,8 @@ Run the same command each time you start the factory. Ctrl+C stops it. Postgres 
 
 Aspire keeps the AppHost's parameters per checkout, in that checkout's user secrets, so each new clone or worktree asks for them once. On a start with any missing, the Aspire dashboard shows **Unresolved parameters**. Select **Enter values**, fill in the form, and tick **Save to user secrets** so the next start asks nothing. The factory's resources wait until every value is in. The form hides secret values. After pasting a token copied with `Set-Clipboard`, clear it with `Set-Clipboard -Value $null`, and remove it from clipboard history (Win+V) if that's on. To change one later, run `pwsh scripts/set-local-secrets.ps1` and press Enter to keep the ones you don't change.
 
+The factory reads the App's `.pem` from its path on every start, so keep the file where `github-app-key-path` points. A checkout set up before this took the key itself as `github-app-key`, which nothing reads now. Remove that copy of the key with `aspire secret delete Parameters:github-app-key`.
+
 | Parameter | What to enter |
 |---|---|
 | `claude-oauth-token` | The token `claude setup-token` printed |
