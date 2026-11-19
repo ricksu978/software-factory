@@ -159,6 +159,25 @@ describe("the API", dbTest, () => {
     assert.equal((await post({ kind: "requeue", itemId, reason: "r" })).status, 409, "an InProgress item isn't re-queued");
   });
 
+  test("an item override refuses Start now on an InProgress item and moves a Queued one through the queue", async () => {
+    const post = (b: unknown) => as("otto", "/v1/overrides", { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post({ kind: "start_now", itemId, reason: "r" })).status, 409, "an InProgress item can't be started now");
+    assert.equal((await post({ kind: "move_up", itemId, reason: "r" })).status, 409, "an InProgress item isn't in the queue");
+    const source = (await db.pool.query<{ source_id: string }>("select source_id from item where id = $1", [itemId])).rows[0].source_id;
+    const [a, b] = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000a2"];
+    await db.pool.query("insert into item (id, source_id, external_id, title, state) values ($1, $3, 'q1', 'q1', 'Queued'), ($2, $3, 'q2', 'q2', 'Queued')", [a, b, source]);
+    try {
+      assert.equal((await post({ kind: "move_up", itemId: b, reason: "first" })).status, 201);
+      const moves = (await db.pool.query("select kind, value from override where target_id = $1 and cleared_at is null", [b])).rows;
+      assert.equal(moves.length, 1);
+      assert.equal(moves[0].kind, "move_up");
+      assert.ok(moves[0].value, "a move keeps its new queue key");
+    } finally {
+      await db.pool.query("delete from override where target_id = any($1)", [[a, b]]);
+      await db.pool.query("delete from item where id = any($1)", [[a, b]]);
+    }
+  });
+
   test("a second WIP pin replaces the first", async () => {
     for (const value of [2, 4]) {
       assert.equal((await as("otto", "/v1/overrides", { method: "POST", body: JSON.stringify({ kind: "wip", value, reason: "pin" }) })).status, 201);

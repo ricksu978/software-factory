@@ -46,7 +46,7 @@ const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue", "st
  * NotReady, Queued, or waiting on a question that's been answered. Move up and Move down fit an item in the factory
  * queue: Queued, or answered.
  */
-async function selectable(pool: pg.Pool, id: string, state: string): Promise<{ startable: boolean; movable: boolean }> {
+export async function selectable(pool: pg.Pool, id: string, state: string): Promise<{ startable: boolean; movable: boolean }> {
   let answered = false;
   if (state === "SignOff" || state === "NeedsInput") {
     answered = (await pool.query(

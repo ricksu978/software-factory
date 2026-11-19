@@ -12,9 +12,10 @@ import type pg from "pg";
 import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
 import { decide, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
-import { BLOB_PATH, floor, phase0, tokenBanner } from "../http/routes.ts";
+import { BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
 import { blobReader } from "../main.ts";
 import { createPool, withTx } from "../store/db.ts";
+import { moveInQueue } from "../store/items.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readinessSpend } from "../store/readiness-checks.ts";
 import { handleWebhook } from "../watcher/webhook.ts";
@@ -47,7 +48,7 @@ type User = { id: string; role: Role; product_owner: boolean; github_login: stri
 type Env = { Bindings: Partial<HttpBindings>; Variables: { user: User } };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart", "wip"];
-const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue"];
+const ITEM_KINDS: OverrideKind[] = ["hold", "unhold", "stop_run", "requeue", "start_now", "move_up", "move_down"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ROLES: Role[] = ["viewer", "operator", "owner"];
 /** The largest webhook delivery the API reads, as today's handler in src/main.ts allows. */
@@ -206,6 +207,17 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
       const state = (await d.pool.query<{ state: string }>("select state from item where id = $1", [itemId])).rows[0]?.state;
       if (!state) throw new Refused(404, "no such item");
       if (kind === "requeue" && state !== "Failed" && state !== "Abandoned") throw new Refused(409, "only a Failed or Abandoned item can be re-queued");
+      if (kind === "start_now" || kind === "move_up" || kind === "move_down") {
+        const can = await selectable(d.pool, itemId, state);
+        if (kind === "start_now" && !can.startable) throw new Refused(409, "only an Eligible, NotReady or Queued item, or one whose question was answered, can be started now");
+        if (kind !== "start_now" && !can.movable) throw new Refused(409, "only an item in the factory queue, Queued or answered, can move up or down it");
+      }
+    }
+    // A move takes its new rank from its neighbours in the queue, so it's worked out and logged in one go (PBI 265).
+    if (itemId && (kind === "move_up" || kind === "move_down")) {
+      await withTx(d.pool, (tx) => moveInQueue(tx, itemId, kind === "move_up" ? "up" : "down", { reason, createdBy: user.id }));
+      console.log(`override: user ${user.id} set the ${kind} on item ${itemId}: ${JSON.stringify(reason)}`);
+      return c.json({ ok: true }, 201);
     }
     await withTx(d.pool, (tx) => setOverride(tx, {
       scope: itemId ? "item" : "factory", targetId: itemId, kind, reason, createdBy: user.id, expiresAt: null,
