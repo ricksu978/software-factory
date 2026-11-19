@@ -142,6 +142,9 @@ describe("cleanSummary with a note after the wrapper (PBI 297)", () => {
     for (const reply of [
       "```markdown\n## Problem\n\nX.\n\n## Fix\n\nRun:\n```\n\nnpm test\n```\n\nDone.\n```",
       "```markdown\n## Problem\n\nX.\n\nSee:\n```\n\nnpm test\n\n```\n\nok\n```",
+      // The bare block's closing fence has text right before and right after it, so it isn't spaced as an opening fence.
+      "```markdown\n## Problem\n\nX.\n\n## Fix\n\nRun:\n```\n\nnpm test\n```\nDone.\n```",
+      "```markdown\n## Problem\n\nX.\n\nRun:\n```\n\nnpm test\n```\nThen merge.\n```",
     ]) {
       const r = cleanSummary(reply);
       assert.ok("finding" in r, reply);

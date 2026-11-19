@@ -130,9 +130,9 @@ function closes(line: string, o: { char: string; len: number }): boolean {
  * block follows only in the second reading, a line spaced as a closing fence is returned as `ambiguous`: a bare block
  * that starts with a blank line is spaced just like a wrapper's end before a note whose code block holds a `## ` line,
  * and closing the wrapper there would silently drop the sections after that block. So is one whose block, read as a
- * bare block, closes at a fence with a blank line, or nothing, after it: a bare block that starts with a blank line,
- * with text after it in the body's last section, reads just like that, while a note's code block opens at a fence with
- * its code right after it. Spaced any other way, it opens a
+ * bare block, closes at a fence not spaced as an opening fence: a bare block that starts with a blank line, with text
+ * after it in the body's last section, reads like that, while a note's code block opens at a fence with a blank line
+ * before it and its code right after it. Spaced any other way, it opens a
  * bare block: agents often leave the language off a code block, and a bare block before more sections is far likelier
  * than such a note. Any other line
  * that both readings fit is returned as `ambiguous`, which gives a finding, since either guess could drop part of the
@@ -152,7 +152,7 @@ function wrapperEnd(lines: string[], from: number, wrapper: { char: string; len:
       const look = spacing(lines, i);
       const own = opening(line)!;
       const end = lines.findIndex((l, j) => j > i && closes(l, own));
-      if (look === "closing") return heading || (lines[end + 1] ?? "").trim() === "" ? { ambiguous: i } : i;
+      if (look === "closing") return heading || spacing(lines, end) !== "opening" ? { ambiguous: i } : i;
       if (!heading && (look !== "opening" || spacing(lines, end) !== "closing")) return { ambiguous: i };
     }
     const o = opening(line);
