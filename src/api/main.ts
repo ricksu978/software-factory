@@ -12,13 +12,14 @@ import type pg from "pg";
 import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
 import { decide, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
-import { BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
+import { activity, BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
 import { blobReader } from "../main.ts";
 import { createPool, withTx } from "../store/db.ts";
 import { moveInQueue } from "../store/items.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readinessSpend } from "../store/readiness-checks.ts";
 import { handleWebhook } from "../watcher/webhook.ts";
+import { activityLog } from "./activity.ts";
 import { bearerVerifier, discoverJwks, type VerifyBearer } from "./auth.ts";
 import { eventFeed, STREAM_MS } from "./events.ts";
 import { itemDetail } from "./items.ts";
@@ -163,7 +164,10 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     return c.body(stored, 200, { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
   });
 
-  // Server-sent events, each stream ended after five minutes. The activity log's read endpoint is PBI 286's.
+  // The activity log: the 100 newest events, newest first, with only what today's /activity page shows (PBI 286).
+  app.get("/v1/activity", async (c) => c.json({ events: activityLog(await activity(d.pool)) }));
+
+  // Server-sent events, each stream ended after five minutes.
   app.get("/v1/events", async (c) => {
     // Listen first, so no event is missed between the stream opening and the LISTEN taking effect.
     await feed.listen();

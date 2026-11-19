@@ -100,6 +100,20 @@ describe("the API", dbTest, () => {
     assert.equal((await as("vera", "/v1/blobs/secrets/key.txt")).status, 404);
   });
 
+  test("the activity log lists events newest first, without what the page hides", async () => {
+    await db.pool.query(
+      `insert into event (at, actor, actor_id, item_id, kind, payload) values
+         ('2026-11-19T09:00:00Z', 'system', 'test', $1, 'transition', '{"from":"Queued","to":"InProgress","event":"claimed","detail":"hidden-detail"}'),
+         ('2026-11-19T09:10:00Z', 'human', 'test', $1, 'decision', '{"text":"hidden-text","from":"A","to":"B"}')`, [itemId]);
+    const r = await as("vera", "/v1/activity");
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.ok(!text.includes("hidden-detail") && !text.includes("hidden-text"), text);
+    const { events } = JSON.parse(text) as { events: { kind: string; from: string | null; event: string | null }[] };
+    const mine = events.filter((e) => e.kind === "transition" || e.kind === "decision");
+    assert.deepEqual(mine.map((e) => [e.kind, e.from, e.event]), [["decision", null, null], ["transition", "Queued", "claimed"]]);
+  });
+
   test("/v1/events streams server-sent events", async () => {
     const ctl = new AbortController();
     const r = await as("vera", "/v1/events", { headers: { accept: "text/event-stream" }, signal: ctl.signal });
