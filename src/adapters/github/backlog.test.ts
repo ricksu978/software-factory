@@ -16,7 +16,7 @@ describe("githubBacklog", () => {
   });
 
   // An org-owned board goes through the installation client, so one stub serves both the board and the issues.
-  function orgBoard(comments: { body: string; user: { type: string } }[], failFirstLookup = false) {
+  function orgBoard(comments: { body: string; user: { type: string } }[], failFirstLookup = false, map: FieldMap = fieldMap) {
     const posted: string[] = [];
     let lookups = 0;
     const client = {
@@ -31,12 +31,12 @@ describe("githubBacklog", () => {
           return { organization: { projectV2: { id: "P1", fields: { nodes: [] } } } };
         }
         return { node: { items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
-          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [] },
+          id: "I1", updatedAt: "2026-11-06T00:00:00Z", fieldValues: { nodes: [{ field: { name: "Size" }, text: "3" }, { field: { name: "Priority" }, number: 1 }] },
           content: { number: 7, title: "t", body: "", state: "OPEN", createdAt: "2026-11-05T08:00:00Z", updatedAt: "2026-11-06T00:00:00Z", repository: { nameWithOwner: "o/r" }, labels: { nodes: [{ name: "factory" }] } },
         }] } } };
       },
     };
-    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap });
+    const adapter = githubBacklog({ app: { octokit: client, getInstallationOctokit: async () => client }, installationId: 1, owner: { type: "org", login: "acme" }, projectToken: null, projectNumber: 1, fieldMap: map });
     return { adapter, posted };
   }
 
@@ -53,6 +53,15 @@ describe("githubBacklog", () => {
     const { adapter } = orgBoard([], true);
     await assert.rejects(adapter.getItem("7"), /rate limited/);
     assert.equal((await adapter.getItem("7"))?.externalId, "7");
+  });
+
+  test("Priority comes through to order the claims, and is judged only when it's a readiness field (PBI 320)", async () => {
+    const own = await orgBoard([]).adapter.getItem("7");
+    assert.deepEqual(own?.fields, { Size: "3", Priority: "1" });
+    assert.deepEqual(own?.orderOnly, ["Priority"]);
+    const judged = await orgBoard([], false, { ...fieldMap, readinessFields: ["Size", "Priority"] }).adapter.getItem("7");
+    assert.deepEqual(judged?.fields, { Size: "3", Priority: "1" });
+    assert.equal(judged?.orderOnly, undefined);
   });
 
   test("an item carries its issue's creation time (PBI 187)", async () => {

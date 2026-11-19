@@ -163,7 +163,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       acceptanceCriteria: acceptanceCriteria(c.body ?? "", cfg.fieldMap.acceptanceCriteriaHeading),
       labels: (c.labels?.nodes ?? []).map((l) => l.name), status: values.get(cfg.fieldMap.statusField) ?? "", rank,
       repo: c.repository.nameWithOwner,
-      fields: Object.fromEntries(cfg.fieldMap.readinessFields.filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      // The Priority field orders the claims (PBI 320), so it comes through beside the readiness fields. It's judged only
+      // when the repo lists it as a readiness field too.
+      fields: Object.fromEntries([...new Set([...cfg.fieldMap.readinessFields, "Priority"])].filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      ...(cfg.fieldMap.readinessFields.includes("Priority") ? {} : { orderOnly: ["Priority"] }),
       closed: c.state !== "OPEN", updatedAt: [raw.updatedAt, c.updatedAt ?? ""].sort().at(-1)!,
       ...(c.createdAt ? { createdAt: c.createdAt } : {}),
     };
