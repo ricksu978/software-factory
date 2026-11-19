@@ -12,6 +12,7 @@ import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { cellModelEnv } from "../../src/control/model-gateway.ts";
 import { long } from "./pbi-8.steps.ts";
 import { ctx as ctx134, type Ctx as Ctx134 } from "./pbi-134.steps.ts";
 
@@ -144,7 +145,7 @@ When("item {string}'s cell sends a model request to {string}", long, async funct
   const sent: Sent = { ext, path, abort, done: false, promise: Promise.resolve() };
   sent.promise = fetch(`${await cellApiUrl(c134)}/internal/model${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer sk-ant-oat01-${credential}`, "content-type": "application/json", [HEADER]: ext },
+    headers: { authorization: `Bearer ${cellModelEnv({ gatewayUrl: "http://gateway.test", credential }).CLAUDE_CODE_OAUTH_TOKEN}`, "content-type": "application/json", [HEADER]: ext },
     body,
     signal: abort.signal,
   }).then(

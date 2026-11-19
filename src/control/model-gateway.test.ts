@@ -364,7 +364,10 @@ describe("model gateway slow line (PBI 154)", () => {
     }
   }
 
-  function open(gatewayPort: number, path = "/v1/messages", auth = "Bearer sk-ant-oat01-ok") {
+  /** The Authorization header a cell sends for a credential, built the way the cell's own env is. */
+  const bearer = (credential: string) => `Bearer ${cellModelEnv({ gatewayUrl: "http://gateway.test", credential }).CLAUDE_CODE_OAUTH_TOKEN}`;
+
+  function open(gatewayPort: number, path = "/v1/messages", auth = bearer("ok")) {
     const events: string[] = [];
     const req = request({ host: "127.0.0.1", port: gatewayPort, method: "POST", path, headers: { authorization: auth, "content-type": "application/json" } }, (res) => {
       events.push(`status ${res.statusCode}`);
@@ -431,7 +434,7 @@ describe("model gateway slow line (PBI 154)", () => {
 
   test("a refused request never starts a watch", async () => {
     await withGateway("hang", async ({ clock, lines, gatewayPort }) => {
-      const { events } = open(gatewayPort, "/v1/messages", "Bearer sk-ant-oat01-forged");
+      const { events } = open(gatewayPort, "/v1/messages", bearer("forged"));
       for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
       assert.deepEqual(events, ["status 401"]);
       assert.equal(clock.pending(), 0);
