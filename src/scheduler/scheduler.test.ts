@@ -405,6 +405,9 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(await state(id), { state: "SignOff", held: false });
     const q = (await db.pool.query("select asked_at, reminders_sent from question where item_id = $1", [id])).rows[0];
     assert.deepEqual(q, { asked_at: NOW, reminders_sent: 0 });
+    // The board comment quotes the question again, from the transition's payload (PBI 219).
+    const ev = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'reopened_signoff'", [id])).rows[0];
+    assert.equal(ev.payload.question, "q");
   });
 
   test("re-queueing an item withdrawn from NotReady sends it back to Eligible, not Queued (PBI 168)", async () => {
