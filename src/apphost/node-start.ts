@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { DockerBuild } from "./cell-image.ts";
 import { StartStopped, startAppHost, type StartDeps } from "./start.ts";
 
 /** Where Docker Desktop installs on Windows, per user and machine-wide, as scripts/factory.ps1 looks. */
@@ -22,6 +23,41 @@ function dockerAnswers(): Promise<boolean> {
   });
 }
 
+/** The arguments of `docker build` for one build, after `build`. Plain progress, so its log reads line by line. */
+export function dockerBuildArgs(build: DockerBuild): string[] {
+  const args = ["build", "--progress=plain", "-f", build.dockerfile, "-t", build.tag];
+  for (const [k, v] of Object.entries(build.labels)) args.push("--label", `${k}=${v}`);
+  return [...args, build.context];
+}
+
+/**
+ * Runs `docker build` in `repo`, passing each line it prints, stdout and stderr alike, to `log`, and resolves to its
+ * exit status. A docker CLI that can't be run logs why and resolves to 1. `docker` is the command, for tests.
+ */
+export function dockerBuild(repo: string, build: DockerBuild, log: (line: string) => void, docker = "docker"): Promise<number> {
+  return new Promise((resolve) => {
+    const p = spawn(docker, dockerBuildArgs(build), { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
+    for (const stream of [p.stdout, p.stderr]) {
+      let rest = "";
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk: string) => {
+        const lines = (rest + chunk).split(/\r?\n/);
+        rest = lines.pop() ?? "";
+        for (const l of lines) log(l);
+      });
+      stream.on("end", () => {
+        if (rest) log(rest);
+        rest = "";
+      });
+    }
+    p.on("error", (e) => {
+      log(`Couldn't run ${docker}: ${e.message}`);
+      resolve(1);
+    });
+    p.on("close", (code) => resolve(code ?? 1));
+  });
+}
+
 /** The start's deps for the checkout at `repo`, apart from starting the resources. */
 export function nodeStartDeps(repo: string): Omit<StartDeps, "startResources"> {
   return {
@@ -35,9 +71,7 @@ export function nodeStartDeps(repo: string): Omit<StartDeps, "startResources"> {
     launch(exe) {
       spawn(exe, [], { detached: true, stdio: "ignore" }).unref();
     },
-    async dockerBuild() {
-      throw new Error("dockerBuild isn't built yet (PBI 206)");
-    },
+    dockerBuild: (build, log) => dockerBuild(repo, build, log),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
     say: (line) => console.log(line),

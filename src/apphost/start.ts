@@ -3,9 +3,10 @@
 // and a pull that fails stops the start with git's own message. On any other branch, or on no branch, it warns that it
 // runs the checkout as it is and pulls nothing. Then, when Docker doesn't answer, it launches Docker Desktop and waits
 // up to 3 minutes for it. aspire-apphost/apphost.mts calls startAppHost() with the real git, Docker and clock, and
-// passes the resources' start as startResources.
+// passes the resources' start as startResources. The resources it hands over include "cell-image" (PBI 206), which
+// builds factory-cell:local from the pulled checkout, and the worker waits for it.
 
-import type { CellImageDeps, DockerBuild } from "./cell-image.ts";
+import { buildCellImage, CELL_IMAGE_RESOURCE, type CellImageDeps, type DockerBuild } from "./cell-image.ts";
 
 /** What one git command in the checkout returned. */
 export type GitResult = { status: number; stdout: string; stderr: string };
@@ -43,11 +44,14 @@ export type StartDeps = {
 export type AppHostResource = { name: string; waitsFor: string[]; run?: (log: (line: string) => void) => Promise<void> };
 
 /** The resources whose order the start decides, and what each waits for. */
-export function appHostResources(_deps: CellImageDeps): AppHostResource[] {
+export function appHostResources(deps: CellImageDeps): AppHostResource[] {
   return [
     { name: "migrate", waitsFor: [] },
+    // The egress proxy and every cell run factory-cell:local, so the worker waits for it to be built from this checkout
+    // (PBI 206). The pull has finished by the time any resource starts, so it builds the pulled commit.
+    { name: CELL_IMAGE_RESOURCE, waitsFor: [], run: (log) => buildCellImage(deps, log) },
     { name: "control", waitsFor: ["migrate"] },
-    { name: "worker", waitsFor: ["migrate"] },
+    { name: "worker", waitsFor: ["migrate", CELL_IMAGE_RESOURCE] },
   ];
 }
 
