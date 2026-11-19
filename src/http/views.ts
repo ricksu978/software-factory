@@ -195,8 +195,9 @@ export type SplitRow = Issue & { id: string; title: string; children: SplitChild
 
 /**
  * A Split parent's children (PBI 227), in the order of the split: each child's "#N" linking to its issue, its title, and
- * the state the factory holds it in, or "Not in the factory" while nobody has put the opt-in label on it. A URL that
- * isn't a web address makes no link.
+ * the state the factory holds it in, or "Not in the factory" while it holds none: no poll has listed the child yet,
+ * or the child is without the opt-in label, because the owner took it off or a split of a factory-filed item filed it
+ * unlabelled (PBI 237). A URL that isn't a web address makes no link.
  */
 function splitInto(children: SplitChildView[]): string {
   const ref = (k: SplitChildView) => (/^https?:\/\//.test(k.url) ? `<a href="${escapeHtml(k.url)}">#${escapeHtml(k.externalId)}</a>` : `#${escapeHtml(k.externalId)}`);
