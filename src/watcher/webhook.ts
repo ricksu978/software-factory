@@ -22,14 +22,13 @@ export type WebhookDeps = {
   pool: pg.Pool;
   secret: string;
   parse: (headers: Record<string, string>, body: unknown) => FactoryWebhookEvent;
-  /** Runs once a new `comment` event has committed, so /approve and /answer comments reach `applyComment` (Task 15). */
-  onComment?: (e: Extract<FactoryWebhookEvent, { kind: "comment" }>) => Promise<unknown>;
 };
 
 /**
  * 401 for a bad signature, with nothing written. 400 for a signed body with no delivery id or no JSON. Otherwise the
  * delivery id, one `webhook` event and, for a comment, its outbox rows go in together: 204 the first time, 200 with no
- * event for a redelivery.
+ * event for a redelivery. The worker runs a comment's /approve, /changes or /answer from those rows (PBI 219), so a
+ * redelivery never applies the same comment twice.
  */
 export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<string, string | undefined>; rawBody: Buffer }): Promise<{ status: 200 | 204 | 400 | 401 }> {
   const headers = Object.fromEntries(Object.entries(req.headers).filter((e): e is [string, string] => typeof e[1] === "string").map(([k, v]) => [k.toLowerCase(), v]));
@@ -72,12 +71,6 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
   // A failed move is logged, not thrown: the delivery is already recorded, so GitHub's redelivery would be dropped,
   // and the poller's next pass catches the same merge, close or review from the PR's state.
   await applyPrEvent(deps.pool, event).catch((e) => console.error(`applying ${event.kind} failed, the poller retries it:`, e));
-  // Only after the commit and with the client back in the pool, and without holding up GitHub's 204. A redelivery
-  // returned above, so the same comment is never applied twice.
-  if (event.kind === "comment" && deps.onComment) {
-    const comment = event;
-    void deps.onComment(comment).catch((e) => console.error(`applying comment ${comment.commentId} failed:`, e));
-  }
   return { status: 204 };
 }
 

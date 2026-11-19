@@ -1,7 +1,7 @@
 // The cell API as its own service (redesign step 4a, 2026-11-07 design §06 and §12). It answers cells on port 7401:
 // today's cell routes under /internal/cells and the model gateway under /internal/model. Today's control plane,
-// src/main.ts, no longer serves them. Until the outbox lands (step 3), it registers mirrorBoard and the console log
-// for the transitions its routes commit, as the control plane did for them.
+// src/main.ts, no longer serves them. The worker mirrors the transitions its routes commit from their outbox rows
+// (PBI 219).
 import { App } from "@octokit/app";
 import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { Server } from "node:http";
@@ -10,9 +10,7 @@ import { githubRepoHost } from "../adapters/github/repo-host.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { stageAfter } from "../config/sop.ts";
-import { mirrorBoard } from "../control/board.ts";
 import { blobUploadUrl, cellApi } from "../control/cell-api.ts";
-import { logTransitions } from "../control/console-log.ts";
 import { startServer, type Handler } from "../http/server.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { createPool } from "../store/db.ts";
@@ -45,16 +43,13 @@ export function cellApiHandler(d: CellApiDeps): Handler {
   });
 }
 
-/** The cell API's handlers on `port`, once its settings are read, with board mirroring for the transitions it commits. */
+/** The cell API's handlers on `port`, once its settings are read. */
 export async function serveCellApi(d: CellApiDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
-  const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
-  const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   // Bound on every interface, as the control plane is, so a cell reaches it over IPv4 or IPv6.
   const server = await startServer([cellApiHandler(d)], { port, host: "::" });
   return {
     server,
     async stop() {
-      for (const off of hooks) off();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

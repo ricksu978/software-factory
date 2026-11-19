@@ -1,8 +1,8 @@
 // The worker (control plane redesign, §07, step 2 of §12). It sets up the egress proxy that cells reach the outside
 // through, runs the scheduler's tick, and polls each board with the readiness judge. Today's control plane,
-// src/main.ts, runs none of them, so each job runs in one process. Until the outbox lands (step 3), the worker mirrors
-// its own transitions onto the board, as the control plane mirrors its own. `aspire run` starts it as the worker
-// resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
+// src/main.ts, runs none of them, so each job runs in one process. It also works through the outbox (PBI 219): it
+// mirrors every process's transitions and overrides onto the board, runs comment commands and announces decisions.
+// `aspire run` starts it as the worker resource. A worker runs its jobs only while it holds the factory's worker lock, a session-level Postgres advisory lock
 // on a connection of its own (PBI 157). One that can't take it stands by, and one whose lock connection closes exits.
 // Each scheduler tick records the worker's heartbeat, the time it started, in worker_heartbeat (PBI 158). It builds the
 // cell image from `main`'s fetched commit before the egress proxy, which runs from it, and then keeps it current with
@@ -14,8 +14,6 @@ import { githubRepoHost } from "../adapters/github/repo-host.ts";
 import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { haikuJudge, runAgent } from "../agent/run.ts";
-import { mirrorBoard } from "../control/board.ts";
-import { logTransitions } from "../control/console-log.ts";
 import type { SplitDeps } from "../gate/split.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
@@ -26,6 +24,7 @@ import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { mainDefaults } from "./main-defaults.ts";
+import { OUTBOX_MS, workOutbox } from "./outbox.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
 
@@ -51,6 +50,8 @@ export type WorkerDeps = {
   secret: string;
   sopVersion: string;
   tickMs?: number;
+  /** How often it works through the outbox. OUTBOX_MS by default. */
+  outboxMs?: number;
   /**
    * The clock each scheduler tick reads its time from, once, as the tick starts. That time is the tick's `now`, and the
    * worker's heartbeat records it (PBI 158). `new Date()` by default.
@@ -157,7 +158,7 @@ async function lockConnection(pool: pg.Pool, onClose: (why: string) => void) {
 
 /**
  * Takes the worker lock, or stands by for it, and returns at once either way. Once it holds the lock, it sets up the egress
- * proxy, then starts mirroring, the tick and one poll loop per board. A standby does none of that: it tries for the lock
+ * proxy, then starts the outbox loop, the tick and one poll loop per board. A standby does none of that: it tries for the lock
  * again every `lockRetryMs`. A worker whose lock connection closes stops its jobs and its `done` rejects. startWorker
  * throws if the lock connection can't be opened, or if the proxy fails for a worker that took the lock at once.
  */
@@ -256,10 +257,9 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
   };
 }
 
-/** Starts mirroring, the tick and one poll loop per board. Returns the call that stops them all. */
+/** Starts the outbox loop, the tick and one poll loop per board. Returns the call that stops them all. */
 function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log" | "error">): () => Promise<void> {
   const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
-  const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   let ticked = false;
   const ciMemo: CiMemo = new Map();
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
@@ -282,6 +282,7 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
     if (!ticked) log.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs, log)];
+  loops.push(every(d.outboxMs ?? OUTBOX_MS, "working through the outbox", () => workOutbox({ pool: d.pool, backlogFor, repoHost: d.repoHost }), runs, log));
   // The default policies come from the commit of `main` the cell image loop last fetched into the checkout, so a merged
   // change to one re-checks NotReady items on the next poll with no restart (PBI 261).
   const defaults = d.cellImage && mainDefaults(d.cellImage);
@@ -297,7 +298,6 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   }
   return async () => {
     await Promise.all(loops.map((stop) => stop()));
-    for (const off of hooks) off();
   };
 }
 

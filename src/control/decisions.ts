@@ -68,27 +68,18 @@ export async function decide(c: pg.PoolClient, d: Decision): Promise<Outcome> {
   return "applied";
 }
 
-const announcement: Record<DecisionKind, string> = {
+const announcements: Record<DecisionKind, string> = {
   approve: "Scenarios signed off. The factory locks them and starts Red.",
   changes: "Scenarios sent back for changes. The factory rewrites them and asks for sign-off again.",
   answer: "Answer received. The factory picks the item up again.",
 };
 
 /**
- * Runs `decide` in its own transaction and, once it's applied, comments the decision on the PBI. The decision has
- * committed by then, so a failed comment is logged and the outcome stays `applied`.
+ * The comment that announces an applied decision on the item, quoting its text. The worker posts it from the decision's
+ * outbox row (PBI 219), so the dashboard and a comment command only apply the decision, and it's announced once.
  */
-export async function decideAndAnnounce(deps: { pool: pg.Pool; adapter: BacklogAdapter }, d: Decision, externalId: string): Promise<Outcome> {
-  const outcome = await withTx(deps.pool, (c) => decide(c, d));
-  if (outcome === "applied") {
-    const note = d.text ? `\n\n> ${d.text.replace(/\n/g, "\n> ")}` : "";
-    try {
-      await deps.adapter.comment(externalId, `${announcement[d.kind]}${note}`, `decision:${d.itemId}:${d.kind}:${Date.now()}`);
-    } catch (e) {
-      console.error(`decision on item ${d.itemId} applied, but its PBI comment failed:`, e);
-    }
-  }
-  return outcome;
+export function announcement(kind: DecisionKind, text: string): string {
+  return text ? `${announcements[kind]}\n\n> ${text.replace(/\n/g, "\n> ")}` : announcements[kind];
 }
 
 const refusal: Record<DecisionKind, string> = {
@@ -100,7 +91,9 @@ const refusal: Record<DecisionKind, string> = {
 /**
  * Applies an item comment that starts with /approve, /changes or /answer. It must be on the item's own repo, since
  * the same issue number exists in every repo. The author's GitHub login must map to an allowlisted user with the
- * right role. A refused command gets one reply naming who may decide, and changes nothing.
+ * right role. A refused command gets one reply naming who may decide, keyed on the comment, and changes nothing. An
+ * applied one goes through `decide` alone, so its announcement comes from the decision's outbox row. The worker runs
+ * it from the comment's outbox row (PBI 219).
  */
 export async function applyComment(
   deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string },
@@ -114,7 +107,7 @@ export async function applyComment(
   if (!fi?.repo || fi.repo.toLowerCase() !== e.repo.toLowerCase()) return "ignored";
   const user = (await deps.pool.query<{ id: string }>(`select id from "user" where lower(github_login) = lower($1)`, [e.login])).rows[0];
   const outcome = user
-    ? await decideAndAnnounce(deps, { itemId: item.id, userId: user.id, kind: command.kind, text: command.text, via: "comment" }, e.externalId)
+    ? await withTx(deps.pool, (c) => decide(c, { itemId: item.id, userId: user.id, kind: command.kind, text: command.text, via: "comment" }))
     : "forbidden";
   if (outcome === "forbidden") await deps.adapter.comment(e.externalId, `@${e.login} ${refusal[command.kind]}`, `refused:${e.commentId}`);
   return outcome;
