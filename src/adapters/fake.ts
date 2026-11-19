@@ -145,7 +145,7 @@ type PostedReview = { repo: string; prNumber: number; commitSha: string; body: s
  * GitHub's does: on an open PR, from a trusted login in any case, once it has stood for THREAD_SETTLE_MS. A review that
  * requests changes counts when it has a body, or when a comment outside the factory's threads carries its author and
  * `submittedAt`, which is how the fake ties a comment to its review.
- * It records each review postReview posts in `postedReviews`, and each thread resolveThread resolves in `resolvedThreads`,
+ * It records each review postReview posts in `postedReviews`, and as a `commented` review by `factory[bot]` in the PR's `reviews`, and each thread resolveThread resolves in `resolvedThreads`,
  * once, so the engine's tests can read what a stage posted. Each line comment a posted review carries opens a thread by
  * `factory[bot]` in `reviewComments`, which postReview returns. diffLines answers from `diffs`, by `repo#number@sha`, and
  * with null for a commit it holds no diff for, as GitHub's does when it can't give the whole diff (PBI 266).
@@ -290,8 +290,14 @@ export function fakeRepoHost(): RepoHost & {
     async commentOnPr(repo, n, body) {
       pr(repo, n).comments.push(body);
     },
+    async prReviews(repo, n) {
+      return [...pr(repo, n).reviews].sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
+        .map((r, i) => ({ id: `review-${i + 1}`, author: r.author, state: r.state, body: r.body ?? "" }));
+    },
     async postReview({ repo, prNumber, commitSha, body, comments }) {
       postedReviews.push({ repo, prNumber, commitSha, body, comments: comments.map(({ path, line, body }) => ({ path, line, body })), event: "COMMENT" });
+      // The review is one of the PR's, by the factory's bot, as on GitHub (PBI 318).
+      prs.find((p) => p.repo === repo && p.number === prNumber)?.reviews.push({ state: "commented", submittedAt: new Date().toISOString(), author: "factory[bot]", body });
       // Each line comment opens a thread by the factory's bot, as on GitHub.
       const key = `${repo}#${prNumber}`;
       const threads = comments.map(({ path, line, body }) => ({ threadId: `review-thread-${++openedThreads}`, path, line, body }));

@@ -282,7 +282,20 @@ describe("githubRepoHost", () => {
 
   test("the cell's repo host can post a review, resolve a thread and read the open threads", () => {
     const host = cellRepoHost(async () => "t");
-    for (const k of ["postReview", "resolveThread", "openReviewComments"] as const) assert.equal(typeof host[k], "function", k);
+    for (const k of ["postReview", "resolveThread", "openReviewComments", "prReviews"] as const) assert.equal(typeof host[k], "function", k);
+  });
+
+  test("prReviews lists the PR's submitted reviews oldest first, with each author's login and state (PBI 318)", async () => {
+    const { calls, host } = stubGitHub({ "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [
+      { id: 1, state: "COMMENTED", body: "The factory's PR review, round 1", user: { login: "factory[bot]" } },
+      { id: 2, state: "PENDING", body: "draft", user: { login: "owner" } },
+      { id: 3, state: "APPROVED", body: null, user: { login: "owner" } },
+    ] });
+    assert.deepEqual(await host.prReviews("o/r", 3), [
+      { id: "1", author: "factory[bot]", state: "commented", body: "The factory's PR review, round 1" },
+      { id: "3", author: "owner", state: "approved", body: "" },
+    ]);
+    assert.deepEqual(calls[0].params, { owner: "o", repo: "r", pull_number: 3, per_page: 100 });
   });
 
   test("postReview ignores an event a caller slips in", async () => {

@@ -54,7 +54,7 @@ type Ctx = {
   operator?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi265?: Ctx };
   w.pbi265 ??= { items: new Map(), nextRank: 1, boardCalls: [], pages: new Map() };
   return w.pbi265;
@@ -71,7 +71,7 @@ function kindOf(control: string): string {
   return k;
 }
 
-function itemOf(world: object, name: string) {
+export function itemOf(world: object, name: string) {
   const it = ctx(world).items.get(name);
   assert.ok(it, `no item "${name}" was set up`);
   return it;
@@ -140,7 +140,7 @@ async function seedBoard(world: object, name: string, ext: string, rank: number,
 }
 
 /** Puts an item on the board and in the factory's database in `state`, below every item already there. */
-async function newItem(world: object, name: string, state: ItemState): Promise<string> {
+export async function newItem(world: object, name: string, state: ItemState): Promise<string> {
   const c = p89(world);
   const m = ctx(world);
   assert.ok(!m.items.has(name), `item "${name}" was set up twice`);
@@ -156,7 +156,7 @@ async function newItem(world: object, name: string, state: ItemState): Promise<s
   return id;
 }
 
-async function openRun(id: string, stage: string): Promise<void> {
+export async function openRun(id: string, stage: string): Promise<void> {
   await pool().query(
     "insert into run (item_id, run_number, next_stage, config_sha, sop_version, scenarios_sha) values ($1, 1, $2, 'pinned', 'default@1', 'scen')",
     [id, stage],
@@ -176,7 +176,7 @@ async function waiting(world: object, name: string, kind: "needs_input" | "sign_
   );
 }
 
-async function inState(world: object, name: string, state: string): Promise<void> {
+export async function inState(world: object, name: string, state: string): Promise<void> {
   switch (state) {
     case "in NeedsInput with its question answered": return waiting(world, name, "needs_input", 60_000);
     case "in NeedsInput with its question unanswered": return waiting(world, name, "needs_input", null);
@@ -203,8 +203,15 @@ Given(re(`item "([^"]+)" is in (NeedsInput with its question|SignOff with its si
   await waiting(this, name, what.startsWith("SignOff") ? "sign_off" : "needs_input", ms);
 });
 
+// An item a step before already set up Queued, as PBI 320's scenarios do, keeps its place, so long as the board order holds.
 Given(re(`items ${LIST} are Queued, in that board order`), async function (list: string) {
-  for (const name of names(list)) await newItem(this, name, "Queued");
+  const all = names(list);
+  for (const name of all) {
+    if (ctx(this).items.has(name)) assert.equal(await stateOf(this, name), "Queued", `item "${name}" isn't Queued`);
+    else await newItem(this, name, "Queued");
+  }
+  const ranks = all.map((n) => itemOf(this, n).rank);
+  assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), `items ${list} aren't in that board order`);
 });
 
 Given(re(`items ${LIST} are Queued, and item "([^"]+)" is NotReady, in the board order ${LIST}`), async function (queued: string, notReady: string, order: string) {
@@ -214,13 +221,13 @@ Given(re(`items ${LIST} are Queued, and item "([^"]+)" is NotReady, in the board
   for (const name of all) await newItem(this, name, states.get(name)!);
 });
 
-async function orderBoard(world: object, order: string[]): Promise<void> {
+export async function orderBoard(world: object, order: string[]): Promise<void> {
   const m = ctx(world);
   for (const [i, name] of order.entries()) {
     const it = itemOf(world, name);
     it.rank = i + 1;
     const fi = await p89(world).fake!.adapter.getItem(it.ext);
-    await seedBoard(world, name, it.ext, it.rank, fi ?? {});
+    await seedBoard(world, name, it.ext, it.rank, { ...fi, rank: it.rank });
     await pool().query("update item set backlog_rank = $2 where id = $1", [it.id, it.rank]);
   }
   m.nextRank = order.length + 1;
@@ -277,7 +284,7 @@ When(re(`the operator re-queues item "([^"]+)" with the reason "([^"]*)"`), asyn
 
 // ---- pages ----
 
-async function fetchPage(world: object, path: string, login: string): Promise<string> {
+export async function fetchPage(world: object, path: string, login: string): Promise<string> {
   const c = p89(world);
   const r = await fetch(`${c.origin}${path}`, { headers: headers(login), redirect: "manual" });
   const page = await r.text();
@@ -285,7 +292,7 @@ async function fetchPage(world: object, path: string, login: string): Promise<st
   return page;
 }
 
-async function openItem(world: object, name: string, login: string): Promise<string> {
+export async function openItem(world: object, name: string, login: string): Promise<string> {
   const page = await fetchPage(world, `/items/${itemOf(world, name).id}`, login);
   const m = ctx(world);
   m.pages.set(name, page);
@@ -434,7 +441,7 @@ When(re(`the poller reads the board, still ordered ${LIST}`), long, async functi
   await poll(this);
 });
 
-async function poll(world: object): Promise<void> {
+export async function poll(world: object): Promise<void> {
   const c = p89(world);
   await pollOnce({
     pool: pool(), adapter: c.fake!.adapter, repoHost: c.host!, sourceId: c.sourceId!,
@@ -483,7 +490,7 @@ async function moves(world: object, name: string, events: ItemEvent[]): Promise<
   });
 }
 
-async function stateOf(world: object, name: string): Promise<ItemState> {
+export async function stateOf(world: object, name: string): Promise<ItemState> {
   return (await pool().query<{ state: ItemState }>("select state from item where id = $1", [itemOf(world, name).id])).rows[0].state;
 }
 
@@ -512,6 +519,8 @@ When(re(`the item's author fixes item "([^"]+)" and the readiness gate passes it
 When(re(`item "([^"]+)" reaches (Done|Failed|Abandoned|Split)`), async function (name: string, state: ItemState) {
   const it = itemOf(this, name);
   await withTx(pool(), (c) => overrideItem(c, it.id, state, { actor: "system", actorId: "pbi-265" }, `the scenario moves it to ${state}`));
+  // PBI 320's items reach Done from InReview, outside any WIP slot, so the slot stays free for the next claim.
+  if ((this as { finishKeepsSlotFree?: boolean }).finishKeepsSlotFree) return;
   await pool().query("update wip_policy set current_wip = greatest(current_wip - 1, 0)");
 });
 

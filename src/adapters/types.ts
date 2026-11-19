@@ -6,8 +6,19 @@ export type FactoryItem = {
   repo: string | null; fields: Record<string, string>; closed: boolean; updatedAt: string;
   /** When the item's issue was created, as an ISO time, where the backlog knows it (PBI 187). */
   createdAt?: string;
+  /**
+   * The names in `fields` that come through only to order the claims, such as Priority (PBI 320), and that the
+   * readiness check doesn't judge. A field the repo also lists as a readiness field isn't here.
+   */
+  orderOnly?: string[];
 };
-// fields holds the values of FieldMap.readinessFields, such as { Size: "8" }
+// fields holds the values of FieldMap.readinessFields, such as { Size: "8" }, and any field named in orderOnly
+
+/** The fields the readiness check judges: an item's fields without those that only order the claims (PBI 320). */
+export function judgedFields(fi: Pick<FactoryItem, "fields" | "orderOnly">): Record<string, string> {
+  const skip = new Set(fi.orderOnly ?? []);
+  return Object.fromEntries(Object.entries(fi.fields).filter(([k]) => !skip.has(k)));
+}
 
 export type FactoryWebhookEvent =
   | { kind: "item_changed"; externalId: string }
@@ -212,6 +223,11 @@ export interface RepoHost {
   defaultBranchSha(repo: string): Promise<string>;
   /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;
+  /**
+   * The PR's submitted reviews, oldest first, each with its author's login, its state and its body. The PR review stage
+   * reads the factory's own among them for the last round an earlier claim posted (PBI 318).
+   */
+  prReviews(repo: string, prNumber: number): Promise<Review[]>;
   /** Adds a reply to one review thread, as the address stage does when it answers a comment instead of changing code. */
   replyToThread(repo: string, threadId: string, body: string): Promise<void>;
   /** Posts a comment on the PR itself, as the address stage does to answer a review summary, which has no thread. */

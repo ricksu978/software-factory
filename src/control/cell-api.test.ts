@@ -277,6 +277,7 @@ describe("cell API", dbTest, () => {
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       scenarioNotes: [],
       trustedComments: [],
+      trustedBot: "factory[bot]",
       stageAttempts: { specify: 2 },
       resume: null,
     });

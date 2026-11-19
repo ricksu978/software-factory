@@ -11,7 +11,7 @@ import { decideAndAnnounce, revivable, type DecisionKind } from "../control/deci
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
-import { LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
+import { claimKeys, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
@@ -160,10 +160,19 @@ async function floor(pool: pg.Pool) {
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails].map((r) => r.id));
+  // PBI 320: each item's priority and group, and every final-stage item, an item in the group through a dependent
+  // included, wherever it is, in the order the group is claimed.
+  const keys = await claimKeys(pool);
+  const finalIds = [...keys].filter(([, k]) => k.finalStage).sort(([, a], [, b]) => a.priority - b.priority).map(([id]) => id);
+  const finalRows = (await pool.query<{ id: string; external_id: string; title: string; state: string }>(
+    "select id, external_id, title, state from item where id = any($1::uuid[])", [finalIds],
+  )).rows;
+  const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
+    keys, finalStage: withRepo(finalStage),
     baseFails: withRepo(baseFails), mainBreaks,
     restart, cellImage: await readCellImage(pool),
   };
@@ -307,6 +316,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
      order by o.created_at desc limit 1`, [id],
   )).rows[0] ?? null;
   const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
+  const claim = (await claimKeys(pool, [id])).get(id) ?? null;
   return {
     item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
@@ -315,6 +325,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
       ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
       : null,
     startNow,
+    claim,
     durations,
   };
 }

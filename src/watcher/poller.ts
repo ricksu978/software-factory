@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
+import { judgedFields, loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
@@ -9,7 +9,9 @@ import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
-import { keepSplit, keptSplit } from "../store/splits.ts";
+import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
+import { doneChildren, filedChildren, keepSplit, keptSplit, keptSplits } from "../store/splits.ts";
+import { filedFromMarkers, type ChildIssue } from "../gate/file-split.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -73,7 +75,20 @@ export function criteriaHash(criteria: string[]): string {
  * it. Its open dependencies aren't judged (PBI 237): the scheduler skips a Queued item whose `blocked_by` isn't empty.
  */
 export function readinessItemHash(fi: FactoryItem): string {
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: fi.fields, repo: fi.repo });
+  // A field that only orders the claims, such as Priority when the repo doesn't judge it (PBI 320), doesn't re-gate.
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: judgedFields(fi), repo: fi.repo });
+}
+
+/** The board field an item's priority is read from (PBI 320). */
+export const PRIORITY_FIELD = "Priority";
+
+/**
+ * An item's own priority from its board fields (PBI 320): the Priority field's value when it's a whole number from 1
+ * to 5, where 1 is the highest, and 3 when it's missing or anything else.
+ */
+export function boardPriority(fields: Record<string, string>): number {
+  const raw = String(fields[PRIORITY_FIELD] ?? "").trim();
+  return /^[1-5]$/.test(raw) ? Number(raw) : 3;
 }
 
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
@@ -200,7 +215,7 @@ export async function readinessFingerprint(d: {
 /**
  * One pass over a backlog source. In order: new and edited items; the PRs of InReview, InProgress and NeedsInput items;
  * withdrawals, criteria changes and dependencies of the other items the factory holds; re-gates after a readiness
- * input changed; and the gate on every Eligible item. Each item's failure is its own, so a judge on a usage limit or
+ * input changed; the gate on every Eligible item; and Split parents whose children are all Done. Each item's failure is its own, so a judge on a usage limit or
  * one unreachable PR never stops merge or withdrawal detection for the rest, and the cursor is always saved.
  */
 export async function pollOnce(deps: PollDeps): Promise<{ seen: number; cursor: string }> {
@@ -231,7 +246,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       const fi = await adapter.getItem(ext);
       fetched.set(ext, fi);
       if (fi) {
-        await pool.query("update item set repo = $3 where source_id = $1 and external_id = $2 and repo is distinct from $3", [sourceId, ext, fi.repo]);
+        await pool.query(
+          "update item set repo = $3, board_priority = $4 where source_id = $1 and external_id = $2 and (repo is distinct from $3 or board_priority is distinct from $4)",
+          [sourceId, ext, fi.repo, boardPriority(fi.fields)],
+        );
       }
     }
     return fetched.get(ext)!;
@@ -244,6 +262,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
+    await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
     await returnWithdrawn(pool, id);
   });
 
@@ -309,9 +328,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
-    if (row.state === "Queued" || row.state === "SignOff" || row.state === "NeedsInput") {
-      await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
-    }
+    // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
+    // lends its group and priority to the items it depends on (PBI 320).
+    await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
   });
 
   w.step("re-queuing items stopped by a red base");
@@ -368,8 +387,32 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       }
       // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
       // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
-      if (out.filed) await transitionItem(c, row.id, "split_filed", system);
+      // The move keeps the children filed, so step 5 knows which of the parent's sub-issues are the split's (PBI 226).
+      if (out.filed) await transitionItem(c, row.id, "split_filed", system, { children: out.children ?? [] });
     });
+  });
+
+  // A parent whose move to Split recorded no children, as one split before PBI 226 did, has them found again by the
+  // split markers they carry among its sub-issues, for a split kept for it. Without a board to look on, it stays Split.
+  const recoveredChildren = async (row: Row): Promise<ChildIssue[] | null> => {
+    const board = split?.file?.board;
+    if (!board) return null;
+    const kept = await keptSplits(pool, row.id);
+    if (kept.length === 0) return null;
+    return filedFromMarkers(row.external_id, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+  };
+
+  w.step("closing split parents");
+  // 5. A Split parent whose filed children are all Done moves to Done (PBI 226). A sub-issue added by hand isn't one
+  //    of them. The comment, keyed on the parent, and the close as completed both go before the move, so the next
+  //    poll retries a failed one, and the move is last, so a Done parent is never read again.
+  await each(await items(pool, sourceId, ["Split"]), (row) => `closing split parent ${row.external_id}`, async (row) => {
+    const filed = (await filedChildren(pool, row.id)) ?? (await recoveredChildren(row));
+    const done = filed && (await doneChildren(pool, sourceId, filed));
+    if (!done) return;
+    await adapter.comment(row.external_id, splitDoneComment(done), splitDoneKey(row.external_id));
+    await adapter.close(row.external_id);
+    await move(pool, row.id, "children_done");
   });
 
   w.step("saving the cursor");
