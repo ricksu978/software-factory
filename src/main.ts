@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type pg from "pg";
 import { githubBacklog, parseGitHubWebhook, splitFiling, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
+import { TimedOctokit } from "./adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
 import { loadSop } from "./config/sop.ts";
 import { mirrorBoard } from "./control/board.ts";
@@ -192,7 +193,7 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
   const pool = createPool(dbUri);
   // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
   await clearRestartOnStart(pool);
-  const app = new App({ appId, privateKey: appKey });
+  const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
 

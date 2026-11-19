@@ -11,6 +11,7 @@ import { App } from "@octokit/app";
 import { join } from "node:path";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
+import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { haikuJudge, runAgent } from "../agent/run.ts";
 import { mirrorBoard } from "../control/board.ts";
@@ -315,7 +316,7 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
   const pool = createPool(dbUri);
   // A prepared restart holds back the tick, which runs here, so a worker restarted on its own clears it too (PBI 140).
   await clearRestartOnStart(pool);
-  const app = new App({ appId, privateKey: appKey });
+  const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
