@@ -68,7 +68,8 @@ function ran(world: object) {
 }
 
 async function states(world: object, items: string[], expected: string) {
-  const c = ran(world);
+  // A state needs no tick to read: PBI 301's scenarios read it after the cells' renewals alone.
+  const c = ctx(world);
   for (const name of items) {
     const r = await need().pool.query<{ state: string }>("select state from item where id = $1", [c.items[name]]);
     assert.equal(r.rows[0]?.state, expected, `item ${name} is ${r.rows[0]?.state}, not ${expected}`);
