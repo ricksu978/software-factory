@@ -301,3 +301,141 @@ describe("model gateway request check", () => {
     assert.equal(bodies.length, 0);
   });
 });
+
+describe("model gateway slow line (PBI 154)", () => {
+  /** A clock whose timers fire only when the test says so. */
+  function handClock() {
+    let t = 0;
+    let seq = 0;
+    const timers = new Map<number, { at: number; fn: () => void }>();
+    return {
+      now: () => t,
+      setTimeout: (fn: () => void, ms: number) => {
+        timers.set(++seq, { at: t + ms, fn });
+        return seq;
+      },
+      clearTimeout: (h: unknown) => void timers.delete(h as number),
+      pending: () => timers.size,
+      advance(ms: number) {
+        t += ms;
+        for (const [id, v] of [...timers]) {
+          if (v.at > t) continue;
+          timers.delete(id);
+          v.fn();
+        }
+      },
+    };
+  }
+
+  type Mode = "hang" | "answer" | "drop";
+  async function withGateway(mode: Mode, fn: (ctx: { clock: ReturnType<typeof handClock>; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>) {
+    let got = 0;
+    const up = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        got++;
+        if (mode === "answer") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: one\n\n");
+        } else if (mode === "drop") req.socket.destroy();
+      });
+    });
+    await listen(up);
+    const clock = handClock();
+    const lines: string[] = [];
+    const g = await startModelGateway({
+      port: 0,
+      upstream: `http://127.0.0.1:${port(up)}`,
+      ownerToken: () => "owner",
+      verify: (c) => (c === "ok" ? { webTools: [], runId: "11111111-2222-3333-4444-555555555555" } : null),
+      slow: { clock, log: (l) => lines.push(l) },
+    });
+    const forwarded = async () => {
+      for (let i = 0; i < 100 && got === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.equal(got, 1, "the gateway never forwarded the request");
+    };
+    try {
+      await fn({ clock, lines, gatewayPort: port(g), forwarded });
+    } finally {
+      g.closeAllConnections();
+      up.closeAllConnections();
+      await close(g);
+      await close(up);
+    }
+  }
+
+  function open(gatewayPort: number, path = "/v1/messages", auth = "Bearer sk-ant-oat01-ok") {
+    const events: string[] = [];
+    const req = request({ host: "127.0.0.1", port: gatewayPort, method: "POST", path, headers: { authorization: auth, "content-type": "application/json" } }, (res) => {
+      events.push(`status ${res.statusCode}`);
+      res.on("data", () => events.push("data"));
+      res.on("error", () => {});
+    });
+    req.on("error", () => events.push("error"));
+    req.end("{}");
+    return { req, events };
+  }
+
+  const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
+
+  test("a request with no upstream answer 60 seconds after it was forwarded logs one line naming its path and run", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req } = open(gatewayPort, "/v1/messages?beta=true");
+      await forwarded();
+      clock.advance(59_999);
+      assert.deepEqual(lines, []);
+      clock.advance(1);
+      assert.deepEqual(lines, ["slow: the model gateway request POST /v1/messages for run 11111111-2222-3333-4444-555555555555 has had no upstream answer for 60 seconds"]);
+      clock.advance(600_000);
+      assert.equal(lines.length, 1);
+      req.destroy();
+    });
+  });
+
+  test("upstream headers before 60 seconds stop the warning, however long the stream runs", async () => {
+    await withGateway("answer", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req, events } = open(gatewayPort);
+      await forwarded();
+      for (let i = 0; i < 100 && !events.includes("data"); i++) await tick(10);
+      assert.equal(clock.pending(), 0);
+      clock.advance(300_000);
+      assert.deepEqual(lines, []);
+      req.destroy();
+    });
+  });
+
+  test("an upstream error before 60 seconds stops the warning", async () => {
+    await withGateway("drop", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { events } = open(gatewayPort);
+      await forwarded();
+      for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+      assert.deepEqual(events, ["status 502"]);
+      assert.equal(clock.pending(), 0);
+      clock.advance(300_000);
+      assert.deepEqual(lines, []);
+    });
+  });
+
+  test("a cell that disconnects before 60 seconds stops the warning", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req } = open(gatewayPort);
+      await forwarded();
+      clock.advance(20_000);
+      req.destroy();
+      for (let i = 0; i < 100 && clock.pending() > 0; i++) await tick(10);
+      assert.equal(clock.pending(), 0);
+      clock.advance(300_000);
+      assert.deepEqual(lines, []);
+    });
+  });
+
+  test("a refused request never starts a watch", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort }) => {
+      const { events } = open(gatewayPort, "/v1/messages", "Bearer sk-ant-oat01-forged");
+      for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+      assert.deepEqual(events, ["status 401"]);
+      assert.equal(clock.pending(), 0);
+      assert.deepEqual(lines, []);
+    });
+  });
+});

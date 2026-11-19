@@ -4,7 +4,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { pipeline } from "node:stream";
-import type { Slow } from "./slow-work.ts";
+import { seconds, SLOW_REQUEST_MS, watch, type Slow } from "./slow-work.ts";
 
 // Claude Code sends CLAUDE_CODE_OAUTH_TOKEN as "Authorization: Bearer <token>", and the prefix marks it as a
 // subscription token, so the cell's own anthropic-beta carries the OAuth capability the upstream needs.
@@ -39,7 +39,7 @@ export type GatewayConfig = {
   /**
    * Where the gateway's slow line goes and the clock that times it (PBI 154). A request whose upstream hasn't sent
    * its response headers SLOW_REQUEST_MS after the gateway forwarded it logs one line, in the format
-   * src/control/slow-work.ts documents. Not yet wired: Red stub.
+   * src/control/slow-work.ts documents. Without it the line goes to console.warn on the real clock.
    */
   slow?: Slow;
 };
@@ -162,7 +162,13 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
       headers["content-length"] = String(body.length);
     }
     const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+    // A request whose upstream hasn't sent its headers 60 seconds after the forward warns once (PBI 154). Headers,
+    // an upstream error or the cell disconnecting all end the watch, so a long stream that started in time is quiet.
+    const name = `${req.method} ${target.pathname}`;
+    const run = grant.runId ? ` for run ${grant.runId}` : "";
+    const w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the model gateway request ${name}${run} has had no upstream answer for ${seconds(ms)}`, cfg.slow);
     const up = send(target, { method: req.method, headers }, (upRes) => {
+      w.end();
       res.writeHead(upRes.statusCode ?? 502, upRes.headers);
       // pipeline, not pipe: an upstream reset mid-stream errors upRes, not `up`, and pipeline then destroys res, so
       // a cut-off stream never ends cleanly for the cell.
@@ -171,9 +177,11 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     // A cell that disconnects, or is stopped, cancels its upstream call instead of leaving it running on the
     // owner's subscription.
     res.on("close", () => {
+      w.end();
       if (!res.writableFinished) up.destroy();
     });
     up.on("error", () => {
+      w.end();
       // After the headers went out, a clean end would make a cut-off stream look complete, so it's destroyed.
       if (res.headersSent) res.destroy();
       else res.writeHead(502).end();
