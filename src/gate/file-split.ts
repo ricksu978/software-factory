@@ -171,7 +171,8 @@ export async function priorFiling(parent: FactoryItem, children: SplitChild[], b
  * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
  * poll. A child is labelled only as it's filed, never when found already filed, so a label the owner removed stays off.
  * Returns the filed children, in order, when the split is filed, and null when the parent was already split
- * another way. The poller keeps them on the parent's move to Split, to know when they're all Done (PBI 226). `known` is a
+ * another way. The poller keeps them on the parent's move to Split, to know when they're all Done (PBI 226),
+ * and keeps them for its "Split into" on Floor and Run detail (PBI 227). `known` is a
  * `priorFiling` the caller already read, so the gate can word its proposal comment without reading twice.
  */
 export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps,

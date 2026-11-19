@@ -246,6 +246,7 @@ describe("pollOnce", dbTest, () => {
     const { ext, subs, pollSplit, moves, age } = await splitting();
     await pollSplit();
     age();
+    await db.pool.query("delete from split_child where parent_id = $1", [(await row(ext)).id]);
     await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [(await row(ext)).id]);
     // A sub-issue added by hand carries no split marker, so it isn't a filed child and doesn't hold the parent back.
     subs.push("999");
@@ -266,11 +267,41 @@ describe("pollOnce", dbTest, () => {
   test("a Split parent whose move to Split recorded no children stays Split while a filed child isn't among its sub-issues (PBI 226)", async () => {
     const { ext, subs, pollSplit } = await splitting();
     await pollSplit();
+    // A parent split before PBI 226 has no "Split into" kept either (PBI 227).
+    await db.pool.query("delete from split_child where parent_id = $1", [(await row(ext)).id]);
     await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [(await row(ext)).id]);
     subs.splice(subs.indexOf("102"), 1);
     await child("101", "Done", 61);
     await child("102", "Done", 62);
     await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+  });
+
+  test("a parent that moves to Split keeps the children its split filed, in order, for its \"Split into\" (PBI 227)", async () => {
+    const { ext, pollSplit } = await splitting();
+    await pollSplit();
+    const id = (await row(ext)).id;
+    assert.equal((await row(ext)).state, "Split");
+    const kept = (await db.pool.query("select position, external_id, title, url from split_child where parent_id = $1 order by position", [id])).rows;
+    assert.deepEqual(kept, [{ position: 1, external_id: "101", title: "A", url: "u/101" }, { position: 2, external_id: "102", title: "B", url: "u/102" }]);
+  });
+
+  test("a Split parent with no \"Split into\" kept, split before PBI 227, gets its filed children kept by the next poll (PBI 227)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    const id = (await row(ext)).id;
+    const kept = async () => (await db.pool.query("select position, external_id, title, url from split_child where parent_id = $1 order by position", [id])).rows;
+    const want = [{ position: 1, external_id: "101", title: "A", url: "u/101" }, { position: 2, external_id: "102", title: "B", url: "u/102" }];
+    // From the children its move to Split recorded.
+    await db.pool.query("delete from split_child where parent_id = $1", [id]);
+    await pollSplit();
+    assert.deepEqual(await kept(), want);
+    // From the split markers, when its move recorded none, leaving out a sub-issue added by hand.
+    await db.pool.query("delete from split_child where parent_id = $1", [id]);
+    await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [id]);
+    subs.push("999");
+    await pollSplit();
+    assert.deepEqual(await kept(), want);
     assert.equal((await row(ext)).state, "Split");
   });
 

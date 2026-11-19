@@ -6,6 +6,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { fakeLauncher } from "../scheduler/launcher.ts";
 import { tick } from "../scheduler/scheduler.ts";
 import { LEASE_RAN_OUT } from "../store/items.ts";
+import { keepSplitChildren } from "../store/splits.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { createAuth } from "./auth.ts";
 import { dashboardRoutes, tokenBanner } from "./routes.ts";
@@ -128,6 +129,38 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(view.includes("The item depends on #7, which is still open"), view);
     assert.ok(view.includes("Has a Size of 5 or less"), view);
     assert.ok(!view.includes("engine rule"), view);
+  });
+
+  // PBI 227: a Split parent shows its filed children, each with the state the factory holds it in.
+  const splitParent = async (title: string, kids: { ext: string; title: string; state?: string }[]) => {
+    const parent = await item("Split", title);
+    for (const k of kids) {
+      if (k.state) await db.pool.query("insert into item (source_id, external_id, title, state) values ($1, $2, $3, $4)", [sourceId, k.ext, k.title, k.state]);
+    }
+    await keepSplitChildren(db.pool, parent.id, kids.map((k) => ({ externalId: k.ext, title: k.title, url: `https://github.com/o/r/issues/${k.ext}` })));
+    return parent;
+  };
+
+  test("Floor shows a Split parent with its children and their states while any child is still open (PBI 227)", async () => {
+    await person("octo", "viewer");
+    await splitParent("Checkout redesign", [{ ext: "141", title: "Card payments", state: "InReview" }, { ext: "142", title: "Bank transfers" }]);
+    await splitParent("Search revamp", [{ ext: "151", title: "Search filters", state: "Done" }, { ext: "152", title: "Search ranking", state: "Abandoned" }]);
+    const { html } = await get("/", "octo");
+    const view = html.slice(html.indexOf("<h2>Split</h2>"), html.indexOf("<h2", html.indexOf("<h2>Split</h2>") + 1));
+    assert.match(view, /Checkout redesign<\/a> <span class="muted">Split into<\/span>/);
+    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/141">#141</a> Card payments <span class="muted">InReview</span>`), view);
+    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/142">#142</a> Bank transfers <span class="muted">Not in the factory</span>`), view);
+    // A parent whose children have all finished has nothing left to follow on Floor. Its Run detail still shows them.
+    assert.doesNotMatch(view, /Search revamp/);
+  });
+
+  test("Run detail shows a Split parent's children under \"Split into\", and an item with none shows no \"Split into\" (PBI 227)", async () => {
+    await person("octo", "viewer");
+    const done = await splitParent("Search revamp", [{ ext: "151", title: "Search filters", state: "Done" }, { ext: "152", title: "Search ranking" }]);
+    const { html } = await get(`/items/${done.id}`, "octo");
+    assert.match(html, /<h2>Split into<\/h2><ol class="split-into"><li><a href="https:\/\/github.com\/o\/r\/issues\/151">#151<\/a> Search filters <span class="muted">Done<\/span><\/li><li>[^<]*<a[^>]*>#152<\/a> Search ranking <span class="muted">Not in the factory/);
+    const plain = await item("Queued", "plain");
+    assert.doesNotMatch((await get(`/items/${plain.id}`, "octo")).html, /Split into/);
   });
 
   test("Blocked lists a Queued item with open dependencies and names them, and Next up leaves it out (PBI 237)", async () => {

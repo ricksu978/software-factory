@@ -1,6 +1,7 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
 import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
@@ -189,6 +190,20 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
+/** A Split parent on Floor (PBI 227): the item, and the children its split filed, in order. */
+export type SplitRow = Issue & { id: string; title: string; children: SplitChildView[] };
+
+/**
+ * A Split parent's children (PBI 227), in the order of the split: each child's "#N" linking to its issue, its title, and
+ * the state the factory holds it in, or "Not in the factory" while it holds none: no poll has listed the child yet,
+ * or the child is without the opt-in label, because the owner took it off or a split of a factory-filed item filed it
+ * unlabelled (PBI 237). A URL that isn't a web address makes no link.
+ */
+function splitInto(children: SplitChildView[]): string {
+  const ref = (k: SplitChildView) => (/^https?:\/\//.test(k.url) ? `<a href="${escapeHtml(k.url)}">#${escapeHtml(k.externalId)}</a>` : `#${escapeHtml(k.externalId)}`);
+  return `<ol class="split-into">${children.map((k) => `<li>${ref(k)} ${escapeHtml(k.title)} <span class="muted">${escapeHtml(k.state ?? "Not in the factory")}</span></li>`).join("")}</ol>`;
+}
+
 /**
  * A failed check's name, linked to its URL. POST /stage takes only https URLs under the run's repo, and any other
  * stored URL shows the name as plain text, so a link a cell sent can't run script on the dashboard.
@@ -244,6 +259,7 @@ const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${u
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
   notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
+  split?: SplitRow[];
   /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
   keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
   const st = (id: string) => standing(f.keys?.get(id));
@@ -267,6 +283,8 @@ ${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${es
 ${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>Blocked</h2>
 ${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
+<h2>Split</h2>
+${list((f.split ?? []).map((p) => `<li>${named(p)} <span class="muted">Split into</span>${splitInto(p.children)}</li>`), "No item is split into children that are still open.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
@@ -325,6 +343,8 @@ export type RunDetail = {
   now?: Date;
   /** Where the item's time went (PBI 187). Without it, the Time section is left out. */
   durations?: ItemDurations;
+  /** The children a Split parent's split filed, in order (PBI 227). Without any, no "Split into" shows. */
+  splitInto?: SplitChildView[];
 };
 
 /**
@@ -428,6 +448,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
+${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
