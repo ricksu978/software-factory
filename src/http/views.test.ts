@@ -162,8 +162,9 @@ describe("floorPage", () => {
 });
 
 describe("issueRef", () => {
-  // PBI 140: Prepare restart sits among the factory's Controls, and Floor counts down its wrap-up until no cell runs.
-  const floor = (restart: { minutesLeft: number; running: number } | null, canOperate = true) =>
+  // PBI 140: Prepare restart sits among the factory's Controls, and Floor says how many cells still wrap up until none
+  // does. PBI 300: the factory stops none of them, so Floor names no deadline.
+  const floor = (restart: { running: number } | null, canOperate = true) =>
     floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate, restart }, null);
 
   test("offers Prepare restart among the Controls to an operator", () => {
@@ -171,21 +172,14 @@ describe("issueRef", () => {
     assert.doesNotMatch(floor(null, false), /Prepare restart/);
   });
 
-  test("counts the cells still running and the wrap-up's minutes, and says it's ready once none runs", () => {
-    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells still running\. 9 minutes left in the wrap-up\./);
-    assert.match(floor({ minutesLeft: 1, running: 1 }), /Preparing to restart: 1 cell still running\. 1 minute left in the wrap-up\./);
-    const ready = floor({ minutesLeft: 9, running: 0 });
+  test("counts the cells still running, with no deadline, and says it's ready once none runs", () => {
+    assert.match(floor({ running: 2 }), /Preparing to restart: 2 cells still running\. The factory won&#39;t stop them\./);
+    assert.match(floor({ running: 1 }), /Preparing to restart: 1 cell still running\. The factory won&#39;t stop it\./);
+    assert.doesNotMatch(floor({ running: 1 }), /minutes? left/);
+    const ready = floor({ running: 0 });
     assert.match(ready, /Ready to restart\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
     assert.doesNotMatch(ready, /Preparing to restart/);
     assert.doesNotMatch(floor(null), /restart\./);
-  });
-
-  // PBI 302: a cell whose stop failed once the wrap-up ran out still counts, with no minutes claimed and no "Ready".
-  test("says the wrap-up has run out while a cell whose stop failed still runs", () => {
-    const out = floor({ minutesLeft: 0, running: 1 });
-    assert.match(out, /Preparing to restart: 1 cell still running\. The wrap-up has run out/);
-    assert.doesNotMatch(out, /minutes? left/);
-    assert.doesNotMatch(out, /Ready to restart/);
   });
 
   test("links #N to its issue on GitHub when the repo is known", () => {

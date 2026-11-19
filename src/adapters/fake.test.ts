@@ -100,6 +100,25 @@ describe("fakeRepoHost", () => {
     assert.equal((await host.prState(repo, number, ["owner"])).lastChangesRequestedAt, at, "with no trusted bot, no thread is the factory's");
   });
 
+  test("prState counts a review whose only text sits in a thread only while that thread is unresolved, and names its cause (PBI 258)", async () => {
+    const host = fakeRepoHost();
+    const { number } = await host.openOrUpdatePr({ repo, branch: "b", base: "main", title: "t", body: "" });
+    const at = "2026-11-06T10:00:00Z";
+    host.prs[0].reviews.push({ state: "changes_requested", submittedAt: at, author: "owner", body: "" });
+    const thread = [
+      { threadId: "pt", path: "a.ts", line: 1, author: "owner", body: "Use the table.", submittedAt: "2026-11-06T09:00:00Z", resolved: true },
+      { threadId: "pt", path: "a.ts", line: 1, author: "owner", body: "Verified, fixed.", submittedAt: at, resolved: true },
+    ];
+    host.reviewComments.set(`${repo}#${number}`, thread);
+    assert.equal((await host.prState(repo, number, ["owner"])).lastChangesRequested, null, "resolved, whatever it says");
+    for (const c of thread) c.resolved = false;
+    assert.deepEqual((await host.prState(repo, number, ["owner"])).lastChangesRequested,
+      { kind: "thread_comment", threadId: "pt", author: "owner", body: "Verified, fixed.", submittedAt: at });
+    host.prs[0].reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T11:00:00Z", author: "owner", body: "Name it." });
+    assert.deepEqual((await host.prState(repo, number, ["owner"])).lastChangesRequested,
+      { kind: "review", author: "owner", body: "Name it.", submittedAt: "2026-11-06T11:00:00Z" }, "the newest");
+  });
+
   test("postReview records each review in order, always as COMMENT", async () => {
     const host = fakeRepoHost();
     assert.deepEqual(host.postedReviews, []);

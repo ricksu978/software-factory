@@ -160,6 +160,9 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
         return { threads: p.comments.map((c, i) => ({ threadId: `rt-${calls.length}-${i}`, ...c })) };
       },
       resolveThread: async (_r, threadId) => rec("/repo/resolveThread", { threadId }),
+      // The PR's open threads as they stand: the claim's comments, then each reply posted since (PBI 258).
+      openReviewComments: async () => (rec("/repo/openReviewComments"), [...deps.ctx.trustedComments,
+        ...calls.filter((c) => c.route === "/repo/replyToThread").map((c) => ({ threadId: c.body.threadId, path: "app.txt", line: 1, author: "factory[bot]", body: c.body.body }))]),
     },
     sop: SOP,
     config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
@@ -1027,11 +1030,61 @@ describe("runCell", () => {
     assert.deepEqual(h.calls.filter((c) => c.route === "/repo/replyToThread").map((c) => c.body), [{ threadId: "t1", body: "kept, it matches the spec" }]);
   });
 
-  test("an address run with no trusted review text and a clean merge blocks, and never posts pr_opened", async () => {
-    const h = harness({ nextStage: "address" });
-    assert.equal(await h.run(), "waiting");
-    assert.deepEqual(h.transitions(), [{ event: "blocked", question: { kind: "needs_input", body: "no trusted review text to address" } }]);
+  test("an address run with no trusted review text and a clean merge passes without a question, and the PR review hands the PR back (PBI 258)", async () => {
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7 } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["address", "pr-review"]);
+    assert.equal(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body.status, "passed");
+    assert.deepEqual(h.transitions(), [{ event: "pr_opened", prNumber: 7 }]);
     assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+    assert.ok(!h.routes().includes("/repo/replyToThread") && !h.routes().includes("/repo/commentOnPr") && !h.routes().includes("/repo/resolveThread"));
+  });
+
+  test("address resolves each person's thread it fixed or replied to, after CI and the reply, and leaves the rest open (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar"), thread("t3", "name baz"),
+      { threadId: "PRR_9", path: null, line: null, author: "owner", body: "Split run.ts" }] },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        writeFileSync(file, '{"threadId":"t1","body":"kept, it matches the spec"}\n{"threadId":"t2","fixed":true}\n{"threadId":"PRR_9","body":"split"}\n{"threadId":"t9","fixed":true}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1", "t2"], "not t3, which it didn't answer, nor a summary or a stranger's id");
+    const at = (route: string, id?: string) => h.calls.findIndex((c) => c.route === route && (id === undefined || c.body.threadId === id));
+    assert.ok(at("/repo/resolveThread", "t1") > at("/repo/replyToThread", "t1"), "resolved after its reply");
+    const checked = h.calls.map((c, i) => [c, i] as const).filter(([c]) => c.route === "/checks").at(0)![1];
+    assert.ok(at("/repo/resolveThread", "t2") > checked, "resolved after CI passed on the fix");
+  });
+
+  test("address leaves open a thread it marked fixed when it changed no code, and resolves the one it replied to (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "Not fixed, the total still skips the tax table.")] },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(file, '{"threadId":"t1","body":"kept, it matches the spec"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2: no commit, so no fix, and no reply");
+  });
+
+  test("address leaves open a thread it answered that a reviewer replied in while CI ran, and resolves the rest (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar")], threadCommentCounts: { t1: 1, t2: 1 } },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        writeFileSync(file, '{"threadId":"t1","body":"renamed"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    const read = h.deps.repoHost.openReviewComments!;
+    h.deps.repoHost.openReviewComments = async (r, n) => [...await read(r, n), thread("t2", "Not fixed")];
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2, whose newer reply address never read");
+    const at = (route: string) => h.calls.findIndex((c) => c.route === route);
+    assert.ok(at("/repo/openReviewComments") > at("/repo/replyToThread"), "the threads are read again after the replies are posted");
   });
 
   for (const [what, comments] of [["review text", [ownerComment]], ["no review text", []]] as const) {
@@ -1110,7 +1163,8 @@ describe("runCell", () => {
 
   test("a stop that arrives while the cell reports a block still ends the run as stopped", async () => {
     let leases = 0;
-    const h = harness({ nextStage: "address", lease: async () => ({ stop: ++leases > 0 }) });
+    // A stage no cell resumes at blocks before any stage starts.
+    const h = harness({ nextStage: "nowhere", lease: async () => ({ stop: ++leases > 0 }) });
     assert.equal(await h.run(), "stopped");
     assert.ok(!h.transitions().length);
   });

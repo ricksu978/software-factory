@@ -152,6 +152,8 @@ export async function githubSources(pool: pg.Pool, app: App, projectToken: strin
  * the transitions it commits. It runs no background job. Those are the worker's.
  */
 export async function serveControl(d: ControlDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
+  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
+  await clearRestartOnStart(d.pool);
   const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
   const control = controlHandlers(d);
   const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
@@ -193,8 +195,6 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     ["FACTORY_DB_URI", "FACTORY_BLOB", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY"].map(need);
 
   const pool = createPool(dbUri);
-  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
-  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);

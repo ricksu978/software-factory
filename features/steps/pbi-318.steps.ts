@@ -568,11 +568,13 @@ Then("in the next claim the factory replied {string} inside the thread {string},
     `the next claim's replies in the thread don't say "${text}" at ${sha}: ${JSON.stringify(replies.map((x) => x.body))}`);
 });
 
-Then("the factory resolved the thread {string}", function (body: string) {
-  const { c } = done(this);
+// PBI 258's steps register this phrase too, for a person's thread address resolved, and hand a PR review scenario's
+// world here, so the one step serves both features.
+export function factoryResolvedThread(world: object, body: string): void {
+  const { c } = done(world);
   reviewerCall(c, 1);
-  assert.ok(resolved(c, threadFor(c, body).threadId, own(this).resolvedBefore), `the factory didn't resolve the thread "${body}"`);
-});
+  assert.ok(resolved(c, threadFor(c, body).threadId, own(world).resolvedBefore), `the factory didn't resolve the thread "${body}"`);
+}
 
 Then("the factory resolved the thread {string} in the next claim", function (body: string) {
   const { c, o } = nextClaim(this);

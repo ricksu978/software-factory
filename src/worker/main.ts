@@ -159,7 +159,7 @@ async function lockConnection(pool: pg.Pool, onClose: (why: string) => void) {
 /**
  * Takes the worker lock, or stands by for it, and returns at once either way. Once it holds the lock, it sets up the egress
  * proxy, then starts mirroring, the tick and one poll loop per board. A standby does none of that: it tries for the lock
- * again every `lockRetryMs`. A worker whose lock connection closes stops its jobs and its `done` rejects. startWorker
+ * again every `lockRetryMs`. Either way it first clears a restart prepared before it started. A worker whose lock connection closes stops its jobs and its `done` rejects. startWorker
  * throws if the lock connection can't be opened, or if the proxy fails for a worker that took the lock at once.
  */
 export async function startWorker(d: WorkerDeps): Promise<Worker> {
@@ -176,6 +176,9 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
   let pending = Promise.resolve();
   let lock: Awaited<ReturnType<typeof lockConnection>> | undefined;
 
+  // A prepared restart holds back the tick, which runs here, so a worker restarted on its own clears it too (PBI 140).
+  // A standby clears it as well: the restart was meant to end once the worker process came back.
+  await clearRestartOnStart(d.pool);
   // A takeover under way finishes first, so the timers it sets are cleared after it.
   const halt = async () => {
     clearTimeout(retry);
@@ -316,8 +319,6 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
     ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CELL_IMAGE", "CELL_CONTROL_URL"].map(need);
 
   const pool = createPool(dbUri);
-  // A prepared restart holds back the tick, which runs here, so a worker restarted on its own clears it too (PBI 140).
-  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
