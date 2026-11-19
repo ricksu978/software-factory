@@ -104,27 +104,39 @@ After({ tags: "@pbi-154", ...long }, async function () {
 
 const ms = (n: number, unit: string) => n * (unit.startsWith("minute") ? 60_000 : 1000);
 
+// A behaviour governs the requests that reach the upstream after it is set, so none may have reached it yet.
+function setBehaviour(world: object, b: Behaviour, ext?: string): void {
+  const c = ctx(world);
+  assert.equal(c.received.length, 0, "a model request reached the upstream before its behaviour was set");
+  if (ext === undefined) {
+    c.fallback = b;
+    return;
+  }
+  assert.ok(ctx134(world).runs.get(ext), `item ${ext} has no run in progress`);
+  c.behaviours.set(ext, b);
+}
+
 Given("the upstream never answers", function () {
-  ctx(this).fallback = { kind: "never" };
+  setBehaviour(this, { kind: "never" });
 });
 
 Given("the upstream never answers item {string}'s model requests", function (ext: string) {
-  ctx(this).behaviours.set(ext, { kind: "never" });
+  setBehaviour(this, { kind: "never" }, ext);
 });
 
 Given(/^the upstream sends its response headers (\d+) (seconds?|minutes?) after it gets a request$/, function (n: string, unit: string) {
-  ctx(this).fallback = { kind: "headers", afterMs: ms(Number(n), unit), streamMs: null };
+  setBehaviour(this, { kind: "headers", afterMs: ms(Number(n), unit), streamMs: null });
 });
 
 Given(
   /^the upstream answers item "([^"]*)"'s model requests with headers after (\d+) (seconds?|minutes?) and keeps streaming for (\d+) (seconds?|minutes?)$/,
   function (ext: string, h: string, hUnit: string, s: string, sUnit: string) {
-    ctx(this).behaviours.set(ext, { kind: "headers", afterMs: ms(Number(h), hUnit), streamMs: ms(Number(s), sUnit) });
+    setBehaviour(this, { kind: "headers", afterMs: ms(Number(h), hUnit), streamMs: ms(Number(s), sUnit) }, ext);
   },
 );
 
 Given(/^the upstream drops item "([^"]*)"'s model requests after (\d+) (seconds?|minutes?) without answering$/, function (ext: string, n: string, unit: string) {
-  ctx(this).behaviours.set(ext, { kind: "drop", afterMs: ms(Number(n), unit) });
+  setBehaviour(this, { kind: "drop", afterMs: ms(Number(n), unit) }, ext);
 });
 
 // --- the cell ------------------------------------------------------------------------------------------------------
