@@ -56,17 +56,6 @@ Feature: An attempt whose cell died is closed as stopped when its lease expires
   Rule: A restart that sends a cell's item back to Queued closes its started attempts the same way
 
     @ac-2 @db
-    Scenario: A cell the wrap-up's end stops has its open attempt closed as stopped, with the lease message
-      Given a fresh factory database with WIP 1 and a review capacity of 3
-      And item "A" is running in cell "cell-a" with a live lease, at green attempt 1, started and never reported
-      And an operator prepared a restart 15 minutes ago
-      When the scheduler ticks
-      Then cell "cell-a" is stopped with the launcher's stop
-      And item "A" is in state "Queued"
-      And item "A"'s green attempt 1 is recorded as stopped, ended at the moment of that tick
-      And item "A"'s green attempt 1 has a message saying the cell's lease ran out
-
-    @ac-2 @db
     Scenario: A cell that wraps up for a restart also leaves no other attempt of its run started
       Given a fresh factory database with WIP 1 and a review capacity of 3
       And item "A" is running in cell "cell-a" with a live lease, at green attempt 2

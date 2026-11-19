@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
-import { clearRestartOnStart, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { clearRestartOnStart, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
 import { FAILED_RECHECK_MS, tick, type CiMemo } from "./scheduler.ts";
@@ -589,8 +589,8 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(kills, [{ cleared_by: operator }]);
   });
 
-  // PBI 140: Prepare restart. A restart override starts nothing, and once its wrap-up runs out it stops every cell still
-  // running, records each open attempt stopped and sends the item back to Queued at the stage it was in.
+  // PBI 140: Prepare restart. A restart override starts nothing. PBI 300: it never stops a cell either, however long the
+  // cell runs, so each cell wraps up in its own time and its attempt stays open until the cell reports it.
   const prepared = async (minutesAgo: number) => {
     await override("restart");
     await db.pool.query("update override set created_at = $1 where kind = 'restart'", [ago(minutesAgo * 60_000)]);
@@ -602,7 +602,7 @@ describe("scheduler", dbTest, () => {
     return { id, runId };
   };
 
-  test("a restart being prepared starts nothing and stops no cell before its wrap-up runs out", async () => {
+  test("a restart being prepared starts nothing and stops no cell", async () => {
     await item("1", "Queued");
     await running("2", "cell-2");
     await prepared(14);
@@ -611,46 +611,29 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(stopped, []);
   });
 
-  test("when the wrap-up runs out, each cell still running is stopped, its attempt recorded stopped and its item queued at its stage", async () => {
+  test("hours after a restart was prepared, a running cell isn't stopped and its attempt stays open", async () => {
     const a = await running("2", "cell-2");
-    await prepared(15);
+    await prepared(180);
     await run();
-    assert.deepEqual(stopped, ["cell-2"]);
-    assert.equal((await state(a.id)).state, "Queued");
+    assert.deepEqual(stopped, []);
+    assert.equal((await state(a.id)).state, "InProgress");
     const attempt = (await db.pool.query("select status, ended_at from stage_run where run_id = $1", [a.runId])).rows[0];
-    assert.equal(attempt.status, "stopped");
-    assert.ok(attempt.ended_at);
-    assert.equal((await db.pool.query("select next_stage from run where id = $1", [a.runId])).rows[0].next_stage, "green");
+    assert.deepEqual(attempt, { status: "started", ended_at: null });
     assert.deepEqual(started, [], "the factory still starts nothing until it restarts");
   });
 
-  test("FACTORY_RESTART_WAIT_MINUTES sets the wrap-up", async () => {
+  test("FACTORY_RESTART_WAIT_MINUTES stops nothing", async () => {
     const before = process.env.FACTORY_RESTART_WAIT_MINUTES;
-    process.env.FACTORY_RESTART_WAIT_MINUTES = "5";
+    process.env.FACTORY_RESTART_WAIT_MINUTES = "0";
     try {
       await running("2", "cell-2");
       await prepared(5);
       await run();
-      assert.deepEqual(stopped, ["cell-2"]);
+      assert.deepEqual(stopped, []);
     } finally {
       if (before === undefined) delete process.env.FACTORY_RESTART_WAIT_MINUTES;
       else process.env.FACTORY_RESTART_WAIT_MINUTES = before;
     }
-  });
-
-  test("a restart's stop that fails leaves that item running and still stops the others", async () => {
-    const a = await running("2", "cell-2");
-    const b = await running("3", "cell-3");
-    const real = launcher.stop;
-    launcher.stop = async (name: string) => {
-      if (name === "cell-2") throw new Error("no such container");
-      return real(name);
-    };
-    await prepared(15);
-    await run();
-    assert.deepEqual(stopped, ["cell-3"]);
-    assert.equal((await state(a.id)).state, "InProgress");
-    assert.equal((await state(b.id)).state, "Queued");
   });
 
   test("clearRestartOnStart clears only the restart override, and resume clears one too", async () => {
@@ -663,14 +646,6 @@ describe("scheduler", dbTest, () => {
     await override("resume");
     const restarts = (await db.pool.query("select cleared_by from override where kind = 'restart' order by created_at")).rows;
     assert.equal(restarts.at(-1).cleared_by, operator);
-  });
-
-  test("restartWaitMs reads FACTORY_RESTART_WAIT_MINUTES and falls back to 15 minutes", () => {
-    assert.equal(restartWaitMs({}), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "5" }), 5 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "soon" }), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "-1" }), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "0" }), 0);
   });
 
   test("an override with a blank reason is refused", async () => {

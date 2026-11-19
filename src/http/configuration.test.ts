@@ -115,4 +115,8 @@ describe("envSettings", () => {
       assert.ok(!shown.some((s) => s.key === secret), secret);
     }
   });
+
+  test("doesn't list FACTORY_RESTART_WAIT_MINUTES, which no longer does anything (PBI 300)", () => {
+    assert.ok(!envSettings({ FACTORY_RESTART_WAIT_MINUTES: "5" }).some((s) => s.key === "FACTORY_RESTART_WAIT_MINUTES"));
+  });
 });
