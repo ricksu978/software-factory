@@ -21,19 +21,25 @@
 // factory holds the item in state" and "the item's run resumes from", and PBI 305's "GitHub reports PR ... as
 // conflicting with its base", read that harness. The second claim is a fresh clone of the pushed branch, run from the
 // stage the poller left the run at.
-import { Given, Then, When } from "@cucumber/cucumber";
+import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { next, type ItemEvent, type ItemState } from "../../src/core/states.ts";
-import { long, need } from "./pbi-8.steps.ts";
+import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, setup } from "./pbi-12.steps.ts";
 import { runTheCell, setUp, type Ctx as CellCtx } from "./pbi-18.steps.ts";
 
 const BRANCH = "factory/pbi-482-r1";
 const PR = 57;
 const REPO = "acme/widgets";
+
+// The poller harness's setup inserts its repo row afresh, so each @db scenario starts from empty tables, as PBI 142's do.
+Before({ tags: "@pbi-331 and @db", ...long }, async function () {
+  const d = await testDb();
+  if (d) await d.pool.query('truncate item, backlog_source, repo, "user" cascade');
+});
 
 type Moves = "none" | "conflicting" | "docs" | "both";
 type Agent = "resolves" | "markers" | "aborts";
