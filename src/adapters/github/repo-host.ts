@@ -3,7 +3,7 @@
 import { TimedOctokit } from "./timed.ts";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
-import { factoryThread, LOGGED_CHECKS, logTail, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -160,20 +160,23 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       // A comment counts once it has stood for THREAD_SETTLE_MS.
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const settled = Date.now() - THREAD_SETTLE_MS;
-      const threads = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { databaseId: number | null; submittedAt: string | null } | null }[] } }[])
+      const threads = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { id: string; isResolved: boolean; comments: { nodes: { author: Author; body: string; pullRequestReview: { databaseId: number | null; submittedAt: string | null } | null }[] } }[])
         .filter((t) => !factoryThread(t.comments.nodes[0] && authorLogin(t.comments.nodes[0].author), trustedBot));
-      // A review that requests changes counts only when it has a summary or a comment outside the factory's threads. One
-      // whose only text is a reply inside the factory's thread would hand the address run nothing to read (PBI 130).
-      const withText = new Set(threads.flatMap((t) => t.comments.nodes.map((c) => c.pullRequestReview?.databaseId)));
+      // A review that requests changes counts only when it has a summary or a comment in a person's thread that is still
+      // unresolved. One whose only text is a reply inside the factory's thread would hand the address run nothing to read
+      // (PBI 130), and so would one whose only text sits in a thread resolved since (PBI 258).
+      const unresolved = threads.filter((t) => !t.isResolved);
+      const withText = new Set(unresolved.flatMap((t) => t.comments.nodes.map((c) => c.pullRequestReview?.databaseId)));
       const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())
-        && ((v.body ?? "").trim() !== "" || withText.has(v.id))).map((v) => v.submitted_at as string);
-      const open = threads.filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
-        .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
-        .map((c) => c.pullRequestReview!.submittedAt!);
-      const times = [...requested, ...open].sort();
+        && ((v.body ?? "").trim() !== "" || withText.has(v.id)))
+        .map((v) => ({ kind: "review" as const, author: String(v.user?.login), body: v.body ?? "", submittedAt: v.submitted_at as string }));
+      const open = unresolved.flatMap((t) => t.comments.nodes.map((c) => ({ t, c })))
+        .filter(({ c }) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
+        .map(({ t, c }) => ({ kind: "thread_comment" as const, threadId: t.id, author: authorLogin(c.author), body: c.body, submittedAt: c.pullRequestReview!.submittedAt! }));
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" }>>([...requested, ...open]);
       return {
         merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
-        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: times.at(-1) ?? null,
+        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause,
       };
     },
 

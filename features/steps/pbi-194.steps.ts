@@ -230,6 +230,14 @@ Then("the item doesn't move to NeedsInput", function () {
 
 Then("no reply is posted on PR {int}", function (n: number) {
   assert.deepEqual(ctx(this).replies, [], `a reply was posted on PR ${n}`);
+  // PBI 258: with PBI 128's repo host in place, neither a reply in a thread nor a comment on the PR itself.
+  const host = (this as { pbi128?: { host: Host } }).pbi128?.host;
+  if (!host) return;
+  const pr = host.prs.find((p) => p.number === n);
+  assert.deepEqual(pr?.comments ?? [], [], `a comment was posted on PR ${n}`);
+  const all = [...host.reviewComments.values()].flat();
+  const replies = all.filter((x, i) => x.author === "factory[bot]" && all.findIndex((y) => y.threadId === x.threadId) !== i);
+  assert.deepEqual(replies.map((x) => x.body), [], `a reply was posted on PR ${n}`);
 });
 
 Then("the cell reports no move for the item", function () {

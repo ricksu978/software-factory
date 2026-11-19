@@ -1,7 +1,7 @@
 // Step definitions for features/pbi-302-restart-running-cells.feature. Every scenario reuses PBI 140's steps and
-// hooks, which also run for @pbi-302: its control plane, clock, restart override, Floor and launcher steps, and PBI 17's
-// running items and scheduler tick. Only the two steps PBI 140 has no wording for live here.
-import { Given, When } from "@cucumber/cucumber";
+// hooks, which also run for @pbi-302: its control plane, clock, restart override and Floor steps, and PBI 17's running
+// items. Only the step PBI 140 has no wording for lives here.
+import { Given } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { long, need } from "./pbi-8.steps.ts";
 import { ctx as p17, newItem } from "./pbi-17.steps.ts";
@@ -24,8 +24,4 @@ Given("item {string} is running in cell {string} whose lease ran out a minute ag
   assert.equal(row.lease_owner, cell, `item ${name} should be leased to ${cell}`);
   assert.ok(row.lease_expires && row.lease_expires.getTime() < now.getTime(), `item ${name}'s lease should have ended before the scenario's clock`);
   assert.equal(row.open_runs, 1, `item ${name} should have one open run in ${cell}`);
-});
-
-When("the launcher can stop cell {string} again", function (cell: string) {
-  assert.ok(p17(this).failStop?.delete(cell), `no earlier step made the launcher fail to stop ${cell}`);
 });

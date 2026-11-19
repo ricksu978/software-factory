@@ -2,7 +2,7 @@
 // acted on once, so a redelivery never produces a second event (spec §10).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import { botKey, loginKey, type FactoryWebhookEvent } from "../adapters/types.ts";
+import { botKey, loginKey, type ChangeCause, type FactoryWebhookEvent } from "../adapters/types.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
@@ -114,7 +114,9 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
       const trusted = await pool.query(`select 1 from "user" where lower(github_login) = lower($1)`, [e.author]);
       if (!trusted.rowCount) return;
       await withTx(pool, async (c) => {
-        await transitionItem(c, row.item_id, "changes_requested", github);
+        // The move names its cause, the review delivered (PBI 258).
+        const cause: ChangeCause = { kind: "review", author: e.author, body: e.body, submittedAt: e.submittedAt };
+        await transitionItem(c, row.item_id, "changes_requested", github, { cause });
         await c.query("update run set next_stage = 'address' where id = $1", [row.run_id]);
       });
     }

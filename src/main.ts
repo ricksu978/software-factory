@@ -144,6 +144,8 @@ export async function githubSources(pool: pg.Pool, app: App, projectToken: strin
  * mirroring, comment commands and decision announcements to the worker's outbox (PBI 219).
  */
 export async function serveControl(d: ControlDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
+  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
+  await clearRestartOnStart(d.pool);
   const control = controlHandlers(d);
   // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
   const server = await startServer(control.handlers, { port, host: "::" });
@@ -181,8 +183,6 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     ["FACTORY_DB_URI", "FACTORY_BLOB", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY"].map(need);
 
   const pool = createPool(dbUri);
-  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
-  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);

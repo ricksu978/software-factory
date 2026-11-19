@@ -487,8 +487,9 @@ describe("dashboard routes", dbTest, () => {
     assert.match(html, /<form method="post" action="\/overrides">/);
   });
 
-  // PBI 140: Prepare restart is a factory override, logged like any, and Floor counts down its wrap-up until no cell runs.
-  test("an operator prepares a restart with a reason, and Floor counts its wrap-up down until no cell runs", async (t) => {
+  // PBI 140: Prepare restart is a factory override, logged like any, and Floor says how many cells still wrap up until
+  // none does. PBI 300: the factory stops none of them, so Floor names no deadline.
+  test("an operator prepares a restart with a reason, and Floor shows the cells still wrapping up until none runs", async (t) => {
     await person("op", "operator");
     const logged = t.mock.method(console, "log", () => {});
     assert.equal((await post("/overrides", "op", "kind=restart&reason=")).status, 400);
@@ -498,7 +499,7 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("update override set created_at = now() - interval '6 minutes' where kind = 'restart'");
     const busy = await item("InProgress", "busy");
     await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
-    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. 9 minutes left in the wrap-up/);
+    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. The factory won&#39;t stop it\./);
     await db.pool.query("update item set state = 'Queued', lease_expires = null where id = $1", [busy.id]);
     const ready = (await get("/", "op")).html;
     assert.match(ready, /Ready to restart\. No cell is running/);
