@@ -403,7 +403,7 @@ describe("runCell", () => {
   test("a base merge that fails, not on a conflict, ends an attempt of the stage the run resumes at with its message (PBI 259)", async () => {
     const h = harness();
     const boom = new Error("git fetch failed on a network or GitHub error after 5 tries: HTTP 503");
-    h.deps.git = { ...h.deps.git, mergeBase: async () => { throw boom; } };
+    h.deps.git = { ...h.deps.git, fetchBase: async () => { throw boom; } };
     await assert.rejects(h.run(), (e) => e === boom);
     const stages = h.calls.filter((c) => c.route === "/stage").map((c) => c.body);
     assert.deepEqual(stages.map((b) => `${b.stageId} ${b.status}`), ["red started", "red failed"]);
@@ -414,7 +414,7 @@ describe("runCell", () => {
     mock.timers.enable({ apis: ["setInterval"] });
     const h = harness({ lease: async () => { throw new Error("control plane unreachable"); } });
     // The fetch keeps retrying until the fence fires, as withRetries does, then rejects with the fence's reason.
-    h.deps.git = { ...h.deps.git, mergeBase: async (_base, fence) => {
+    h.deps.git = { ...h.deps.git, fetchBase: async (_base, fence) => {
       for (let i = 0; i < 3 && !fence?.signal?.aborted; i++) {
         mock.timers.tick(60_000);
         await new Promise((r) => setImmediate(r));
