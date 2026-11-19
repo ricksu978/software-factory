@@ -896,6 +896,26 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select next_stage from run where id = $1", [run])).rows[0].next_stage, "address");
   });
 
+  test("the changes_requested event names its cause: the thread comment, the review, or a PR GitHub reports not mergeable (PBI 258)", async () => {
+    await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
+    const causeOf = async (id: string) => (await db.pool.query<{ payload: { cause?: unknown } }>(
+      "select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'changes_requested' order by at desc, id desc limit 1", [id],
+    )).rows[0]?.payload.cause;
+
+    const a = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    const pa = host.prs.find((x) => x.number === a.pr)!;
+    pa.reviews.push({ state: "commented", submittedAt: "2026-11-06T10:30:00Z", author: "octo" });
+    host.reviewComments.set(`${pa.repo}#${a.pr}`, [{ threadId: "t1", path: "a.ts", line: 1, author: "octo", body: "Verified, fixed.", submittedAt: "2026-11-06T10:30:00Z" }]);
+    const b = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
+    host.prs.find((x) => x.number === b.pr)!.reviews.push({ state: "changes_requested", submittedAt: "2026-11-06T10:40:00Z", author: "octo", body: "Name it." });
+    const c = await held("InReview", { pr: true });
+    host.prs.find((x) => x.number === c.pr)!.mergeable = false;
+    await poll();
+    assert.deepEqual(await causeOf(a.id), { kind: "thread_comment", threadId: "t1", author: "octo", body: "Verified, fixed.", submittedAt: "2026-11-06T10:30:00Z" });
+    assert.deepEqual(await causeOf(b.id), { kind: "review", author: "octo", body: "Name it.", submittedAt: "2026-11-06T10:40:00Z" });
+    assert.deepEqual(await causeOf(c.id), { kind: "not_mergeable" });
+  });
+
   test("a review older than the address run's claim leaves the item in InReview", async () => {
     await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
     const { ext, pr } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });
