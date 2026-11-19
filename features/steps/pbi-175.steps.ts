@@ -76,7 +76,7 @@ export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).repl
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
 export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178" }, function ({ pickleStep }) {
+BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-284" }, function ({ pickleStep }) {
   ctx(this).stepType = pickleStep.type;
 });
 
@@ -234,8 +234,12 @@ Given("{string} is an operator", long, async function (login: string) {
   await user(login, "operator");
 });
 
+// As a Given this adds the viewer; as a Then (PBI 284's owner adding someone through the API) it reads them, by the
+// subject or GitHub login the API stored them under.
 Given("{string} is a viewer", long, async function (login: string) {
-  await user(login, "viewer");
+  if (ctx(this).stepType !== "Outcome") return user(login, "viewer");
+  const rows = (await pool().query<{ role: string }>(`select role from "user" where subject = $1 or github_login = $1`, [login])).rows;
+  assert.deepEqual(rows.map((r) => r.role), ["viewer"], `"${login}" isn't one viewer in the user table`);
 });
 
 Given("the factory started with {word} set to {string}", function (name: string, value: string) {
