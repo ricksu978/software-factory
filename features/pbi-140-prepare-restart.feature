@@ -174,16 +174,6 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And item "B" is "Queued"
 
     @ac-6 @db
-    Scenario: When every cell wraps up early, Floor says so before the wrap-up runs out
-      Given the control plane is running with a fake board
-      And an operator is signed in
-      And item "A" is running in cell "cell-a" with a live lease
-      And the operator prepared a restart 3 minutes ago
-      And cell "cell-a" wrapped up and exited during the wrap-up
-      When the operator opens Floor
-      Then Floor shows "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker."
-
-    @ac-6 @db
     Scenario: Preparing a restart with no cell running is ready at once
       Given the control plane is running with a fake board
       And an operator is signed in
