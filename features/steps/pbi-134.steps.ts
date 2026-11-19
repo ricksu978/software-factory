@@ -29,6 +29,7 @@ import { withTx } from "../../src/store/db.ts";
 import { claimNext } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi286, pass as pass286 } from "./pbi-286.steps.ts";
 
 const NOW = new Date("2026-11-06T10:00:00Z");
 const REPO = "ricksu978/software-factory";
@@ -458,8 +459,10 @@ Given("the cell's request to {} is answered after {int} seconds", long, async fu
 // --- time ----------------------------------------------------------------------------------------------------------
 
 When(/^(\d+) (?:more )?(minutes?|seconds?) pass$/, long, async function (n: string, unit: string) {
-  const clock = ctx(this).clock;
   const ms = Number(n) * (unit.startsWith("minute") ? 60_000 : 1000);
+  // PBI 286's event streams wait on the API's own timer, which its steps hold on their clock.
+  if (isPbi286(this)) return pass286(this, ms);
+  const clock = ctx(this).clock;
   const before = clock.now();
   await clock.advance(ms);
   assert.equal(clock.now() - before, ms, `the clock moved ${clock.now() - before} ms, not ${ms}`);
