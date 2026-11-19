@@ -226,8 +226,8 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
-    `${CLAIM_KEYS} select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
+  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null; source_id: string }>(
+    `${CLAIM_KEYS} select i.id, i.source_id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
        ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
      from item i join claim_key k on k.id = i.id where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
@@ -241,9 +241,11 @@ export async function moveInQueue(
   const [before, after] = dir === "up" ? [group[at - 2], group[at - 1]] : [group[at + 1], group[at + 2]];
   const stays = dir === "up" ? at === 0 : at === last;
   const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
-  // PBI 311: the item it passed, so a later board poll can hold it on its side of that item (keepMovesInPlace).
-  const passed = stays ? undefined : group[dir === "up" ? at - 1 : at + 1].id;
-  const value = { ...storedKey(key, me.board), ...(passed ? { passed } : {}) };
+  // PBI 311: the item it passed, so a later board poll can hold it on its side of that item (keepMovesInPlace), and
+  // which side of that item the board had it on, so the poll ends the move only when the board flips the two.
+  const passedRow = stays ? undefined : group[dir === "up" ? at - 1 : at + 1];
+  const boardSide = passedRow ? boardSideOf(me, passedRow) : null;
+  const value = { ...storedKey(key, me.board), ...(passedRow ? { passed: passedRow.id } : {}), ...(boardSide ? { boardSide } : {}) };
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
     [itemId, dir === "up" ? "move_up" : "move_down", value, o.reason.trim(), o.createdBy],
@@ -268,15 +270,25 @@ function keyCmp(a: QueueKey, b: QueueKey): number {
   return decCmp(a.tie, b.tie);
 }
 
+/** Which side of `passed` the board has `me` on (PBI 311): only for two items of one backlog source, each with a distinct board rank. */
+type BoardSide = "ahead" | "behind";
+function boardSideOf(me: { source_id: string; board: string | null }, passed: { source_id: string; board: string | null }): BoardSide | null {
+  if (me.source_id !== passed.source_id || me.board === null || passed.board === null) return null;
+  const r = decCmp(me.board, passed.board);
+  return r < 0 ? "ahead" : r > 0 ? "behind" : null;
+}
+
 /** Why the board ended a Move up or Move down (PBI 311), as `override.cleared_cause` records it. */
 export const ENDED_BY_BOARD_ORDER = "board_order";
 
 /**
  * Holds every active Move up and Move down on its side of the item it passed (PBI 311). The poller calls it once the
  * board's order is read. Each item's latest move is taken in the order the moves were made:
- * - When the board itself now puts the moved item on the passed item's side, ahead of it for a Move up or behind it for
- *   a Move down, the board wins: the move ends, recording `ENDED_BY_BOARD_ORDER` and an event, and the item follows
- *   the board from then on. Only two items of the same backlog source, each with a board rank, are compared.
+ * - When the board itself now puts the moved item and the passed item the other way round from the order it had them
+ *   in when the move was made (`boardSide` on the move), the board wins: every active Move up and Move down on the item
+ *   ends, each recording `ENDED_BY_BOARD_ORDER` and an event, so no earlier move takes the latest one's place and the
+ *   item follows the board from then on. Only two items of the same backlog source, each with a board rank, are
+ *   compared. A move with no `boardSide` had the two tied or not comparable on the board, so it's never ended this way.
  * - Otherwise, when a board change left the moved item on the wrong side of the passed one, such as a new issue that
  *   landed between them, its key is set again, just ahead of or just behind the passed item. The neighbour it lands
  *   beside is read among every live item, not only the Queued ones, so an item the gate passes later can't come between.
@@ -285,8 +297,8 @@ export const ENDED_BY_BOARD_ORDER = "board_order";
 export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
   if (!inTx(c)) throw new Error("keepMovesInPlace needs a client inside withTx");
   await c.query("select pg_advisory_xact_lock(265)");
-  const moves = (await c.query<{ id: string; target_id: string; kind: "move_up" | "move_down"; passed: string | null; reason: string }>(
-    `select * from (select distinct on (o.target_id) o.id, o.target_id, o.kind, o.value->>'passed' as passed, o.reason, o.created_at
+  const moves = (await c.query<{ id: string; target_id: string; kind: "move_up" | "move_down"; passed: string | null; board_side: BoardSide | null }>(
+    `select * from (select distinct on (o.target_id) o.id, o.target_id, o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side, o.created_at
        from override o where o.scope = 'item' and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
        order by o.target_id, o.created_at desc, o.id desc) m
      order by m.created_at, m.id`,
@@ -302,20 +314,24 @@ export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
     const passed = live.find((r) => r.id === m.passed);
     if (!me || !passed) continue;
     const up = m.kind === "move_up";
-    if (me.source_id === passed.source_id && me.board !== null && passed.board !== null) {
-      const board = decCmp(me.board, passed.board);
-      if (up ? board < 0 : board > 0) {
-        await c.query("update override set cleared_at = now(), cleared_cause = $2 where id = $1", [m.id, ENDED_BY_BOARD_ORDER]);
-        await appendEvent(c, { ...system("poller"), itemId: me.id, kind: "move_ended", payload: { override: m.id, control: m.kind, passed: passed.id, cause: ENDED_BY_BOARD_ORDER } });
-        continue;
+    const now = boardSideOf(me, passed);
+    if (m.board_side && now && now !== m.board_side) {
+      const ended = (await c.query<{ id: string; kind: "move_up" | "move_down" }>(
+        `update override o set cleared_at = now(), cleared_cause = $2
+         where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+         returning o.id, o.kind`, [me.id, ENDED_BY_BOARD_ORDER],
+      )).rows;
+      for (const e of ended) {
+        await appendEvent(c, { ...system("poller"), itemId: me.id, kind: "move_ended", payload: { override: e.id, control: e.kind, passed: e.id === m.id ? passed.id : null, cause: ENDED_BY_BOARD_ORDER } });
       }
+      continue;
     }
     const side = keyCmp(me, passed);
     if (up ? side < 0 : side > 0) continue;
     const others = live.filter((r) => r.id !== me.id);
     const at = others.indexOf(passed);
     const key = up ? keyBetween(others[at - 1], passed, me.idnum) : keyBetween(passed, others[at + 1], me.idnum);
-    await c.query("update override set value = $2 where id = $1", [m.id, { ...storedKey(key, me.board), passed: passed.id }]);
+    await c.query("update override set value = $2 where id = $1", [m.id, { ...storedKey(key, me.board), passed: passed.id, ...(m.board_side ? { boardSide: m.board_side } : {}) }]);
   }
 }
 

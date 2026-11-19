@@ -264,6 +264,47 @@ describe("queue order", dbTest, () => {
     assert.deepEqual(await order(), ["A", "C"]);
     assert.equal((await moveOf(c)).cleared_at, null);
   });
+
+  const activeMoves = async (id: string) => (await db.pool.query<{ kind: string }>(
+    "select kind from override where target_id = $1 and kind in ('move_up', 'move_down') and cleared_at is null", [id],
+  )).rows.map((r) => r.kind);
+
+  test("moving an item back where the board has it isn't ended by a board change nobody made", async () => {
+    const a = await item("A", "Queued", 1);
+    const b = await item("B", "Queued", 2);
+    await item("C", "Queued", 3);
+    await move(a, "down");
+    await move(a, "up");
+    assert.deepEqual(await order(), ["A", "B", "C"]);
+    await ranks([]);
+    assert.deepEqual(await order(), ["A", "B", "C"]);
+    const latest = await moveOf(a);
+    assert.equal(latest.cleared_at, null);
+    assert.equal(latest.passed, b);
+    // Once the board itself puts A behind B, the order the move up was made in has flipped, so the board wins.
+    await ranks([[b, 1], [a, 2]]);
+    assert.deepEqual(await order(), ["B", "A", "C"]);
+    assert.deepEqual(await activeMoves(a), []);
+  });
+
+  test("the board ending a move ends the item's earlier moves too, so it follows the board", async () => {
+    const a = await item("A", "Queued", 1);
+    const b = await item("B", "Queued", 2);
+    const c = await item("C", "Queued", 3);
+    await move(c, "up");
+    await move(c, "up");
+    assert.deepEqual(await order(), ["C", "A", "B"]);
+    await ranks([[c, 1], [a, 2], [b, 3]]);
+    assert.deepEqual(await order(), ["C", "A", "B"]);
+    assert.deepEqual(await activeMoves(c), []);
+    const ended = (await db.pool.query<{ n: number }>(
+      "select count(*)::int as n from override where target_id = $1 and cleared_cause = 'board_order'", [c],
+    )).rows[0].n;
+    assert.equal(ended, 2);
+    // It follows the board from then on.
+    await ranks([[a, 1], [b, 2], [c, 3]]);
+    assert.deepEqual(await order(), ["A", "B", "C"]);
+  });
 });
 
 describe("claim keys (PBI 320)", dbTest, () => {
