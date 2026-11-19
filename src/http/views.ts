@@ -1,6 +1,7 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import type { ClaimKey } from "../store/items.ts";
 import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
@@ -112,6 +113,28 @@ const withPr = (r: OpenPr & { state: string }) => {
 /** An item as a page names it: "#N", then its title linking to Run detail. */
 const named = (r: Issue & { id: string; title: string }) => `${issueRef(r.external_id, r.repo)} ${link(r.id, r.title)}`;
 
+/**
+ * Floor's note on an item's claim key (PBI 320): its priority, and whether it's final-stage, each naming the item that
+ * depends on it where the priority or the group comes from that item.
+ */
+export function standing(k: ClaimKey | undefined): string {
+  if (!k) return "";
+  const from = k.priorityFrom ? `, from #${escapeHtml(k.priorityFrom.externalId)}` : "";
+  const group = k.finalStage ? `, final-stage${k.finalStageFrom ? ` because of #${escapeHtml(k.finalStageFrom.externalId)}` : ""}` : "";
+  return ` <span class="muted">priority ${k.priority}${from}${group}</span>`;
+}
+
+/** The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page. */
+export function claimLines(k: ClaimKey): string {
+  const priority = k.priorityFrom
+    ? `Priority ${k.priority}, from #${escapeHtml(k.priorityFrom.externalId)}, which depends on it. Its own priority on the board is ${k.own}.`
+    : `Priority ${k.priority}.`;
+  const group = !k.finalStage ? ""
+    : k.finalStageFrom ? ` Final-stage because #${escapeHtml(k.finalStageFrom.externalId)} depends on it, so it's claimed ahead of other work while that dependency stands.`
+    : " Final-stage: its PR is open and it's in the review loop, so it's claimed ahead of other work.";
+  return `<p>${priority}${group}</p>`;
+}
+
 /** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */
 function overrideForm(kinds: [kind: string, label: string][], itemId: string | null): string {
   const id = itemId ? `-${escapeHtml(itemId)}` : "";
@@ -220,7 +243,10 @@ function mainRedNotice(rows: MainBreakRow[]): string {
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[] }, banner: string | null): string {
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
+  /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
+  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
+  const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
     + f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
@@ -232,16 +258,18 @@ export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waiti
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a> <a href="/configuration">Configuration</a></p>
 <h2>Waiting on you</h2>
-${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span></li>`), "Nothing waits on you.")}
+${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span>${st(w.id)}</li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
-${list(f.next.map((n) => `<li>${named(n)}</li>`), "Nothing is ready to start.")}
+${list(f.next.map((n) => `<li>${named(n)}${st(n.id)}</li>`), "Nothing is ready to start.")}
+<h2>Final stage</h2>
+${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${escapeHtml(n.state)}</span>${st(n.id)}</li>`), "No item is in the review loop, and none is depended on by one that is.")}
 <h2>Not ready</h2>
-${list(f.notReady.map((n) => `<li>${named(n)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
+${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>Blocked</h2>
-${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span></li>`), "No ready item waits on another.")}
+${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
+${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
 </tbody></table>` : `<p class="muted">No item is in flight.</p>`}
 ${controls}
 <script>
@@ -289,6 +317,8 @@ export type RunDetail = {
   controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
   /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
   startNow?: { reason: string; by: string | null } | null;
+  /** The item's claim key (PBI 320): its priority and whether it's final-stage, and the items they come from. */
+  claim?: ClaimKey | null;
   /** The viewer's IANA time zone, from their browser's `tz` cookie (PBI 189). Defaults to UTC. */
   zone?: string;
   /** The time now, for how long a running attempt has taken so far (PBI 189). Defaults to the real time. */
@@ -398,7 +428,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
 ${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${

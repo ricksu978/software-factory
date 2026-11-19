@@ -13,6 +13,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { dirname, join } from "node:path";
 import { setUp, type Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { isPbi173, ownerAskedNoQuestion } from "./pbi-173.steps.ts";
+import { isPbi259, ownerAskedNoQuestion as pbi259NoQuestion } from "./pbi-259.steps.ts";
 
 const BRANCH = "factory/pbi-482-r1";
 const ORDERS = "features/pbi-482-orders.feature";
@@ -561,6 +562,7 @@ function questions(c: CellCtx): string[] {
 
 Then("the owner is asked no question", async function () {
   if (isPbi173(this)) return ownerAskedNoQuestion(this);
+  if (isPbi259(this)) return pbi259NoQuestion(this);
   const c = cell(this);
   ranClean(c);
   assert.deepEqual(questions(c), [], "the owner was asked a question");

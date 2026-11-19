@@ -62,6 +62,15 @@ export type Ctx = {
    * poll in `polls`.
    */
   driver?: (c: Ctx) => Promise<void>;
+  /** PBI 226: other parents, by external id, the judge also finds oversized. */
+  alsoOversized?: Set<string>;
+  /** PBI 226: the coding model's reply for a parent whose title its prompt names, before `reply`. */
+  replies?: { title: string; reply: string }[];
+  /**
+   * PBI 226: titles of children the board files without the labels the factory asks for, as every child was filed
+   * before PBI 237 gave children the opt-in label, so a child can still be one that never entered the factory.
+   */
+  unlabelled?: Set<string>;
   /** PBI 264: a scripted judge that replaces this harness's, which passes every line. */
   judgeOverride?: (item: FactoryItem, dor: Policy) => Promise<string>;
   /** PBI 264: a scripted coding model that replaces this harness's, which always answers `reply`. */
@@ -132,7 +141,7 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     async createIssue(repo, title, body, labels = []) {
       refuse(c, "file", title);
       const externalId = await c.fake.seed({
-        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: [...labels], repo, status: "", fields: {},
+        title, body, acceptanceCriteria: acceptanceCriteria(body, HEADING), labels: c.unlabelled?.has(title) ? [] : [...labels], repo, status: "", fields: {},
       });
       const url = `https://github.com/${repo}/issues/${externalId}`;
       c.filed.push({ externalId, title, url, repo });
@@ -183,7 +192,8 @@ export function scriptedBoard(c: Ctx): SplitBoard {
 export function agent(c: Ctx) {
   return async (a: AgentArgs): Promise<AgentResult> => {
     c.requests.push(a);
-    return { ok: true, text: c.reply, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+    const text = c.replies?.find((r) => a.prompt.includes(JSON.stringify(r.title)))?.reply ?? c.reply;
+    return { ok: true, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
 }
 
@@ -191,7 +201,7 @@ export function agent(c: Ctx) {
 export function judge(c: Ctx) {
   return async (item: FactoryItem, dor: Policy) => [
     ...dor.criteria.map((cr) => JSON.stringify({ index: cr.index, status: "passed", reason: "ok" })),
-    JSON.stringify({ flags: [], oversized: c.oversized && item.externalId === c.parentId }),
+    JSON.stringify({ flags: [], oversized: (c.oversized && item.externalId === c.parentId) || (c.alsoOversized?.has(item.externalId) ?? false) }),
   ].join("\n");
 }
 

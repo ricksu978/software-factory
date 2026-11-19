@@ -11,10 +11,16 @@ import { itemTextHash, type SplitChild } from "./split.ts";
 /** An issue the factory filed, or found already filed. `url` is its web URL, which the parent's link comment carries. */
 export type ChildIssue = { externalId: string; title: string; url: string };
 
+/**
+ * A parent's sub-issue, as the board lists it: with its body, and whether the factory's own App opened it, when the
+ * board can say. Recovery matches split markers on these, so it never has to search the repo (PBI 226).
+ */
+export type SubIssue = ChildIssue & { body?: string; openedByApp?: boolean };
+
 /** The board and repo writes filing needs, beyond the BacklogAdapter's. Every write may fail; filing is retried. */
 export interface SplitBoard {
   /** The parent's sub-issues, in order. */
-  subIssues(parentId: string): Promise<ChildIssue[]>;
+  subIssues(parentId: string): Promise<SubIssue[]>;
   /** The issues in `repo` whose title or body holds `text`, so a child filed but not yet linked is found again. */
   findIssues(repo: string, text: string): Promise<ChildIssue[]>;
   /** Files a new issue in `repo`, carrying `labels` as it's filed (PBI 237), or no label when none is given. */
@@ -52,7 +58,39 @@ export type FileSplitDeps = { board: SplitBoard; optInLabel: string; backlogStat
 
 /** Filing's key for this parent and its text: a new text is a new split, and a parent's children never match another's. */
 export function splitKey(parent: FactoryItem): string {
-  return createHash("sha256").update(`${parent.externalId}\n${itemTextHash(parent)}`).digest("hex").slice(0, 16);
+  return keyFor(parent.externalId, itemTextHash(parent));
+}
+
+/** The split key for a parent's id and the text hash its split was kept for. */
+function keyFor(externalId: string, textHash: string): string {
+  return createHash("sha256").update(`${externalId}\n${textHash}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * The children the factory filed for a parent whose move to Split recorded none, as a parent split before PBI 226
+ * did (PBI 226). They're the parent's sub-issues that the factory's own App opened and whose body carries the parent's
+ * split marker, for one of the splits kept for it (`kept`, newest first, each by its text hash and child count). The
+ * markers are matched on the sub-issues as listed, not searched for in the repo, so a child filed long ago is found
+ * however many issues came after it. A sub-issue added by hand carries no marker, so it isn't one. Null when no kept
+ * split has every child found among the parent's sub-issues.
+ */
+export async function filedFromMarkers(parentId: string, kept: { textHash: string; count: number }[],
+  board: Pick<SplitBoard, "subIssues">): Promise<ChildIssue[] | null> {
+  if (kept.length === 0) return null;
+  const subs = (await board.subIssues(parentId)).filter((s) => s.openedByApp === true && s.body);
+  for (const { textHash, count } of kept) {
+    const key = keyFor(parentId, textHash);
+    const filed: ChildIssue[] = [];
+    for (let n = 1; n <= count; n++) {
+      // The marker for child 1 is a prefix of child 10's, so a digit may not follow it.
+      const marker = new RegExp(`${splitMarker(key, n)}(?!\\d)`);
+      const found = subs.find((s) => marker.test(s.body!));
+      if (!found) break;
+      filed.push({ externalId: found.externalId, title: found.title, url: found.url });
+    }
+    if (count > 0 && filed.length === count) return filed;
+  }
+  return null;
 }
 
 /** The token a filed child's body carries, so a child filed but not yet linked is found again instead of filed twice. */
@@ -132,14 +170,15 @@ export async function priorFiling(parent: FactoryItem, children: SplitChild[], b
  * filed, linked, placed and blocked does the parent get its one link comment, through `adapter.comment`, and lose its
  * opt-in label. Any failed write throws, so the gate throws and the poller leaves the parent Eligible for the next
  * poll. A child is labelled only as it's filed, never when found already filed, so a label the owner removed stays off.
- * Returns true when the split is filed, false when the parent was already split another way. `known` is a
+ * Returns the filed children, in order, when the split is filed, and null when the parent was already split
+ * another way. The poller keeps them on the parent's move to Split, to know when they're all Done (PBI 226). `known` is a
  * `priorFiling` the caller already read, so the gate can word its proposal comment without reading twice.
  */
 export async function fileSplit(parent: FactoryItem, children: SplitChild[], adapter: BacklogAdapter, deps: FileSplitDeps,
-  known?: PriorFiling | null): Promise<boolean> {
+  known?: PriorFiling | null): Promise<ChildIssue[] | null> {
   const { board } = deps;
   const prior = known === undefined ? await priorFiling(parent, children, board) : known;
-  if (!prior) return false;
+  if (!prior) return null;
   const repo = parent.repo!;
   const key = splitKey(parent);
   const { subs, found } = prior;
@@ -164,5 +203,5 @@ export async function fileSplit(parent: FactoryItem, children: SplitChild[], ada
   // The comment goes before the label comes off: a parent without its label is never gated again to post it.
   await adapter.comment(parent.externalId, filedComment(filed, deps.optInLabel, optedIn), `split-filed:${key}`);
   await board.removeLabel(parent.externalId, deps.optInLabel);
-  return true;
+  return filed;
 }

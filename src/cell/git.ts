@@ -2,12 +2,16 @@
 // configures a credential helper that asks the cell API for a fresh token on demand.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { realSleep, type RetryFence, withRetries } from "./retry.ts";
 
 const run = promisify(execFile);
 
 export type Git = {
-  /** Fetches the base once for the claim. Returns the commit `origin/<base>` then points at. */
-  fetchBase(base: string): Promise<string>;
+  /**
+   * Fetches the base once for the claim, retrying a network fault. Returns the commit `origin/<base>` then points at.
+   * `fence` stops the fetch's retries, as for push.
+   */
+  fetchBase(base: string, fence?: RetryFence): Promise<string>;
   /**
    * Merges `commit`, the base as `fetchBase` fetched it, into the branch, without fetching again (PBI 331). Returns the
    * paths still in conflict, empty when the merge is clean or the commit is already merged.
@@ -15,16 +19,63 @@ export type Git = {
   mergeAt(base: string, commit: string): Promise<string[]>;
   /** Commits every change, deletions included. Returns HEAD, unchanged when there's nothing to commit. */
   commitAll(msg: string): Promise<string>;
-  push(): Promise<void>;
+  /**
+   * Pushes HEAD to the run's branch, retrying a network fault. `fence.signal` ends the retries and kills a push in
+   * flight. `fence.beforeRetry` runs before each retry, so a lease check there keeps a fenced-off cell from pushing.
+   */
+  push(fence?: RetryFence): Promise<void>;
   head(): Promise<string>;
 };
 
-export function shellGit(dir: string, branch: string): Git {
-  const git = async (...args: string[]) => (await run("git", args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout.trim();
+/** Runs one git command in `cwd`. It rejects as execFile does, with the exit code, signal and stderr on the error. */
+export type GitExec = (args: string[], opts: { cwd: string; timeout?: number; signal?: AbortSignal }) => Promise<{ stdout: string; stderr: string }>;
+
+/** How long one git push or fetch may run before it's killed and counts as a timeout (PBI 259). */
+export const REMOTE_TIMEOUT_MS = 10 * 60_000;
+
+// What git and curl print when the network, a proxy or GitHub's front end failed, rather than GitHub refusing the
+// request: a host that can't be resolved or reached, a dropped connection, a timeout, or a 5xx from GitHub or a proxy.
+const NETWORK_FAULT = new RegExp([
+  "Could not resolve (host|proxy)", "Failed to connect", "Couldn't connect to server", "Connection (reset|refused|timed out)",
+  "Operation timed out", "early EOF", "unexpected disconnect", "CONNECT tunnel failed, response 5\\d\\d", "HTTP 5\\d\\d",
+  "returned error: 5\\d\\d",
+].join("|"), "i");
+
+/**
+ * True when a failed git command failed on the network, a proxy 5xx or its time limit, so trying it again may work.
+ * A push GitHub rejects, a 4xx or a ref that doesn't exist isn't one.
+ */
+export function gitNetworkFault(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const x = e as Error & { killed?: boolean; signal?: string | null; stderr?: string };
+  if (x.killed || x.signal) return true;
+  return NETWORK_FAULT.test(x.stderr ?? "");
+}
+
+/**
+ * What the cell's git runs on, for tests: the command runner and the clock it waits on between tries (PBI 259).
+ * Each defaults to the real one.
+ */
+export type GitDeps = {
+  exec?: GitExec;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const execGit: GitExec = (args, opts) => run("git", args, { cwd: opts.cwd, timeout: opts.timeout, signal: opts.signal, maxBuffer: 64 * 1024 * 1024 });
+
+export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
+  const exec = deps.exec ?? execGit;
+  const sleep = deps.sleep ?? realSleep;
+  const git = async (...args: string[]) => (await exec(args, { cwd: dir })).stdout.trim();
+  // A push or fetch talks to GitHub, so a network fault is retried, and it has a time limit (PBI 259). The fence's
+  // signal kills the git child and ends the retries.
+  const remote = (fence: RetryFence, ...args: string[]) =>
+    withRetries(`git ${args[0]}`, (signal) => exec(args, { cwd: dir, timeout: REMOTE_TIMEOUT_MS, signal }),
+      { transient: gitNetworkFault, sleep, ...fence });
   const unmerged = async () => (await git("diff", "--name-only", "--diff-filter=U")).split("\n").filter(Boolean);
   return {
-    async fetchBase(base) {
-      await git("fetch", "-q", "origin", base);
+    async fetchBase(base, fence = {}) {
+      await remote(fence, "fetch", "-q", "origin", base);
       return git("rev-parse", `origin/${base}^{commit}`);
     },
     async mergeAt(base, commit) {
@@ -49,8 +100,8 @@ export function shellGit(dir: string, branch: string): Git {
       }
       return git("rev-parse", "HEAD");
     },
-    async push() {
-      await git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    async push(fence = {}) {
+      await remote(fence, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
     },
     head: () => git("rev-parse", "HEAD"),
   };

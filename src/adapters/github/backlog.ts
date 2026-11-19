@@ -1,6 +1,6 @@
 // A GitHub Projects (v2) board as a BacklogAdapter. Board reads and writes use the project token on a user-owned
 // board and the App on an org one. Issue comments, labels and closing always go through the App.
-import { Octokit } from "@octokit/core";
+import { TimedOctokit } from "./timed.ts";
 import type { ItemState } from "../../core/states.ts";
 import { CLAIM_MARKER } from "../contract.ts";
 import type { ChildIssue, FileSplitDeps, SplitBoard } from "../../gate/file-split.ts";
@@ -138,7 +138,7 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
   }
   let installation: Promise<GitHubClient> | undefined;
   const app = () => (installation ??= cfg.app.getInstallationOctokit(cfg.installationId) as Promise<GitHubClient>);
-  const userBoard = cfg.projectToken ? (new Octokit({ auth: cfg.projectToken }) as unknown as GitHubClient) : null;
+  const userBoard = cfg.projectToken ? (new TimedOctokit({ auth: cfg.projectToken }) as unknown as GitHubClient) : null;
   const board = async () => (cfg.owner.type === "user" && userBoard ? userBoard : app());
 
   let project: Promise<Project> | undefined;
@@ -163,7 +163,10 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
       acceptanceCriteria: acceptanceCriteria(c.body ?? "", cfg.fieldMap.acceptanceCriteriaHeading),
       labels: (c.labels?.nodes ?? []).map((l) => l.name), status: values.get(cfg.fieldMap.statusField) ?? "", rank,
       repo: c.repository.nameWithOwner,
-      fields: Object.fromEntries(cfg.fieldMap.readinessFields.filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      // The Priority field orders the claims (PBI 320), so it comes through beside the readiness fields. It's judged only
+      // when the repo lists it as a readiness field too.
+      fields: Object.fromEntries([...new Set([...cfg.fieldMap.readinessFields, "Priority"])].filter((f) => values.has(f)).map((f) => [f, values.get(f)!])),
+      ...(cfg.fieldMap.readinessFields.includes("Priority") ? {} : { orderOnly: ["Priority"] }),
       closed: c.state !== "OPEN", updatedAt: [raw.updatedAt, c.updatedAt ?? ""].sort().at(-1)!,
       ...(c.createdAt ? { createdAt: c.createdAt } : {}),
     };
@@ -232,7 +235,11 @@ export function githubBacklog(cfg: GitHubBacklogConfig): GitHubBacklog {
     async subIssues(parentId) {
       const p = await ref(parentId);
       const list = (await (await app()).request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { ...p, per_page: 100 })).data as RestIssue[];
-      return list.map((i) => child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i));
+      // Each sub-issue comes with its body and who opened it, so a filed child is found by its split marker here,
+      // however old it is, and only one this App opened counts (PBI 226).
+      const own = await ownLogin();
+      return list.map((i) => ({ ...child(repoFromApi(i.repository_url, `${p.owner}/${p.repo}`), i), body: i.body ?? "",
+        openedByApp: i.user?.type === "Bot" && i.user.login === own }));
     },
     async findIssues(repo, text) {
       const [owner, name] = repo.split("/");

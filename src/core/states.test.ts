@@ -22,6 +22,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
   // PBI 225: a parent whose split is filed rests in Split.
   ["NotReady", "split_filed", "Split"],
+  // PBI 226: a Split parent whose filed children are all Done moves to Done.
+  ["Split", "children_done", "Done"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -30,6 +32,9 @@ test("a returning item never skips the gate", () => assert.equal(next("Abandoned
 test("answer alone does not move state", () => assert.equal(next("NeedsInput", "ready"), null));
 test("a Split item has no way back to the gate", () => {
   for (const ev of ["returned", "policy_changed", "item_edited", "withdrawn", "ready"] as ItemEvent[]) assert.equal(next("Split", ev), null);
+});
+test("children_done moves only a Split item", () => {
+  for (const s of ["NotReady", "Eligible", "Abandoned", "Failed", "Done"] as ItemState[]) assert.equal(next(s, "children_done"), null);
 });
 test("split_filed moves only a NotReady item", () => assert.equal(next("Eligible", "split_filed"), null));
 test("override goes anywhere", () => assert.equal(overrideTo("Done", "Queued"), "Queued"));
