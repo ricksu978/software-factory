@@ -245,10 +245,22 @@ Given("the control plane is running with a fake board and FACTORY_RESTART_WAIT_M
 Given("FACTORY_RESTART_WAIT_MINUTES is {word}", function (setting: string) {
   if (setting === "unset") delete process.env[WAIT];
   else process.env[WAIT] = setting;
+  assert.equal(process.env[WAIT], setting === "unset" ? undefined : setting, `${WAIT} is ${process.env[WAIT]}, not ${setting}`);
 });
+
+/** Exactly one active factory restart override exists, dated `minutesAgo` before the scenario's clock. */
+async function assertPrepared(world: object, minutesAgo: number) {
+  const r = await need().pool.query<{ created_at: Date }>(
+    "select created_at from override where scope = 'factory' and kind = 'restart' and cleared_at is null");
+  assert.equal(r.rowCount, 1, `${r.rowCount} active factory restart overrides, not 1`);
+  const expected = ctx(world).clock.getTime() - minutesAgo * 60_000;
+  assert.equal(r.rows[0].created_at.getTime(), expected,
+    `the restart is dated ${r.rows[0].created_at.toISOString()}, not ${minutesAgo} minutes before the clock`);
+}
 
 Given("an operator prepared a restart {int} minute(s) ago", long, async function (n: number) {
   await prepare(this, "scenario: restart", n);
+  await assertPrepared(this, n);
 });
 
 Given("the operator prepared a restart {int} minute(s) ago", long, async function (n: number) {
