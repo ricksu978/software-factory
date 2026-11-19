@@ -84,8 +84,8 @@ async function realPoll(world: object): Promise<void> {
   k.passes++;
 }
 
-// PBI 226 runs its scenarios on this same harness.
-Before({ tags: "(@pbi-225 or @pbi-226) and @db", ...long }, async function () {
+// PBI 226 and PBI 228 run their scenarios on this same harness.
+Before({ tags: "(@pbi-225 or @pbi-226 or @pbi-228) and @db", ...long }, async function () {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   await d.pool.query('truncate item, event, backlog_source, repo, "user" cascade');
