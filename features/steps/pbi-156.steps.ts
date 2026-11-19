@@ -386,6 +386,9 @@ Given("the worker is running and has ticked once", long, async function () {
 // ---- When ----
 
 When("the worker starts", long, async function () {
+  // PBI 300's scenarios start the real worker as a standby, so it runs no tick of its own, through `workerStart`.
+  const own = (this as { workerStart?: () => Promise<void> }).workerStart;
+  if (own) return own();
   const c = ctx(this);
   if (!c.env) return startWorker(this, 1);
   const mod = await load<WorkerModule>("src/worker/main.ts");

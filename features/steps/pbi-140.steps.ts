@@ -78,7 +78,8 @@ type Engine = {
   ran: boolean;
 };
 
-function ctx(world: object): Ctx {
+/** PBI 140's scenario state. PBI 300's steps share its clock, its cell API and the restart it prepared. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi140?: Ctx };
   w.pbi140 ??= { clock: new Date(), logs: [], restore: [], renewals: [], origins: new Map(), steps: [] };
   return w.pbi140;
@@ -188,7 +189,7 @@ async function cellCall(world: object, cell: string, method: "GET" | "POST", rou
   return call(world, run, method, route, body ?? (method === "POST" ? {} : undefined));
 }
 
-async function renew(world: object, cell: string): Promise<Answer> {
+export async function renew(world: object, cell: string): Promise<Answer> {
   const run = await cellRun(cell);
   const answer = await call(world, run, "POST", "lease", { generation: run.generation });
   ctx(world).renewals.push({ cell, answer });
@@ -209,7 +210,7 @@ async function operatorId(world: object): Promise<string | null> {
   return (await need().pool.query<{ id: string }>(`select id from "user" where subject = $1`, [login])).rows[0]?.id ?? null;
 }
 
-async function prepare(world: object, reason: string, minutesAgo: number) {
+export async function prepare(world: object, reason: string, minutesAgo: number) {
   const c = ctx(world);
   const pool = need().pool;
   await setOverride(pool, { scope: "factory", targetId: null, kind: "restart", reason, createdBy: (await operatorId(world)) as string, expiresAt: null });
@@ -240,13 +241,26 @@ Given("the control plane is running with a fake board and FACTORY_RESTART_WAIT_M
   await startControlPlane(this);
 });
 
+// PBI 300: FACTORY_RESTART_WAIT_MINUTES no longer does anything. These steps set it, so a scenario can show that.
 Given("FACTORY_RESTART_WAIT_MINUTES is {word}", function (setting: string) {
   if (setting === "unset") delete process.env[WAIT];
   else process.env[WAIT] = setting;
+  assert.equal(process.env[WAIT], setting === "unset" ? undefined : setting, `${WAIT} is ${process.env[WAIT]}, not ${setting}`);
 });
+
+/** Exactly one active factory restart override exists, dated `minutesAgo` before the scenario's clock. */
+async function assertPrepared(world: object, minutesAgo: number) {
+  const r = await need().pool.query<{ created_at: Date }>(
+    "select created_at from override where scope = 'factory' and kind = 'restart' and cleared_at is null");
+  assert.equal(r.rowCount, 1, `${r.rowCount} active factory restart overrides, not 1`);
+  const expected = ctx(world).clock.getTime() - minutesAgo * 60_000;
+  assert.equal(r.rows[0].created_at.getTime(), expected,
+    `the restart is dated ${r.rows[0].created_at.toISOString()}, not ${minutesAgo} minutes before the clock`);
+}
 
 Given("an operator prepared a restart {int} minute(s) ago", long, async function (n: number) {
   await prepare(this, "scenario: restart", n);
+  await assertPrepared(this, n);
 });
 
 Given("the operator prepared a restart {int} minute(s) ago", long, async function (n: number) {
@@ -411,19 +425,6 @@ async function attemptStatus(itemId: string, stageId: string, attempt: number): 
 
 // ---- the scheduler ----
 
-When("{int} minutes have passed since the restart was prepared and the scheduler ticks", long, async function (n: number) {
-  const c = ctx(this);
-  assert.ok(c.preparedAt, "no restart was prepared");
-  const s = p17(this);
-  s.now = minutesFrom(c.preparedAt, n);
-  await tick(s);
-});
-
-Given("the launcher fails to stop cell {string}", function (cell: string) {
-  const s = p17(this);
-  (s.failStop ??= new Set()).add(cell);
-});
-
 function ticked(world: object) {
   const s = p17(world);
   assert.ok(s.ticked, "the scheduler never ticked");
@@ -434,21 +435,8 @@ Then("no cell is stopped", function () {
   assert.deepEqual(ticked(this).stopped, []);
 });
 
-Then("cells {string} and {string} are stopped with the launcher's stop", function (a: string, b: string) {
-  assert.deepEqual([...ticked(this).stopped].sort(), [a, b].sort());
-});
-
-Then("cell {string} is stopped with the launcher's stop", function (cell: string) {
-  assert.ok(ticked(this).stopped.includes(cell), `${cell} wasn't stopped; stopped: ${JSON.stringify(p17(this).stopped)}`);
-});
-
 Then("cell {string} is not stopped", function (cell: string) {
   assert.ok(!ticked(this).stopped.includes(cell), `${cell} was stopped`);
-});
-
-Then("the log records that stopping cell {string} failed", function (cell: string) {
-  const logs = ctx(this).logs;
-  assert.ok(logs.some((l) => l.includes(cell) && /fail/i.test(l)), `no log line says stopping ${cell} failed:\n${logs.join("\n")}`);
 });
 
 // ---- Floor and Run detail ----
@@ -474,13 +462,6 @@ Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kil
   const form = html.slice(at, html.indexOf("</form>", at));
   for (const kind of ["pause", "drain", "resume", "kill"]) assert.ok(form.includes(`value="${kind}"`), `the Controls lack ${kind}`);
   assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
-});
-
-Then("Floor shows {string} with {int} minutes left in the wrap-up", function (text: string, n: number) {
-  const html = unescape(floorHtml(this));
-  const line = html.split(/<\/p>|\n/).find((l) => l.includes(text));
-  assert.ok(line, `Floor doesn't show "${text}"`);
-  assert.match(line, new RegExp(`\\b${n} minutes?\\b`), `"${text}" doesn't say ${n} minutes are left: ${line}`);
 });
 
 Then("Floor shows {string}", function (text: string) {
@@ -580,20 +561,6 @@ Given("cell {string} reported green passed and pushed before it stopped", long, 
   await report(this, cell, "self-review", 1, "stopped");
 });
 
-Given("item {string} was at green in cell {string}, and its last pushed commit is red's", long, async function (name: string, cell: string) {
-  const o = (await runningAt(this, name, cell, "green", ["red"]), ctx(this).origins.get(name)!);
-  o.shas.expected = o.shas.red;
-});
-
-Given("item {string} was at green in cell {string}, and its last pushed commit is a work-in-progress commit", long, async function (name: string, cell: string) {
-  const o = (await runningAt(this, name, cell, "green", ["red", "wip"]), ctx(this).origins.get(name)!);
-  o.shas.expected = o.shas.wip;
-});
-
-Then("item {string}'s open green attempt is recorded as stopped", long, async function (name: string) {
-  assert.equal(await attemptStatus(p17(this).items[name], "green", 1), "stopped");
-});
-
 When("the factory restarts and a cell starts for item {string}", long, async function (_name: string) {
   // The restart: the control plane starts, and a minute later, inside the stopped cells' last leases, its scheduler ticks.
   await clearRestartOnStart(need().pool);
@@ -638,14 +605,6 @@ async function checkoutAt(world: object, name: string, sha: string) {
 }
 
 Then("the new cell's checkout of the run's branch is at the work-in-progress commit the stopped cell pushed", long, async function () {
-  await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.wip);
-});
-
-Then("the new cell's checkout of the run's branch is at red's commit", long, async function () {
-  await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.red);
-});
-
-Then("the new cell's checkout of the run's branch is at that work-in-progress commit", long, async function () {
   await checkoutAt(this, "A", ctx(this).origins.get("A")!.shas.wip);
 });
 

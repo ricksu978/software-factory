@@ -61,18 +61,6 @@ export async function clearItemOverrides(c: pg.Pool | pg.PoolClient, itemId: str
   );
 }
 
-const RESTART_WAIT_MINUTES = 15;
-
-/**
- * How long a prepared restart lets cells wrap up before the scheduler stops them (PBI 140): FACTORY_RESTART_WAIT_MINUTES,
- * or 15 minutes when it's unset or isn't a number of minutes.
- */
-export function restartWaitMs(env: Record<string, string | undefined> = process.env): number {
-  const raw = env.FACTORY_RESTART_WAIT_MINUTES?.trim();
-  const n = raw ? Number(raw) : NaN;
-  return (Number.isFinite(n) && n >= 0 ? n : RESTART_WAIT_MINUTES) * 60_000;
-}
-
 /**
  * Clears a restart override left from before this process started, so the restarted factory runs (PBI 140). The
  * control plane and the worker each call it, since either can restart on its own. A pause, drain or kill stays: only
