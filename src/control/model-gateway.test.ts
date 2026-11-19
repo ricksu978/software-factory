@@ -328,7 +328,7 @@ describe("model gateway slow line (PBI 154)", () => {
   }
 
   type Mode = "hang" | "answer" | "drop";
-  async function withGateway(mode: Mode, fn: (ctx: { clock: ReturnType<typeof handClock>; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>) {
+  async function withGateway(mode: Mode, fn: (ctx: { clock: ReturnType<typeof handClock>; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>, ownerToken = "owner") {
     let got = 0;
     const up = createServer((req, res) => {
       req.resume();
@@ -346,7 +346,7 @@ describe("model gateway slow line (PBI 154)", () => {
     const g = await startModelGateway({
       port: 0,
       upstream: `http://127.0.0.1:${port(up)}`,
-      ownerToken: () => "owner",
+      ownerToken: () => ownerToken,
       verify: (c) => (c === "ok" ? { webTools: [], runId: "11111111-2222-3333-4444-555555555555" } : null),
       slow: { clock, log: (l) => lines.push(l) },
     });
@@ -430,6 +430,22 @@ describe("model gateway slow line (PBI 154)", () => {
       clock.advance(300_000);
       assert.deepEqual(lines, []);
     });
+  });
+
+  test("a request http.request throws on, never forwarded, logs no slow line", async () => {
+    // An owner token ending in a newline makes http.request throw ERR_INVALID_CHAR before anything reaches the upstream.
+    await withGateway(
+      "hang",
+      async ({ clock, lines, gatewayPort }) => {
+        const { events } = open(gatewayPort);
+        for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+        assert.deepEqual(events, ["status 400"]);
+        assert.equal(clock.pending(), 0);
+        clock.advance(300_000);
+        assert.deepEqual(lines, []);
+      },
+      "owner\n",
+    );
   });
 
   test("a refused request never starts a watch", async () => {

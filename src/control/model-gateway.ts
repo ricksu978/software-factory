@@ -4,7 +4,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { pipeline } from "node:stream";
-import { seconds, SLOW_REQUEST_MS, watch, type Slow } from "./slow-work.ts";
+import { seconds, SLOW_REQUEST_MS, watch, type Slow, type Watch } from "./slow-work.ts";
 
 // Claude Code sends CLAUDE_CODE_OAUTH_TOKEN as "Authorization: Bearer <token>", and the prefix marks it as a
 // subscription token, so the cell's own anthropic-beta carries the OAuth capability the upstream needs.
@@ -132,6 +132,7 @@ function refuse(req: IncomingMessage, res: ServerResponse, status: number): void
  * It never throws: a malformed request gets 400, so one cell can't crash the process that hosts it.
  */
 export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessage, res: ServerResponse, path = req.url ?? "/"): Promise<void> {
+  let w: Watch | undefined;
   try {
     const grant = await allowed(cfg, req.headers.authorization);
     if (grant === "unavailable") return refuse(req, res, 503);
@@ -166,9 +167,9 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     // an upstream error or the cell disconnecting all end the watch, so a long stream that started in time is quiet.
     const name = `${req.method} ${target.pathname}`;
     const run = grant.runId ? ` for run ${grant.runId}` : "";
-    const w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the model gateway request ${name}${run} has had no upstream answer for ${seconds(ms)}`, cfg.slow);
+    w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the model gateway request ${name}${run} has had no upstream answer for ${seconds(ms)}`, cfg.slow);
     const up = send(target, { method: req.method, headers }, (upRes) => {
-      w.end();
+      w?.end();
       res.writeHead(upRes.statusCode ?? 502, upRes.headers);
       // pipeline, not pipe: an upstream reset mid-stream errors upRes, not `up`, and pipeline then destroys res, so
       // a cut-off stream never ends cleanly for the cell.
@@ -177,11 +178,11 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     // A cell that disconnects, or is stopped, cancels its upstream call instead of leaving it running on the
     // owner's subscription.
     res.on("close", () => {
-      w.end();
+      w?.end();
       if (!res.writableFinished) up.destroy();
     });
     up.on("error", () => {
-      w.end();
+      w?.end();
       // After the headers went out, a clean end would make a cut-off stream look complete, so it's destroyed.
       if (res.headersSent) res.destroy();
       else res.writeHead(502).end();
@@ -189,6 +190,9 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     if (body) up.end(body);
     else req.pipe(up);
   } catch {
+    // http.request throws synchronously on a header it can't send (an owner token ending in a newline, say). That
+    // request never reached the upstream and is answered here, so its watch ends rather than blaming the upstream.
+    w?.end();
     refuse(req, res, 400);
   }
 }
