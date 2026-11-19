@@ -18,13 +18,17 @@ describe("boardPriority", () => {
 });
 
 describe("readinessItemHash", () => {
-  const fi = (fields: Record<string, string>): FactoryItem => ({
+  const fi = (fields: Record<string, string>, orderOnly?: string[]): FactoryItem => ({
     sourceId: "s", externalId: "1", title: "t", body: "b", acceptanceCriteria: ["it works"], labels: [], status: "", rank: 1, repo: "o/r", fields,
-    closed: false, updatedAt: "",
+    closed: false, updatedAt: "", ...(orderOnly ? { orderOnly } : {}),
   });
 
-  test("ignores the Priority field, so a new priority doesn't re-gate the item", () => {
-    assert.equal(readinessItemHash(fi({ Size: "3", Priority: "1" })), readinessItemHash(fi({ Size: "3" })));
-    assert.notEqual(readinessItemHash(fi({ Size: "5" })), readinessItemHash(fi({ Size: "3" })));
+  test("ignores an order-only Priority field, so a new priority doesn't re-gate the item", () => {
+    assert.equal(readinessItemHash(fi({ Size: "3", Priority: "1" }, ["Priority"])), readinessItemHash(fi({ Size: "3" })));
+    assert.notEqual(readinessItemHash(fi({ Size: "5" }, ["Priority"])), readinessItemHash(fi({ Size: "3" }, ["Priority"])));
+  });
+
+  test("counts a Priority field the repo judges, so setting it re-gates the item", () => {
+    assert.notEqual(readinessItemHash(fi({ Size: "3", Priority: "1" })), readinessItemHash(fi({ Size: "3" })));
   });
 });

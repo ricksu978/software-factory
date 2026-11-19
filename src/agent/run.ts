@@ -3,7 +3,7 @@ import { query, type AgentDefinition, type Options, type SDKMessage } from "@ant
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
-import type { FactoryItem } from "../adapters/types.ts";
+import { judgedFields, type FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
 import { splitPrompt, TEMPLATE_DOR } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
@@ -128,7 +128,7 @@ type JudgeSop = { models: { triage: string } };
 type JudgePolicy = { text: string; criteria: { index: number; text: string }[] };
 
 export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
-  const data = JSON.stringify({ title: item.title, body: item.body, acceptanceCriteria: item.acceptanceCriteria, fields: item.fields }, null, 2);
+  const data = JSON.stringify({ title: item.title, body: item.body, acceptanceCriteria: item.acceptanceCriteria, fields: judgedFields(item) }, null, 2);
   return [
     "You check one backlog item against a team's Definition of Ready. Here is their dor.md:",
     "",

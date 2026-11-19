@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
+import { judgedFields, loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
@@ -73,9 +73,8 @@ export function criteriaHash(criteria: string[]): string {
  * it. Its open dependencies aren't judged (PBI 237): the scheduler skips a Queued item whose `blocked_by` isn't empty.
  */
 export function readinessItemHash(fi: FactoryItem): string {
-  // The Priority field orders the claims (PBI 320) and isn't judged, so a new priority doesn't re-gate the item.
-  const { [PRIORITY_FIELD]: _priority, ...fields } = fi.fields;
-  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields, repo: fi.repo });
+  // A field that only orders the claims, such as Priority when the repo doesn't judge it (PBI 320), doesn't re-gate.
+  return sha256({ title: fi.title, body: fi.body, criteria: fi.acceptanceCriteria, fields: judgedFields(fi), repo: fi.repo });
 }
 
 /** The board field an item's priority is read from (PBI 320). */
