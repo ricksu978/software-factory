@@ -148,9 +148,14 @@ describe("pollOnce", dbTest, () => {
     const subs: string[] = [];
     const filed: { externalId: string; title: string; url: string; body: string }[] = [];
     let n = 100;
+    // Once set, the filed children are older than the repo's newest issues, so a search of the repo no longer finds them.
+    let old = false;
     const board = {
-      subIssues: async () => subs.map((id) => ({ externalId: id, title: id, url: `u/${id}` })),
-      findIssues: async (_repo: string, text: string) =>
+      subIssues: async () => subs.map((id) => {
+        const f = filed.find((x) => x.externalId === id);
+        return { externalId: id, title: f?.title ?? id, url: `u/${id}`, body: f?.body ?? "", openedByApp: !!f };
+      }),
+      findIssues: async (_repo: string, text: string) => old ? [] :
         filed.filter((f) => f.body.includes(text)).map(({ externalId, title, url }) => ({ externalId, title, url })),
       createIssue: async (_repo: string, title: string, body: string) => {
         const issue = { externalId: String(++n), title, url: `u/${n}` };
@@ -171,7 +176,7 @@ describe("pollOnce", dbTest, () => {
       "select payload->>'from' as from, payload->>'event' as event, payload->>'to' as to from event where item_id = $1 and kind = 'transition' order by at, id",
       [(await row(ext)).id],
     )).rows;
-    return { ext, subs, pollSplit, moves };
+    return { ext, subs, pollSplit, moves, age: () => void (old = true) };
   }
 
   test("a parent whose split is filed moves NotReady to Split, and stays there with its label back and a new policy (PBI 225)", async () => {
@@ -238,8 +243,9 @@ describe("pollOnce", dbTest, () => {
   });
 
   test("a Split parent whose move to Split recorded no children finds them by their split markers, and moves to Done once they're Done (PBI 226)", async () => {
-    const { ext, subs, pollSplit, moves } = await splitting();
+    const { ext, subs, pollSplit, moves, age } = await splitting();
     await pollSplit();
+    age();
     await db.pool.query("update event set payload = payload - 'children' where item_id = $1 and payload->>'event' = 'split_filed'", [(await row(ext)).id]);
     // A sub-issue added by hand carries no split marker, so it isn't a filed child and doesn't hold the parent back.
     subs.push("999");

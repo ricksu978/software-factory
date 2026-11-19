@@ -11,10 +11,16 @@ import { itemTextHash, type SplitChild } from "./split.ts";
 /** An issue the factory filed, or found already filed. `url` is its web URL, which the parent's link comment carries. */
 export type ChildIssue = { externalId: string; title: string; url: string };
 
+/**
+ * A parent's sub-issue, as the board lists it: with its body, and whether the factory's own App opened it, when the
+ * board can say. Recovery matches split markers on these, so it never has to search the repo (PBI 226).
+ */
+export type SubIssue = ChildIssue & { body?: string; openedByApp?: boolean };
+
 /** The board and repo writes filing needs, beyond the BacklogAdapter's. Every write may fail; filing is retried. */
 export interface SplitBoard {
   /** The parent's sub-issues, in order. */
-  subIssues(parentId: string): Promise<ChildIssue[]>;
+  subIssues(parentId: string): Promise<SubIssue[]>;
   /** The issues in `repo` whose title or body holds `text`, so a child filed but not yet linked is found again. */
   findIssues(repo: string, text: string): Promise<ChildIssue[]>;
   /** Files a new issue in `repo`, carrying `labels` as it's filed (PBI 237), or no label when none is given. */
@@ -62,21 +68,25 @@ function keyFor(externalId: string, textHash: string): string {
 
 /**
  * The children the factory filed for a parent whose move to Split recorded none, as a parent split before PBI 226
- * did (PBI 226). They're the parent's sub-issues that carry its split marker, for one of the splits kept for it
- * (`kept`, newest first, each by its text hash and child count). A sub-issue added by hand carries no marker, so it
- * isn't one. Null when no kept split has every child found among the parent's sub-issues.
+ * did (PBI 226). They're the parent's sub-issues that the factory's own App opened and whose body carries the parent's
+ * split marker, for one of the splits kept for it (`kept`, newest first, each by its text hash and child count). The
+ * markers are matched on the sub-issues as listed, not searched for in the repo, so a child filed long ago is found
+ * however many issues came after it. A sub-issue added by hand carries no marker, so it isn't one. Null when no kept
+ * split has every child found among the parent's sub-issues.
  */
-export async function filedFromMarkers(parentId: string, repo: string, kept: { textHash: string; count: number }[],
-  board: Pick<SplitBoard, "subIssues" | "findIssues">): Promise<ChildIssue[] | null> {
+export async function filedFromMarkers(parentId: string, kept: { textHash: string; count: number }[],
+  board: Pick<SplitBoard, "subIssues">): Promise<ChildIssue[] | null> {
   if (kept.length === 0) return null;
-  const subs = new Set((await board.subIssues(parentId)).map((s) => s.externalId));
+  const subs = (await board.subIssues(parentId)).filter((s) => s.openedByApp === true && s.body);
   for (const { textHash, count } of kept) {
     const key = keyFor(parentId, textHash);
     const filed: ChildIssue[] = [];
     for (let n = 1; n <= count; n++) {
-      const found = (await board.findIssues(repo, splitMarker(key, n))).find((f) => subs.has(f.externalId));
+      // The marker for child 1 is a prefix of child 10's, so a digit may not follow it.
+      const marker = new RegExp(`${splitMarker(key, n)}(?!\\d)`);
+      const found = subs.find((s) => marker.test(s.body!));
       if (!found) break;
-      filed.push(found);
+      filed.push({ externalId: found.externalId, title: found.title, url: found.url });
     }
     if (count > 0 && filed.length === count) return filed;
   }

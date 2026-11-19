@@ -24,7 +24,10 @@ function memoryBoard(s: Store): SplitBoard {
   const strip = ({ body: _, labels: _l, ...i }: ChildIssue & { body: string; labels?: string[] }) => i;
   return {
     async subIssues() {
-      return s.subs.map((id) => strip(s.issues.find((i) => i.externalId === id) ?? { externalId: id, title: "by hand", url: "", body: "" }));
+      return s.subs.map((id) => {
+        const i = s.issues.find((x) => x.externalId === id);
+        return i ? { ...strip(i), body: i.body, openedByApp: true } : { externalId: id, title: "by hand", url: "", body: "", openedByApp: false };
+      });
     },
     async findIssues(_repo, text) {
       return s.issues.filter((i) => i.body.includes(text) || i.title.includes(text)).map(strip);
@@ -208,11 +211,29 @@ describe("fileSplit", () => {
     const { s, run } = await setup();
     const filed = await run();
     s.subs.push("999");
-    const board = memoryBoard(s);
+    // The children are older than any repo search reaches: they're found on the parent's sub-issues alone.
+    const board = { ...memoryBoard(s), findIssues: async () => [] };
     const kept = [{ textHash: "older", count: 2 }, { textHash: itemTextHash(parent), count: 3 }];
-    assert.deepEqual(await filedFromMarkers("12", "o/r", kept, board), filed);
+    assert.deepEqual(await filedFromMarkers("12", kept, board), filed);
     s.subs = s.subs.filter((id) => id !== filed![2].externalId);
-    assert.equal(await filedFromMarkers("12", "o/r", kept, board), null);
-    assert.equal(await filedFromMarkers("12", "o/r", [], board), null);
+    assert.equal(await filedFromMarkers("12", kept, board), null);
+    assert.equal(await filedFromMarkers("12", [], board), null);
+  });
+
+  test("a sub-issue carrying a split marker that the factory's App didn't open isn't a filed child (PBI 226)", async () => {
+    const { s, run } = await setup();
+    const filed = await run();
+    const real = memoryBoard(s);
+    const board = { subIssues: async (id: string) => (await real.subIssues(id)).map((x, i) => (i === 1 ? { ...x, openedByApp: false } : x)) };
+    assert.equal(await filedFromMarkers("12", [{ textHash: itemTextHash(parent), count: 3 }], board), null);
+    assert.ok(filed);
+  });
+
+  test("child 1's split marker doesn't match child 10's (PBI 226)", async () => {
+    const key = splitKey(parent);
+    const sub = (n: number) => ({ externalId: String(n), title: `c${n}`, url: `u${n}`, body: `(${splitMarker(key, n)})`, openedByApp: true });
+    const board = { subIssues: async () => [sub(10), ...Array.from({ length: 9 }, (_, i) => sub(i + 1))] };
+    const found = await filedFromMarkers("12", [{ textHash: itemTextHash(parent), count: 10 }], board);
+    assert.deepEqual(found?.map((f) => f.externalId), ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
   });
 });

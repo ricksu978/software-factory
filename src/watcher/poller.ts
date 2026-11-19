@@ -382,9 +382,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     if (!board) return null;
     const kept = await keptSplits(pool, row.id);
     if (kept.length === 0) return null;
-    const repo = (await itemOf(row.external_id))?.repo;
-    if (!repo) return null;
-    return filedFromMarkers(row.external_id, repo, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+    return filedFromMarkers(row.external_id, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
   };
 
   w.step("closing split parents");
