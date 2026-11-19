@@ -1,4 +1,4 @@
-# Prompts for each parameter the local AppHost declares (aspire-apphost/apphost.mts) and saves it in that checkout's
+# Prompts for each parameter the local AppHost (aspire-apphost/apphost.mts) declares under `aspire run` and saves it in that checkout's
 # Aspire user secrets. Aspire keys user secrets by checkout path, so run it once per checkout or worktree.
 # Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>] [-MissingOnly]
 # Secret values are typed hidden. Enter alone keeps the current value. github-app-key takes the path to the App's .pem.
@@ -7,10 +7,13 @@
 param([string]$AppHost = (Split-Path $PSScriptRoot -Parent), [switch]$MissingOnly)
 $ErrorActionPreference = 'Stop'
 
-$src = Get-Content (Join-Path $AppHost 'aspire-apphost/apphost.mts') -Raw
-# Secrets are the ones declared through apphost.mts's secret() helper. @() keeps a single match a list.
-$secret = @([regex]::Matches($src, "secret\('([\w-]+)'\)") | ForEach-Object { $_.Groups[1].Value })
-$plain = @([regex]::Matches($src, "addParameter\('([\w-]+)'") | ForEach-Object { $_.Groups[1].Value })
+# Only the parameters the AppHost declares under `aspire run`, so never the published BFF's oidc-issuer or
+# oidc-client-secret (PBI 312). src/apphost/local-parameters.ts reads them, and its scenarios hold what it reads.
+# Secrets are the ones declared through apphost.mts's secret() helper. @() keeps a single line a list.
+$declared = @(node (Join-Path $PSScriptRoot '../src/apphost/local-parameters.ts') $AppHost)
+if ($LASTEXITCODE) { throw "could not read the parameters $AppHost/aspire-apphost/apphost.mts declares" }
+$secret = @($declared | Where-Object { $_ -like 'secret *' } | ForEach-Object { $_.Substring(7) })
+$plain = @($declared | Where-Object { $_ -like 'plain *' } | ForEach-Object { $_.Substring(6) })
 if (-not ($secret + $plain)) { throw "no parameters found in $AppHost/aspire-apphost/apphost.mts" }
 
 $out = aspire secret path --apphost $AppHost --non-interactive --nologo
