@@ -1,12 +1,14 @@
-# Starts the local factory in one step (plan Task 18): the latest main, Docker, the cell image, then `aspire run`.
-# Usage: npm run factory. Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes. The Aspire
-# dashboard asks for any AppHost parameter this checkout has no value for (issue #207), and the control resource's
-# console shows the factory dashboard's sign-in link.
+# Starts the local factory in one step (plan Task 18): the latest main and Docker, then `aspire run`, whose cell-image
+# resource builds factory-cell:local from this checkout before the worker starts (PBI 206). Usage: npm run factory.
+# Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes. The Aspire dashboard asks for any
+# AppHost parameter this checkout has no value for (issue #207), and the control resource's console shows the factory
+# dashboard's sign-in link.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 # Only fast-forwards, and only on main, so work on another branch is never touched. The AppHost runs the same pull and
-# Docker check itself (PBI 205, src/apphost/start.ts), but this script needs both first, to build the cell image below.
+# Docker check itself (PBI 205, src/apphost/start.ts), but this script runs them first so a failed pull or a missing
+# Docker shows before `aspire run` starts.
 $branch = git branch --show-current
 if ($branch -eq 'main') {
   git pull --ff-only
@@ -27,15 +29,5 @@ if ($LASTEXITCODE) {
   do { Start-Sleep -Seconds 3; docker version *> $null } while ($LASTEXITCODE -and (Get-Date) -lt $deadline)
   if ($LASTEXITCODE) { throw 'Docker did not come up within 3 minutes.' }
 }
-
-# The egress proxy and cells run factory-cell:local, so it's built here first, from this checkout. Once the worker starts,
-# it builds the image again from main's fetched commit and keeps it current with main (PBI 210). Docker's cache makes
-# an unchanged build quick. It records HEAD's commit in the image's revision label, which Floor shows, but only when the
-# working tree is clean: an image holding uncommitted edits was built from no commit, so it gets no label.
-'Building factory-cell:local...'
-$label = @()
-if (-not (git status --porcelain)) { $label = @('--label', "org.opencontainers.image.revision=$(git rev-parse HEAD)") }
-docker build -q -f cell/Dockerfile -t factory-cell:local @label . | Out-Null
-if ($LASTEXITCODE) { throw 'Building factory-cell:local failed.' }
 
 aspire run

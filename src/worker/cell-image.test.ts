@@ -129,7 +129,7 @@ describe("keeping the cell image current with main", dbTest, () => {
   test("a start whose fetch fails still records this run's commit, so a later poll measures main against it", async () => {
     const earlier = git(seed, "rev-parse", "HEAD");
     await startCellImage(deps());
-    // This run's checkout holds a commit that changes worker code, and factory.ps1 retagged the image from it.
+    // This run's checkout holds a commit that changes worker code, and the AppHost's cell-image resource retagged the image from it.
     git(checkout, "pull", "-q", "--ff-only");
     const running = push(["src/worker/main.ts"]);
     git(checkout, "pull", "-q", "--ff-only");
@@ -193,7 +193,7 @@ describe("keeping the cell image current with main", dbTest, () => {
   test("a start that builds nothing records the commit the tagged image carries, not an earlier run's", async () => {
     const running = git(seed, "rev-parse", "HEAD");
     await startCellImage(deps());
-    // A later run starts on a branch that changes worker code, and factory.ps1 builds the tag from its edited tree, unlabelled.
+    // A later run starts on a branch that changes worker code, and the AppHost's cell-image resource builds the tag from its edited tree, unlabelled.
     push(["src/worker/main.ts"]);
     tagged = null;
     await startCellImage(deps());
