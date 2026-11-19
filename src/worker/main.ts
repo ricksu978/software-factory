@@ -9,6 +9,7 @@
 // `main` on each poll, so a merged cell-side change reaches the next cell without a restart (PBI 210).
 import { App } from "@octokit/app";
 import { join } from "node:path";
+import { loadAppKey } from "../adapters/github/app-key.ts";
 import pg from "pg";
 import { githubRepoHost } from "../adapters/github/repo-host.ts";
 import { TimedOctokit } from "../adapters/github/timed.ts";
@@ -303,6 +304,7 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
 
 /** Reads the worker's settings from `env` and starts it with the real board, repo host, launcher and judge. */
 export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress): Promise<Worker> {
+  loadAppKey(env);
   if (env.FACTORY_ENV !== "local") throw new Error("Azure mode isn't wired yet: the worker launches cells with Docker only. Run it under `aspire run`.");
   const need = (name: string) => {
     const v = env[name];

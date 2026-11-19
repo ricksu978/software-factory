@@ -3,6 +3,7 @@
 // src/main.ts, no longer serves them. Until the outbox lands (step 3), it registers mirrorBoard and the console log
 // for the transitions its routes commit, as the control plane did for them.
 import { App } from "@octokit/app";
+import { loadAppKey } from "../adapters/github/app-key.ts";
 import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { Server } from "node:http";
 import type pg from "pg";
@@ -66,6 +67,7 @@ export async function serveCellApi(d: CellApiDeps, port: number): Promise<{ serv
  * checked before anything connects or listens, so a missing one stops it with nothing started.
  */
 export async function main(env: Record<string, string | undefined>): Promise<{ stop(): Promise<void> }> {
+  loadAppKey(env);
   const names = ["FACTORY_DB_URI", "FACTORY_BLOB", "CELL_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
   const unset = names.filter((name) => !env[name]);
   if (unset.length) throw new Error(`refusing to start the cell API: ${unset.join(", ")} ${unset.length === 1 ? "is" : "are"} not set`);

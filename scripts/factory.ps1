@@ -1,6 +1,7 @@
-# Starts the local factory in one step (plan Task 18): the latest main, Docker, the AppHost's secrets, the cell image,
-# then `aspire run`. Usage: npm run factory. Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes.
-# The control resource's console shows the dashboard's sign-in link.
+# Starts the local factory in one step (plan Task 18): the latest main, Docker, the cell image, then `aspire run`.
+# Usage: npm run factory. Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes. The Aspire
+# dashboard asks for any AppHost parameter this checkout has no value for (issue #207), and the control resource's
+# console shows the factory dashboard's sign-in link.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
@@ -26,10 +27,6 @@ if ($LASTEXITCODE) {
   do { Start-Sleep -Seconds 3; docker version *> $null } while ($LASTEXITCODE -and (Get-Date) -lt $deadline)
   if ($LASTEXITCODE) { throw 'Docker did not come up within 3 minutes.' }
 }
-
-# Aspire keys secrets by checkout path, so a fresh checkout has none. This asks only for what's missing.
-& "$PSScriptRoot/set-local-secrets.ps1" -MissingOnly
-if ($LASTEXITCODE) { throw 'Some AppHost parameters are still missing, and the factory waits on them forever.' }
 
 # The egress proxy and cells run factory-cell:local, so it's built here first, from this checkout. Once the worker starts,
 # it builds the image again from main's fetched commit and keeps it current with main (PBI 210). Docker's cache makes
