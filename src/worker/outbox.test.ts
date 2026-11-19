@@ -72,6 +72,24 @@ describe("workOutbox", dbTest, () => {
     assert.deepEqual(await outbox(), []);
   });
 
+  test("a row a pre-219 process wrote is removed unhandled, and holds back none of its item's later rows", async () => {
+    const id = await item("1", "Queued");
+    // An old revision still running in a swap writes its row as PBI 218's code did, naming no worker_handles, and its
+    // own hook has already mirrored the change.
+    await withTx(db.pool, async (c) => {
+      const e = (await c.query<{ id: string }>(
+        "insert into event (actor, actor_id, item_id, kind, payload) values ('system', 'old', $1, 'transition', $2) returning id",
+        [id, { from: "Queued", to: "SignOff", event: "scenarios_written" }],
+      )).rows[0].id;
+      await c.query("insert into outbox (consumer, event_id, item_id) values ('board_mirror', $1, $2)", [e, id]);
+    });
+    await withTx(db.pool, (c) => transitionItem(c, id, "claimed", system));
+    await workOutbox(deps());
+    assert.equal(await statuses("1"), "Doing");
+    assert.deepEqual(await board.comments("1"), []);
+    assert.deepEqual(await outbox(), []);
+  });
+
   test("a failed row stays with its attempt counted and a later due time, holds back its item's later rows, and no other item's", async () => {
     const a = await item("1", "Queued");
     const b = await item("2", "Queued");
@@ -117,7 +135,7 @@ describe("workOutbox", dbTest, () => {
         "insert into event (actor, actor_id, kind, payload) values ('system', 'github', 'webhook', $1) returning id",
         [{ event: { kind: "comment", externalId: "1", repo: "acme/app", login: "pat", body: "/approve", commentId: "c1" } }],
       )).rows[0].id;
-      await c.query("insert into outbox (consumer, event_id, item_id) values ('comment_commands', $1, $2)", [e, id]);
+      await c.query("insert into outbox (consumer, event_id, item_id, worker_handles) values ('comment_commands', $1, $2, true)", [e, id]);
     });
     await workOutbox(deps());
     assert.deepEqual(await board.comments("1"), [announcement("approve", "")]);
@@ -134,7 +152,7 @@ describe("workOutbox", dbTest, () => {
         "insert into event (actor, actor_id, kind, payload, at) values ('system', 'github', 'webhook', $1, now() - interval '1 hour') returning id",
         [{ event: { kind: "comment", externalId: "1", repo: "acme/app", login: "pat", body: "/approve", commentId: "c1" } }],
       )).rows[0].id;
-      await c.query("insert into outbox (consumer, event_id, item_id) values ('comment_commands', $1, $2)", [e, id]);
+      await c.query("insert into outbox (consumer, event_id, item_id, worker_handles) values ('comment_commands', $1, $2, true)", [e, id]);
     });
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Sign off the rewrite?')", [id]);
     await workOutbox(deps());
