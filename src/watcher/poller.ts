@@ -4,7 +4,7 @@ import type pg from "pg";
 import { judgedFields, loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
-import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
+import { CI_BACK_TO_GREEN, MERGE_AGAIN, NO_REVIEW_TEXT, olderCiFailedQuestion, olderMergeConflictQuestion } from "../core/questions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
@@ -305,10 +305,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       });
     } else if (!pr.open) {
       await move(pool, row.id, "withdrawn");
-    } else if (row.state === "NeedsInput" && !row.held && ((await requeueForAddress(pool, row, pr)) || (await requeueForGreen(pool, row)))) {
+    } else if (row.state === "NeedsInput" && !row.held && ((await requeueForAddress(pool, row, pr)) || (await requeueOlderQuestion(pool, row)))) {
       // The factory answered the item's "no trusted review text to address" question, and the scheduler claims it
       // again at address (PBI 305). Or it answered an older "Address failed" question naming only CI failures, and the
-      // scheduler claims it again at green (PBI 317).
+      // scheduler claims it again at green (PBI 317), or an older "left conflicts" one, at its stage (PBI 338).
     } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
       // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
       // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
@@ -460,6 +460,11 @@ export const REQUEUED_FOR_ADDRESS = "requeued_for_address";
  * and `prNumber`.
  */
 export const REQUEUED_FOR_GREEN = "requeued_for_green";
+/**
+ * The kind of the event that logs a re-queue of an item that waited on a "left conflicts" question asked before #331,
+ * when a base that moved during the merge pass could block it (PBI 338). Its payload holds `questionId` and `prNumber`.
+ */
+export const REQUEUED_TO_MERGE_AGAIN = "requeued_to_merge_again";
 /** How many of a base branch's newest commits the poller reads CI on, newest first, to find the newest one with a verdict. */
 const BASE_COMMITS_READ = 20;
 /** The base a base failure names, or the cell API's own base for a question asked before cells named theirs. */
@@ -571,8 +576,11 @@ async function requeueForAddress(
  * green, where the scheduler claims the answered item, and the cell reads the failed checks of the PR's head as Green's
  * findings. The item and question are re-read under a lock after the PR was read, so a person's answer, a Hold or
  * another poll that came first wins and nothing is logged twice. Returns whether it answered.
+ *
+ * PBI 338: the same way, answers a "left conflicts" question asked before #331 stopped the check after the merge pass
+ * fetching the base again, with MERGE_AGAIN. The run stays at its stage, whose claim merges the base first.
  */
-async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
+async function requeueOlderQuestion(pool: pg.Pool, row: Row): Promise<boolean> {
   return withTx(pool, async (c) => {
     const q = (await c.query<{ id: string; body: string; asked_at: Date }>(
       `select q.id, q.body, q.asked_at from item i join question q on q.item_id = i.id
@@ -582,11 +590,12 @@ async function requeueForGreen(pool: pg.Pool, row: Row): Promise<boolean> {
        for update of i, q`,
       [row.id],
     )).rows[0];
-    if (!q || !olderCiFailedQuestion(q.body, q.asked_at)) return false;
-    const prNumber = row.pr_number!;
-    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, CI_BACK_TO_GREEN]);
-    await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
-    await appendEvent(c, { ...system, itemId: row.id, kind: REQUEUED_FOR_GREEN, payload: { questionId: q.id, prNumber } });
+    if (!q) return false;
+    const green = olderCiFailedQuestion(q.body, q.asked_at);
+    if (!green && !olderMergeConflictQuestion(q.body, q.asked_at)) return false;
+    await c.query("update question set answer = $2, decision = 'answer', answered_at = now() where id = $1", [q.id, green ? CI_BACK_TO_GREEN : MERGE_AGAIN]);
+    if (green) await c.query("update run set next_stage = 'green' where id = $1", [row.run_id]);
+    await appendEvent(c, { ...system, itemId: row.id, kind: green ? REQUEUED_FOR_GREEN : REQUEUED_TO_MERGE_AGAIN, payload: { questionId: q.id, prNumber: row.pr_number! } });
     return true;
   });
 }

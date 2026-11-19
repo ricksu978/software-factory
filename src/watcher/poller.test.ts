@@ -8,8 +8,8 @@ import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { SPLIT_DONE_HEADING } from "../gate/split-done.ts";
-import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
-import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "./poller.ts";
+import { CI_BACK_TO_GREEN, MERGE_AGAIN, NO_REVIEW_TEXT } from "../core/questions.ts";
+import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN, REQUEUED_TO_MERGE_AGAIN } from "./poller.ts";
 
 const REPO = "octo/repo";
 const files = {
@@ -821,6 +821,47 @@ describe("pollOnce", dbTest, () => {
     await Promise.all([poll(), poll()]);
     assert.equal((await question(q)).answer, CI_BACK_TO_GREEN);
     assert.equal((await greens(id)).length, 1);
+  });
+
+  const remerges = async (id: string) =>
+    (await db.pool.query<{ actor: string; payload: Record<string, unknown> }>("select actor, payload from event where item_id = $1 and kind = $2", [id, REQUEUED_TO_MERGE_AGAIN])).rows;
+  const conflicted = "Merging main left conflicts in: src/main.ts, src/worker/main.ts";
+
+  test("an older \"left conflicts\" question is answered once by the factory, the run left at its stage (PBI 338)", async () => {
+    const { id, q, pr } = await waiting(conflicted, "2026-11-19T12:24:12Z");
+    await poll();
+    await poll();
+    const a = await question(q);
+    assert.equal(a.answer, MERGE_AGAIN);
+    assert.equal(a.answered_by, null);
+    assert.ok(a.answered_at);
+    const events = await remerges(id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].actor, "system");
+    assert.deepEqual(events[0].payload, { questionId: q, prNumber: pr });
+    assert.equal(await nextStage(id), "address");
+  });
+
+  test("one asked since #331 shipped, a held item, or a person's answer keeps it as it was (PBI 338)", async () => {
+    const since = await waiting(conflicted, "2026-11-19T13:00:00Z");
+    const heldOne = await waiting(conflicted);
+    await db.pool.query("update item set held = true where id = $1", [heldOne.id]);
+    const answered = await waiting(conflicted);
+    await db.pool.query("update question set answer = 'Leave it', decision = 'answer', answered_at = now() where id = $1", [answered.q]);
+    await poll();
+    for (const w of [since, heldOne]) assert.equal((await question(w.q)).answer, null);
+    assert.equal((await question(answered.q)).answer, "Leave it");
+    for (const w of [since, heldOne, answered]) assert.equal((await remerges(w.id)).length, 0);
+    await db.pool.query("update item set held = false where id = $1", [heldOne.id]);
+    await poll();
+    assert.equal((await question(heldOne.q)).answer, MERGE_AGAIN);
+  });
+
+  test("two polls at once answer an older \"left conflicts\" question and log its re-queue once (PBI 338)", async () => {
+    const { id, q } = await waiting(conflicted);
+    await Promise.all([poll(), poll()]);
+    assert.equal((await question(q)).answer, MERGE_AGAIN);
+    assert.equal((await remerges(id)).length, 1);
   });
 
   test("an InProgress item with an open PR and a newer review stays InProgress", async () => {

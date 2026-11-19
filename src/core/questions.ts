@@ -35,3 +35,20 @@ export function olderCiFailedQuestion(body: string, askedAt: Date): boolean {
  * back as its decision: a claim at green that carries it reads CI on the PR's head, and Green's findings are its failed checks.
  */
 export const CI_BACK_TO_GREEN = "Address failed only on CI. Since #292 a CI failure goes back to Green, so the factory sends the item back to Green to fix the CI failure on the PR's head, merging the base first.";
+
+/**
+ * When #331 (PR #332) merged, and the check after a cell's `merge` pass stopped fetching the base again. Before it, a
+ * base that moved while the merge agent worked blocked the item with "Merging <base> left conflicts in: ..." on files
+ * the agent was never given, the same question an agent that left conflict markers asks. The poller answers such a
+ * question asked before this, once: a re-run that truly can't resolve asks again, after this, and waits (PBI 338).
+ */
+// ponytail: a cell image still built from before #332 can block this way until the worker rebuilds it from main (PBI 210).
+export const BASE_FETCHED_ONCE_SINCE = new Date("2026-11-19T12:38:57Z");
+
+/** Whether the poller answers this question itself: a "left conflicts" one asked before #331 shipped (PBI 338). */
+export function olderMergeConflictQuestion(body: string, askedAt: Date): boolean {
+  return askedAt.getTime() < BASE_FETCHED_ONCE_SINCE.getTime() && /^Merging \S+ left conflicts in: /.test(body);
+}
+
+/** The factory's answer to an older "left conflicts" question (PBI 338). */
+export const MERGE_AGAIN = "Before #331 a base that moved during the merge pass blocked the item on conflicts the agent was never given. The factory picks the item up again at its stage and merges the base first.";

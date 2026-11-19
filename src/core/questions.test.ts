@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CI_BACK_TO_GREEN, CI_TO_GREEN_SINCE, olderCiFailedQuestion, onlyCiFailures } from "./questions.ts";
+import { BASE_FETCHED_ONCE_SINCE, CI_BACK_TO_GREEN, CI_TO_GREEN_SINCE, MERGE_AGAIN, olderCiFailedQuestion, olderMergeConflictQuestion, onlyCiFailures } from "./questions.ts";
 
 test("an \"Address failed\" question naming one CI failure is one the factory answers (PBI 317)", () => {
   assert.equal(onlyCiFailures("Address failed:\n- CI failed on m3rge01"), true);
@@ -32,4 +32,13 @@ test("only a CI-only question asked before #292 shipped is one the factory answe
   assert.equal(olderCiFailedQuestion(body, CI_TO_GREEN_SINCE), false);
   assert.equal(olderCiFailedQuestion(body, new Date("2026-11-16T00:00:00Z")), false);
   assert.equal(olderCiFailedQuestion("Address failed:\n- Definition of Done failed", new Date("2026-11-10T00:00:00Z")), false);
+});
+
+test("only a \"left conflicts\" question asked before #331 shipped is one the factory answers, since the base may have moved under it (PBI 338)", () => {
+  const body = "Merging main left conflicts in: src/main.ts, src/worker/main.ts";
+  assert.equal(olderMergeConflictQuestion(body, new Date(BASE_FETCHED_ONCE_SINCE.getTime() - 1)), true);
+  assert.equal(olderMergeConflictQuestion("Merging develop left conflicts in: a.ts", new Date("2026-11-10T00:00:00Z")), true);
+  assert.equal(olderMergeConflictQuestion(body, BASE_FETCHED_ONCE_SINCE), false);
+  assert.equal(olderMergeConflictQuestion("Address failed:\n- CI failed on m3rge01", new Date("2026-11-10T00:00:00Z")), false);
+  assert.match(MERGE_AGAIN, /merges the base/);
 });
