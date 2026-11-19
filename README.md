@@ -30,8 +30,9 @@ npm run factory
 1. fast-forwards `main`, but only when you're on `main`;
 2. starts Docker Desktop if it isn't running, and waits up to 3 minutes for it;
 3. asks for any AppHost secret this checkout doesn't have yet;
-4. rebuilds the `factory-cell:local` image that cells run, so the egress proxy has an image to start from. When your working tree is clean, the image records HEAD's commit in its `org.opencontainers.image.revision` label. With uncommitted edits it gets no label, and Floor says the image's commit is not known until the worker builds it from `main`;
-5. runs `aspire run`.
+4. runs `aspire run`.
+
+`aspire run` itself rebuilds the `factory-cell:local` image that cells run, as a resource named `cell-image` in the Aspire dashboard, so the egress proxy has an image to start from. It builds from your checkout as it is once the pull is done, with the checkout's `cell/Dockerfile`, and the worker starts only once that build has finished. A build that fails shows `cell-image` as failed, with Docker's error in its console, and the worker never starts. When your working tree is clean, the image records HEAD's commit in its `org.opencontainers.image.revision` label. With uncommitted edits it gets no label, and Floor says the image's commit is not known until the worker builds it from `main`.
 
 Once running, the worker builds `factory-cell:local` again from `main`'s fetched commit and checks `main` on each poll. A merged change to cell-side files only (`sop/`, `policy/`, `cell/`, `src/cell/`, except `sop/default.yml` and `src/cell/sop-move.ts`, which the control plane and the worker load too) is rebuilt into the image without a restart, and the next cell runs it. A change to anything the control plane or the worker runs is not, and Floor says a restart is needed. The build never reads your checkout's working tree or local commits.
 
