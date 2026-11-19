@@ -127,8 +127,12 @@ export function scriptedBoard(c: Ctx): SplitBoard {
     return { externalId: found.externalId, title: found.title, url: found.url };
   };
   return {
+    // As GitHub's adapter does, each sub-issue comes with its body and whether the App opened it, so a child filed
+    // before its parent's move to Split recorded it is found by its split marker (PBI 226, PBI 228).
     async subIssues(parentId) {
-      return (c.subIssues.get(parentId) ?? []).map(issue);
+      return Promise.all((c.subIssues.get(parentId) ?? []).map(async (id) => ({
+        ...issue(id), body: (await c.fake.adapter.getItem(id))?.body ?? "", openedByApp: true,
+      })));
     },
     async findIssues(repo, text) {
       const out: ChildIssue[] = [];

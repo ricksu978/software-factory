@@ -11,7 +11,7 @@ import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
 import { doneChildren, filedChildren, keepSplit, keptSplit, keptSplits } from "../store/splits.ts";
-import { filedFromMarkers, type ChildIssue } from "../gate/file-split.ts";
+import { filedFromMarkers, type ChildIssue, type SplitBoard } from "../gate/file-split.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -255,6 +255,22 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     return fetched.get(ext)!;
   };
 
+  w.step("moving split parents out of Abandoned");
+  // 0. A parent split before PBI 225 lost its label once its split was filed, and a poll withdrew it from NotReady to
+  //    Abandoned. One whose kept split's children are all among its sub-issues, found by their split markers, moves to
+  //    Split, recording them, so step 5 closes it once they're Done (PBI 228). It goes first, so step 1 never returns
+  //    it to the gate when its label is back. One this step couldn't read stays put in step 1 too.
+  const unread = new Set<string>();
+  await each(await items(pool, sourceId, ["Abandoned"]), (row) => `moving split parent ${row.external_id}`, async (row) => {
+    try {
+      const children = await abandonedSplitChildren(pool, row, split?.file?.board);
+      if (children) await moveToSplit(pool, row.id, children);
+    } catch (e) {
+      unread.add(row.id);
+      throw e;
+    }
+  });
+
   w.step("listing new and changed items");
   // 1. New and changed items. If any of them fails to go in, the cursor stays put so the next poll lists it again.
   const listed = await adapter.listEligible(src.cursor);
@@ -263,7 +279,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
     await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
-    await returnWithdrawn(pool, id);
+    if (!unread.has(id)) await returnWithdrawn(pool, id);
   });
 
   w.step("reading the PRs of items in review");
@@ -629,6 +645,28 @@ async function openQuestion(c: pg.ClientBase, itemId: string): Promise<{ id: str
   return (await c.query<{ id: string; body: string }>(
     "select id, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1", [itemId],
   )).rows[0] ?? null;
+}
+
+/**
+ * The children an Abandoned parent's kept split filed, found by their split markers among its sub-issues, when its last
+ * move to Abandoned was a withdrawal from Eligible or NotReady (PBI 228). Null for any other Abandoned item: one with
+ * no split kept, one abandoned any other way, or one whose children aren't all filed. Without a board, null.
+ */
+async function abandonedSplitChildren(pool: pg.Pool, row: Row, board: Pick<SplitBoard, "subIssues"> | undefined): Promise<ChildIssue[] | null> {
+  if (!board) return null;
+  const kept = await keptSplits(pool, row.id);
+  if (kept.length === 0) return null;
+  if (!(await withdrawnBeforeQueue(pool, row.id))) return null;
+  return filedFromMarkers(row.external_id, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+}
+
+/** Moves an Abandoned parent to Split, recording its filed children, unless something moved it first (PBI 228). */
+async function moveToSplit(pool: pg.Pool, itemId: string, children: ChildIssue[]): Promise<void> {
+  await withTx(pool, async (c) => {
+    const held = await c.query("select 1 from item where id = $1 and state = 'Abandoned' for update", [itemId]);
+    if (held.rowCount === 0 || !(await withdrawnBeforeQueue(c, itemId))) return;
+    await transitionItem(c, itemId, "split_filed", system, { children });
+  });
 }
 
 /**

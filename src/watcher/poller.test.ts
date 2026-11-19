@@ -274,6 +274,57 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await row(ext)).state, "Split");
   });
 
+  /** Puts a parent split today back as one split before PBI 225 left it: no split_filed move, withdrawn from NotReady. */
+  async function abandonedBefore225(ext: string) {
+    const id = (await row(ext)).id;
+    const filed = "select id from event where item_id = $1 and payload->>'event' = 'split_filed'";
+    await db.pool.query(`delete from outbox where event_id in (${filed})`, [id]);
+    await db.pool.query(`delete from event where id in (${filed})`, [id]);
+    await db.pool.query("update item set state = 'NotReady' where id = $1", [id]);
+    await db.pool.query(
+      `insert into event (item_id, kind, actor, actor_id, payload) values ($1, 'transition', 'system', 'poller', '{"from":"NotReady","to":"Abandoned","event":"withdrawn"}')`, [id]);
+    await db.pool.query("update item set state = 'Abandoned' where id = $1", [id]);
+  }
+
+  test("an Abandoned parent whose split was filed moves to Split once, and on to Done once its children are (PBI 228)", async () => {
+    const { ext, pollSplit, moves } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    // Its label back, it still moves to Split rather than returning to the gate.
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, acceptanceCriteria: ["one", "two"] });
+    judged = [];
+    await pollSplit();
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Split");
+    assert.deepEqual(judged, []);
+    assert.deepEqual((await moves()).slice(-2), [{ from: "NotReady", event: "withdrawn", to: "Abandoned" }, { from: "Abandoned", event: "split_filed", to: "Split" }]);
+    await child("101", "Done", 61);
+    await child("102", "Done", 62);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Done");
+    assert.equal((await fake.adapter.getItem(ext))!.closed, true);
+  });
+
+  test("an Abandoned parent whose kept split's children aren't all among its sub-issues stays Abandoned (PBI 228)", async () => {
+    const { ext, subs, pollSplit } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    subs.splice(subs.indexOf("102"), 1);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Abandoned");
+  });
+
+  test("an item abandoned on a timeout stays Abandoned, though a split is kept for it (PBI 228)", async () => {
+    const { ext, pollSplit } = await splitting();
+    await pollSplit();
+    await abandonedBefore225(ext);
+    await db.pool.query(
+      `insert into event (item_id, kind, actor, actor_id, payload, at) values ($1, 'transition', 'system', 'poller', '{"from":"SignOff","to":"Abandoned","event":"timed_out"}', now() + interval '1 second')`,
+      [(await row(ext)).id]);
+    await pollSplit();
+    assert.equal((await row(ext)).state, "Abandoned");
+  });
+
   test("intake stores each item's repo as owner/name, from its issue, or none for a board item in no repo", async () => {
     const a = await seed();
     const b = await seed({ repo: "other/tools" });

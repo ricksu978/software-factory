@@ -54,6 +54,9 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "split_filed", "Split"],
   // Split's one way out: every child the factory filed for the parent reached Done (PBI 226).
   ["Split", "children_done", "Done"],
+  // A parent split before PBI 225 lost its label once its split was filed and was withdrawn from NotReady to Abandoned.
+  // Its children carrying their split markers, it moves on to Split, once (PBI 228).
+  ["Abandoned", "split_filed", "Split"],
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));
