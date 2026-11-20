@@ -19,7 +19,7 @@ const person = (yes: boolean) => JSON.stringify({ needsPerson: yes, reason: "fak
 function ctx(over: Partial<RiskContext> & { agent: RiskContext["agent"] }, sensitive: string[] = [], riskText = "Low: docs.\nHigh: payments."): RiskContext {
   return {
     sop: { sop: "default", version: "0.1.0", models: { coding: "claude-sonnet-5-5", triage: "claude-haiku-5-5" }, stages: [] },
-    config: { sensitivePaths: sensitive, reviewers: [], webTools: [], bdd: { parse: "", run: "", report: "" }, commands: { test: "", lint: "" } },
+    config: { sensitivePaths: sensitive, reviewers: [], webTools: [], failedRecheckHours: 8, bdd: { parse: "", run: "", report: "" }, commands: { test: "", lint: "" } },
     risk: { name: "risk", source: "repo", sha: "s", text: riskText, criteria: [] },
     dodVerdicts: [],
     ...over,
