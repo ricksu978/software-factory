@@ -176,8 +176,9 @@ if (runMode) {
 }
 
 // Before any resource starts, the AppHost pulls main fast-forward-only and brings Docker up (PBI 205,
-// src/apphost/start.ts), however it was launched, so control, the worker and migrate run the pulled code. A check that
-// fails shows why and exits before anything starts. A pull that changes this file takes effect on the next start.
+// src/apphost/start.ts), so `aspire run` is the one start command (PBI 208) and control, the worker and migrate run the
+// pulled code. A test run (FACTORY_FLOAT_PORTS=1) pulls nothing. A check that fails shows why and exits before anything
+// starts. A pull that changes this file takes effect on the next start.
 // `aspire publish` starts nothing, so it skips them. The path is a variable so this project's tsc, rooted here, doesn't
 // compile the repo's src; the AppHost's runtime loads the .ts file itself.
 // run() returns Aspire's PromiseLike, and runAppHostStart wants a Promise, so await it inside an async function.

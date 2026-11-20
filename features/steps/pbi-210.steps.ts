@@ -526,7 +526,7 @@ Then("Floor doesn't say a restart is needed", long, async function () {
   assert.deepEqual(asks, [], "Floor says a restart is needed");
 });
 
-// ---- @local: the owner runs this against the factory `npm run factory` started, and the PR records the run ----
+// ---- @local: the owner runs this against the factory `aspire run` started, and the PR records the run ----
 
 const APPHOST = "--apphost . --non-interactive --nologo";
 const sh = (cmd: string) => spawnSync(cmd, { shell: true, encoding: "utf8" });
