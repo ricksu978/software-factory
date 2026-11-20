@@ -98,10 +98,10 @@ export function ctx(world: object): Ctx {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const quoted = (s: string) => [...s.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-const keyOf = (r: Role) => (r.kind === "fix" ? `fix${r.n}` : r.kind === "sha" ? `sha:${r.sha}` : r.kind);
+export const keyOf = (r: Role) => (r.kind === "fix" ? `fix${r.n}` : r.kind === "sha" ? `sha:${r.sha}` : r.kind);
 
 /** Whether the text names the word as one of its own, so "ci" isn't found inside "decision". */
-function namesWord(t: string, word: string): boolean {
+export function namesWord(t: string, word: string): boolean {
   return new RegExp(`(^|[^\\w-])${escapeRe(word)}([^\\w-]|$)`, "i").test(t);
 }
 
@@ -170,6 +170,11 @@ function classify(c: Ctx, run: CellCtx, sha: string): string {
 
 function checksOn(c: Ctx, run: CellCtx, sha: string): Check[] {
   return c.rules.get(classify(c, run, sha)) ?? [{ name: "ci", conclusion: "success", url: "https://github.com/acme/widgets/actions/runs/1", failingTests: [] }];
+}
+
+/** PBI 233's steps lay re-runs over the checks this CI reports on a commit. */
+export function checksAt(world: object, sha: string): Check[] {
+  return checksOn(ctx(world), cell(world), sha);
 }
 
 export function install(world: object) {
@@ -287,7 +292,7 @@ Given(new RegExp(`^these checks report on ${ON}:$`), function (head: string | un
 
 // ---- the cell's Thens ----
 
-function settled(run: CellCtx): void {
+export function settled(run: CellCtx): void {
   assert.equal(run.error, null, `the cell failed: ${run.error instanceof Error ? run.error.stack : String(run.error)}`);
 }
 
@@ -299,16 +304,16 @@ function greenBriefs(world: object): string[] {
 
 const ORDINALS: Record<string, number> = { "": 1, "first ": 1, "second ": 2, "third ": 3 };
 
-function brief(world: object, which: string): string {
+export function brief(world: object, which: string): string {
   const n = ORDINALS[which];
   const all = greenBriefs(world);
   assert.ok(all[n - 1], `Green ran ${all.length} time(s), so it has no brief ${n}`);
   return all[n - 1];
 }
 
-const tddPrompt = () => readFileSync(join(repo, "sop/prompts/tdd.md"), "utf8");
+export const tddPrompt = () => readFileSync(join(repo, "sop/prompts/tdd.md"), "utf8");
 
-function saysFailedOn(t: string, sha: string): boolean {
+export function saysFailedOn(t: string, sha: string): boolean {
   return t.split("\n").some((l) => /CI failed/i.test(l) && l.includes(sha.slice(0, 7)));
 }
 
@@ -351,7 +356,7 @@ Then("Green's brief says CI named no failing test for the check {string}", funct
 });
 
 /** The messages of the attempts the cell ended, with each attempt's stage. */
-function ended(world: object): { stageId: string; attempt: number; message: string }[] {
+export function ended(world: object): { stageId: string; attempt: number; message: string }[] {
   const run = cell(world);
   settled(run);
   return run.calls.filter((x) => x.route === "/stage" && x.body.status !== "started")

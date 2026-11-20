@@ -70,6 +70,11 @@ export type CellApi = {
    */
   ciChecks?(sha: string, on?: "base"): Promise<CiCheck[] | null>;
   /**
+   * PBI 233: asks the repo host to re-run the named checks that failed on `sha`, one of the run's own commits. It
+   * rejects when the repo host refuses to start the re-run. The checks' new results come from `checks` as before.
+   */
+  rerunFailedChecks?(sha: string, checks: string[]): Promise<void>;
+  /**
    * Ends the claim of a cell a restart stopped with no attempt open (PBI 140), or of one that ended at a stage boundary
    * while a restart was being prepared (PBI 301). Outside a restart it changes nothing.
    */
