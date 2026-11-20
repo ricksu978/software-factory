@@ -1,13 +1,14 @@
-// The parameter check `npm run factory` runs before `aspire run` (PBI 312). It reads the parameters the checkout's
-// AppHost (aspire-apphost/apphost.mts) declares, decides which ones to ask the owner for, and decides whether the start
-// can go on to `aspire run`. It takes only the parameters the AppHost declares under `aspire run`. One declared only
-// for a published run, such as the BFF's oidc-issuer and oidc-client-secret, is never asked for and never stops the start.
+// The parameter check for a local run (PBI 312). It reads the parameters the checkout's AppHost
+// (aspire-apphost/apphost.mts) declares, decides which ones to ask the owner for, and decides whether the start can go
+// on to `aspire run`. It takes only the parameters the AppHost declares under `aspire run`. One declared only for a
+// published run, such as the BFF's oidc-issuer and oidc-client-secret, is never asked for and never stops the start.
 //
-// The real start reaches it through the command line at the bottom of this file: scripts/factory.ps1 runs
-// scripts/set-local-secrets.ps1 -MissingOnly, which takes the parameters to ask for from `--ask` and its "Still missing"
-// line and exit code from `--verdict`. The PowerShell only reads the owner's values (hidden input, .pem paths) and
-// saves them. checkLocalParameters() runs the same parametersToAsk() and verdict() around a scripted owner, which is
-// what the PBI 312 scenarios drive. The one thing the two copies share by hand is "an empty answer keeps the value".
+// `npm run factory` no longer runs it: the Aspire dashboard asks for a missing parameter itself (issue #207). It's
+// reached through the command line at the bottom of this file, which scripts/set-local-secrets.ps1 runs. That script
+// takes the parameters to ask for from `--ask` under -MissingOnly, and its "Still missing" line and exit code from
+// `--verdict`. The PowerShell only reads the owner's values (hidden input, .pem paths) and saves them.
+// checkLocalParameters() runs the same parametersToAsk() and verdict() around a scripted owner, which is what the
+// PBI 312 scenarios drive. The one thing the two copies share by hand is "an empty answer keeps the value".
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 

@@ -7,7 +7,7 @@ import { startServer } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { claimNext, expireLeases, LEASE_RAN_OUT, transitionItem } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { mirrorBoard } from "./board.ts";
+import { workOutbox } from "../worker/outbox.ts";
 import { cellApi, runToken } from "./cell-api.ts";
 
 const secret = "cell-secret";
@@ -22,7 +22,6 @@ describe("cell API", dbTest, () => {
   let board: ReturnType<typeof fakeBacklog>;
   let host: ReturnType<typeof fakeRepoHost>;
   let clock: Date;
-  let off: () => void;
   let sourceId: string;
   let configReads = 0;
   let killed = false;
@@ -49,16 +48,17 @@ describe("cell API", dbTest, () => {
       now: () => clock,
     });
     server = await startServer([api], { port: 0 });
-    off = mirrorBoard({ pool: db.pool, backlogFor: () => board.adapter, repoHost: hostProxy() });
   });
 
-  // The API and the hook hold one RepoHost for the whole suite, so each test's fresh fake sits behind this proxy.
+  /** The worker's pass over the outbox, which mirrors the API's transitions onto the board (PBI 219). */
+  const mirrored = () => workOutbox({ pool: db.pool, backlogFor: () => board.adapter, repoHost: hostProxy() });
+
+  // The API and the worker hold one RepoHost for the whole suite, so each test's fresh fake sits behind this proxy.
   function hostProxy(): ReturnType<typeof fakeRepoHost> {
     return new Proxy({} as ReturnType<typeof fakeRepoHost>, { get: (_t, k) => (host as unknown as Record<string | symbol, unknown>)[k] });
   }
 
   after(async () => {
-    off();
     await new Promise((r) => server.close(r));
     await new Promise((r) => upstream.close(r));
     await db.stop();
@@ -179,6 +179,7 @@ describe("cell API", dbTest, () => {
     assert.equal(run.risk_tier, "Medium");
     assert.deepEqual(run.tier_reasons, ["touches src/control"]);
     assert.deepEqual(run.reviews_seen_at, at);
+    await mirrored();
     assert.equal((await board.adapter.getItem("7"))?.fields.pr, `https://github.com/${repo}/pull/9`);
   });
 
@@ -221,6 +222,7 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(run.locked_files, ["features/a.feature"]);
     const q = await db.pool.query("select kind, body from question where item_id = $1", [cell.itemId]);
     assert.deepEqual(q.rows, [{ kind: "sign_off", body: "Sign these off" }]);
+    await mirrored();
     assert.ok((await board.comments("7")).some((c) => c.includes("/approve") && c.includes("Sign these off")));
   });
 
@@ -235,6 +237,7 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "retries_exhausted" })).body.state, "Failed");
     const e = await db.pool.query("select payload from event where item_id = $1 and payload->>'event' = 'retries_exhausted'", [cell.itemId]);
     assert.deepEqual(e.rows[0].payload.attempts.map((a: { attempt: number }) => a.attempt), [1, 2, 3]);
+    await mirrored();
     assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"));
     assert.ok((await board.comments("7")).some((c) => c.includes("re-queue")));
   });
@@ -665,7 +668,10 @@ describe("cell API", dbTest, () => {
       throw new Error("502 from GitHub");
     };
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    // The failed release keeps the row for a retry, after every other effect has run.
+    await mirrored();
     assert.equal(host.prs[0].open, false);
+    assert.equal((await db.pool.query("select 1 from outbox where item_id = $1", [cell.itemId])).rowCount, 1);
   });
 
   test("Done releases and closes the board item, and withdrawal closes the open PR naming the kept branch", async () => {
@@ -673,18 +679,21 @@ describe("cell API", dbTest, () => {
     await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
     await host.openOrUpdatePr({ repo, branch: "factory/pbi-7-r1", base: "main", title: "t", body: "b" });
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    await mirrored();
     assert.equal(host.prs[0].open, false);
     assert.match(host.prs[0].comments[0], /factory\/pbi-7-r1/);
     assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "Abandoned didn't release the marker");
     // A revived item's re-claim puts the marker back.
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "requeued", { actor: "human", actorId: "operator" }));
     await withTx(db.pool, (c) => claimNext(c, "cell-b", at));
+    await mirrored();
     assert.ok((await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "the re-claim didn't claim the board item");
 
     await board.seed({ externalId: "8" });
     const done = await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '8', 'x', 'Accepted') returning id", [sourceId]);
     await board.adapter.claim("8");
     await withTx(db.pool, (c) => transitionItem(c, done.rows[0].id, "dod_verified", { actor: "system", actorId: "ci" }));
+    await mirrored();
     const shown = await board.adapter.getItem("8");
     assert.equal(shown?.status, "Done");
     assert.equal(shown?.closed, true);

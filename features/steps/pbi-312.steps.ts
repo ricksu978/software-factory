@@ -21,7 +21,7 @@ import { checkLocalParameters, runCli } from "../../src/apphost/local-parameters
 const REAL_APPHOST = join(import.meta.dirname, "..", "..", "aspire-apphost", "apphost.mts");
 /** What the factory's AppHost declares under `aspire run`, and only for a published run, as the feature lists them. */
 const RUN_PARAMS = [
-  "claude-oauth-token", "github-app-key", "github-project-token", "cell-secret", "github-webhook-secret", "dev-login",
+  "claude-oauth-token", "github-app-key-path", "github-project-token", "cell-secret", "github-webhook-secret", "dev-login",
   "github-app-id", "claude-token-created-at", "bff-session-key",
 ];
 const PUBLISH_ONLY_PARAMS = ["oidc-issuer", "oidc-client-secret"];

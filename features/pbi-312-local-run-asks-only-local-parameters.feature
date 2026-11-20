@@ -6,7 +6,7 @@ Feature: npm run factory asks only for the parameters a local run uses
   `oidc-client-secret`, which the AppHost declares only for a published run. Under `aspire run` the BFF signs
   in at the local Keycloak realm and uses neither. An owner who leaves them empty can't start the factory.
   With this item the start asks only for the parameters the AppHost declares under `aspire run`. Under
-  `aspire run` today those are claude-oauth-token, github-app-key, github-project-token, cell-secret,
+  `aspire run` today those are claude-oauth-token, github-app-key-path, github-project-token, cell-secret,
   github-webhook-secret, dev-login, github-app-id, claude-token-created-at and bff-session-key.
   A parameter declared under `aspire run` that's still missing stops the start, as it does today. A parameter
   declared only for a published run never changes what the start asks for.
@@ -24,7 +24,7 @@ Feature: npm run factory asks only for the parameters a local run uses
       When the owner runs "npm run factory"
       Then the start asks for exactly these parameters:
         | claude-oauth-token      |
-        | github-app-key          |
+        | github-app-key-path     |
         | github-project-token    |
         | cell-secret             |
         | github-webhook-secret   |

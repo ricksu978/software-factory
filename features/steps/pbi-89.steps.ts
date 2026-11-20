@@ -16,6 +16,7 @@ import { cellApiHandler } from "../../src/cell-api/main.ts";
 import { controlHandlers } from "../../src/main.ts";
 import { fakeLauncher } from "../../src/scheduler/launcher.ts";
 import { tick, TICK_MS } from "../../src/scheduler/scheduler.ts";
+import { workOutbox } from "../../src/worker/outbox.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 export const CELL_SECRET = "cell-secret";
@@ -184,11 +185,8 @@ When("GitHub delivers a signed comment {string} by {string} on the item", long, 
     },
   });
   assert.equal(r.status, 204);
-  // The control plane applies the comment after its 204, so give it a moment.
-  for (let i = 0; i < 50; i++) {
-    if ((await pool().query("select decision from question where item_id = $1", [c.itemId])).rows[0].decision) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  // The control plane only records the comment. The worker runs it, and announces its decision, from the outbox (PBI 219).
+  await workOutbox({ pool: pool(), backlogFor: () => c.fake!.adapter, repoHost: c.host! });
 });
 
 Then("the item's sign-off question is answered with {string}", async function (decision: string) {

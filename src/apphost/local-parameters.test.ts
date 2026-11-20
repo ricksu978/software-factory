@@ -11,8 +11,8 @@ const HEAD = "const runMode = await builder.executionContext().isRunMode();\ncon
 test("the factory's own AppHost: only the parameters it declares under aspire run, secrets first", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "..", "aspire-apphost", "apphost.mts"), "utf8");
   assert.deepEqual(names(src), [
-    "claude-oauth-token", "github-app-key", "github-project-token", "cell-secret", "github-webhook-secret",
-    "bff-session-key", "dev-login", "github-app-id", "claude-token-created-at",
+    "claude-oauth-token", "github-project-token", "cell-secret", "github-webhook-secret",
+    "bff-session-key", "github-app-key-path", "dev-login", "github-app-id", "claude-token-created-at",
   ]);
 });
 

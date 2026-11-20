@@ -1,13 +1,14 @@
-# Starts the local factory in one step (plan Task 18): the latest main, Docker and the AppHost's secrets, then
-# `aspire run`, whose cell-image resource builds factory-cell:local from this checkout before the worker starts
-# (PBI 206). Usage: npm run factory. Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes.
-# The control resource's console shows the dashboard's sign-in link.
+# Starts the local factory in one step (plan Task 18): the latest main and Docker, then `aspire run`, whose cell-image
+# resource builds factory-cell:local from this checkout before the worker starts (PBI 206). Usage: npm run factory.
+# Ctrl+C stops it, and Postgres and Azurite keep their data in Aspire's volumes. The Aspire dashboard asks for any
+# AppHost parameter this checkout has no value for (issue #207), and the control resource's console shows the factory
+# dashboard's sign-in link.
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 # Only fast-forwards, and only on main, so work on another branch is never touched. The AppHost runs the same pull and
 # Docker check itself (PBI 205, src/apphost/start.ts), but this script runs them first so a failed pull or a missing
-# Docker shows before it asks for any secret.
+# Docker shows before `aspire run` starts.
 $branch = git branch --show-current
 if ($branch -eq 'main') {
   git pull --ff-only
@@ -28,9 +29,5 @@ if ($LASTEXITCODE) {
   do { Start-Sleep -Seconds 3; docker version *> $null } while ($LASTEXITCODE -and (Get-Date) -lt $deadline)
   if ($LASTEXITCODE) { throw 'Docker did not come up within 3 minutes.' }
 }
-
-# Aspire keys secrets by checkout path, so a fresh checkout has none. This asks only for what's missing.
-& "$PSScriptRoot/set-local-secrets.ps1" -MissingOnly
-if ($LASTEXITCODE) { throw 'Some AppHost parameters are still missing, and the factory waits on them forever.' }
 
 aspire run

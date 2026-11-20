@@ -1,9 +1,10 @@
-# Prompts for each parameter the local AppHost (aspire-apphost/apphost.mts) declares under `aspire run` and saves it in that checkout's
-# Aspire user secrets. Aspire keys user secrets by checkout path, so run it once per checkout or worktree.
+# Changes the parameters the local AppHost (aspire-apphost/apphost.mts) declares under `aspire run` in that checkout's
+# Aspire user secrets. A missing parameter needs no script, because the Aspire dashboard asks for it on `aspire run`
+# (issue #207). Aspire keys user secrets by checkout path, so each checkout or worktree has its own.
 # Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>] [-MissingOnly]
-# Secret values are typed hidden. Enter alone keeps the current value. github-app-key takes the path to the App's .pem.
+# Secret values are typed hidden. Enter alone keeps the current value. github-app-key-path takes the path to the App's .pem.
 # Values go straight into secrets.json, never onto a command line, where other processes could read them.
-# -MissingOnly asks only for parameters not yet set, which is how scripts/factory.ps1 calls it. Exits 1 while any is missing.
+# -MissingOnly asks only for parameters not yet set. Nothing calls it now that the dashboard asks. Exits 1 while any is missing.
 param([string]$AppHost = (Split-Path $PSScriptRoot -Parent), [switch]$MissingOnly)
 $ErrorActionPreference = 'Stop'
 
@@ -29,11 +30,7 @@ foreach ($line in $toAsk) {
   $kind, $name = $line -split ' ', 2
   $key = "Parameters:$name"
   $state = if ($store.ContainsKey($key)) { 'set' } else { 'missing' }
-  if ($name -eq 'github-app-key') {
-    # Trim the quotes that Explorer's "Copy as path" adds.
-    $path = (Read-Host "$name ($state), path to the .pem file").Trim().Trim('"', "'")
-    $value = if ($path) { (Get-Content -LiteralPath $path -Raw).Trim() } else { '' }
-  } elseif ($kind -eq 'secret') {
+  if ($kind -eq 'secret') {
     # NetworkCredential, because ConvertFrom-SecureString throws on the empty input that Enter gives.
     $value = [Net.NetworkCredential]::new('', (Read-Host "$name ($state), hidden" -AsSecureString)).Password
   } else {
