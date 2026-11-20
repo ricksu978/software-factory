@@ -356,6 +356,24 @@ async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: str
   }
 }
 
+/**
+ * PBI 233: re-runs each named check that failed on `sha`. A GitHub Actions check run's id is its job's id, so its job
+ * is re-run, which needs the App's `actions: write`; a check from another app is re-requested from that app. A named
+ * check that didn't fail on `sha` is refused before any re-run starts.
+ */
+async function rerunChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string, names: string[]): Promise<void> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
+    (GhCheckRun & { app?: { slug?: string } | null })[];
+  const failed = runs.filter(failedRun);
+  const missing = names.filter((n) => !failed.some((c) => c.name === n));
+  if (missing.length) throw new Error(`no failed check named ${missing.join(", ")} on ${sha}`);
+  for (const c of failed.filter((x) => names.includes(x.name))) {
+    if (c.app?.slug === "github-actions") await gh.request("POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", { ...r, job_id: c.id });
+    else await gh.request("POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", { ...r, check_run_id: c.id });
+  }
+}
+
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
     id isResolved path line comments(first: 100) { nodes { author { __typename login } body pullRequestReview { databaseId submittedAt } } } } }
@@ -409,6 +427,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async ciChecksOnSha(repo, sha) {
       return namedChecksOn(await client(), split(repo), sha);
+    },
+
+    async rerunChecksOnSha(repo, sha, checks) {
+      return rerunChecksOn(await client(), split(repo), sha, checks);
     },
 
     async checksOnHead(repo, prNumber) {

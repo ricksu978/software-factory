@@ -381,6 +381,17 @@ const routes: Record<string, Route> = {
     return { checks: await deps.repoHost.ciChecksOnSha(repoOf(run), sha) };
   },
 
+  // PBI 233: re-runs the named checks that failed on one of the run's own commits, once, before the cell charges a red
+  // CI to an attempt. A host that can't re-run, or refuses to, answers an error, and the cell charges the failure as it stands.
+  "POST rerun-checks": async (deps, { run, body }) => {
+    const { repo, sha } = await ownCommit(deps, run, new URLSearchParams({ sha: str(body.sha, "sha") }));
+    const checks = strings(body.checks, "checks");
+    if (!checks.length || checks.some((x) => x === "")) throw new BadRequest("checks must name at least one check");
+    if (!deps.repoHost.rerunChecksOnSha) throw new BadRequest("the repo host can't re-run checks");
+    await deps.repoHost.rerunChecksOnSha(repo, sha, checks);
+    return { ok: true };
+  },
+
   "POST stage": async (deps, { c, run, body, now }) => {
     const stageId = str(body.stageId, "stageId");
     const attempt = int(body.attempt, "attempt");

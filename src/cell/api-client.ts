@@ -141,6 +141,8 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
       return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
     },
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
+    // Sent once: a retry could start a second re-run of the same checks, and a commit's checks are re-run once at most.
+    rerunFailedChecks: async (sha, checks) => void (await call("POST", "/rerun-checks", { sha, checks }, { once: true })),
     ciChecks: async (sha, on) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}${on ? `&on=${on}` : ""}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });

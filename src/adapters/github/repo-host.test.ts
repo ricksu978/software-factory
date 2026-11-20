@@ -475,6 +475,40 @@ describe("githubRepoHost", () => {
     assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
   });
 
+  test("rerunChecksOnSha re-runs each named failed Actions job, re-requests another app's check, and leaves the rest (PBI 233)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") => ({ id, name, status: "completed", conclusion, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun": () => ({}),
+      "POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest": () => ({}),
+    });
+    await host.rerunChecksOnSha!("o/r", "abc", ["ci", "other"]);
+    assert.deepEqual(calls.filter((c) => c.route.startsWith("POST")).map((c) => [c.route, c.params.job_id ?? c.params.check_run_id]), [
+      ["POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", 2],
+      ["POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", 4],
+    ]);
+  });
+
+  test("rerunChecksOnSha refuses a check that didn't fail on the sha, and re-runs nothing (PBI 233)", async () => {
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { id: 1, name: "lint", status: "completed", conclusion: "success" }, { id: 2, name: "ci", status: "completed", conclusion: "failure" },
+      ] }),
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["ci", "lint"]), /no failed check named lint/);
+    assert.ok(!calls.some((c) => c.route.startsWith("POST")));
+  });
+
+  test("fakeRepoHost re-runs only checks that failed on the sha, and records each re-run", async () => {
+    const fake = fakeRepoHost();
+    fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "failure", url: "u" }, { name: "lint", conclusion: "success", url: "v" }]);
+    await fake.rerunChecksOnSha!("o/r", "abc", ["ci"]);
+    await assert.rejects(fake.rerunChecksOnSha!("o/r", "abc", ["lint"]));
+    assert.deepEqual(fake.reruns, [{ key: "o/r@abc", checks: ["ci"] }]);
+  });
+
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {
     const fake = fakeRepoHost();
     fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "success", url: "u" }]);

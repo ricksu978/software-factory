@@ -220,7 +220,9 @@ Then("Green didn't run", function () {
 });
 
 Then("Green's second brief doesn't name the check {string}", function (check: string) {
-  const b = brief(this, "second ").replace(tddPrompt(), "");
+  // "CI failed on <commit>" opens every CI finding (PBI 292) and names CI, not a check, so a check called "ci" isn't
+  // named by it.
+  const b = brief(this, "second ").replace(tddPrompt(), "").replace(/\bCI failed on [0-9a-f]{7,40}\b/g, "");
   assert.ok(!namesWord(b, check), `Green's second brief names the check "${check}":\n${b}`);
 });
 

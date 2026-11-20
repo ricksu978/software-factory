@@ -612,6 +612,18 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
   });
 
+  test("rerun-checks: re-runs the named failed checks on the run's own commit, and a sha off the branch or on main gets 400 (PBI 233)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "failure", url: "u" }]);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "0ff0ff0", checks: ["ci"] })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "0a0a0a0", checks: ["ci"] })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: [] })).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true });
+    assert.deepEqual(host.reruns, [{ key: `${repo}@abc1234`, checks: ["ci"] }]);
+  });
+
   test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {
     const cell = await claimed();
     host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);

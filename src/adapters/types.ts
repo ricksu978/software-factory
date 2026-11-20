@@ -218,6 +218,11 @@ export interface RepoHost {
   pendingChecksOnSha(repo: string, sha: string): Promise<string[]>;
   /** Each check CI reported on the sha, by name, or null when none has (PBI 229). A dod.md `ci:` line reads its own. */
   ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
+  /**
+   * PBI 233: re-runs the named checks that failed on `sha`, once, so a flaky check gets a second go before a red CI is
+   * charged. Rejects when a named check didn't fail on `sha` or the host refuses to start the re-run.
+   */
+  rerunChecksOnSha?(repo: string, sha: string, checks: string[]): Promise<void>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /**

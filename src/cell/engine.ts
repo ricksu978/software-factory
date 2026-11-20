@@ -21,6 +21,7 @@ import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckAnswer, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase, type BaseLine } from "./base-run.ts";
 import { ciFailureOf, ciFindings, ciQuestion, sharedCiLines, type CiFailure } from "./ci-failure.ts";
+import { failedNames, refusedNotes, rerunNotes } from "./ci-rerun.ts";
 import type { Git } from "./git.ts";
 
 /** The body of GET /context (Run contract 5). */
@@ -861,11 +862,35 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Reads CI on a head a stage pushed. A head CI failed on before is never read again: nothing changed for CI to judge,
   // so the factory gives up and asks a person instead.
+  // PBI 233: before a red CI is charged, its failed checks are re-run once, and CI is read again. A pass on the re-run
+  // counts as green. Either way the stage's message says what was re-run and how it ended. A commit's checks are re-run
+  // once at most, and only the ones that failed.
   const readCi = async (sha: string): Promise<CheckAnswer> => {
     if (failedHeads.has(sha)) throw new Blocked(ciQuestion(ciFailures));
-    const ci = await waitForChecks(sha);
+    let ci = await waitForChecks(sha);
+    if (ci.status === "failure") ci = await rerunOnce(sha, ci);
     if (ci.status === "failure") failedLogs.set(sha, ci.failedChecks);
     return ci;
+  };
+  const rerunShas = new Set<string>();
+  const ciNotes = (lines: string[]) => { if (current) current.notes = [...(current.notes ?? []), ...lines]; };
+  const rerunOnce = async (sha: string, ci: CheckAnswer): Promise<CheckAnswer> => {
+    if (!api.rerunFailedChecks || !api.ciChecks || rerunShas.has(sha)) return ci;
+    rerunShas.add(sha);
+    const failed = failedNames(await orNull(api.ciChecks(sha)));
+    if (!failed.length) return ci;
+    try {
+      await api.rerunFailedChecks(sha, failed);
+    } catch (e) {
+      if (e instanceof LeaseLost) throw e;
+      console.error(`re-running ${failed.join(", ")} on ${sha} failed, so the red CI stands:`, e);
+      ciNotes(refusedNotes(sha, failed, e));
+      return ci;
+    }
+    const again = await waitForChecks(sha);
+    const status = again.status === "failure" ? "failure" : "success";
+    ciNotes(rerunNotes(sha, failed, status, await orNull(api.ciChecks(sha))));
+    return again;
   };
 
   // A CI failure on `sha`, the head a stage pushed: each failed check with its URL and failing tests. When the base
