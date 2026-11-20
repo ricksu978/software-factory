@@ -41,9 +41,15 @@ const blobs = await storage.addBlobs('blobs');
 const apiAudience = 'factory-api';
 const keycloak = runMode ? await builder.addKeycloak('keycloak', { port: 7430 }).withRealmImport('./keycloak') : null;
 
+// A parameter with no value makes the Aspire dashboard ask for it ("Unresolved parameters", then "Enter values"), and
+// "Save to user secrets" keeps it in this checkout's user secrets, so the next start asks nothing (issue #207). Each
+// resource that uses a parameter waits until it has a value.
 const secret = (name: string) => builder.addParameter(name, { secret: true });
 const claudeToken = await secret('claude-oauth-token');
-const appKey = await secret('github-app-key');
+// The App's key goes in as the path to its .pem. The form's inputs are one line, so a pasted key would lose its line
+// breaks. The apps read the file (src/adapters/github/app-key.ts). A path isn't secret, so the form shows it.
+const appKeyFile = await builder.addParameter('github-app-key-path')
+  .withDescription("The path to the GitHub App's .pem file. A quoted path from Explorer's \"Copy as path\" works.");
 const projectToken = await secret('github-project-token');
 const cellSecret = await secret('cell-secret');
 const webhookSecret = await secret('github-webhook-secret');
@@ -65,7 +71,7 @@ const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
-  .withEnvironment('GITHUB_APP_KEY', appKey)
+  .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
   .withEnvironment('CELL_SECRET', cellSecret)
   .withEnvironment('GITHUB_WEBHOOK_SECRET', webhookSecret)
@@ -85,7 +91,7 @@ const cellApi = await builder.addNodeApp('cell-api', repo, 'src/cell-api/main.ts
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
-  .withEnvironment('GITHUB_APP_KEY', appKey)
+  .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
   .withEnvironment('CELL_SECRET', cellSecret)
   .withEnvironment('GITHUB_APP_ID', appId)
@@ -120,7 +126,7 @@ const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
-  .withEnvironment('GITHUB_APP_KEY', appKey)
+  .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
   .withEnvironment('CELL_SECRET', cellSecret)
   .withEnvironment('GITHUB_APP_ID', appId)

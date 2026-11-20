@@ -7,7 +7,7 @@ import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
 import type { ItemState } from "../core/states.ts";
 import type { CiFailure } from "../cell/api-client.ts";
-import { decideAndAnnounce, revivable, type DecisionKind } from "../control/decisions.ts";
+import { decide, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
@@ -573,13 +573,14 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         send(res, 400, "Pick approve or changes.");
         return true;
       }
-      const ext = (await deps.pool.query<{ external_id: string }>("select external_id from item where id = $1", [itemPath[1]])).rows[0]?.external_id;
-      if (!ext) {
+      const known = (await deps.pool.query("select 1 from item where id = $1", [itemPath[1]])).rowCount;
+      if (!known) {
         send(res, 404, "No such item.");
         return true;
       }
       const text = kind === "answer" ? (body.answer ?? "") : (body.note ?? "");
-      const outcome = await decideAndAnnounce(deps, { itemId: itemPath[1], userId: user.id, kind, text, via: "dashboard" }, ext);
+      // The worker announces the decision on the item from its outbox row (PBI 219), so it's announced once.
+      const outcome = await withTx(deps.pool, (c) => decide(c, { itemId: itemPath[1], userId: user.id, kind, text, via: "dashboard" }));
       if (outcome === "forbidden") send(res, 403, "You can't make that decision.");
       else if (outcome === "ignored") send(res, 409, "That item isn't waiting for this decision.");
       else send(res, 303, "", { location: `/items/${itemPath[1]}` });

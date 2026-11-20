@@ -8,6 +8,7 @@ import { Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import type pg from "pg";
+import { CLAIM_MARKER, OPT_IN_LABEL } from "../../src/adapters/contract.ts";
 import type { FactoryWebhookEvent } from "../../src/adapters/types.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
 import { decide, type Outcome } from "../../src/control/decisions.ts";
@@ -18,7 +19,7 @@ import { handleWebhook } from "../../src/watcher/webhook.ts";
 import { ctx as p156 } from "./pbi-156.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
-type Row = { seq: string; consumer: string; event_id: string; item_id: string | null; attempts: number; failed_at: Date | null };
+export type Row = { seq: string; consumer: string; event_id: string; item_id: string | null; attempts: number; failed_at: Date | null };
 type Ctx = {
   /** The outbox rows the failing transaction saw just before it rolled back. */
   inside?: Row[];
@@ -39,34 +40,47 @@ const num = (issue: string) => issue.replace(/^#/, "");
 const scheduler = { actor: "system", actorId: "scheduler" } as const;
 const operator = { actor: "human", actorId: "operator" } as const;
 const SECRET = "pbi-218-secret";
-const REPO = "acme/app";
+export const REPO = "acme/app";
 
 class RolledBack extends Error {
   override name = "RolledBack";
 }
 
-function board(world: object, name: string): string {
+export function board(world: object, name: string): string {
   const found = p156(world).boards.find((b) => b.name === name);
   assert.ok(found, `no board "${name}"`);
   return found.id;
 }
 
-async function item(world: object, issue: string, boardName: string): Promise<string> {
+export async function item(world: object, issue: string, boardName: string): Promise<string> {
   const r = await pool().query<{ id: string }>("select id from item where source_id = $1 and external_id = $2", [board(world, boardName), num(issue)]);
   assert.ok(r.rows[0], `board "${boardName}" has no item ${issue}`);
   return r.rows[0].id;
 }
 
-async function newItem(world: object, issue: string, boardName: string, state: ItemState): Promise<string> {
+/**
+ * The item, and the same item on the board's fake as the board would show it: in REPO, with the status the field map
+ * names for its state and, while it's InProgress, the factory's claim. PBI 219's worker mirrors onto it.
+ */
+export async function newItem(world: object, issue: string, boardName: string, state: ItemState): Promise<string> {
+  const sourceId = board(world, boardName);
   const r = await pool().query<{ id: string }>(
     "insert into item (source_id, external_id, title, state) values ($1, $2, $3, $4) returning id",
-    [board(world, boardName), num(issue), `item ${issue}`, state],
+    [sourceId, num(issue), `item ${issue}`, state],
   );
+  const status = (await pool().query<{ status: string | null }>(
+    "select field_map->'statusFor'->>$2 as status from backlog_source where id = $1", [sourceId, state],
+  )).rows[0]?.status;
+  const fake = p156(world).boards.find((b) => b.id === sourceId)!.fake;
+  await fake.seed({
+    externalId: num(issue), title: `item ${issue}`, repo: REPO, ...(status ? { status } : {}),
+    labels: state === "InProgress" ? [OPT_IN_LABEL, CLAIM_MARKER] : [OPT_IN_LABEL],
+  });
   return r.rows[0].id;
 }
 
 /** The user `name`, made by newUser here or by PBI 175's "{string} is an operator", which keys them on their GitHub login. */
-async function user(name: string): Promise<string> {
+export async function user(name: string): Promise<string> {
   const r = await pool().query<{ id: string }>(`select id from "user" where github_login = $1`, [name]);
   assert.ok(r.rows[0], `no user "${name}"`);
   return r.rows[0].id;
@@ -79,7 +93,7 @@ async function newUser(name: string, role: "viewer" | "operator", productOwner: 
   );
 }
 
-async function outbox(c: pg.Pool | pg.PoolClient = pool()): Promise<Row[]> {
+export async function outbox(c: pg.Pool | pg.PoolClient = pool()): Promise<Row[]> {
   return (await c.query<Row>("select seq, consumer, event_id, item_id, attempts, failed_at from outbox order by seq")).rows;
 }
 
@@ -106,9 +120,11 @@ async function rolledBack(world: object, kind: string, fn: (c: pg.PoolClient) =>
 
 // ---- the background ----
 
-// PBI 156's "a fresh factory database with two boards" makes the boards, and its truncate of item cascades to event and outbox.
+// PBI 156's "a fresh factory database with two boards" makes the boards, and its truncate of item cascades to event and
+// outbox, so in a Background this holds already. PBI 219's scenarios also use it as a Then.
 Given("the outbox is empty", long, async function () {
-  await pool().query("truncate outbox");
+  const rows = await outbox();
+  assert.deepEqual(rows, [], `the outbox holds ${rows.length} rows: ${describe(rows)}`);
 });
 
 // ---- items and people ----
