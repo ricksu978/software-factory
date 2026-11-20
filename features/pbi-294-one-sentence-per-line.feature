@@ -11,7 +11,12 @@ Feature: The spec and the Phase 0 plan keep one sentence per line, so PRs that c
 
   "The spec" is docs/superpowers/specs/2026-11-05-software-factory-design.html.
   "The plan" is docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md.
-  "Before this item" means commit 3df4f2e, the base of this item's branch.
+  CI checks out one commit, so no scenario reads git history beyond HEAD.
+  "The before-text" is a record committed with this item of how the spec and the plan stood
+  on this item's branch before it changed them: each file's text with whitespace collapsed,
+  and the plan's code blocks.
+  "The replay inputs" are files committed with this item: for each of the 47 file merges in
+  the item's Notes, the base, ours and theirs, in the old layout and in the new.
 
   Rule: Each sentence in the spec and the plan starts on its own line, and so does each table cell in the spec
 
@@ -19,32 +24,32 @@ Feature: The spec and the Phase 0 plan keep one sentence per line, so PRs that c
     Scenario: No line of the spec's prose holds more than one sentence
       When I read the spec
       Then no line outside code holds more than one sentence
-      And its text reads the same in a browser as it did before this item
+      And its text, with whitespace collapsed, is the same as the before-text for the spec
 
     @ac-1
     Scenario: No line of the plan's prose holds more than one sentence
       When I read the plan
       Then no line outside code blocks holds more than one sentence
-      And its rendered text reads the same as it did before this item
+      And its text, with whitespace collapsed, is the same as the before-text for the plan
 
     @ac-1
     Scenario: Each table cell in the spec starts on its own line
       When I read the spec's tables
       Then every table cell starts on a line of its own
       And no line holds the end of one table cell and the start of the next
-      And the tables read the same in a browser as they did before this item
+      And the spec's text, with whitespace collapsed, is the same as the before-text for the spec
 
     @ac-1
     Scenario: The spec and the plan keep every sentence they had
       When I read the spec and the plan
       Then no line outside code holds more than one sentence
-      And every sentence in each file before this item is still in it, word for word
+      And every sentence in the before-text for each file is still in it, word for word
 
     @ac-1
     Scenario: Code in the plan keeps its line breaks
       When I read the plan
       Then no line outside code blocks holds more than one sentence
-      And every code block in it is the same, line for line, as before this item
+      And every code block in it is the same, line for line, as in the before-text for the plan
 
   Rule: The prose lint fails a line in the spec or the plan that holds more than one sentence, and names the file and line
 
@@ -125,15 +130,16 @@ Feature: The spec and the Phase 0 plan keep one sentence per line, so PRs that c
 
     @ac-3
     Scenario: Replaying the 47 file merges in the item's Notes gives at most 19 conflicts
-      Given the merges listed in the item's Notes, 47 file merges in all
-      When I replay each merge with both sides in the new one-sentence-per-line layout
-      Then at most 19 of the 47 file merges conflict
+      Given the replay inputs committed in the repo
+      When I replay each file merge with base, ours and theirs in the new layout
+      Then 47 file merges were replayed
+      And at most 19 of the 47 file merges conflict
 
     @ac-3
-    Scenario: The PR states the conflict count the replay got
-      Given the merges listed in the item's Notes have been replayed with the new layout
-      When I read the description of this item's PR
-      Then it states how many of the 47 file merges conflicted
+    Scenario: The replay writes the count it got to a file the PR can cite
+      Given the replay inputs committed in the repo
+      When I replay each file merge with base, ours and theirs in the new layout
+      Then the replay's result file in the repo states how many of the 47 file merges conflicted
       And that count is the one the replay got
 
   Rule: Two lists that PRs often extend together put one entry per line
@@ -142,10 +148,13 @@ Feature: The spec and the Phase 0 plan keep one sentence per line, so PRs that c
     Scenario: The fake repo host's state list puts one entry per line
       When I read the list of state that `fakeRepoHost` in "src/adapters/fake.ts" returns
       Then each entry sits on a line of its own
-      And the list holds the same entries as before this item
+      And the list holds every piece of state that `fakeRepoHost`'s return type declares
+      And the list holds at least these entries:
+        | prs | checks | failedChecks | pendingChecks | ciChecks | files | heads | branches | reviewComments | postedReviews | resolvedThreads | diffs | mergeCalls | runs | logs | parents | permissionsMissing |
 
     @ac-4
     Scenario: The Floor page's parameter type puts one entry per line
       When I read the parameter type of the Floor page in "src/http/views.ts"
       Then each entry sits on a line of its own
-      And the type holds the same entries, with the same types, as before this item
+      And the type holds at least these entries:
+        | active | waiting | waitingCount | capacity | next | notReady | blocked | factory | canOperate | restart | running | cellImage | baseFails | mainBreaks | split | keys | finalStage | failed | zone |
