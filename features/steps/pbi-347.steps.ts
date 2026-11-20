@@ -140,9 +140,11 @@ function get(url: string, headers: Record<string, string>): Promise<{ status: nu
 }
 
 /**
- * Each path's last 200 body and its ETag. A cell has no GitHub token, and GitHub allows an address 60 requests an hour
- * without one, shared by every cell behind the same egress. A request that sends the ETag back and gets 304 Not Modified
- * doesn't count against that limit, so polling a run that hasn't changed costs nothing.
+ * Each path's last 200 body and its ETag, sent back so an unchanged resource comes back 304 with no body. A cell has no
+ * GitHub token, and neither does CI's run (ci.yml exports none), and GitHub allows an address 60 requests an hour
+ * without one, shared by every cell behind the same egress. A 304 counts against that limit too: GitHub exempts it only
+ * for a request that carries an Authorization header. So every request without a token costs one of the 60, and the
+ * When polls sparingly (ciWait).
  */
 const ghSeen = new Map<string, { etag: string; body: string }>();
 
@@ -182,10 +184,11 @@ function isThisRun(run: GhRun): boolean {
 const finishedRuns = new Map<string, CiRun>();
 
 /**
- * The run of the "ci" workflow on `sha`, with its jobs, or what stopped us reading it: the run these scenarios run
- * inside, if they run inside one on `sha`, else the latest.
+ * The run of the "ci" workflow on `sha`, or what stopped us reading it: the run these scenarios run inside, if they run
+ * inside one on `sha`, else the latest. Its jobs come with it once it has finished, for the run these scenarios run
+ * inside, or when `withJobs` asks for them; a run still going has none, so polling one costs a request, not two.
  */
-async function ciRunOn(sha: string): Promise<CiRun> {
+async function ciRunOn(sha: string, withJobs = false): Promise<CiRun> {
   const finished = finishedRuns.get(sha);
   if (finished) return finished;
   try {
@@ -194,6 +197,7 @@ async function ciRunOn(sha: string): Promise<CiRun> {
     const runs = workflow_runs.filter((w) => w.path === workflowPath || w.name === "ci").sort((a, b) => b.run_number - a.run_number);
     const run = runs.find(isThisRun) ?? runs[0];
     if (!run) return { sha };
+    if (run.status !== "completed" && !isThisRun(run) && !withJobs) return { sha, run };
     const { jobs } = await gh<{ jobs: GhJob[] }>(`/repos/${r}/actions/runs/${run.id}/jobs?per_page=100`);
     // A finished run doesn't change, so every scenario after the first reads it from here.
     if (run.status === "completed" && !isThisRun(run)) finishedRuns.set(sha, { sha, run, jobs });
@@ -242,9 +246,13 @@ function finishedRun(c: Ctx): { run: GhRun; jobs: GhJob[] } {
   const ci = c.ci;
   assert.ok(ci, "no step read CI's run");
   assert.ok(!ci.error, `couldn't read CI's run on ${ci.sha}: ${ci.error}`);
-  assert.ok(ci.run && ci.jobs, `CI has no run of ${workflowPath} on commit ${ci.sha}`);
-  if (isThisRun(ci.run)) return settledThisRun(ci.run, ci.jobs);
+  assert.ok(ci.run, `CI has no run of ${workflowPath} on commit ${ci.sha}`);
+  if (isThisRun(ci.run)) {
+    assert.ok(ci.jobs, `couldn't read the jobs of CI's run ${ci.run.html_url}`);
+    return settledThisRun(ci.run, ci.jobs);
+  }
   assert.equal(ci.run.status, "completed", `CI's run on ${ci.sha} (${ci.run.html_url}) hasn't finished: it's ${ci.run.status}`);
+  assert.ok(ci.jobs, `couldn't read the jobs of CI's run ${ci.run.html_url}`);
   return { run: ci.run, jobs: ci.jobs };
 }
 
@@ -252,16 +260,21 @@ function everyStep(jobs: GhJob[]): { job: string; step: GhStep }[] {
   return jobs.flatMap((j) => (j.steps ?? []).map((step) => ({ job: j.name, step })));
 }
 
-/** How long the When waits for CI's run on HEAD to finish, when it has one that's still going. */
-const ciWait = { totalMs: 15 * 60_000, everyMs: 30_000 };
+/**
+ * How long the When waits for CI's run on HEAD to finish, when it has one that's still going: the first look comes a
+ * minute in, and each gap after doubles, up to five minutes. Each look is one request (ciRunOn reads no jobs for a run
+ * still going), so a full wait makes about six, plus the jobs once the run ends: a tenth of the hourly budget without
+ * a token, not all of it.
+ */
+const ciWait = { totalMs: 15 * 60_000, firstMs: 60_000, maxMs: 5 * 60_000 };
 
 When("CI has finished its run on the commit this checkout is at", { timeout: ciWait.totalMs + 120_000 }, async function () {
   const sha = git("rev-parse", "HEAD");
   const until = Date.now() + ciWait.totalMs;
   let ci = await ciRunOn(sha);
   // A run still going on HEAD (not the one these scenarios run inside) is waited for; the Thens judge it once it ends.
-  while (ci.run && ci.run.status !== "completed" && !isThisRun(ci.run) && Date.now() < until) {
-    await new Promise((r) => setTimeout(r, ciWait.everyMs));
+  for (let gap = ciWait.firstMs; ci.run && ci.run.status !== "completed" && !isThisRun(ci.run) && Date.now() < until; gap = Math.min(gap * 2, ciWait.maxMs)) {
+    await new Promise((r) => setTimeout(r, Math.min(gap, Math.max(until - Date.now(), 0))));
     ci = await ciRunOn(sha);
   }
   ctx(this).ci = ci;
@@ -327,7 +340,8 @@ async function appHostAsCiRanIt(): Promise<{ compile: Ran; lint: Ran }> {
   const failed = (output: string): { compile: Ran; lint: Ran } => ({ compile: { status: 1, output }, lint: { status: 1, output } });
   const dirty = git("status", "--porcelain");
   if (dirty) return failed(`NuGet is unreachable here, and CI's run on HEAD doesn't cover the uncommitted edits:\n${dirty}`);
-  const ci = await ciRunOn(git("rev-parse", "HEAD"));
+  // A step can have finished in a run that's still going, so this reads the jobs either way: one look, not a poll.
+  const ci = await ciRunOn(git("rev-parse", "HEAD"), true);
   if (ci.error) return failed(`NuGet is unreachable here, and CI's run on ${ci.sha} couldn't be read: ${ci.error}`);
   if (!ci.run || !ci.jobs) return failed(`NuGet is unreachable here, and CI has no run of ${workflowPath} on ${ci.sha}`);
   const steps = ci.jobs.find((j) => j.name === "ci")?.steps ?? [];
