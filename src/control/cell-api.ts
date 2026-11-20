@@ -182,7 +182,26 @@ function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string 
   });
 }
 
-/** Under a restart being prepared (PBI 140), ends a stopping cell's claim: the item goes back to Queued at its stage. */
+/** What's set over a running cell when it renews its lease: a pause of the factory or of its backlog, the kill switch, a restart being prepared, an operator's stop on its run. */
+export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean };
+
+/**
+ * What a lease renewal tells a running cell. `stop` cuts the cell's stage short now: a pause, the kill switch or an
+ * operator's stop on its run. A restart being prepared doesn't (PBI 301): `restarting` tells the cell to finish the
+ * stage it's in, start no further stage and end its claim at that stage boundary. A stop outranks it.
+ */
+export function leaseAnswer(set: LeaseOverrides): { stop: boolean; restarting: boolean } {
+  const stop = set.kill || set.pause || set.stopRun;
+  return { stop, restarting: set.restart && !stop };
+}
+
+/** The lease route's reply. It names `restarting` only while a restart is being prepared, so it's `{ ok, stop }` otherwise. */
+const leaseReply = (a: { stop: boolean; restarting: boolean }) => ({ ok: true, stop: a.stop, ...(a.restarting ? { restarting: true } : {}) });
+
+/**
+ * Under a restart being prepared, ends the claim of a cell that stopped (PBI 140) or that ended at a stage boundary
+ * (PBI 301): the item goes back to Queued at its run's next stage.
+ */
 async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
   const restart = await c.query(
     "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
@@ -197,18 +216,20 @@ async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise
 const routes: Record<string, Route> = {
   "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
-    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13). Either one tells every cell to stop, as a pause and
-    // a restart being prepared do (PBI 140).
-    if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) return { ok: true, stop: true };
-    const r = await c.query<{ stop: boolean }>(
-      `select exists (select from override o
-         where o.cleared_at is null and (o.expires_at is null or o.expires_at > $3)
-           and ((o.scope = 'factory' and o.kind in ('pause', 'kill', 'restart'))
-             or (o.scope = 'backlog' and o.target_id = $2 and o.kind = 'pause')
-             or (o.scope = 'item' and o.target_id = $1 and o.kind = 'stop_run'))) as stop`,
+    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13).
+    if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) {
+      return leaseReply(leaseAnswer({ kill: true, pause: false, restart: false, stopRun: false }));
+    }
+    const r = await c.query<{ pause: boolean; kill: boolean; restart: boolean; stop_run: boolean }>(
+      `with o as (select scope, kind, target_id from override where cleared_at is null and (expires_at is null or expires_at > $3))
+       select exists (select from o where (scope = 'factory' and kind = 'pause') or (scope = 'backlog' and target_id = $2 and kind = 'pause')) as pause,
+              exists (select from o where scope = 'factory' and kind = 'kill') as kill,
+              exists (select from o where scope = 'factory' and kind = 'restart') as restart,
+              exists (select from o where scope = 'item' and target_id = $1 and kind = 'stop_run') as stop_run`,
       [run.item_id, run.source_id, now],
     );
-    return { ok: true, stop: r.rows[0].stop };
+    const set = r.rows[0];
+    return leaseReply(leaseAnswer({ kill: set.kill, pause: set.pause, restart: set.restart, stopRun: set.stop_run }));
   },
 
   "POST github-token": async (deps, { run }) => deps.repoHost.cellToken(repoOf(run)),
@@ -411,8 +432,8 @@ const routes: Record<string, Route> = {
     return { ok: true };
   },
 
-  // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would.
-  // Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
+  // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would. So
+  // does one that finished its stage while a restart was being prepared and starts no further stage (PBI 301). Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
   "POST release": async (_deps, { c, run, now }) => {
     await releaseForRestart(c, run, now);
     return { ok: true };

@@ -245,9 +245,10 @@ Then("a cell starts for item {string}", function (name: string) {
   assert.deepEqual(c.started.map((env) => env.ITEM_ID), [c.items[name]]);
 });
 
+// A state needs no tick to read: PBI 140's and PBI 301's scenarios read it after a cell's own calls.
 Then("item {string} is {string}", long, async function (name: string, expected: string) {
   const c = ctx(this);
-  ran(c);
+  assert.ok(c.items[name], `no item ${name}`);
   assert.equal((await state(c.items[name])).state, expected);
 });
 

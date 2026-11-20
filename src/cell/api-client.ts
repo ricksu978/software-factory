@@ -44,12 +44,18 @@ export type TransitionBody = {
 };
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
 
+/**
+ * A lease renewal's answer. `stop` cuts the stage short now (PBI 140). `restarting` says a restart is being prepared, so
+ * the cell finishes the stage it's in, starts no further stage and ends its claim at that stage boundary (PBI 301).
+ */
+export type LeaseAnswer = { stop: boolean; restarting?: boolean };
+
 export type CellApi = {
   /**
    * Renews the lease. `once` tries it a single time, for the renewal loop, which keeps its own tolerance of 3 minutes
    * of failed renewals (PBI 259). Every other call is retried on a 5xx, a connection fault or a timeout.
    */
-  lease(opts?: { once?: boolean }): Promise<{ stop: boolean }>;
+  lease(opts?: { once?: boolean }): Promise<LeaseAnswer>;
   stage(b: StageReport): Promise<void>;
   transition(b: TransitionBody): Promise<void>;
   policyResults(b: PolicyResults): Promise<void>;
@@ -63,7 +69,10 @@ export type CellApi = {
    * the base branch instead, as PBI 292 does to tell a CI failure the base shares from the item's own.
    */
   ciChecks?(sha: string, on?: "base"): Promise<CiCheck[] | null>;
-  /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
+  /**
+   * Ends the claim of a cell a restart stopped with no attempt open (PBI 140), or of one that ended at a stage boundary
+   * while a restart was being prepared (PBI 301). Outside a restart it changes nothing.
+   */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
   upload(b: { kind: "transcript" | "report"; stageId: string; attempt: number; body: string }): Promise<void>;
@@ -110,7 +119,10 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
   const call = (method: "GET" | "POST", path: string, body?: unknown, opts: { once?: boolean } = {}): Promise<any> =>
     opts.once ? once(method, path, body) : withRetries(`${method} ${path.split("?")[0]}`, () => once(method, path, body), { transient: (e) => e instanceof Transient, sleep });
   return {
-    lease: async (opts) => ({ stop: (await call("POST", "/lease", { generation: cfg.generation }, opts)).stop === true }),
+    lease: async (opts) => {
+      const a = await call("POST", "/lease", { generation: cfg.generation }, opts);
+      return { stop: a.stop === true, ...(a.restarting === true ? { restarting: true } : {}) };
+    },
     context: () => call("GET", "/context"),
     githubToken: async () => (await call("POST", "/github-token", {})).token,
     stage: async (b) => void (await call("POST", "/stage", b)),

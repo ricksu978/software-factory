@@ -327,7 +327,10 @@ Given("a fresh run for item 482 that has never been claimed", long, async functi
   await side(this).run({ sopVersion: null, stage: "understand", configSha: null });
 });
 
-Given("green passes", function () {
+// PBI 301's scenarios say it as a When, and run their cell through green with it, through `stagePasses`.
+Given("green passes", long, async function () {
+  const own = (this as { stagePasses?: (stage: string) => Promise<void> }).stagePasses;
+  if (own) return own("green");
   const stage = "green";
   ctx(this).passes.add(stage);
 });

@@ -110,6 +110,47 @@ describe("workOutbox", dbTest, () => {
     assert.deepEqual(await outbox(), []);
   });
 
+  const mirrorRow = async (id: string): Promise<OutboxRow> => {
+    const r = (await outbox()).find((x) => x.consumer === "board_mirror" && x.item_id === id);
+    assert.ok(r, "no board mirror row");
+    return { seq: r.seq, consumer: "board_mirror", eventId: r.event_id, itemId: r.item_id };
+  };
+
+  test("a board mirror row handled twice sets the status and claims once, and leaves a later change on the board alone", async () => {
+    const id = await item("1", "Queued");
+    await withTx(db.pool, (c) => transitionItem(c, id, "claimed", system));
+    const row = await mirrorRow(id);
+    const setStatus = mock.method(board.adapter, "setStatus");
+    const claim = mock.method(board.adapter, "claim");
+    await runRowEffects(deps(), row);
+    await board.adapter.setStatus("1", "Backlog");
+    await runRowEffects(deps(), row);
+    assert.equal(setStatus.mock.callCount(), 2, "the factory's set and the person's");
+    assert.equal(claim.mock.callCount(), 1);
+    assert.equal(await statuses("1"), "Backlog");
+  });
+
+  test("a board mirror row retried after its comment failed sets the status no more, posts the comment, and its record goes with the row", async () => {
+    const id = await item("1", "InProgress");
+    await withTx(db.pool, (c) => transitionItem(c, id, "scenarios_written", system));
+    const comment = board.adapter.comment;
+    let refuse = true;
+    mock.method(board.adapter, "comment", async (...a: Parameters<typeof comment>) => {
+      if (refuse) throw new Error("the board refuses comments");
+      return comment.apply(board.adapter, a);
+    });
+    const setStatus = mock.method(board.adapter, "setStatus");
+    await workOutbox(deps());
+    assert.equal((await outbox()).length, 1);
+    refuse = false;
+    await db.pool.query("update outbox set next_attempt_at = now()");
+    await workOutbox(deps());
+    assert.equal(setStatus.mock.callCount(), 1);
+    assert.equal((await board.comments("1")).length, 1);
+    assert.deepEqual(await outbox(), []);
+    assert.equal((await db.pool.query("select count(*)::int as n from outbox_effect")).rows[0].n, 0);
+  });
+
   test("a decision's announcement quotes its text, and handling its row twice posts it once", async () => {
     const id = await item("1", "NeedsInput");
     const user = (await db.pool.query<{ id: string }>(
