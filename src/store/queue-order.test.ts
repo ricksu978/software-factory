@@ -265,6 +265,37 @@ describe("queue order", dbTest, () => {
     assert.equal((await moveOf(c)).cleared_at, null);
   });
 
+  test("a Move up pressed on an item already at the top keeps its hold on the item it passed", async () => {
+    const a = await item("A", "Queued", 1);
+    const b = await item("B", "Queued", 2);
+    const c = await item("C", "Queued", 3);
+    await move(c, "up");
+    await move(c, "up");
+    await move(c, "up");
+    assert.deepEqual(await order(), ["C", "A", "B"]);
+    assert.equal((await moveOf(c)).passed, a);
+    await item("X", "Queued", 3);
+    await item("Y", "Queued", 4);
+    await ranks([[a, 1], [b, 2], [c, 5]]);
+    assert.deepEqual(await order(), ["C", "A", "B", "X", "Y"]);
+  });
+
+  test("two moves that each passed the other settle once, and a poll of an unchanged board writes nothing", async () => {
+    await item("A", "Queued", 1);
+    const b = await item("B", "Queued", 2);
+    const c = await item("C", "Queued", 3);
+    await move(c, "up");
+    await move(b, "up");
+    assert.deepEqual(await order(), ["A", "B", "C"]);
+    const values = async () => (await db.pool.query<{ v: string }>(
+      "select value::text as v from override where kind in ('move_up', 'move_down') order by id",
+    )).rows.map((r) => r.v);
+    const before = await values();
+    for (let i = 0; i < 3; i++) await ranks([]);
+    assert.deepEqual(await values(), before);
+    assert.deepEqual(await order(), ["A", "B", "C"]);
+  });
+
   const activeMoves = async (id: string) => (await db.pool.query<{ kind: string }>(
     "select kind from override where target_id = $1 and kind in ('move_up', 'move_down') and cleared_at is null", [id],
   )).rows.map((r) => r.kind);

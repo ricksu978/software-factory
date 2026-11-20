@@ -239,9 +239,24 @@ export async function moveInQueue(
   const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
   // PBI 311: the item it passed, so a later board poll can hold it on its side of that item (keepMovesInPlace), and
   // which side of that item the board had it on, so the poll ends the move only when the board flips the two.
+  // A press that leaves the item where it is keeps the hold its latest move of the same direction already had, so the
+  // new override, now its latest move, doesn't drop it back to an offset only.
   const passedRow = stays ? undefined : group[dir === "up" ? at - 1 : at + 1];
-  const boardSide = passedRow ? boardSideOf(me, passedRow) : null;
-  const value = { ...storedKey(key, me.board), ...(passedRow ? { passed: passedRow.id } : {}), ...(boardSide ? { boardSide } : {}) };
+  let hold: { passed?: string; boardSide?: BoardSide } = {};
+  if (passedRow) {
+    const boardSide = boardSideOf(me, passedRow);
+    hold = { passed: passedRow.id, ...(boardSide ? { boardSide } : {}) };
+  } else {
+    const prev = (await c.query<{ kind: string; passed: string | null; board_side: BoardSide | null }>(
+      `select o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side from override o
+       where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+       order by o.created_at desc, o.id desc limit 1`, [itemId],
+    )).rows[0];
+    if (prev?.passed && prev.kind === (dir === "up" ? "move_up" : "move_down")) {
+      hold = { passed: prev.passed, ...(prev.board_side ? { boardSide: prev.board_side } : {}) };
+    }
+  }
+  const value = { ...storedKey(key, me.board), ...hold };
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
     [itemId, dir === "up" ? "move_up" : "move_down", value, o.reason.trim(), o.createdBy],
@@ -288,7 +303,8 @@ export const ENDED_BY_BOARD_ORDER = "board_order";
  * - Otherwise, when a board change left the moved item on the wrong side of the passed one, such as a new issue that
  *   landed between them, its key is set again, just ahead of or just behind the passed item. The neighbour it lands
  *   beside is read among every live item, not only the Queued ones, so an item the gate passes later can't come between.
- * - A move that passed no item, or whose passed item has left the factory's live states, is left as it is.
+ * - A move that passed no item, or whose passed item has left the factory's live states, is left as it is. Nor is one
+ *   whose passed item has a later move that passed this item back: the later move settles the pair.
  */
 export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
   if (!inTx(c)) throw new Error("keepMovesInPlace needs a client inside withTx");
@@ -322,6 +338,9 @@ export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
       }
       continue;
     }
+    // Two moves that each passed the other: the newer one settles the pair, so the older isn't set again on every poll.
+    const back = moves.findIndex((x) => x.target_id === m.passed && x.passed === m.target_id);
+    if (back > moves.indexOf(m)) continue;
     const side = keyCmp(me, passed);
     if (up ? side < 0 : side > 0) continue;
     const others = live.filter((r) => r.id !== me.id);
