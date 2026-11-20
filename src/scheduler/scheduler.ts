@@ -300,6 +300,16 @@ export async function pollMergedCi(d: MergedCiDeps) {
 }
 
 /**
+ * PBI 369: re-checks each item that went to Failed with `dod_failed`, every `failed_recheck_hours` hours (8 when the
+ * repo's .factory/config.yml has no such key), by running today's post-merge rules on its merge commit. Each re-check
+ * records an event of kind `recheck` on the item at `d.now`. When the rules no longer say the merge broke main, the
+ * item goes from Failed to Accepted with the event `rechecked`, waits on main as the rules say, and gets one comment
+ * saying why; otherwise nothing else changes and nothing is commented. The worker runs it after pollMergedCi.
+ * Not built yet: it re-checks nothing.
+ */
+export async function recheckFailed(_d: MergedCiDeps): Promise<void> {}
+
+/**
  * The status of a branch commit for the green search, answered "failure" from the memo while the failure was read
  * less than FAILED_RECHECK_MS ago. Only the green search uses it: an Accepted item's own merge commit is read afresh.
  */
