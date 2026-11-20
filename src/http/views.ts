@@ -283,13 +283,29 @@ function mainRedNotice(rows: MainBreakRow[]): string {
  */
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
+/** PBI 369: an item that failed its Definition of Done on main, on Floor, and when it was last re-checked, or null. */
+export type FailedRow = Issue & { id: string; title: string; rechecked: Date | null };
+
+/** When the factory last re-checked a Failed item (PBI 369), or that it hasn't yet. */
+function recheckLine(at: Date | null, zone: string, sentence: boolean): string {
+  const said = at ? `last re-checked at ${local(at, zone)}` : "not yet re-checked";
+  if (!sentence) return `Failed, ${said}`;
+  return at
+    ? `Last re-checked at ${local(at, zone)}. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.`
+    : "It hasn't been re-checked yet. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.";
+}
+
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
   notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null;
   /** PBI 316: the cells still running, InProgress with a live lease, as Prepare restart counts them. */
   running?: number; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
   split?: SplitRow[];
   /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
-  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
+  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[];
+  /** PBI 369: each item that went to Failed with dod_failed, and when it was last re-checked since, or null. */
+  failed?: FailedRow[];
+  /** The viewer's IANA time zone, from their browser's `tz` cookie. Defaults to UTC. */
+  zone?: string }, banner: string | null): string {
   const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
@@ -315,6 +331,8 @@ ${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) =
 ${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
 <h2>Split</h2>
 ${list((f.split ?? []).map((p) => `<li>${named(p)} <span class="muted">Split into</span>${splitInto(p.children)}</li>`), "No item is split into children that are still open.")}
+<h2>Failed on main</h2>
+${list((f.failed ?? []).map((n) => `<li>${named(n)} <span class="muted">${recheckLine(n.rechecked, f.zone ?? "UTC", false)}</span></li>`), "No item failed its Definition of Done on main.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
@@ -377,6 +395,8 @@ export type RunDetail = {
   durations?: ItemDurations;
   /** The children a Split parent's split filed, in order (PBI 227). Without any, no "Split into" shows. */
   splitInto?: SplitChildView[];
+  /** PBI 369: for an item that failed its Definition of Done on main, when it was last re-checked, or null. */
+  recheck?: { last: Date | null } | null;
 };
 
 /**
@@ -480,7 +500,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
+${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n` : ""}${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
