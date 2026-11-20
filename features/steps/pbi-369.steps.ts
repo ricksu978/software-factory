@@ -130,6 +130,7 @@ function writeConfig(c: PollCtx, mine: Ctx): void {
 }
 
 Given("the repo is {string}", function (repo: string) {
+  assert.match(repo, /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/, `"${repo}" isn't an "owner/name" repo`);
   ctx(this).repo = repo;
   ctx255(this).repo = repo;
 });
@@ -441,6 +442,12 @@ Given("an operator whose time zone is UTC is signed in", long, async function ()
   );
   // No tz cookie: the dashboard shows times in UTC.
   c.login = "op";
+  assert.ok(c.origin, "the control plane didn't start");
+  const role = (await pool().query<{ role: string }>(
+    `select role from "user" where provider = 'microsoft' and subject = 'op'`,
+  )).rows[0]?.role;
+  assert.equal(role, "operator", "the signed-in user isn't an operator");
+  assert.ok(!("cookie" in headers(c.login)), "the operator's requests send a cookie, so maybe a tz one");
 });
 
 When("the operator opens item {int}'s Run detail", long, async function (n: number) {
