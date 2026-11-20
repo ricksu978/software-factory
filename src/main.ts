@@ -15,10 +15,7 @@ import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import { TimedOctokit } from "./adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
 import { loadSop } from "./config/sop.ts";
-import { mirrorBoard } from "./control/board.ts";
-import { logTransitions } from "./control/console-log.ts";
 import { blobUploadUrl } from "./control/cell-api.ts";
-import { applyComment } from "./control/decisions.ts";
 import type { FileSplitDeps } from "./gate/file-split.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
 import { dashboardRoutes } from "./http/routes.ts";
@@ -86,10 +83,6 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     if (size > MAX_WEBHOOK) throw new BadRequest("the payload is over 25 MB", 413);
     const { status } = await handleWebhook({
       pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook,
-      // applyComment ignores a comment on an item another source holds, so each source can be asked in turn.
-      onComment: async (e) => {
-        for (const s of d.sources) await applyComment({ pool: d.pool, adapter: s.adapter, sourceId: s.id }, e);
-      },
     }, { headers: req.headers as Record<string, string | undefined>, rawBody: Buffer.concat(chunks) });
     json(res, status);
     return true;
@@ -107,7 +100,7 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     return true;
   };
 
-  // ponytail: Phase 0 has one board, so the dashboard announces decisions on the first source. Route by item.source_id when a second board arrives.
+  // ponytail: Phase 0 has one board, so the dashboard reads items from the first source. Route by item.source_id when a second board arrives.
   const first = d.sources[0];
   const dashboard = dashboardRoutes({
     pool: d.pool, auth: d.auth, origin: d.origin, adapter: first?.adapter ?? missing<BacklogAdapter>("no backlog source is configured"),
@@ -147,21 +140,18 @@ export async function githubSources(pool: pg.Pool, app: App, projectToken: strin
 }
 
 /**
- * The control plane once its settings are read: its handlers on `port`, and board mirroring and the console log for
- * the transitions it commits. It runs no background job. Those are the worker's.
+ * The control plane once its settings are read: its handlers on `port`. It runs no background job, and leaves board
+ * mirroring, comment commands and decision announcements to the worker's outbox (PBI 219).
  */
 export async function serveControl(d: ControlDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
   // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
   await clearRestartOnStart(d.pool);
-  const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
   const control = controlHandlers(d);
-  const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
   const server = await startServer(control.handlers, { port, host: "::" });
   return {
     server,
     async stop() {
-      for (const off of hooks) off();
       await control.close();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { next, overrideTo, type ItemEvent, type ItemState } from "../core/states.ts";
-import { inTx, runAfterCommit, txPool } from "./db.ts";
+import { transitionLine } from "../control/console-log.ts";
+import { inTx, runAfterCommit } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
 import { CONSUMER, writeOutboxRows } from "./outbox.ts";
 
@@ -11,38 +12,23 @@ export class IllegalTransition extends Error {
   }
 }
 
-// "override" marks an operator's move through overrideItem, which follows no edge of the state machine.
-type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent | "override") => Promise<void>;
-const hooks: { hook: Hook; pool?: pg.Pool }[] = [];
-
 /**
- * Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is
- * one (Run contract 8). Given a pool, the hook runs only for transitions committed through that pool, so a process
- * handles the transitions it made, and two in one test process don't each handle the other's.
+ * Writes the control plane's console line for a transition or override once its transaction commits (PBI 105), and
+ * none when it rolls back. Its board effects are the worker's, from the event's outbox row (PBI 219).
  */
-export function onTransition(hook: Hook, pool?: pg.Pool): () => void {
-  const entry = { hook, pool };
-  hooks.push(entry);
-  return () => {
-    const i = hooks.indexOf(entry);
-    if (i !== -1) hooks.splice(i, 1);
-  };
-}
-
-function runHooks(c: pg.PoolClient, ...args: Parameters<Hook>): void {
-  const pool = txPool(c);
-  for (const h of hooks) if (!h.pool || h.pool === pool) runAfterCommit(c, () => h.hook(...args));
+function logAfterCommit(c: pg.PoolClient, externalId: string, from: ItemState, to: ItemState, event: ItemEvent | "override"): void {
+  runAfterCommit(c, async () => console.log(transitionLine(externalId, from, to, event)));
 }
 
 /**
  * Moves an item along one state-machine edge. It writes the state, its event and the event's board mirror outbox row
  * on the caller's withTx transaction, so all commit or none does, and leaving InProgress fences the old cell (Run contract 2).
- * Outside withTx it refuses before any write: the row lock, the atomicity and the hooks all depend on it.
+ * Outside withTx it refuses before any write: the row lock, the atomicity and the console line all depend on it.
  * `detail` adds fields to the event's payload, such as the attempts behind retries_exhausted.
  */
 export async function transitionItem(c: pg.PoolClient, itemId: string, event: ItemEvent, actor: Actor, detail: Record<string, unknown> = {}): Promise<ItemState> {
   if (!inTx(c)) throw new Error("transitionItem needs a client inside withTx");
-  const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
+  const r = await c.query<{ state: ItemState; external_id: string }>("select state, external_id from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
   const from = r.rows[0].state;
   const to = next(from, event);
@@ -58,18 +44,19 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   }
   const eventId = await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
   await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
-  runHooks(c, itemId, from, to, event);
+  logAfterCommit(c, r.rows[0].external_id, from, to, event);
   return to;
 }
 
 /**
  * An operator's move to any state, such as a stopped run going to Failed (overrideTo, plan Task 3). It writes like
- * transitionItem, fences the old cell when leaving InProgress, logs an override event with the reason and its board
- * mirror outbox row, and runs the same hooks, so the board mirrors it.
+ * transitionItem, fences the old cell when leaving InProgress, and logs an override event with the reason and its board
+ * mirror outbox row, so the worker mirrors it onto the board. An override into SignOff or NeedsInput records the open
+ * question of that kind in its payload, so the board's waiting comment quotes it.
  */
 export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemState, actor: Actor, reason: string): Promise<ItemState> {
   if (!inTx(c)) throw new Error("overrideItem needs a client inside withTx");
-  const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
+  const r = await c.query<{ state: ItemState; external_id: string }>("select state, external_id from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
   const from = r.rows[0].state;
   const target = overrideTo(from, to);
@@ -78,9 +65,18 @@ export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemSta
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, target]);
   }
-  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  // An override into a wait quotes the item's open question on the board, as a transition into one does, so the
+  // worker's board mirror reads it from the payload as it was when the override committed.
+  const waitKind = target === "SignOff" ? "sign_off" : target === "NeedsInput" ? "needs_input" : null;
+  const question = waitKind
+    ? (await c.query<{ body: string }>(
+        "select body from question where item_id = $1 and kind = $2 and answer is null and closed_at is null order by asked_at desc limit 1",
+        [itemId, waitKind],
+      )).rows[0]?.body
+    : undefined;
+  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason, ...(question ? { question } : {}) } });
   await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
-  runHooks(c, itemId, from, target, "override");
+  logAfterCommit(c, r.rows[0].external_id, from, target, "override");
   return target;
 }
 

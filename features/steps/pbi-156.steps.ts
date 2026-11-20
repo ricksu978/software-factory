@@ -216,6 +216,7 @@ export async function fakes(world: object) {
     blob: BLOB,
     sopVersion: "default@1",
     tickMs: TICK_MS,
+    outboxMs: TICK_MS,
     pollMs: POLL_MS,
     // The control plane's own settings.
     local: false,
@@ -263,6 +264,11 @@ async function waitFor(world: object, n: number): Promise<void> {
   // The tick under way as the poll ended started beside it, so it doesn't count.
   const base = ticks(w) + 1;
   await until(`the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
+  // The board shows what those ticks did once the worker has worked through the outbox after them (PBI 219). The pass
+  // under way as the last tick ended may have started before it, so it doesn't count.
+  const passes = () => w.runs.get("working through the outbox") ?? 0;
+  const after = passes() + 1;
+  await until("the worker works through the outbox", () => passes() >= after + 1);
   await learnItems(world);
 }
 
