@@ -76,11 +76,13 @@ export type Ctx = {
   local?: { browser: Browser; page?: Seen; back?: Seen };
   /** The source of src/bff/main.ts, as "I read src/bff/main.ts" read it. */
   mainSource?: string;
+  /** PBI 278: what the BFF answered for each path a browser with no session opened, in order. */
+  opened: Seen[];
 };
 
 export function ctx(world: object): Ctx {
   const w = world as { pbi288?: Ctx };
-  w.pbi288 ??= { browsers: [], checks: [], issuedBefore: 0 };
+  w.pbi288 ??= { browsers: [], checks: [], issuedBefore: 0, opened: [] };
   return w.pbi288;
 }
 
@@ -227,6 +229,15 @@ export async function startBff(c: Ctx): Promise<void> {
 }
 
 export const bffUrl = (c: Ctx, path: string) => new URL(path, `http://localhost:${c.port}`);
+
+/** Opens `path` on the running BFF in a browser with no session, records the answer in ctx.opened, and returns it. */
+export async function openOnBff(c: Ctx, path: string): Promise<Seen> {
+  assert.ok(c.port && c.bff, "the BFF isn't running");
+  const seen = await new Browser().request(bffUrl(c, path));
+  assert.notEqual(seen.status, 0, `nothing answered at ${path}: ${seen.body}`);
+  c.opened.push(seen);
+  return seen;
+}
 export const bffHost = "localhost";
 
 // ---- The database ----
@@ -1124,6 +1135,9 @@ async function follow(b: Browser, at: Seen): Promise<Seen> {
 }
 
 When("a browser opens {string}", local, async function (url: string) {
+  // A path rather than an address, as PBI 278's scenarios give, opens that path on the BFF the scenario started, in a
+  // browser with no session, without following redirects (features/steps/pbi-278.steps.ts reads ctx.opened).
+  if (url.startsWith("/")) return void (await openOnBff(ctx(this), url));
   const l = lc(ctx(this));
   l.page = await follow(l.browser, await l.browser.request(new URL(url)));
   assert.notEqual(l.page.status, 0, `nothing answered on the way from ${url}: ${l.page.body}`);
