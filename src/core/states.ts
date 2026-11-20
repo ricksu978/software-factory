@@ -9,7 +9,7 @@ export type ItemEvent =
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
-  | "returned" | "split_filed" | "children_done";
+  | "returned" | "split_filed" | "children_done" | "rechecked";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -57,6 +57,9 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   // A parent split before PBI 225 lost its label once its split was filed and was withdrawn from NotReady to Abandoned.
   // Its children carrying their split markers, it moves on to Split, once (PBI 228).
   ["Abandoned", "split_filed", "Split"],
+  // A Failed item's re-check finds today's post-merge rules no longer say its merge broke main, so it's Accepted again
+  // and waits on main or goes to Done as an Accepted item does (PBI 369).
+  ["Failed", "rechecked", "Accepted"],
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));

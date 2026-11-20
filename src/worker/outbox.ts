@@ -1,7 +1,8 @@
 // The worker's handling of the outbox (2026-11-07 design, §07 "An outbox in place of hooks"). The worker is the one
 // place outbox rows are handled: it mirrors each transition and override onto the item's board, runs each comment
 // command and posts each decision's announcement, and removes a row once every effect of it has succeeded. A row
-// whose effect fails stays in the outbox and holds back no other item.
+// whose effect fails stays in the outbox, is tried again with backoff, and holds back no other item. After its tenth
+// failed attempt it's marked failed and set aside (PBI 221).
 import type { FactoryWebhookEvent } from "../adapters/types.ts";
 import { mirror, type BoardDeps } from "../control/board.ts";
 import { announcement, applyComment, type DecisionKind } from "../control/decisions.ts";
@@ -21,14 +22,18 @@ export function backoffMs(attempts: number): number {
   return Math.min(30_000 * 2 ** Math.max(attempts - 1, 0), 30 * 60_000);
 }
 
+/** The failed attempts after which a row is marked failed and set aside: it stays in the outbox, and isn't tried again. */
+export const MAX_ATTEMPTS = 10;
+
 /**
  * Handles every row that is due, once, and then returns. Rows go in seq order. A row waits while an earlier row for
- * the same item and consumer is still in the outbox, so one item's rows run in the order they were written, and a
- * failed one holds back only its own item's later rows. A row written while it works, such as the announcement of a
- * decision a comment command made, is handled in the same pass. Each row is taken with `for no key update skip locked`,
- * so another worker skips it, and recording its effects in `outbox_effect` from another connection doesn't wait on the
- * lock. A row whose seq isn't in `outbox_worker_row` came from a pre-219 process that already acted on it, and is deleted
- * unhandled.
+ * the same item and consumer is still in the outbox and not set aside, so one item's rows run in the order they were
+ * written, and a failing one holds back only its own item's later rows. A row that fails is tried again after
+ * `backoffMs`, and on its `MAX_ATTEMPTS`th failure it's marked failed and set aside, which lets its item's later rows
+ * run. A row written while it works, such as the announcement of a decision a comment command made, is handled in the
+ * same pass. Each row is taken with `for no key update skip locked`, so another worker skips it, and recording its
+ * effects in `outbox_effect` from another connection doesn't wait on the lock. A row whose seq isn't in
+ * `outbox_worker_row` came from a pre-219 process that already acted on it, and is deleted unhandled.
  */
 export async function workOutbox(deps: OutboxDeps): Promise<void> {
   // A row a pre-219 process wrote, as one still running while old and new revisions overlap in a swap (§07), was
@@ -57,9 +62,15 @@ export async function workOutbox(deps: OutboxDeps): Promise<void> {
           await runRowEffects(deps, row);
           await c.query("delete from outbox where seq = $1", [row.seq]);
         } catch (e) {
-          const wait = backoffMs(found.attempts + 1);
-          console.error(`outbox: the ${row.consumer} row ${row.seq} for item ${row.itemId} failed, and is tried again in ${wait / 1000} seconds:`, e);
-          await c.query("update outbox set attempts = attempts + 1, next_attempt_at = now() + $2 * interval '1 millisecond' where seq = $1", [row.seq, wait]);
+          const attempts = found.attempts + 1;
+          if (attempts >= MAX_ATTEMPTS) {
+            console.error(`outbox: the ${row.consumer} row ${row.seq} for item ${row.itemId} failed ${attempts} times, and is marked failed and set aside:`, e);
+            await c.query("update outbox set attempts = $2, failed_at = now() where seq = $1", [row.seq, attempts]);
+          } else {
+            const wait = backoffMs(attempts);
+            console.error(`outbox: the ${row.consumer} row ${row.seq} for item ${row.itemId} failed, and is tried again in ${wait / 1000} seconds:`, e);
+            await c.query("update outbox set attempts = $2, next_attempt_at = now() + $3 * interval '1 millisecond' where seq = $1", [row.seq, attempts, wait]);
+          }
         }
       }
       await c.query("commit");

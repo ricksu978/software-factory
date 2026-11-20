@@ -396,6 +396,82 @@ describe("scheduler", dbTest, () => {
     assert.equal(backlog.filed.length, 0);
   });
 
+  // PBI 369: an item that failed its Definition of Done on main is re-checked every failed_recheck_hours hours. The
+  // scenarios cover the rest.
+  const HOUR = 3_600_000;
+  async function failedMerge(externalId: string, sha: string, parent: string, mergeRuns: CheckRun[], parentRuns: CheckRun[], failedAgo = 0, event = "dod_failed") {
+    const id = await redMerge(externalId, sha, parent, mergeRuns, parentRuns, failedAgo + HOUR);
+    await db.pool.query("update item set state = 'Failed' where id = $1", [id]);
+    await db.pool.query(
+      "insert into event (at, actor, actor_id, item_id, kind, payload) values ($1, 'system', 't', $2, 'transition', $3)",
+      [ago(failedAgo), id, JSON.stringify({ from: "Accepted", to: "Failed", event })],
+    );
+    repoHost.branches.set(`${REPO}@main`, [parent, sha]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    return id;
+  }
+  const rechecks = async (id: string) =>
+    (await db.pool.query<{ at: Date }>("select at from event where item_id = $1 and kind = 'recheck' order by at", [id])).rows.map((r) => r.at.toISOString());
+  const later = (ms: number) => new Date(NOW.getTime() + ms);
+
+  test("a Failed item is first re-checked 8 hours after it failed, and one on a main already red goes back to Accepted and waits on main (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")]);
+    const before = (await backlog.comments("1")).length;
+    await run(later(8 * HOUR - 60_000));
+    assert.deepEqual(await rechecks(id), []);
+    assert.equal((await state(id)).state, "Failed");
+    await run(later(8 * HOUR));
+    assert.deepEqual(await rechecks(id), [later(8 * HOUR).toISOString()]);
+    assert.equal((await state(id)).state, "Accepted");
+    const moves = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'rechecked'", [id])).rows;
+    assert.deepEqual(moves.map((m) => [m.payload.from, m.payload.to]), [["Failed", "Accepted"]]);
+    assert.equal((await db.pool.query("select waits_on_branch from run where item_id = $1", [id])).rows[0].waits_on_branch, "main");
+    const comments = (await backlog.comments("1")).slice(before);
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /re-check/i);
+    assert.match(comments[0], /m1/);
+    assert.match(comments[0], /p1/);
+    await run(later(16 * HOUR));
+    assert.equal((await backlog.comments("1")).length, before + 1);
+    assert.equal((await rechecks(id)).length, 1);
+  });
+
+  test("a merge that still broke main stays Failed with no comment, and is re-checked again failed_recheck_hours later (PBI 369)", async () => {
+    repoHost.files.set(`${REPO}@main:.factory/config.yml`, "failed_recheck_hours: 2\n");
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const before = (await backlog.comments("1")).length;
+    for (const h of [1, 2, 3, 4]) await run(later(h * HOUR));
+    assert.deepEqual(await rechecks(id), [later(2 * HOUR).toISOString(), later(4 * HOUR).toISOString()]);
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal((await backlog.comments("1")).length, before);
+    assert.equal(backlog.filed.length, 0);
+  });
+
+  test("a merge commit whose CI now passes goes back to Accepted, and is Done on the next pass (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")], 8 * HOUR);
+    repoHost.runs.set(`${REPO}@m1`, [check("test", "success")]);
+    repoHost.checks.set(`${REPO}@m1`, "success");
+    await run();
+    assert.equal((await state(id)).state, "Accepted");
+    assert.match((await backlog.comments("1")).at(-1)!, /now passes/);
+    await run(later(60_000));
+    assert.equal((await state(id)).state, "Done");
+  });
+
+  test("an item that went to Failed for another reason is never re-checked (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")], 8 * HOUR, "retries_exhausted");
+    await run(later(HOUR));
+    assert.deepEqual(await rechecks(id), []);
+    assert.equal((await state(id)).state, "Failed");
+  });
+
+  test("a config whose failed_recheck_hours is wrong re-checks every 8 hours (PBI 369)", async () => {
+    repoHost.files.set(`${REPO}@main:.factory/config.yml`, "failed_recheck_hours: nope\n");
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")], 8 * HOUR);
+    await run();
+    assert.equal((await rechecks(id)).length, 1);
+  });
+
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {
     const id = await item("1", "Abandoned", "held = true");
     await openRun(id, "next_stage = 'sign-off'");
