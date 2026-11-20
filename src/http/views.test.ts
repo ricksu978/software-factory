@@ -630,3 +630,29 @@ describe("an item's priority and group (PBI 320)", () => {
     assert.equal(claimLines(own), "<p>Priority 3.</p>");
   });
 });
+
+describe("PBI 369: when a Failed item was last re-checked", () => {
+  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const item = { id: "i1", title: "Export a month", external_id: "482", repo: "acme/widgets" };
+
+  test("Floor lists each item that failed its Definition of Done on main, with its last re-check in the viewer's zone", () => {
+    const html = floorPage({ ...empty, zone: "Europe/Amsterdam", failed: [{ ...item, rechecked: new Date("2026-11-20T16:00:00Z") }, { ...item, id: "i2", external_id: "483", rechecked: null }] }, null);
+    assert.match(html, /<li>[^\n]*#482[^\n]*last re-checked at <time[^>]*>2026-11-20 17:00<\/time>[^\n]*<\/li>/);
+    assert.match(html, /<li>[^\n]*#483[^\n]*not yet re-checked[^\n]*<\/li>/);
+  });
+
+  test("Floor says so when no item failed on main", () => {
+    assert.match(floorPage(empty, null), /No item failed its Definition of Done on main/);
+  });
+
+  const detail = (recheck: { last: Date | null } | null) => runDetailPage({
+    item: { ...item, state: "Failed" }, run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, recheck,
+  }, null);
+
+  test("Run detail shows when the item was last re-checked, or that it hasn't been yet", () => {
+    assert.match(detail({ last: new Date("2026-11-20T16:00:00Z") }), /Last re-checked at <time[^>]*>2026-11-20 16:00<\/time>/);
+    assert.match(detail({ last: null }), /hasn't been re-checked yet/);
+    assert.doesNotMatch(detail(null), /re-checked/);
+  });
+});

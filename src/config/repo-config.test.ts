@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { ConfigError, parseRepoConfig } from "./repo-config.ts";
+import { ConfigError, failedRecheckHours, parseRepoConfig } from "./repo-config.ts";
 
 const valid = `bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n`;
 
@@ -42,6 +42,20 @@ describe("parseRepoConfig", () => {
     assert.deepEqual(parseRepoConfig(valid).webTools, []);
     assert.deepEqual(parseRepoConfig(`${valid}web_tools: [WebSearch]\n`).webTools, ["WebSearch"]);
     assert.throws(() => parseRepoConfig(`${valid}web_tools: [Bash]\n`), (e: unknown) => e instanceof ConfigError && e.key === "web_tools");
+  });
+
+  test("failed_recheck_hours is 8 when it's missing, and reads through when set (PBI 369)", () => {
+    assert.equal(parseRepoConfig(valid).failedRecheckHours, 8);
+    assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: 2\n`).failedRecheckHours, 2);
+    assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: 0.5\n`).failedRecheckHours, 0.5);
+    assert.equal(failedRecheckHours(null), 8);
+    assert.equal(failedRecheckHours("failed_recheck_hours: 3\n"), 3);
+  });
+
+  test("a failed_recheck_hours that isn't a number above zero fails naming it (PBI 369)", () => {
+    for (const bad of ["0", "-1", "'8'", "[8]"]) {
+      assert.throws(() => parseRepoConfig(`${valid}failed_recheck_hours: ${bad}\n`), (e: unknown) => e instanceof ConfigError && e.key === "failed_recheck_hours", bad);
+    }
   });
 
   test("this repo's own .factory/config.yml parses", () => {

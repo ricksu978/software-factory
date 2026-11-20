@@ -12,7 +12,12 @@ export type RepoConfig = {
   bdd: { parse: string; run: string; report: string };
   /** `setup` installs the repo's dependencies in a fresh checkout. The engine runs it before any stage. */
   commands: { test: string; lint: string; setup?: string };
+  /** PBI 369: how many hours apart the factory re-checks an item that failed its Definition of Done on main. */
+  failedRecheckHours: number;
 };
+
+/** `failed_recheck_hours` when the key is missing (PBI 369). */
+export const DEFAULT_FAILED_RECHECK_HOURS = 8;
 
 /** Thrown for a missing or invalid config. `key` names the setting that's wrong. */
 export class ConfigError extends Error {
@@ -58,8 +63,14 @@ function setup(doc: Record<string, unknown>): { setup?: string } {
   return { setup: v };
 }
 
-/** Parses config.yml. Null means the repo has none, which fails on `bdd`, since such a repo can't run BDD. */
-export function parseRepoConfig(yamlText: string | null): RepoConfig {
+function recheckHours(doc: Record<string, unknown>): number {
+  const v = doc.failed_recheck_hours;
+  if (v === undefined || v === null) return DEFAULT_FAILED_RECHECK_HOURS;
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) throw new ConfigError("failed_recheck_hours", "failed_recheck_hours must be a number of hours above zero");
+  return v;
+}
+
+function parseYaml(yamlText: string | null): Record<string, unknown> {
   let doc: unknown = null;
   if (yamlText !== null) {
     try {
@@ -68,12 +79,26 @@ export function parseRepoConfig(yamlText: string | null): RepoConfig {
       throw new ConfigError("yaml", `not valid YAML: ${(e as Error).message}`);
     }
   }
-  const d = (doc && typeof doc === "object" ? doc : {}) as Record<string, unknown>;
+  return (doc && typeof doc === "object" ? doc : {}) as Record<string, unknown>;
+}
+
+/**
+ * Only `failed_recheck_hours` from config.yml, 8 when it's missing or the repo has no config (PBI 369). The scheduler
+ * reads it alone, so a config that's wrong elsewhere still sets how often Failed items are re-checked.
+ */
+export function failedRecheckHours(yamlText: string | null): number {
+  return recheckHours(parseYaml(yamlText));
+}
+
+/** Parses config.yml. Null means the repo has none, which fails on `bdd`, since such a repo can't run BDD. */
+export function parseRepoConfig(yamlText: string | null): RepoConfig {
+  const d = parseYaml(yamlText);
   return {
     sensitivePaths: strings(d, "sensitive_paths"),
     reviewers: strings(d, "reviewers"),
     webTools: webTools(d),
     bdd: section(d, "bdd", ["parse", "run", "report"] as const),
     commands: { ...section(d, "commands", ["test", "lint"] as const), ...setup(d) },
+    failedRecheckHours: recheckHours(d),
   };
 }
