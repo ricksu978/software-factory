@@ -12,6 +12,11 @@ import { buildCellImage, CELL_IMAGE_RESOURCE, type CellImageDeps, type DockerBui
 export type GitResult = { status: number; stdout: string; stderr: string };
 
 export type StartDeps = {
+  /**
+   * The AppHost's environment. FACTORY_FLOAT_PORTS=1 marks a test run (PBI 208), as the BDD suites for PBIs 6, 89 and
+   * 156 start the AppHost. Not read yet.
+   */
+  env?: { FACTORY_FLOAT_PORTS?: string };
   /** Runs git in the checkout with these arguments. */
   git(args: string[]): GitResult;
   /** Whether Docker answers, as `docker version` does. */
