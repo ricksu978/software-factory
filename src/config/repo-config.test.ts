@@ -52,9 +52,10 @@ describe("parseRepoConfig", () => {
     assert.equal(failedRecheckHours("failed_recheck_hours: 3\n"), 3);
   });
 
-  test("a failed_recheck_hours that isn't a number above zero fails naming it (PBI 369)", () => {
-    for (const bad of ["0", "-1", "'8'", "[8]"]) {
-      assert.throws(() => parseRepoConfig(`${valid}failed_recheck_hours: ${bad}\n`), (e: unknown) => e instanceof ConfigError && e.key === "failed_recheck_hours", bad);
+  test("a failed_recheck_hours that isn't a number above zero counts as 8 and leaves the config valid (PBI 369)", () => {
+    for (const bad of ["0", "-1", "'8'", "8h", "[8]", ".nan", ".inf"]) {
+      assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: ${bad}\n`).failedRecheckHours, 8, bad);
+      assert.equal(failedRecheckHours(`failed_recheck_hours: ${bad}\n`), 8, bad);
     }
   });
 

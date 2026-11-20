@@ -63,11 +63,13 @@ function setup(doc: Record<string, unknown>): { setup?: string } {
   return { setup: v };
 }
 
+/**
+ * 8 when the key is missing or isn't a number above zero (spec §6). It never throws: a setting that only paces
+ * re-checks of Failed items mustn't make the whole config invalid and stop the repo's pipeline.
+ */
 function recheckHours(doc: Record<string, unknown>): number {
   const v = doc.failed_recheck_hours;
-  if (v === undefined || v === null) return DEFAULT_FAILED_RECHECK_HOURS;
-  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) throw new ConfigError("failed_recheck_hours", "failed_recheck_hours must be a number of hours above zero");
-  return v;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : DEFAULT_FAILED_RECHECK_HOURS;
 }
 
 function parseYaml(yamlText: string | null): Record<string, unknown> {
@@ -83,7 +85,7 @@ function parseYaml(yamlText: string | null): Record<string, unknown> {
 }
 
 /**
- * Only `failed_recheck_hours` from config.yml, 8 when it's missing or the repo has no config (PBI 369). The scheduler
+ * Only `failed_recheck_hours` from config.yml, 8 when it's missing or wrong or the repo has no config (PBI 369). The scheduler
  * reads it alone, so a config that's wrong elsewhere still sets how often Failed items are re-checked.
  */
 export function failedRecheckHours(yamlText: string | null): number {
