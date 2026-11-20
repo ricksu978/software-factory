@@ -413,7 +413,7 @@ flowchart LR
     <li><b>API end to end.</b> Tests get a real token from Keycloak's e2e client by direct grant, with no browser. Direct access grants have to be enabled on that client (<a href="https://www.keycloak.org/docs/25.0.6/securing_apps/index.html" target="_blank" rel="noopener">Keycloak securing apps</a>), and only that client.</li>
     <li><b>Sign-in scenarios.</b> The ones in <code>features/pbi-19-dashboard.feature</code> and <code>features/pbi-89-dashboard-wiring.feature</code> are rewritten for OIDC. Their steps today read the dev token (<code>features/steps/pbi-89.steps.ts:101</code>).</li>
     <li><b>Single-process scenarios.</b> These assume one <code>control</code> resource and change with the split: <code>features/pbi-89-dashboard-wiring.feature:30</code> starts the control plane from <code>src/main.ts</code>, and <code>features/steps/pbi-6.steps.ts:73</code> and <code>:118</code> look up <code>control</code>, call its probes and check that <code>CELL_CONTROL_URL</code> names its port.</li>
-    <li><b>Docs.</b> <code>README.md:55</code> and <code>scripts/factory.ps1:3</code> tell the owner to open the sign-in link from the <code>control</code> console. Both change in step 9.</li>
+    <li><b>Docs.</b> <code>README.md</code>'s "Sign in" section tells the owner to open the sign-in link from the <code>control</code> console. It changes in step 9. <code>scripts/factory.ps1</code> said the same, and PBI 208 removed it.</li>
     <li><b>UI end to end.</b> Deferred. Add a browser driver when a flow only the UI can show needs a test.</li>
   </ul>
 </section>

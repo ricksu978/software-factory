@@ -1,8 +1,9 @@
-// What the AppHost does before any resource starts (PBI 205), whether `npm run factory` or a plain `aspire run`
-// launched it. On `main` it runs a fast-forward-only pull, so control, the worker and migrate run the code it pulled,
+// What `aspire run` does before any resource starts (PBI 205), so it is the one command that starts the factory (PBI
+// 208). On `main` it runs a fast-forward-only pull, so control, the worker and migrate run the code it pulled,
 // and a pull that fails stops the start with git's own message. On any other branch, or on no branch, it warns that it
 // runs the checkout as it is and pulls nothing. Then, when Docker doesn't answer, it launches Docker Desktop and waits
-// up to 3 minutes for it. aspire-apphost/apphost.mts calls startAppHost() with the real git, Docker and clock, and
+// up to 3 minutes for it. A test run (FACTORY_FLOAT_PORTS=1, as the BDD suites start the AppHost) runs no git at all,
+// so a suite run on `main` never moves the checkout or waits on a credential prompt. aspire-apphost/apphost.mts calls startAppHost() with the real git, Docker and clock, and
 // passes the resources' start as startResources. The resources it hands over include "cell-image" (PBI 206), which
 // builds factory-cell:local from the pulled checkout, and the worker waits for it.
 
@@ -14,7 +15,7 @@ export type GitResult = { status: number; stdout: string; stderr: string };
 export type StartDeps = {
   /**
    * The AppHost's environment. FACTORY_FLOAT_PORTS=1 marks a test run (PBI 208), as the BDD suites for PBIs 6, 89 and
-   * 156 start the AppHost. Not read yet.
+   * 156 start the AppHost. A test run pulls nothing.
    */
   env?: { FACTORY_FLOAT_PORTS?: string };
   /** Runs git in the checkout with these arguments. */
@@ -79,10 +80,15 @@ export const DOCKER_POLL_MS = 3_000;
 
 /** Runs the checks, then starts the resources. Throws StartStopped, having started nothing, when a check fails. */
 export async function startAppHost(deps: StartDeps): Promise<void> {
-  pullMain(deps);
+  if (isTestRun(deps)) deps.say(TEST_RUN_NO_PULL);
+  else pullMain(deps);
   await ensureDocker(deps);
   await deps.startResources(appHostResources(deps));
 }
+
+/** FACTORY_FLOAT_PORTS=1 marks a test run. Unset, "0" or anything else is a real start. */
+export const isTestRun = (deps: Pick<StartDeps, "env">) => deps.env?.FACTORY_FLOAT_PORTS === "1";
+export const TEST_RUN_NO_PULL = "A test run (FACTORY_FLOAT_PORTS=1), so it runs the checkout as it is and pulls nothing.";
 
 /** Git's own words for a failed command, stderr first, as it printed them. */
 const gitSaid = (r: GitResult) => [r.stderr, r.stdout].map((s) => s.trim()).filter(Boolean).join("\n");
