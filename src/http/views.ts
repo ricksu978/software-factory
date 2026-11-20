@@ -3,6 +3,7 @@
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
 import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
+import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { pauseActive } from "./configuration.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
@@ -82,6 +83,22 @@ export function age(since: Date | null, now = Date.now()): string {
 const utc = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
 /** A time to the minute in the viewer's zone (PBI 189), with its full ISO form in the markup. */
 const local = (at: Date, zone: string) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(localTime(at, zone))}</time>`;
+/**
+ * A readiness check's Verdict cell (PBI 348): what its judge call decided, with each failed dor.md line and the judge's
+ * reason and each flag, or why it has no verdict. A judge call on a proposed split child names the child. A split
+ * proposal's cell is empty.
+ */
+function checkVerdict(c: ReadinessCheck): string {
+  if (c.kind === "split") return "";
+  const v = c.verdict;
+  const said = !v ? "No verdict was recorded"
+    : v.outcome === "passed" ? "Passed"
+    : v.outcome === "unreadable" ? escapeHtml("No verdict: the judge's output was unreadable")
+    : v.outcome === "error" ? "The call failed with no verdict"
+    : `Failed<ul>${[...v.lines.map((l) => `${l.criterion}: ${l.reason}`), ...v.flags.map((f) => `Flag: ${f}`)].map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`;
+  return c.child === undefined ? said : `On the proposed child “${escapeHtml(c.child)}”: ${said}`;
+}
+
 /** A readiness judge call costs fractions of a cent, so its spend shows to four places. */
 const judgeUsd = (n: number) => `$${n.toFixed(4)}`;
 
@@ -313,7 +330,7 @@ export type RunDetail = {
     /** What the attempt's cell, or the factory closing it, said about it, such as that the cell's lease ran out (PBI 239). */
     message?: string | null }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
-  readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
+  readiness: ReadinessCheck[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The issue's body as written on GitHub, shown at sign-off, or null when it's blank or no form shows. */
@@ -332,6 +349,8 @@ export type RunDetail = {
   controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
   /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
   startNow?: { reason: string; by: string | null } | null;
+  /** PBI 311: the item's latest Move up or Move down, when a change to the board's order ended it, or null. */
+  moveEnded?: { control: "Move up" | "Move down"; at: Date } | null;
   /** The item's claim key (PBI 320): its priority and whether it's final-stage, and the items they come from. */
   claim?: ClaimKey | null;
   /** The viewer's IANA time zone, from their browser's `tz` cookie (PBI 189). Defaults to UTC. */
@@ -409,8 +428,8 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
-    ? `<table><thead><tr><th scope="col">Ran</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>${d.readiness
-        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td></tr>`)
+    ? `<table><thead><tr><th scope="col">Ran</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Verdict</th></tr></thead><tbody>${d.readiness
+        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td><td>${checkVerdict(c)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No readiness check has run yet.</p>`;
   const criteria = d.criteria
@@ -446,7 +465,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
 ${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
-${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
 ${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
@@ -482,7 +501,7 @@ export type ActivityRow = { at: Date; external_id: string | null; repo: string |
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
 // An SOP move (PBI 173) shows its old and new versions where a transition shows its states.
-const MOVES = new Set(["transition", "override", "sop_moved"]);
+export const MOVES = new Set(["transition", "override", "sop_moved"]);
 
 /** The factory's newest events, newest first, with the time in UTC (PBI 105). */
 export function activityPage(rows: ActivityRow[], banner: string | null): string {

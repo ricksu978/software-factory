@@ -91,7 +91,8 @@ const activeOn = (kinds: string) =>
 // Start now (PBI 265, spec §8) puts an item ahead of every other claimable item, answered ones included.
 const START_NOW = `exists (select from override o where ${activeOn("'start_now'")})`;
 // Move up and Move down (PBI 265) give an item a place in the factory queue, its latest move's key, in place of its
-// board one. The board's own order is never touched, and a board poll leaves the move as it is. A key is a rank and a
+// board one. The board's own order is never touched. A board poll holds the move on its side of the item it passed, or ends it
+// when the board itself puts the two the other way round (PBI 311, keepMovesInPlace). A key is a rank and a
 // tie: an unmoved item's rank is its board rank and its tie is its id read as a 128-bit number, so no two items' keys
 // are equal, even when two backlog sources both rank from 1. A move stores a key strictly between the two items it
 // lands between, its rank null when it lands among items with no board rank, which sort last. A moved item that has a
@@ -221,8 +222,8 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
-    `${CLAIM_KEYS} select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
+  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null; source_id: string }>(
+    `${CLAIM_KEYS} select i.id, i.source_id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
        ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
      from item i join claim_key k on k.id = i.id where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
@@ -236,8 +237,26 @@ export async function moveInQueue(
   const [before, after] = dir === "up" ? [group[at - 2], group[at - 1]] : [group[at + 1], group[at + 2]];
   const stays = dir === "up" ? at === 0 : at === last;
   const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
-  // Kept relative to the item's own board rank where it has one, so a board change that shifts it carries the move.
-  const value = key.rank !== null && me.board !== null ? { offset: decAdd(key.rank, `-${me.board}`.replace(/^--/, "")), tie: key.tie } : key;
+  // PBI 311: the item it passed, so a later board poll can hold it on its side of that item (keepMovesInPlace), and
+  // which side of that item the board had it on, so the poll ends the move only when the board flips the two.
+  // A press that leaves the item where it is keeps the hold its latest move of the same direction already had, so the
+  // new override, now its latest move, doesn't drop it back to an offset only.
+  const passedRow = stays ? undefined : group[dir === "up" ? at - 1 : at + 1];
+  let hold: { passed?: string; boardSide?: BoardSide } = {};
+  if (passedRow) {
+    const boardSide = boardSideOf(me, passedRow);
+    hold = { passed: passedRow.id, ...(boardSide ? { boardSide } : {}) };
+  } else {
+    const prev = (await c.query<{ kind: string; passed: string | null; board_side: BoardSide | null }>(
+      `select o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side from override o
+       where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+       order by o.created_at desc, o.id desc limit 1`, [itemId],
+    )).rows[0];
+    if (prev?.passed && prev.kind === (dir === "up" ? "move_up" : "move_down")) {
+      hold = { passed: prev.passed, ...(prev.board_side ? { boardSide: prev.board_side } : {}) };
+    }
+  }
+  const value = { ...storedKey(key, me.board), ...hold };
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
     [itemId, dir === "up" ? "move_up" : "move_down", value, o.reason.trim(), o.createdBy],
@@ -245,6 +264,91 @@ export async function moveInQueue(
 }
 
 type QueueKey = { rank: string | null; tie: string };
+
+/** A queue key as a move stores it: its rank as an offset from the item's board rank where it has one, so a board change that shifts it carries the move. */
+function storedKey(key: QueueKey, board: string | null): { offset: string; tie: string } | QueueKey {
+  return key.rank !== null && board !== null ? { offset: decAdd(key.rank, `-${board}`.replace(/^--/, "")), tie: key.tie } : key;
+}
+
+/** -1 when `a` comes before `b` in the queue key order, rank (nulls last) then tie, 1 when after, 0 when equal. */
+function keyCmp(a: QueueKey, b: QueueKey): number {
+  if (a.rank !== b.rank) {
+    if (a.rank === null) return 1;
+    if (b.rank === null) return -1;
+    const r = decCmp(a.rank, b.rank);
+    if (r !== 0) return r;
+  }
+  return decCmp(a.tie, b.tie);
+}
+
+/** Which side of `passed` the board has `me` on (PBI 311): only for two items of one backlog source, each with a distinct board rank. */
+type BoardSide = "ahead" | "behind";
+function boardSideOf(me: { source_id: string; board: string | null }, passed: { source_id: string; board: string | null }): BoardSide | null {
+  if (me.source_id !== passed.source_id || me.board === null || passed.board === null) return null;
+  const r = decCmp(me.board, passed.board);
+  return r < 0 ? "ahead" : r > 0 ? "behind" : null;
+}
+
+/** Why the board ended a Move up or Move down (PBI 311), as `override.cleared_cause` records it. */
+export const ENDED_BY_BOARD_ORDER = "board_order";
+
+/**
+ * Holds every active Move up and Move down on its side of the item it passed (PBI 311). The poller calls it once the
+ * board's order is read. Each item's latest move is taken in the order the moves were made:
+ * - When the board itself now puts the moved item and the passed item the other way round from the order it had them
+ *   in when the move was made (`boardSide` on the move), the board wins: every active Move up and Move down on the item
+ *   ends, each recording `ENDED_BY_BOARD_ORDER` and an event, so no earlier move takes the latest one's place and the
+ *   item follows the board from then on. Only two items of the same backlog source, each with a board rank, are
+ *   compared. A move with no `boardSide` had the two tied or not comparable on the board, so it's never ended this way.
+ * - Otherwise, when a board change left the moved item on the wrong side of the passed one, such as a new issue that
+ *   landed between them, its key is set again, just ahead of or just behind the passed item. The neighbour it lands
+ *   beside is read among every live item, not only the Queued ones, so an item the gate passes later can't come between.
+ * - A move that passed no item, or whose passed item has left the factory's live states, is left as it is. Nor is one
+ *   whose passed item has a later move that passed this item back: the later move settles the pair.
+ */
+export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
+  if (!inTx(c)) throw new Error("keepMovesInPlace needs a client inside withTx");
+  await c.query("select pg_advisory_xact_lock(265)");
+  const moves = (await c.query<{ id: string; target_id: string; kind: "move_up" | "move_down"; passed: string | null; board_side: BoardSide | null }>(
+    `select * from (select distinct on (o.target_id) o.id, o.target_id, o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side, o.created_at
+       from override o where o.scope = 'item' and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+       order by o.target_id, o.created_at desc, o.id desc) m
+     order by m.created_at, m.id`,
+  )).rows;
+  for (const m of moves) {
+    if (!m.passed) continue;
+    // Read afresh for each move, since setting one item's key can change where the next one stands.
+    const live = (await c.query<{ id: string; source_id: string; board: string | null; rank: string | null; tie: string; idnum: string }>(
+      `select i.id, i.source_id, i.backlog_rank::text as board, ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum
+       from item i where ${LIVE} order by ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`,
+    )).rows;
+    const me = live.find((r) => r.id === m.target_id);
+    const passed = live.find((r) => r.id === m.passed);
+    if (!me || !passed) continue;
+    const up = m.kind === "move_up";
+    const now = boardSideOf(me, passed);
+    if (m.board_side && now && now !== m.board_side) {
+      const ended = (await c.query<{ id: string; kind: "move_up" | "move_down" }>(
+        `update override o set cleared_at = now(), cleared_cause = $2
+         where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+         returning o.id, o.kind`, [me.id, ENDED_BY_BOARD_ORDER],
+      )).rows;
+      for (const e of ended) {
+        await appendEvent(c, { ...system("poller"), itemId: me.id, kind: "move_ended", payload: { override: e.id, control: e.kind, passed: e.id === m.id ? passed.id : null, cause: ENDED_BY_BOARD_ORDER } });
+      }
+      continue;
+    }
+    // Two moves that each passed the other: the newer one settles the pair, so the older isn't set again on every poll.
+    const back = moves.findIndex((x) => x.target_id === m.passed && x.passed === m.target_id);
+    if (back > moves.indexOf(m)) continue;
+    const side = keyCmp(me, passed);
+    if (up ? side < 0 : side > 0) continue;
+    const others = live.filter((r) => r.id !== me.id);
+    const at = others.indexOf(passed);
+    const key = up ? keyBetween(others[at - 1], passed, me.idnum) : keyBetween(passed, others[at + 1], me.idnum);
+    await c.query("update override set value = $2 where id = $1", [m.id, { ...storedKey(key, me.board), passed: passed.id, ...(m.board_side ? { boardSide: m.board_side } : {}) }]);
+  }
+}
 
 /**
  * A queue key strictly after `lo` and strictly before `hi`, in the order rank (nulls last) then tie. Either may be

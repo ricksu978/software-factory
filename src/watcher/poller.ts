@@ -16,7 +16,7 @@ import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Polic
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
-import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
+import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
@@ -355,6 +355,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   // 3b. Items stopped by a red base (PBI 260). Once CI passes on a newer commit of the base branch, the factory answers
   //     the question itself and the scheduler claims the item again at its stage, merging the base as every claim does.
   await requeueAfterBasePassed(pool, repoHost, sourceId);
+
+  w.step("keeping queue moves in place");
+  // 3c. With the board's new order read, every Move up and Move down is held on its side of the item it passed, or
+  //     ended where the board itself now puts the two the other way round (PBI 311).
+  await withTx(pool, (c) => keepMovesInPlace(c));
 
   w.step("checking readiness");
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, or when a readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
