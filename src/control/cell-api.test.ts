@@ -635,7 +635,10 @@ describe("cell API", dbTest, () => {
     host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
     host.branches.set(`${repo}@main`, ["0a0a0a0"]);
     host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "success", url: "u" }]);
-    assert.notEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).status, 200);
+    // A 400 with the host's reason, so the cell's note says why, not "internal error".
+    const refused = await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] });
+    assert.equal(refused.status, 400);
+    assert.match(JSON.stringify(refused.body), /re-ran none of the checks: .+/);
     host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "failure", url: "u" }]);
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true, rerun: ["ci"], refused: [] });
   });

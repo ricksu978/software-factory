@@ -397,7 +397,12 @@ const routes: Record<string, Route> = {
       [run.run_id, sha, checks, now],
     );
     if (recorded.rowCount === 0) throw new BadRequest(`the checks on ${sha} were already re-run once`);
-    const { rerun, refused } = await deps.repoHost.rerunChecksOnSha(repo, sha, checks);
+    const { rerun, refused } = await deps.repoHost.rerunChecksOnSha(repo, sha, checks).catch((e: unknown) => {
+      // The host re-ran nothing. A 400 rolls the record back and hands the cell the host's reason for its note.
+      // A GitHub 5xx keeps its 503.
+      if (githubFailed(e)) throw e;
+      throw new BadRequest(`the repo host re-ran none of the checks: ${e instanceof Error ? e.message : String(e)}`);
+    });
     if (refused.length) await c.query("update ci_rerun set checks = $3 where run_id = $1 and sha = $2", [run.run_id, sha, rerun]);
     return { ok: true, rerun, refused };
   },
