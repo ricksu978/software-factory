@@ -88,5 +88,13 @@ test("reflow leaves an element the spec styles white-space: pre alone", () => {
   const text = "<style>.formula { white-space: pre; }</style>\n<div class=\"formula\">a = max(0, b)\nc = d</div>\n<p>One, two.</p>\n";
   const out = reflow(text, ".html");
   assert.ok(out.includes("<div class=\"formula\">a = max(0, b)\nc = d</div>"), out);
-  assert.ok(out.includes("<p>One,\ntwo.</p>"), out);
+  assert.ok(out.includes("<p>One,\n\ntwo.</p>"), out);
+});
+
+test("reflow puts a blank line after each HTML line outside code, comments and tags, once, and none in Markdown", () => {
+  const text = "<p>One. Two.</p>\n<pre>a\nb</pre>\n<!-- c\nd -->\n<a\n  href=\"x\">e</a>\n";
+  const out = reflow(text, ".html");
+  assert.equal(out, "<p>One.\n\nTwo.</p>\n\n<pre>a\nb</pre>\n\n<!-- c\nd -->\n\n<a\n  href=\"x\">e</a>\n");
+  assert.equal(reflow(out, ".html"), out);
+  assert.equal(reflow("One. Two.\n", ".md"), "One.\nTwo.\n");
 });

@@ -1,23 +1,20 @@
 {
   "note": "PBI 294's merge replay: each file merge under replay/ through git merge-file, as node scripts/merge-replay.ts run writes it. replayed and conflicted are for the new layout.",
   "replayed": 47,
-  "conflicted": 19,
+  "conflicted": 18,
   "hunks": 22,
   "old": {
     "conflicted": 47,
-    "hunks": 60
+    "hunks": 62
   },
   "conflicts": [
     "1edce7f-spec",
     "1edce7f-plan",
-    "777cce4-spec",
     "db22c2b-plan",
     "bf0ce77-spec",
     "693e463-plan",
-    "71b42d3-spec",
     "20c85fd-plan",
     "7f38375-plan",
-    "0b8a06c-spec",
     "3ecb38e-plan",
     "433f7d4-spec",
     "ca6a897-plan",
@@ -26,6 +23,18 @@
     "571b6d0-spec",
     "571b6d0-plan",
     "0fb349c-plan",
-    "eaea856-plan"
-  ]
+    "eaea856-plan",
+    "0dfbd99-spec",
+    "0dfbd99-plan"
+  ],
+  "leftOut": {
+    "note": "The merge the build leaves out to match the Notes' 34 merges (see scripts/merge-replay.ts), and the count with it put back.",
+    "fileMerges": [
+      "0b8a06c-spec",
+      "0b8a06c-plan"
+    ],
+    "conflicted": 0,
+    "replayedWithIt": 49,
+    "conflictedWithIt": 18
+  }
 }

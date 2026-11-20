@@ -1,6 +1,9 @@
 // PBI 294: lays out the design spec and the Phase 0 plan one sentence per line, and in the spec one table cell per line,
 // so two PRs that change different sentences change different lines. Within a sentence it also starts a new line after
 // each comma, semicolon or colon, so two PRs that change different clauses of one long sentence don't conflict either.
+// In the spec it then puts a blank line after each line, so edits to neighbouring lines don't conflict (see spaced).
+// The prose lint checks the sentences and cells, not the clause breaks or the blank lines: those are a one-off layout,
+// made so the merge replay in scripts/merge-replay.ts meets PBI 294's bound, and later edits needn't keep them.
 // It finds sentences the way the prose lint does.
 // It only turns a run of spaces into a line break, or puts a line break between two tags, so a page renders the same.
 // Code is left alone: fenced blocks and inline code, and in the spec <pre>, <code>, <script>, <style> and comments.
@@ -125,9 +128,41 @@ function allEdits(text: string, html: boolean): Edit[] {
   return out;
 }
 
-/** The text laid out one sentence per line, and in HTML one table cell per line. */
+/**
+ * The spec with a blank line after each line of markup and prose, so one unchanged line sits between any two lines.
+ * git merge-file reports edits to two adjacent lines as one conflict, so without it two PRs that change neighbouring
+ * sentences or clauses still conflict. HTML reads a blank line as whitespace, so the page renders the same.
+ * It leaves alone code, comments, tags that span lines, and elements the stylesheet sets to "white-space: pre",
+ * where a line break would show or change a value. A line already followed by a blank line gets no second one.
+ * Markdown can't take this, since a blank line there ends the paragraph, so the plan doesn't get it.
+ */
+function spaced(text: string): string {
+  const kept: [number, number][] = preformatted(text, true);
+  for (const m of text.matchAll(/<(pre|code|script|style|textarea)\b[\s\S]*?<\/\1>|<!--[\s\S]*?-->|<[^>]*>/gi)) {
+    kept.push([m.index!, m.index! + m[0].length]);
+  }
+  const out: string[] = [];
+  let from = 0;
+  for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) {
+    const line = text.slice(lineStart(text, i), i);
+    const nextEnd = text.indexOf("\n", i + 1);
+    const next = text.slice(i + 1, nextEnd === -1 ? text.length : nextEnd);
+    if (!line.trim() || !next.trim() || kept.some(([a, b]) => i > a && i < b)) continue;
+    out.push(text.slice(from, i + 1), "\n");
+    from = i + 1;
+  }
+  out.push(text.slice(from));
+  return out.join("");
+}
+
+/** The text laid out one sentence per line, and in HTML one table cell per line with a blank line after each line. */
 export function reflow(text: string, ext: string): string {
   const html = ext === ".html";
+  const laidOut = sentences(text, html);
+  return html ? spaced(laidOut) : laidOut;
+}
+
+function sentences(text: string, html: boolean): string {
   for (let pass = 0; pass < 20; pass++) {
     const list = edits(text, html).sort((x, y) => y.from - x.from);
     if (!list.length) return text;
