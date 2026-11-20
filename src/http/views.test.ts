@@ -352,6 +352,32 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(row, /<td>The cell&#39;s &lt;lease&gt; ran out<br>Needed a second ask of the PR reviewer in round 1: unread<\/td><\/tr>/);
   });
 
+  test("each judge call's row shows its own verdict in a Verdict column, and a split proposal's is empty (PBI 348)", () => {
+    const at = (m: number) => new Date(Date.parse("2026-11-09T10:00:00Z") + m * 60_000);
+    const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+    const html = runDetailPage(detail([
+      { ...spend, ranAt: at(0), kind: "judge", verdict: { outcome: "passed" } },
+      { ...spend, ranAt: at(1), kind: "judge", verdict: { outcome: "failed", lines: [{ criterion: "Names its spec section", reason: "It cites <b>§9</b>." }], flags: ["changes CI"] } },
+      { ...spend, ranAt: at(2), kind: "judge", verdict: { outcome: "unreadable" } },
+      { ...spend, ranAt: at(3), kind: "judge", verdict: { outcome: "error" } },
+      { ...spend, ranAt: at(4), kind: "judge" },
+      { ...spend, ranAt: at(5), kind: "split" },
+      { ...spend, ranAt: at(6), kind: "judge", verdict: { outcome: "passed" }, child: "Export as <CSV>" },
+    ]), null);
+    const section = html.split("<h2>Readiness checks</h2>")[1];
+    assert.match(section, /<th scope="col">Cost<\/th><th scope="col">Verdict<\/th><\/tr>/);
+    const verdicts = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(section)![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => /<td>((?:(?!<td>)[\s\S])*)<\/td>$/.exec(m[1])![1]);
+    assert.deepEqual(verdicts, [
+      "Passed",
+      "Failed<ul><li>Names its spec section: It cites &lt;b&gt;§9&lt;/b&gt;.</li><li>Flag: changes CI</li></ul>",
+      "No verdict: the judge&#39;s output was unreadable",
+      "The call failed with no verdict",
+      "No verdict was recorded",
+      "",
+      "On the proposed child “Export as &lt;CSV&gt;”: Passed",
+    ]);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });
