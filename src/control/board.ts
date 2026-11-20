@@ -42,7 +42,7 @@ export type MirrorEvent = { eventId: string; seq: string; question?: string | nu
  * effect runs on its own, so one failed call can't skip the rest, and each failure is logged. Once all have run, it
  * throws if any failed, so the worker keeps the row and tries it again. An effect that succeeded is recorded against the
  * row and skipped when the row is handled again, so a retry runs only what failed. A crash between an effect and its
- * record repeats that one effect, and every effect is safe to repeat.
+ * record repeats that one effect, which can undo a change a person made on the board in that window.
  */
 export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, event: ItemEvent | "override", e: MirrorEvent): Promise<void> {
   const r = await deps.pool.query<Row>(
