@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import { startProvider, type Provider } from "../../features/fixtures/pbi-288-provider.ts";
 import { startApi, type StandInApi } from "../../features/fixtures/pbi-289-api.ts";
@@ -317,4 +320,22 @@ test("a call the API doesn't answer gets 502, and a BFF with no API answers 502 
   assert.equal(r.status, 502);
   const none = createBff({ issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"), sessions: store });
   assert.equal((await none.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } })).status, 502);
+});
+
+test("with spaDir, every other GET gets the SPA, and the BFF's own addresses keep their answers", async () => {
+  const dist = mkdtempSync(join(tmpdir(), "bff-spa-"));
+  try {
+    writeFileSync(join(dist, "index.html"), '<div id="root"></div>');
+    const spa = createBff({
+      issuer: provider.issuer, clientId: "dashboard", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+      sessions: store, apiUrl: api.url, spaDir: dist,
+    });
+    for (const path of ["/", "/runs/482"]) assert.equal(await (await spa.request(path)).text(), '<div id="root"></div>');
+    assert.equal((await spa.request("/auth/session")).status, 401);
+    assert.equal((await spa.request("/bff/v1/no-such-thing")).status, 401);
+    assert.equal((await spa.request("/auth/nothing")).status, 404);
+    assert.equal((await app.request("/")).status, 404, "without spaDir the BFF serves no SPA");
+  } finally {
+    rmSync(dist, { recursive: true, force: true });
+  }
 });
