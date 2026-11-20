@@ -159,13 +159,14 @@ export async function floor(pool: pg.Pool) {
     [LEASE_RAN_OUT],
   )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
   const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
-  // A restart being prepared (PBI 140) shows how many cells still hold a live lease. None is stopped (PBI 300).
+  // A restart being prepared (PBI 140) and a drain (PBI 316) both show how many cells still hold a live lease, counted
+  // once so the two lines agree. None is stopped (PBI 300).
   const prepared = overrides.find((o) => o.scope === "factory" && o.kind === "restart");
-  let restart: Restart | null = null;
-  if (prepared) {
-    const running = (await pool.query<{ n: number }>("select count(*)::int as n from item where state = 'InProgress' and lease_expires > now()")).rows[0].n;
-    restart = { running, reason: prepared.reason };
-  }
+  const draining = factory.some((o) => o.kind === "drain");
+  const running = prepared || draining
+    ? (await pool.query<{ n: number }>("select count(*)::int as n from item where state = 'InProgress' and lease_expires > now()")).rows[0].n
+    : undefined;
+  const restart: Restart | null = prepared ? { running: running!, reason: prepared.reason } : null;
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
   const waitingCount = waiting.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
@@ -183,7 +184,7 @@ export async function floor(pool: pg.Pool) {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
     keys, finalStage: withRepo(finalStage),
     baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split),
-    restart, cellImage: await readCellImage(pool),
+    restart, running, cellImage: await readCellImage(pool),
   };
 }
 
