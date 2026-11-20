@@ -7,6 +7,8 @@
 // - "the scenarios that aren't tagged @local": npm run bdd -- --tags "not @local"
 // The scenarios about CI's run read it from GitHub's Actions API: the latest run of the "ci" workflow on the commit this
 // checkout's HEAD is at. A commit CI hasn't run on, or a run that hasn't finished, fails the Then that reads it.
+// Where aspire restore can't reach NuGet (a factory cell), the AppHost's compile and lint come from CI's run on HEAD, which
+// runs them the same way (appHostAsCiRanIt).
 // Under Actions the scenarios run inside CI's run on HEAD, which can't finish before they do, so they read that run as it
 // will have finished once they pass (settledThisRun).
 import { Given, Then, When } from "@cucumber/cucumber";
@@ -86,7 +88,13 @@ type GhJob = { name: string; status: string; conclusion: string | null; steps?: 
 type GhRun = { id: number; name: string; path: string; status: string; conclusion: string | null; head_sha: string; run_number: number; html_url: string };
 type CiRun = { sha: string; run?: GhRun; jobs?: GhJob[]; error?: string };
 
-type Ctx = { ci?: CiRun; installed?: Ran; restored?: Ran & { version: string }; appHost?: { compile: Ran; lint: Ran }; ran?: Ran };
+type Ctx = {
+  ci?: CiRun;
+  installed?: Ran;
+  restored?: Ran & { version: string; nugetUnreachable: boolean };
+  appHost?: { compile: Ran; lint: Ran };
+  ran?: Ran;
+};
 const ctxs = new WeakMap<object, Ctx>();
 function ctx(world: object): Ctx {
   let c = ctxs.get(world);
@@ -233,28 +241,76 @@ Given("the AppHost's packages are installed as CI installs them", long, function
   ctx(this).installed = ran;
 });
 
-// The restore needs NuGet, which a sandbox may not reach, so this records how it ended; the compile's Then reports a
-// failed restore along with the compile's errors.
+// The restore needs NuGet, which a factory cell's egress allowlist doesn't reach, so this records how it ended; the
+// compile's Then reports a failed restore along with the compile's errors.
 Given("the Aspire CLI version CI pins has restored the AppHost's generated modules", long, function () {
   const version = pinnedAspireVersion();
   const installed = sh("aspire --version", repo, 60_000);
   const cli = installed.status === 0 && installed.output.includes(version) ? "aspire" : `npx -y @microsoft/aspire-cli@${version}`;
-  ctx(this).restored = { version, ...sh(`${cli} restore --non-interactive`, repo) };
+  const ran = sh(`${cli} restore --non-interactive`, repo);
+  ctx(this).restored = { version, ...ran, nugetUnreachable: ran.status !== 0 && nugetUnreachable(ran.output) };
 });
 
-When("the AppHost's compile and lint run as CI runs them", long, function () {
+/** Whether a failed aspire restore failed only because it couldn't reach NuGet's service index. */
+function nugetUnreachable(output: string): boolean {
+  return /Unable to load the service index for source https:\/\/api\.nuget\.org\//.test(output);
+}
+
+/**
+ * The AppHost's compile and lint as CI ran them on HEAD, for a checkout that can't restore the AppHost's generated
+ * modules because it can't reach NuGet (a factory cell). CI's run on HEAD restores them and runs the same command, so
+ * its "aspire restore" step and its compile-and-lint step stand in for the compile here. They count only for a clean
+ * checkout, since CI ran the commit, not the working tree. Under Actions NuGet is reachable, so this never stands in.
+ */
+async function appHostAsCiRanIt(): Promise<{ compile: Ran; lint: Ran }> {
+  const failed = (output: string): { compile: Ran; lint: Ran } => ({ compile: { status: 1, output }, lint: { status: 1, output } });
+  const dirty = git("status", "--porcelain");
+  if (dirty) return failed(`NuGet is unreachable here, and CI's run on HEAD doesn't cover the uncommitted edits:\n${dirty}`);
+  const ci = await ciRunOn(git("rev-parse", "HEAD"));
+  if (ci.error) return failed(`NuGet is unreachable here, and CI's run on ${ci.sha} couldn't be read: ${ci.error}`);
+  if (!ci.run || !ci.jobs) return failed(`NuGet is unreachable here, and CI has no run of ${workflowPath} on ${ci.sha}`);
+  const steps = ci.jobs.find((j) => j.name === "ci")?.steps ?? [];
+  const restore = steps.find((s) => /^Run aspire restore\b/.test(s.name));
+  // GitHub names a step "Run <command>" and doesn't list its working directory, so the command alone picks it out.
+  const command = stepFor("the AppHost's compile and lint").run!.trim();
+  const check = steps.find((s) => s.name === `Run ${command}`);
+  const seen = (s: GhStep | undefined, what: string): Ran =>
+    !s
+      ? { status: 1, output: `CI's run ${ci.run!.html_url} has no step that runs ${what}` }
+      : s.status !== "completed"
+        ? { status: 1, output: `in CI's run ${ci.run!.html_url}, "${s.name}" hasn't finished: it's ${s.status}` }
+        : { status: s.conclusion === "success" ? 0 : 1, output: `in CI's run ${ci.run!.html_url}, "${s.name}" ended ${s.conclusion}` };
+  const restored = seen(restore, "aspire restore");
+  const ran = seen(check, "the AppHost's compile and lint");
+  const both = { status: restored.status === 0 && ran.status === 0 ? 0 : 1, output: `${restored.output}\n${ran.output}` };
+  return { compile: both, lint: both };
+}
+
+When("the AppHost's compile and lint run as CI runs them", long, async function () {
   const step = stepFor("the AppHost's compile and lint");
   const cwd = join(repo, step["working-directory"]!);
   // CI's command joins the two with &&; they run apart here so each Then sees its own result.
   const [compile, lint] = step.run!.split("&&").map((part) => part.trim());
-  ctx(this).appHost = { compile: sh(compile, cwd), lint: sh(lint, cwd) };
+  const local = { compile: sh(compile, cwd), lint: sh(lint, cwd) };
+  const c = ctx(this);
+  if (process.env.GITHUB_ACTIONS === "true" || !c.restored?.nugetUnreachable || local.compile.status === 0) {
+    c.appHost = local;
+    return;
+  }
+  // The compile can't see the modules NuGet would have given it, so CI's run on HEAD reports it. The lint still runs
+  // here as well, and has to pass in both places.
+  const ci = await appHostAsCiRanIt();
+  c.appHost = {
+    compile: { status: ci.compile.status, output: `the compile here can't pass without NuGet:\n${tail(local.compile.output, 10)}\n${ci.compile.output}` },
+    lint: local.lint.status === 0 ? ci.lint : local.lint,
+  };
 });
 
 Then("the AppHost compiles with no errors", function () {
   const c = ctx(this);
   assert.ok(c.appHost, "the AppHost's compile didn't run");
   const r = c.restored;
-  const restore = r && r.status !== 0 ? `\n(aspire restore with CLI ${r.version} exited ${r.status}:\n${tail(r.output, 15)})` : "";
+  const restore = r && r.status !== 0 && c.appHost.compile.status !== 0 ? `\n(aspire restore with CLI ${r.version} exited ${r.status}:\n${tail(r.output, 15)})` : "";
   assert.equal(c.appHost.compile.status, 0, `the AppHost doesn't compile:\n${tail(c.appHost.compile.output)}${restore}`);
 });
 
