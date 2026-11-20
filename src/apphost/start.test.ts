@@ -182,3 +182,31 @@ test("the start hands the resources a cell-image resource", async () => {
   await startAppHost({ ...f.deps, startResources: async (rs) => void (names = rs.map((r) => r.name)) });
   assert.ok(names.includes("cell-image"), JSON.stringify(names));
 });
+
+test("a test run (FACTORY_FLOAT_PORTS=1) on main runs no git at all, checks Docker and starts the checkout as it is", async () => {
+  const f = fake();
+  f.deps.env = { FACTORY_FLOAT_PORTS: "1" };
+  await startAppHost(f.deps);
+  assert.deepEqual(f.log, ["docker up", "start"]);
+  assert.deepEqual(f.warned, []);
+  assert.equal(f.said.length, 1);
+  assert.match(f.said[0]!, /test run.*pulls nothing/i);
+});
+
+test("a test run still launches Docker Desktop when Docker doesn't answer", async () => {
+  const f = fake({ dockerUp: false, answersAfterLaunchMs: 6_000 });
+  f.deps.env = { FACTORY_FLOAT_PORTS: "1" };
+  await startAppHost(f.deps);
+  assert.ok(f.log.includes("launch Docker Desktop.exe"));
+  assert.equal(f.log.at(-1), "start");
+  assert.ok(!f.log.some((l) => l.startsWith("git ")));
+});
+
+for (const value of [undefined, "0", ""]) {
+  test(`with FACTORY_FLOAT_PORTS ${value === undefined ? "unset" : JSON.stringify(value)} it is no test run, and pulls main`, async () => {
+    const f = fake();
+    f.deps.env = value === undefined ? {} : { FACTORY_FLOAT_PORTS: value };
+    await startAppHost(f.deps);
+    assert.ok(f.log.includes("git pull --ff-only"));
+  });
+}
