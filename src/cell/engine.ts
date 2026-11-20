@@ -600,6 +600,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const boundary = () => {
     if (restarting) throw new Restarting("a restart is being prepared");
   };
+  // The same, after a stage whose last lease check may be a long way back: understand never pushes, open-pr waits for
+  // CI, and address and pr-review end on GitHub calls. A fresh check makes the answer at most one command old.
+  const atBoundary = async () => {
+    await guard();
+    boundary();
+  };
   const transition = async (b: TransitionBody) => {
     await guard();
     await api.transition(b);
@@ -1529,9 +1535,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const back = await address();
       if (!back) return "done";
       carried = back;
+      await atBoundary();
     }
     if (start === "understand" || start === "specify") {
-      if (start === "understand") await understand();
+      if (start === "understand") { await understand(); await atBoundary(); }
       await specify();
       return "waiting";
     }
@@ -1543,10 +1550,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     for (;;) {
       if (from <= 1) { await green(carried); boundary(); }
       if (from <= 2) { await selfReview(); boundary(); }
-      const back = (await openPr()) ?? (reviews ? await prReview(opened!, handOverOpened) : null);
+      let back = await openPr();
+      // Open-pr passed and pr-review is next, in this cell. A claim ended here resumes at open-pr, as a stop's does.
+      if (!back && reviews) { await atBoundary(); back = await prReview(opened!, handOverOpened); }
       if (!back) return "done";
       carried = back;
       from = 1;
+      // Back to green, from open-pr's or pr-review's findings: green is a further stage.
+      await atBoundary();
     }
   } catch (e) {
     try {

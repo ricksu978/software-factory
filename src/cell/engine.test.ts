@@ -1577,6 +1577,44 @@ describe("runCell", () => {
     });
   }
 
+  // The other boundaries in a claim: understand to specify, open-pr to pr-review, and back to green from open-pr or address.
+  const told = async () => ({ stop: false, restarting: true });
+  const ended = (h: ReturnType<typeof harness>, stage: string, status: string) => {
+    assert.deepEqual(h.started(), [stage]);
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => c.body.status), ["started", status]);
+    assert.equal(h.routes().at(-1), "/release");
+    assert.ok(!h.transitions().length);
+  };
+
+  test("a cell told restarting finishes understand, starts no specify and releases its claim", async () => {
+    const h = harness({ nextStage: "understand", signedOff: false, lease: told,
+      script: (_a, stage) => (stage === "understand" ? { text: h.deps.ctx.acceptanceCriteria.map((_, i) => `@ac-${i + 1}`).join(" ") } : undefined) });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "understand", "passed");
+    assert.ok(!h.agentCalls.some((a) => a.stage === "specify"));
+  });
+
+  test("a cell told restarting finishes open-pr, starts no pr-review and releases its claim", async () => {
+    const h = harness({ nextStage: "open-pr", lease: told });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "open-pr", "passed");
+    assert.ok(!h.routes().includes("/repo/postReview"));
+  });
+
+  test("a cell told restarting whose open-pr sends it back to green starts no green and releases its claim", async () => {
+    const h = harness({ nextStage: "open-pr", lease: told });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "open-pr", "failed");
+  });
+
+  test("a cell told restarting whose address sends it back to green starts no green and releases its claim", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] }, lease: told });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "address", "failed");
+  });
+
   test("a restart cleared before the stage ends lets the cell go on to the next stage (PBI 301)", async () => {
     mock.timers.enable({ apis: ["setInterval"] });
     let restarting = true;
