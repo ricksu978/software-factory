@@ -182,6 +182,28 @@ describe("issueRef", () => {
     assert.doesNotMatch(floor(null), /restart\./);
   });
 
+  // PBI 316: while the factory drains, Floor counts the cells still running, as Prepare restart does, and says the
+  // drain is done once none runs.
+  const drained = (running: number | undefined) =>
+    floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [{ kind: "drain", reason: "upgrading Docker" }], canOperate: true, running }, null);
+
+  test("counts the cells still running while the factory drains, with the drain's reason", () => {
+    assert.match(drained(2), /Draining: 2 cells still running\. Reason: upgrading Docker\./);
+    assert.match(drained(1), /Draining: 1 cell still running\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(drained(1), /Drain done/);
+  });
+
+  test("says the drain is done once no cell runs", () => {
+    const done = drained(0);
+    assert.match(done, /Drain done\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(done, /still running/);
+  });
+
+  test("shows neither the drain's count nor that it's done without a drain", () => {
+    const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: true, running: 0 }, null);
+    assert.doesNotMatch(html, /Drain done|Draining/);
+  });
+
   test("links #N to its issue on GitHub when the repo is known", () => {
     assert.equal(issueRef("131", "acme/widgets"), `<a href="https://github.com/acme/widgets/issues/131">#131</a>`);
   });

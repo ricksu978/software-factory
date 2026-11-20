@@ -506,6 +506,25 @@ describe("dashboard routes", dbTest, () => {
     assert.doesNotMatch(ready, /Preparing to restart/);
   });
 
+  // PBI 316: while the factory drains, Floor counts the cells still running as Prepare restart does, an InProgress item
+  // with a live lease, and says the drain is done once none runs.
+  test("Floor counts the cells still running while the factory drains, and says when none is", async () => {
+    await person("op", "operator");
+    assert.equal((await post("/overrides", "op", "kind=drain&reason=upgrading+Docker")).status, 303);
+    const busy = await item("InProgress", "busy");
+    const stale = await item("InProgress", "stale");
+    await item("InReview", "review");
+    await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
+    await db.pool.query("update item set lease_expires = now() - interval '1 minute' where id = $1", [stale.id]);
+    const draining = (await get("/", "op")).html;
+    assert.match(draining, /Draining: 1 cell still running\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(draining, /Drain done/);
+    await db.pool.query("update item set state = 'InReview', lease_expires = null where id = $1", [busy.id]);
+    const done = (await get("/", "op")).html;
+    assert.match(done, /Drain done\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
+    assert.doesNotMatch(done, /still running/);
+  });
+
   test("Floor shows an in-flight item's newest agent message", async () => {
     await person("octo", "viewer");
     const { id } = await item("InProgress", "talking item");
