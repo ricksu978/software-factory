@@ -203,6 +203,9 @@ export type MergeView = {
 /** A merge GitHub made, with its commit, or one it refused, with GitHub's message. A refusal never throws. */
 export type MergeResult = { merged: true; sha: string } | { merged: false; reason: string };
 
+/** PBI 233: the checks a re-run started, and each named check the host refused to re-run, with why. */
+export type RerunAnswer = { rerun: string[]; refused: { check: string; reason: string }[] };
+
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   /**
@@ -225,9 +228,10 @@ export interface RepoHost {
   ciChecksOnSha(repo: string, sha: string): Promise<CiCheck[] | null>;
   /**
    * PBI 233: re-runs the named checks that failed on `sha`, once, so a flaky check gets a second go before a red CI is
-   * charged. Rejects when a named check didn't fail on `sha` or the host refuses to start the re-run.
+   * charged. Rejects when a named check didn't fail on `sha`, or when the host started no re-run at all. When it started
+   * some, it answers which checks it re-ran and which it refused, and why, so a partial re-run is still a re-run.
    */
-  rerunChecksOnSha?(repo: string, sha: string, checks: string[]): Promise<void>;
+  rerunChecksOnSha?(repo: string, sha: string, checks: string[]): Promise<RerunAnswer>;
   /** Whether `sha` is the head of `branch` or one of its ancestors, so a cell can only ask about its own commits. */
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>;
   /**

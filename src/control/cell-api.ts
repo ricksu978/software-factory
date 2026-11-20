@@ -384,7 +384,9 @@ const routes: Record<string, Route> = {
   // PBI 233: re-runs the named checks that failed on one of the run's own commits, once, before the cell charges a red
   // CI to an attempt. A host that can't re-run, or refuses to, answers an error, and the cell charges the failure as it stands.
   // The re-run is recorded by run and sha, so a second one on the same commit is refused even from a cell that resumed
-  // the run after a restart. A refused or failed call rolls the record back with the transaction: nothing was re-run.
+  // the run after a restart. A call the host refuses outright rolls the record back with the transaction: nothing was
+  // re-run. Once any check was re-run the record stays, keeping only the checks that were, and the answer names the
+  // checks the host refused, with why, so the cell charges those as they stand and waits only on the rest.
   "POST rerun-checks": async (deps, { c, run, body, now }) => {
     const { repo, sha } = await ownCommit(deps, run, new URLSearchParams({ sha: str(body.sha, "sha") }));
     const checks = strings(body.checks, "checks");
@@ -395,8 +397,9 @@ const routes: Record<string, Route> = {
       [run.run_id, sha, checks, now],
     );
     if (recorded.rowCount === 0) throw new BadRequest(`the checks on ${sha} were already re-run once`);
-    await deps.repoHost.rerunChecksOnSha(repo, sha, checks);
-    return { ok: true };
+    const { rerun, refused } = await deps.repoHost.rerunChecksOnSha(repo, sha, checks);
+    if (refused.length) await c.query("update ci_rerun set checks = $3 where run_id = $1 and sha = $2", [run.run_id, sha, rerun]);
+    return { ok: true, rerun, refused };
   },
 
   "POST stage": async (deps, { c, run, body, now }) => {

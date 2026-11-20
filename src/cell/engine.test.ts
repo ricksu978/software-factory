@@ -1306,6 +1306,30 @@ describe("runCell", () => {
     assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(403 Forbidden\)/);
   });
 
+  test("CI failing at open-pr with a partial re-run waits only on the checks re-run and charges the refused one as it stands (PBI 233)", async () => {
+    let greens = 0;
+    let rerun = false;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (greens >= 2 ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      // e2e wasn't re-run, so it keeps its old failed run: waiting on it would wait out the cap.
+      { name: "e2e", conclusion: "failure", url: "https://ci/e2e" },
+    ];
+    const asked: string[][] = [];
+    h.deps.api.rerunFailedChecks = async (_sha, checks) => {
+      asked.push(checks);
+      rerun = true;
+      return { rerun: ["unit"], refused: [{ check: "e2e", reason: "already running" }] };
+    };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(asked, [["unit", "e2e"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(already running\)/);
+    assert.doesNotMatch(failed.body.message, /The check "unit"[^.]*couldn't re-run/);
+  });
+
   test("CI failing at open-pr with `/ci-checks` unreadable doesn't say no check was named while `/checks` named some (PBI 232)", async () => {
     let checks = 0;
     let greens = 0;

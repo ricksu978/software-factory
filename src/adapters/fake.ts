@@ -245,6 +245,7 @@ export function fakeRepoHost(): RepoHost & {
       const not = names.filter((n) => !failed.includes(n));
       if (not.length) throw new Error(`${not.join(", ")} didn't fail on ${sha}`);
       reruns.push({ key: `${repo}@${sha}`, checks: [...names] });
+      return { rerun: [...names], refused: [] };
     },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;

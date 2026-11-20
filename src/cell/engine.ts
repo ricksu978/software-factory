@@ -894,19 +894,26 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     }
     const failed = failedNames(before);
     if (!failed.length) return ci;
-    // Each failed check's old run, by its URL and when it finished, so CI is read again only once every re-run check
-    // shows a new run. GitHub may still report the old failed run right after the re-run is asked for. A check another
-    // app re-runs through `/rerequest` may finish again under the same run and URL, so a later finish counts too.
-    // A check with neither can't be told apart, so it's taken as it reads.
-    const oldRuns = new Map((before ?? [] as CiCheck[]).filter((c) => failed.includes(c.name) && (c.url || c.completedAt)).map((c) => [c.name, c]));
+    let rerun = failed;
     try {
-      await api.rerunFailedChecks(sha, failed);
+      const answer = await api.rerunFailedChecks(sha, failed);
+      // A partial re-run: the checks the host refused stand as they failed, and CI is waited on for the rest.
+      if (answer) {
+        rerun = failed.filter((x) => answer.rerun.includes(x));
+        for (const r of answer.refused) ciNotes(refusedNotes(sha, [r.check], new Error(r.reason)));
+      }
     } catch (e) {
       if (e instanceof LeaseLost) throw e;
       console.error(`re-running ${failed.join(", ")} on ${sha} failed, so the red CI stands:`, e);
       ciNotes(refusedNotes(sha, failed, e));
       return ci;
     }
+    if (!rerun.length) return ci;
+    // Each failed check's old run, by its URL and when it finished, so CI is read again only once every re-run check
+    // shows a new run. GitHub may still report the old failed run right after the re-run is asked for. A check another
+    // app re-runs through `/rerequest` may finish again under the same run and URL, so a later finish counts too.
+    // A check with neither can't be told apart, so it's taken as it reads.
+    const oldRuns = new Map((before ?? [] as CiCheck[]).filter((c) => rerun.includes(c.name) && (c.url || c.completedAt)).map((c) => [c.name, c]));
     // CI that can't be read by name can't show the old runs, so it reads as it stands, as before the re-run.
     const stale = async () => {
       if (!oldRuns.size) return false;
@@ -915,7 +922,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     };
     const again = await waitForChecks(sha, stale);
     const status = again.status === "failure" ? "failure" : "success";
-    ciNotes(rerunNotes(sha, failed, status, await orNull(api.ciChecks(sha))));
+    ciNotes(rerunNotes(sha, rerun, status, await orNull(api.ciChecks(sha))));
     return again;
   };
 
