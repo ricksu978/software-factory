@@ -11,7 +11,7 @@ import { decide, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
-import { claimKeys, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
+import { claimKeys, ENDED_BY_BOARD_ORDER, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
@@ -324,6 +324,14 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
      where o.scope = 'item' and o.target_id = $1 and o.kind = 'start_now' and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
      order by o.created_at desc limit 1`, [id],
   )).rows[0] ?? null;
+  // PBI 311: the item's latest Move up or Move down, when the board's order ended it, shows to anyone who opens the page.
+  const latestMove = (await pool.query<{ kind: "move_up" | "move_down"; cleared_at: Date | null; cleared_cause: string | null }>(
+    `select kind, cleared_at, cleared_cause from override where scope = 'item' and target_id = $1 and kind in ('move_up', 'move_down')
+     order by created_at desc, id desc limit 1`, [id],
+  )).rows[0];
+  const moveEnded = latestMove?.cleared_at && latestMove.cleared_cause === ENDED_BY_BOARD_ORDER
+    ? { control: latestMove.kind === "move_up" ? "Move up" as const : "Move down" as const, at: latestMove.cleared_at }
+    : null;
   const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
   const claim = (await claimKeys(pool, [id])).get(id) ?? null;
   return {
@@ -334,6 +342,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
       ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
       : null,
     startNow,
+    moveEnded,
     claim,
     durations,
     splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
