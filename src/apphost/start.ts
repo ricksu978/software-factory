@@ -3,9 +3,10 @@
 // and a pull that fails stops the start with git's own message. On any other branch, or on no branch, it warns that it
 // runs the checkout as it is and pulls nothing. Then, when Docker doesn't answer, it launches Docker Desktop and waits
 // up to 3 minutes for it. A test run (FACTORY_FLOAT_PORTS=1, as the BDD suites start the AppHost) runs no git at all,
-// so a suite run on `main` never moves the checkout or waits on a credential prompt. aspire-apphost/apphost.mts calls startAppHost() with the real git, Docker and clock, and
-// passes the resources' start as startResources. The resources it hands over include "cell-image" (PBI 206), which
-// builds factory-cell:local from the pulled checkout, and the worker waits for it.
+// so a suite run on `main` never moves the checkout or waits on a credential prompt. aspire-apphost/apphost.mts calls
+// startAppHost() with the real git, Docker and clock, and passes the resources' start as startResources. The resources
+// it hands over include "cell-image" (PBI 206), which builds factory-cell:local from the pulled checkout, and the
+// worker waits for it.
 
 import { buildCellImage, CELL_IMAGE_RESOURCE, type CellImageDeps, type DockerBuild } from "./cell-image.ts";
 
