@@ -1,5 +1,5 @@
 // The "cell-image" resource (PBI 206): the AppHost builds factory-cell:local from this checkout, with the checkout's
-// cell/Dockerfile, as a resource of its own that the worker waits on. As `npm run factory` does, the image records
+// cell/Dockerfile, as a resource of its own that the worker waits on. The image records
 // the checkout's commit in its revision label only when the checkout has no uncommitted edits.
 import type { GitResult } from "./start.ts";
 

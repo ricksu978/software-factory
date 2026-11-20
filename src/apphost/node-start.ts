@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { DockerBuild } from "./cell-image.ts";
 import { StartStopped, startAppHost, type StartDeps } from "./start.ts";
 
-/** Where Docker Desktop installs on Windows, per user and machine-wide, as scripts/factory.ps1 looks. */
+/** Where Docker Desktop installs on Windows, per user and machine-wide. */
 export function dockerDesktopPaths(env: NodeJS.ProcessEnv = process.env): string[] {
   const paths: string[] = [];
   if (env.LOCALAPPDATA) paths.push(join(env.LOCALAPPDATA, "Programs", "DockerDesktop", "Docker Desktop.exe"));
@@ -58,9 +58,10 @@ export function dockerBuild(repo: string, build: DockerBuild, log: (line: string
   });
 }
 
-/** The start's deps for the checkout at `repo`, apart from starting the resources. */
-export function nodeStartDeps(repo: string): Omit<StartDeps, "startResources"> {
+/** The start's deps for the checkout at `repo`, apart from starting the resources. `env` is the AppHost's environment. */
+export function nodeStartDeps(repo: string, env: NodeJS.ProcessEnv = process.env): Omit<StartDeps, "startResources"> {
   return {
+    env: { FACTORY_FLOAT_PORTS: env.FACTORY_FLOAT_PORTS },
     git(args) {
       // stdin stays the console's, so a credential prompt can still ask.
       const r = spawnSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["inherit", "pipe", "pipe"] });
