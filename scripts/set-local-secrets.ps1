@@ -1,10 +1,10 @@
-# Prompts for each parameter the local AppHost declares (aspire-apphost/apphost.mts) and saves it in that checkout's
-# Aspire user secrets. Aspire keys user secrets by checkout path, so run it once per checkout or worktree.
-# Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>] [-MissingOnly]
-# Secret values are typed hidden. Enter alone keeps the current value. github-app-key takes the path to the App's .pem.
+# Changes the parameters the local AppHost declares (aspire-apphost/apphost.mts) in that checkout's Aspire user
+# secrets. A missing parameter needs no script, because the Aspire dashboard asks for it on `aspire run` (issue #207).
+# Aspire keys user secrets by checkout path, so each checkout or worktree has its own.
+# Usage: pwsh scripts/set-local-secrets.ps1 [-AppHost <checkout path>]
+# Secret values are typed hidden. Enter alone keeps the current value.
 # Values go straight into secrets.json, never onto a command line, where other processes could read them.
-# -MissingOnly asks only for parameters not yet set, which is how scripts/factory.ps1 calls it. Exits 1 while any is missing.
-param([string]$AppHost = (Split-Path $PSScriptRoot -Parent), [switch]$MissingOnly)
+param([string]$AppHost = (Split-Path $PSScriptRoot -Parent))
 $ErrorActionPreference = 'Stop'
 
 $src = Get-Content (Join-Path $AppHost 'aspire-apphost/apphost.mts') -Raw
@@ -25,13 +25,8 @@ if (-not $store) { $store = @{} }
 $changed = $false
 foreach ($name in $secret + $plain) {
   $key = "Parameters:$name"
-  if ($MissingOnly -and $store.ContainsKey($key)) { continue }
   $state = if ($store.ContainsKey($key)) { 'set' } else { 'missing' }
-  if ($name -eq 'github-app-key') {
-    # Trim the quotes that Explorer's "Copy as path" adds.
-    $path = (Read-Host "$name ($state), path to the .pem file").Trim().Trim('"', "'")
-    $value = if ($path) { (Get-Content -LiteralPath $path -Raw).Trim() } else { '' }
-  } elseif ($secret -contains $name) {
+  if ($secret -contains $name) {
     # NetworkCredential, because ConvertFrom-SecureString throws on the empty input that Enter gives.
     $value = [Net.NetworkCredential]::new('', (Read-Host "$name ($state), hidden" -AsSecureString)).Password
   } else {
@@ -46,6 +41,3 @@ if ($changed) {
   # -Depth 100, because the default depth of 2 flattens other tools' nested entries to a type name.
   $store | ConvertTo-Json -Depth 100 | Set-Content $file -Encoding utf8NoBOM
 }
-$missing = ($secret + $plain) | Where-Object { -not $store.ContainsKey("Parameters:$_") }
-if ($missing) { "Still missing: $($missing -join ', ')"; exit 1 }
-"All $(($secret + $plain).Count) parameters are set."

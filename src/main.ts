@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import type pg from "pg";
+import { loadAppKey } from "./adapters/github/app-key.ts";
 import { githubBacklog, parseGitHubWebhook, splitFiling, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import { TimedOctokit } from "./adapters/github/timed.ts";
@@ -160,6 +161,7 @@ export async function serveControl(d: ControlDeps, port: number): Promise<{ serv
 }
 
 export async function start(env: NodeJS.ProcessEnv): Promise<void> {
+  loadAppKey(env);
   const problem = devIdentityProblem(env);
   if (problem) throw new Error(`refusing to start: ${problem}`);
   if (env.FACTORY_ENV !== "local") {
