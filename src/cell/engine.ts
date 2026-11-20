@@ -875,17 +875,30 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return ci;
   };
   const rerunShas = new Set<string>();
+  // A re-run check shows its re-run once it reads at a new URL, or has finished again after its old run finished.
+  const rerunShown = (old: CiCheck, now: CiCheck) =>
+    (!!old.url && now.url !== old.url) ||
+    (now.conclusion !== "pending" && !!old.completedAt && !!now.completedAt && Date.parse(now.completedAt) > Date.parse(old.completedAt));
   const ciNotes = (lines: string[]) => { if (current) current.notes = [...(current.notes ?? []), ...lines]; };
   const rerunOnce = async (sha: string, ci: CheckAnswer): Promise<CheckAnswer> => {
     if (!api.rerunFailedChecks || !api.ciChecks || rerunShas.has(sha)) return ci;
     rerunShas.add(sha);
-    const before = await orNull(api.ciChecks(sha));
+    // `/checks` answers failure as soon as one check fails, while others may still run. GitHub won't re-run a job
+    // until its workflow run has finished, and a check that fails later must be re-run too, so the failed set is read
+    // only once no check on the commit is still pending, under the same cap.
+    const stillRunning = (checks: CiCheck[] | null) => !!checks && checks.some((c) => c.conclusion === "pending");
+    let before = await orNull(api.ciChecks(sha));
+    if (stillRunning(before)) {
+      ci = await waitForChecks(sha, async () => stillRunning(before = await orNull(api.ciChecks!(sha))));
+      if (ci.status !== "failure") return ci;
+    }
     const failed = failedNames(before);
     if (!failed.length) return ci;
-    // Each failed check's run, by its URL, so CI is read again only once every re-run check shows a new run. GitHub
-    // may still report the old failed run right after the re-run is asked for, above all for a check another app
-    // re-runs through `/rerequest`. A check with no URL can't be told apart, so it's taken as it reads.
-    const oldRuns = new Map((before ?? []).filter((c) => failed.includes(c.name) && c.url).map((c) => [c.name, c.url]));
+    // Each failed check's old run, by its URL and when it finished, so CI is read again only once every re-run check
+    // shows a new run. GitHub may still report the old failed run right after the re-run is asked for. A check another
+    // app re-runs through `/rerequest` may finish again under the same run and URL, so a later finish counts too.
+    // A check with neither can't be told apart, so it's taken as it reads.
+    const oldRuns = new Map((before ?? [] as CiCheck[]).filter((c) => failed.includes(c.name) && (c.url || c.completedAt)).map((c) => [c.name, c]));
     try {
       await api.rerunFailedChecks(sha, failed);
     } catch (e) {
@@ -898,7 +911,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const stale = async () => {
       if (!oldRuns.size) return false;
       const now = await orNull(api.ciChecks!(sha));
-      return !!now && [...oldRuns].some(([name, url]) => !now.some((c) => c.name === name && c.url !== url));
+      return !!now && [...oldRuns].some(([name, old]) => !now.some((c) => c.name === name && rerunShown(old, c)));
     };
     const again = await waitForChecks(sha, stale);
     const status = again.status === "failure" ? "failure" : "success";

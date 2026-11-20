@@ -622,6 +622,22 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: [] })).status, 400);
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true });
     assert.deepEqual(host.reruns, [{ key: `${repo}@abc1234`, checks: ["ci"] }]);
+    // Once per commit, kept on the control plane, so a cell resuming the run after a restart can't re-run it again.
+    const again = await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] });
+    assert.equal(again.status, 400);
+    assert.match(JSON.stringify(again.body), /already re-run once/);
+    assert.equal(host.reruns.length, 1);
+  });
+
+  test("rerun-checks: a re-run the host refuses isn't recorded, so it can be asked for again (PBI 233)", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "success", url: "u" }]);
+    assert.notEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).status, 200);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "failure", url: "u" }]);
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true });
   });
 
   test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {

@@ -179,6 +179,11 @@ export type CiCheck = {
   name: string; conclusion: "success" | "failure" | "pending"; url: string;
   /** PBI 292: the tests a failed check names as failing, when its run reports them. Empty or absent when it names none. */
   failingTests?: string[];
+  /**
+   * PBI 233: when the check's run finished, as an ISO time, when the host says. A check another app re-runs on request
+   * may finish again under the same run and URL, so only this tells its re-run apart from the run before.
+   */
+  completedAt?: string;
 };
 
 /** GitHub's `mergeable_state` for a PR, lower case. Only `clean` lets the factory merge (PBI 181). */

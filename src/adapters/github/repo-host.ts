@@ -326,11 +326,12 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; completed_at?: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
   return Promise.all(runs.map(async (c) => {
     const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
     const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion !== "pending" && c.completed_at) check.completedAt = c.completed_at;
     if (conclusion === "failure" && c.app?.slug === "github-actions") {
       const tests = await failingTestsOfJob(gh, r, c.id);
       if (tests.length) check.failingTests = tests;
