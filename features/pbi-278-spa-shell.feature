@@ -107,16 +107,32 @@ Feature: The SPA shell: a Vite build the BFF serves, shadcn/ui components, dark 
     @ac-3
     Scenario: With the operating system set to dark, the SPA is dark
       Given the SPA has been built
-      When the SPA's page is shown with the operating system set to dark
-      Then shadcn's colour variables take their dark values
-      And the page's background is dark and its text is light
+      And the operating system's colour scheme is dark
+      When the SPA starts
+      Then the SPA asks the operating system whether its colour scheme is dark
+      And the SPA marks the page as dark
+      And the SPA's built stylesheet gives shadcn's background and foreground variables their dark values on a page marked dark
 
     @ac-3
     Scenario: With the operating system set to light, the SPA is light
       Given the SPA has been built
-      When the SPA's page is shown with the operating system set to light
-      Then shadcn's colour variables take their light values
-      And the page's background is light and its text is dark
+      And the operating system's colour scheme is light
+      When the SPA starts
+      Then the SPA asks the operating system whether its colour scheme is dark
+      And the SPA doesn't mark the page as dark
+      And the SPA's built stylesheet gives shadcn's background and foreground variables their light values on a page not marked dark
+
+    @ac-3
+    Scenario Outline: When the operating system's setting changes while the SPA is open, the SPA follows it
+      Given the operating system's colour scheme is <before>
+      And the SPA has started
+      When the operating system's colour scheme changes to <after>
+      Then the SPA <marks> the page as dark
+
+      Examples:
+        | before | after | marks         |
+        | light  | dark  | marks         |
+        | dark   | light | doesn't mark  |
 
     @ac-3
     Scenario: The SPA offers no switch of its own, so the operating system's setting decides
