@@ -222,24 +222,27 @@ async function endClaimForWrapUp(c: pg.PoolClient, run: Run, now: Date, boundary
     { reason: restart ? "restart" : "drain", ...(drain ? { drain: true } : {}) });
 }
 
+/** What's set over a running cell now: the overrides a lease renewal answers with, and that a release reads too. */
+async function overridesOver(deps: CellApiDeps, c: pg.PoolClient, run: Run, now: Date): Promise<LeaseOverrides> {
+  // The kill switch is FACTORY_KILL=1 or a kill override (Task 13).
+  if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) return { kill: true, pause: false, restart: false, stopRun: false };
+  const r = await c.query<{ pause: boolean; kill: boolean; restart: boolean; drain: boolean; stop_run: boolean }>(
+    `with o as (select scope, kind, target_id from override where cleared_at is null and (expires_at is null or expires_at > $3))
+     select exists (select from o where (scope = 'factory' and kind = 'pause') or (scope = 'backlog' and target_id = $2 and kind = 'pause')) as pause,
+            exists (select from o where scope = 'factory' and kind = 'kill') as kill,
+            exists (select from o where scope = 'factory' and kind = 'restart') as restart,
+            exists (select from o where scope = 'factory' and kind = 'drain') as drain,
+            exists (select from o where scope = 'item' and target_id = $1 and kind = 'stop_run') as stop_run`,
+    [run.item_id, run.source_id, now],
+  );
+  const set = r.rows[0];
+  return { kill: set.kill, pause: set.pause, restart: set.restart, drain: set.drain, stopRun: set.stop_run };
+}
+
 const routes: Record<string, Route> = {
   "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
-    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13).
-    if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) {
-      return leaseReply(leaseAnswer({ kill: true, pause: false, restart: false, stopRun: false }));
-    }
-    const r = await c.query<{ pause: boolean; kill: boolean; restart: boolean; drain: boolean; stop_run: boolean }>(
-      `with o as (select scope, kind, target_id from override where cleared_at is null and (expires_at is null or expires_at > $3))
-       select exists (select from o where (scope = 'factory' and kind = 'pause') or (scope = 'backlog' and target_id = $2 and kind = 'pause')) as pause,
-              exists (select from o where scope = 'factory' and kind = 'kill') as kill,
-              exists (select from o where scope = 'factory' and kind = 'restart') as restart,
-              exists (select from o where scope = 'factory' and kind = 'drain') as drain,
-              exists (select from o where scope = 'item' and target_id = $1 and kind = 'stop_run') as stop_run`,
-      [run.item_id, run.source_id, now],
-    );
-    const set = r.rows[0];
-    return leaseReply(leaseAnswer({ kill: set.kill, pause: set.pause, restart: set.restart, drain: set.drain, stopRun: set.stop_run }));
+    return leaseReply(leaseAnswer(await overridesOver(deps, c, run, now)));
   },
 
   "POST github-token": async (deps, { run }) => deps.repoHost.cellToken(repoOf(run)),
@@ -446,8 +449,10 @@ const routes: Record<string, Route> = {
   // does one that finished its stage while a restart was being prepared or the factory drains, and starts no further
   // stage (PBI 301, PBI 379). Without it the item would stay InProgress, and Floor would count it as running, until its
   // lease ran out.
-  "POST release": async (_deps, { c, run, now }) => {
-    await endClaimForWrapUp(c, run, now, true);
+  // A cell also releases when a pause, the kill switch or an operator's stop caught it between stages. The route can't
+  // tell that from a boundary, so a drain ends the claim only while none of those is set: their handling keeps it.
+  "POST release": async (deps, { c, run, now }) => {
+    await endClaimForWrapUp(c, run, now, !leaseAnswer(await overridesOver(deps, c, run, now)).stop);
     return { ok: true };
   },
 

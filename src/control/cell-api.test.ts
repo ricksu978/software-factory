@@ -448,6 +448,21 @@ describe("cell API", dbTest, () => {
     assert.equal((await item(cell.itemId)).state, "InProgress");
   });
 
+  // A cell an operator's stop or a pause caught between stages releases with no attempt open. Under a drain too, the
+  // claim stays, so the scheduler fails and holds the stopped item, and a pause holds it InProgress.
+  test("a release under a drain and an operator's stop or a pause keeps the claim", async () => {
+    const stopped = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'upgrading Docker')");
+    await db.pool.query("insert into override (scope, kind, target_id, reason) values ('item', 'stop_run', $1, 'wrong item')", [stopped.itemId]);
+    assert.equal((await send(stopped.runId, stopped.token, "POST", "/release")).status, 200);
+    assert.equal((await item(stopped.itemId)).state, "InProgress");
+    await db.pool.query("update override set cleared_at = now() where kind = 'stop_run'");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");
+    assert.equal((await send(stopped.runId, stopped.token, "POST", "/release")).status, 200);
+    assert.equal((await item(stopped.itemId)).state, "InProgress");
+    assert.equal((await db.pool.query("select 1 from event where item_id = $1 and payload->>'event' = 'lease_expired'", [stopped.itemId])).rowCount, 0);
+  });
+
   test("sop-move records the image's SOP on the run and logs one system event on the item, once", async () => {
     const cell = await claimed("green");
     assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);

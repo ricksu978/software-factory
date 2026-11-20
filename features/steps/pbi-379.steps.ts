@@ -122,7 +122,10 @@ When("an operator drains the factory while red's first attempt runs", function (
 });
 
 Given("red allows {int} retries", function (n: number) {
+  assert.ok(Number.isInteger(n) && n >= 0, `red can't allow ${n} retries`);
+  assert.equal(p301(this).ran, false, "the cell already ran, so red's retries come too late");
   ctx(this).retries.set("red", n);
+  assert.equal(ctx(this).retries.get("red"), n, "red's retries weren't recorded");
 });
 
 /** The attempt the cell last started at its stage, as it reported it. */
@@ -242,8 +245,11 @@ When("cell {string} runs green, whose first attempt fails and whose second attem
 });
 
 When("cell {string} renews its lease while green's agent works", long, async function (cell: string) {
-  // The cell is mid-stage: its green attempt is open, and the renewal's answer isn't judged here.
-  await renew(this, cell);
+  // The cell is mid-stage: its green attempt is open. The renewal is answered and doesn't cut the stage short; whether it
+  // tells the cell to end its claim at the boundary is the scenario's Then.
+  const answer = await renew(this, cell);
+  assert.equal(answer.status, 200, `${cell}'s renewal wasn't answered: ${JSON.stringify(answer)}`);
+  assert.equal(answer.body.stop, false, `${cell}'s renewal cut green short: ${JSON.stringify(answer.body)}`);
 });
 
 When("the operator opens Floor straight away, before cell {string}'s lease would have run out", long, async function (cell: string) {
