@@ -7,37 +7,38 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
   With this item, Azurite runs on an account key of its own, and `FACTORY_BLOB` hands that key to the control
   plane, so only the control plane can sign. A SAS signed with the published key gets 403. The write-only upload
   URLs the cell API hands out keep working from inside a cell container.
-  These scenarios need Docker, the Aspire CLI and the owner's secrets, so they are tagged @local: CI and cells
+  The @ac-1 scenarios read the AppHost's wiring without starting it: they run the AppHost against a stand-in for
+  Aspire that records the key each resource is given, so cells and CI run them. The @ac-2 and @ac-3 scenarios need
+  a live Azurite, so they need Docker, the Aspire CLI and the owner's secrets, and are tagged @local: CI and cells
   skip them, the owner runs them, and the PR records the run.
 
-  Rule: Azurite's account key is not the published development key, and the control plane gets the key Azurite uses
+  Rule: Under aspire run, Azurite's account key is not the published development key, and FACTORY_BLOB carries the same key
 
-    @ac-1 @local
-    Scenario: Under aspire run, Azurite does not accept the published development key
-      Given "aspire run" is up
-      When the owner sends Azurite a request to list the blob containers, signed with the published development key
-      Then Azurite answers 403
-
-    @ac-1 @local
-    Scenario: The key in the control plane's FACTORY_BLOB is not the published development key
-      Given "aspire run" is up
-      When the owner reads the account key in the control resource's "FACTORY_BLOB"
-      Then the account key is not the published development key
-      And the account key is not empty
-
-    @ac-1 @local
-    Scenario: The key FACTORY_BLOB carries is the one Azurite accepts
-      Given "aspire run" is up
-      When the owner sends Azurite a request to list the blob containers, signed with the account key in the control resource's "FACTORY_BLOB"
-      Then Azurite answers 200
+    @ac-1
+    Scenario: The AppHost gives Azurite an account key of its own
+      When the AppHost's wiring for "aspire run" is read without starting it
+      Then the Azurite container is given an account key
       And that account key is not the published development key
+      And that account key is not empty
 
-    @ac-1 @local
-    Scenario: The cell API and the worker get the same key as control
-      Given "aspire run" is up
-      When the owner reads the account key in the "FACTORY_BLOB" of the control, cell API and worker resources
-      Then all three carry the same account key
-      And that account key is not the published development key
+    @ac-1
+    Scenario: The control plane's FACTORY_BLOB carries the key Azurite is given
+      When the AppHost's wiring for "aspire run" is read without starting it
+      Then the control resource's "FACTORY_BLOB" carries the same account key as the Azurite container
+      And the account key in the control resource's "FACTORY_BLOB" is not the published development key
+
+    @ac-1
+    Scenario: The cell API and the worker get the same key as Azurite and control
+      When the AppHost's wiring for "aspire run" is read without starting it
+      Then the "FACTORY_BLOB" of the control, cell API and worker resources all carry the Azurite container's account key
+      And none of them carries the published development key
+
+    @ac-1
+    Scenario: A test run with floating ports still gives Azurite its own key
+      Given ports float, as they do for a test run
+      When the AppHost's wiring for "aspire run" is read without starting it
+      Then the Azurite container is given an account key that is not the published development key
+      And the control resource's "FACTORY_BLOB" carries the same account key as the Azurite container
 
   Rule: A SAS a cell signs with the published key is refused
 
