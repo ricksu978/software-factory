@@ -49,7 +49,7 @@ type Ctx = {
   hookFiles?: string[];
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi219?: Ctx };
   w.pbi219 ??= { refuseUpdates: new Set(), refuseComments: new Set(), users: new Map(), closers: [], cells: new Map() };
   return w.pbi219;
@@ -62,14 +62,14 @@ After({ tags: "@pbi-219" }, async function () {
 const pool = () => need().pool;
 const stop = (s: Server) => new Promise<void>((resolve) => s.close(() => resolve()));
 const num = (issue: string) => issue.replace(/^#/, "");
-const MAIN = "main";
+export const MAIN = "main";
 const SECRET = "pbi-219-cell-secret";
 const WEBHOOK_SECRET = "pbi-219-webhook-secret";
 const scheduler = { actor: "system", actorId: "scheduler" } as const;
 const github = { actor: "system", actorId: "github" } as const;
-const host = (world: object) => p17(world).repoHost as unknown as Host;
+export const host = (world: object) => p17(world).repoHost as unknown as Host;
 
-function boardNamed(world: object, name: string): Board {
+export function boardNamed(world: object, name: string): Board {
   const b = p156(world).boards.find((x) => x.name === name);
   assert.ok(b, `no board "${name}"`);
   return b;
@@ -102,11 +102,11 @@ function backlogFor(world: object) {
   };
 }
 
-function workerDeps(world: object): OutboxDeps {
+export function workerDeps(world: object): OutboxDeps {
   return { pool: pool(), backlogFor: backlogFor(world), repoHost: host(world) };
 }
 
-async function statusFor(world: object, state: string, boardName = MAIN): Promise<string> {
+export async function statusFor(world: object, state: string, boardName = MAIN): Promise<string> {
   const r = await pool().query<{ status: string | null }>(
     "select field_map->'statusFor'->>$2 as status from backlog_source where id = $1", [boardNamed(world, boardName).id, state],
   );
@@ -121,14 +121,14 @@ async function boardItem(world: object, issue: string, boardName = MAIN) {
   return found;
 }
 
-const callsOn = (world: object, issue: string, method: string, boardName = MAIN) =>
+export const callsOn = (world: object, issue: string, method: string, boardName = MAIN) =>
   boardNamed(world, boardName).calls.filter((call) => call.method === method && call.id === num(issue));
 
 async function comments(world: object, issue: string, boardName = MAIN): Promise<string[]> {
   return boardNamed(world, boardName).fake.comments(num(issue));
 }
 
-async function exactlyOne(world: object, issue: string, what: string, matches: (body: string) => boolean): Promise<void> {
+export async function exactlyOne(world: object, issue: string, what: string, matches: (body: string) => boolean): Promise<void> {
   const all = await comments(world, issue);
   const found = all.filter(matches);
   assert.equal(found.length, 1, `item ${issue} on the board has ${found.length} comments saying ${what}: ${JSON.stringify(all)}`);
@@ -153,7 +153,7 @@ async function moveItem(id: string, event: ItemEvent, actor: { actor: "system" |
   await withTx(pool(), (c) => items.transitionItem(c, id, event, actor));
 }
 
-async function repoId(repo: string): Promise<string> {
+export async function repoId(repo: string): Promise<string> {
   const url = `https://github.com/${repo}`;
   await pool().query("insert into repo (host_adapter, url, trusted_bot) values ('github', $1, 'factory[bot]') on conflict (url) do nothing", [url]);
   return (await pool().query<{ id: string }>("select id from repo where url = $1", [url])).rows[0].id;

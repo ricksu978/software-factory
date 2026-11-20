@@ -51,6 +51,8 @@ export type Ctx = {
   items: Map<string, string>;
   transcript?: { path: string; text: string };
   heartbeat?: Date;
+  /** The API's clock, fixed by a step that dates something against it, such as the Claude token's creation. */
+  now?: Date;
   api?: Serving;
   startError?: unknown;
   started: boolean;
@@ -62,6 +64,8 @@ export type Ctx = {
   delivery?: string;
   /** Statuses a When-position "the API answers" expected of the replies it read, checked by every later Then. */
   checks: { status: number; reply: Reply }[];
+  /** The webhook secret the API is given, when a scenario names one (PBI 287). */
+  webhookSecret?: string;
 };
 
 export function ctx(world: object): Ctx {
@@ -84,17 +88,23 @@ function signingKeys() {
   return keys;
 }
 
-Before({ tags: "(@pbi-284 or @pbi-285) and @db" }, function () {
+// PBI 285's and 286's scenarios run on this harness too.
+Before({ tags: "(@pbi-284 or @pbi-285 or @pbi-286) and @db" }, function () {
   ctx(this).db = true;
 });
 
-After({ tags: "@pbi-284 or @pbi-285", ...long }, async function () {
-  const c = ctx(this);
+/** Stops the API and the fake issuer the scenario started. PBI 287's steps share them. */
+export async function stopAll(world: object): Promise<void> {
+  const c = ctx(world);
   await c.api?.stop();
   if (c.issuer) {
     c.issuer.closeAllConnections();
     await new Promise((resolve) => c.issuer!.close(resolve));
   }
+}
+
+After({ tags: "@pbi-284 or @pbi-285 or @pbi-286", ...long }, async function () {
+  await stopAll(this);
 });
 
 // ---- the fake issuer and tokens ----
@@ -140,8 +150,8 @@ async function flawed(c: Ctx, name: string, flaw: string): Promise<string> {
   throw new Error(`no such token flaw: ${flaw}`);
 }
 
-Given("a fake issuer publishing a discovery document and its signing keys", long, async function () {
-  const c = ctx(this);
+/** Starts a fake issuer on a free port that publishes a discovery document and, unless told not to, its key set. */
+export async function startIssuer(c: Ctx): Promise<void> {
   const { jwk } = await signingKeys();
   c.issuer = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
@@ -162,6 +172,10 @@ Given("a fake issuer publishing a discovery document and its signing keys", long
   });
   await new Promise<void>((resolve) => c.issuer!.listen(0, "127.0.0.1", () => resolve()));
   c.issuerUrl = `http://127.0.0.1:${(c.issuer.address() as AddressInfo).port}/realms/factory`;
+}
+
+Given("a fake issuer publishing a discovery document and its signing keys", long, async function () {
+  await startIssuer(ctx(this));
 });
 
 Given("the API is configured with that issuer and the audience {string}", function (audience: string) {
@@ -224,8 +238,12 @@ Given("item {string}'s run has a stored transcript", long, async function (name:
   c.transcript = { path, text };
 });
 
+// The API's clock is fixed at the moment the token is dated against, so the token is exactly `days` old and the
+// banner's count of days left is exact too.
 Given("the Claude token was created {int} days ago", function (days: number) {
-  ctx(this).env.CLAUDE_TOKEN_CREATED_AT = new Date(Date.now() - days * 86_400_000 - 3_600_000).toISOString();
+  const c = ctx(this);
+  c.now ??= new Date();
+  c.env.CLAUDE_TOKEN_CREATED_AT = new Date(c.now.getTime() - days * 86_400_000).toISOString();
 });
 
 Given("the worker last sent a heartbeat a moment ago", long, async function () {
@@ -286,9 +304,10 @@ When("the API starts from src\\/api\\/main.ts", long, async function () {
   c.started = true;
   try {
     c.api = await mod.startApi({
-      pool: apiPool, issuer: c.issuerUrl, audience: c.audience, webhookSecret: WEBHOOK_SECRET,
+      pool: apiPool, issuer: c.issuerUrl, audience: c.audience, webhookSecret: c.webhookSecret ?? WEBHOOK_SECRET,
       readBlob: async (path: string) => c.blobs.get(path) ?? null,
       env: { ...c.env },
+      ...(c.now ? { now: () => c.now! } : {}),
     }, PORT);
   } catch (e) {
     c.startError = e;
@@ -306,7 +325,7 @@ Then("it exits with an error naming jwks_uri", function () {
 
 // ---- requests ----
 
-async function call(world: object, method: string, path: string, opts: { auth?: string; body?: unknown; raw?: Buffer; headers?: Record<string, string> } = {}): Promise<void> {
+export async function call(world: object, method: string, path: string, opts: { auth?: string; body?: unknown; raw?: Buffer; headers?: Record<string, string> } = {}): Promise<void> {
   const c = ctx(world);
   const headers: Record<string, string> = { ...opts.headers };
   if (opts.auth !== undefined) headers.authorization = opts.auth;
@@ -339,7 +358,7 @@ async function firstChunk(r: Response): Promise<string> {
   return new TextDecoder().decode(value);
 }
 
-const bearer = (token: string) => `Bearer ${token}`;
+export const bearer = (token: string) => `Bearer ${token}`;
 
 /** "GET /v1/items/A" as a method and a path, with each item name after /items/ swapped for its id. */
 function route(c: Ctx, text: string): { method: string; path: string } {
@@ -452,7 +471,7 @@ function checked(c: Ctx): void {
   for (const k of c.checks) assert.equal(k.reply.status, k.status, `earlier, the API answered ${said(k.reply)}`);
 }
 
-function reply(c: Ctx): Reply {
+export function reply(c: Ctx): Reply {
   assert.ok(c.started, "the API wasn't started");
   assert.ok(!c.startError, `the API didn't start: ${String((c.startError as Error)?.message ?? c.startError)}`);
   assert.ok(c.reply, "nothing was asked of the API");
@@ -460,7 +479,7 @@ function reply(c: Ctx): Reply {
   return c.reply;
 }
 
-function body(c: Ctx): Record<string, unknown> {
+export function body(c: Ctx): Record<string, unknown> {
   const r = reply(c);
   assert.equal(r.status, 200, `the API answered ${said(r)}`);
   assert.ok(r.json && typeof r.json === "object", `the API's answer isn't a JSON object: ${said(r)}`);
@@ -566,9 +585,11 @@ Then("item {string}'s question is still open", long, async function (name: strin
   assert.equal(q.answer, null, "the question was answered");
 });
 
+// With no delivery id sent (PBI 287), every delivery and webhook event counts.
 async function webhookEvents(c: Ctx): Promise<{ deliveries: number; events: number }> {
-  const deliveries = (await pool().query("select count(*)::int as n from webhook_delivery where id = $1", [c.delivery])).rows[0].n;
-  const events = (await pool().query("select count(*)::int as n from event where kind = 'webhook' and payload->>'deliveryId' = $1", [c.delivery])).rows[0].n;
+  const id = c.delivery ?? null;
+  const deliveries = (await pool().query("select count(*)::int as n from webhook_delivery where $1::text is null or id = $1", [id])).rows[0].n;
+  const events = (await pool().query("select count(*)::int as n from event where kind = 'webhook' and ($1::text is null or payload->>'deliveryId' = $1)", [id])).rows[0].n;
   return { deliveries, events };
 }
 

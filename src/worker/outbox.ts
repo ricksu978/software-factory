@@ -25,8 +25,9 @@ export function backoffMs(attempts: number): number {
  * Handles every row that is due, once, and then returns. Rows go in seq order. A row waits while an earlier row for
  * the same item and consumer is still in the outbox, so one item's rows run in the order they were written, and a
  * failed one holds back only its own item's later rows. A row written while it works, such as the announcement of a
- * decision a comment command made, is handled in the same pass. Each row is taken with `for update skip locked`. A
- * row whose seq isn't in `outbox_worker_row` came from a pre-219 process that already acted on it, and is deleted
+ * decision a comment command made, is handled in the same pass. Each row is taken with `for no key update skip locked`,
+ * so another worker skips it, and recording its effects in `outbox_effect` from another connection doesn't wait on the
+ * lock. A row whose seq isn't in `outbox_worker_row` came from a pre-219 process that already acted on it, and is deleted
  * unhandled.
  */
 export async function workOutbox(deps: OutboxDeps): Promise<void> {
@@ -44,7 +45,7 @@ export async function workOutbox(deps: OutboxDeps): Promise<void> {
          where o.failed_at is null and o.next_attempt_at <= now() and o.seq <> all($1::bigint[])
            and exists (select from outbox_worker_row w where w.seq = o.seq)
            and not exists (select from outbox p where p.item_id = o.item_id and p.consumer = o.consumer and p.seq < o.seq and p.failed_at is null)
-         order by o.seq limit 1 for update skip locked`,
+         order by o.seq limit 1 for no key update skip locked`,
         [tried],
       );
       const found = r.rows[0];
@@ -76,8 +77,9 @@ type Event = { kind: string; payload: Record<string, unknown>; at: Date };
 
 /**
  * Runs every effect of one row, without removing it. Running a row's effects again, as after a crash before its
- * removal, repeats no effect that already took place: every idempotency key comes from the event id, and every text
- * from the event's payload. It throws when any effect failed.
+ * removal, repeats no effect that already took place: every idempotency key comes from the event id, every text from
+ * the event's payload, and a board mirror row's board calls are each recorded against the row once they succeed and
+ * skipped after (PBI 220). It throws when any effect failed.
  */
 export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<void> {
   if (!row.itemId) return;
@@ -90,7 +92,7 @@ export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<v
   if (row.consumer === CONSUMER.boardMirror) {
     const how = event.kind === "override" ? "override" : (p.event as ItemEvent);
     const question = typeof p.question === "string" ? p.question : null;
-    await mirror(deps, row.itemId, p.to as ItemState, how, { eventId: row.eventId, question });
+    await mirror(deps, row.itemId, p.to as ItemState, how, { eventId: row.eventId, seq: row.seq, question });
   } else if (row.consumer === CONSUMER.decisionAnnouncement) {
     const body = announcement(p.kind as DecisionKind, typeof p.text === "string" ? p.text : "");
     await deps.backlogFor(item.source_id).comment(item.external_id, body, `decision:${row.eventId}`);

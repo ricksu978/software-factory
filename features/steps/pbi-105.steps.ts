@@ -39,6 +39,8 @@ type Ctx = {
   lineAt?: number;
   restoreConsole?: () => void;
   ext?: string;
+  /** PBI 286's GET /v1/activity reply, which the log's Thens read in place of the page when it's set. */
+  api?: { status: number | null; json: unknown; text: string };
 };
 
 function ctx(world: object): Ctx {
@@ -122,8 +124,27 @@ async function openLog(world: object, login: string): Promise<void> {
   await get(world, "/activity", login);
 }
 
+/**
+ * PBI 286's activity log is the API's JSON, `{ events: [...] }`, newest first. These steps read each event as one row
+ * whose text is its values, so a row's ISO `at` shows its HH:MM in UTC as the page's row does.
+ */
+export function readActivityFromApi(world: object, reply: { status: number | null; json?: unknown; text: string }): void {
+  ctx(world).api = { status: reply.status, json: reply.json, text: reply.text };
+}
+
+function apiRows(api: NonNullable<Ctx["api"]>): string[] {
+  assert.equal(api.status, 200, `GET /v1/activity answered ${api.status}: ${api.text.slice(0, 300)}`);
+  const events = (api.json as { events?: unknown } | undefined)?.events;
+  assert.ok(Array.isArray(events), `the activity log's answer has no events array: ${api.text.slice(0, 300)}`);
+  return events.map((e) => Object.values(e as Record<string, unknown>).filter((v) => v !== null && v !== undefined)
+    .map((v) => escapeText(String(v))).join(" | "));
+}
+
+const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** The page's event rows: every <tr> that holds a <td>, in page order. */
 function rows(c: Ctx): string[] {
+  if (c.api) return apiRows(c.api);
   assert.ok(c.page !== undefined, "no page came back");
   assert.equal(c.status, 200, `the activity log answered ${c.status}: ${c.page.slice(0, 300)}`);
   return [...c.page.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((m) => m[1]).filter((r) => /<td\b/i.test(r));

@@ -46,8 +46,8 @@ type Ctx = {
   preparedAt?: Date;
   renewals: { cell: string; answer: Answer }[];
   last?: Answer;
-  /** What the lease said just before an operator's Resume, when a cell was running. */
-  stopBeforeResume?: boolean;
+  /** Whether the lease said a restart was being prepared just before an operator's Resume, when a cell was running. */
+  restartingBeforeResume?: boolean;
   cellServer?: Server;
   origins: Map<string, Origin>;
   /** The scenario's step texts, so a step can tell what follows it. */
@@ -78,7 +78,7 @@ type Engine = {
   ran: boolean;
 };
 
-/** PBI 140's scenario state. PBI 300's steps share its clock, its cell API and the restart it prepared. */
+/** PBI 140's scenario state. PBI 300's and PBI 301's steps share its clock, its cell API and the restart it prepared. */
 export function ctx(world: object): Ctx {
   const w = world as { pbi140?: Ctx };
   w.pbi140 ??= { clock: new Date(), logs: [], restore: [], renewals: [], origins: new Map(), steps: [] };
@@ -89,7 +89,7 @@ const minutesFrom = (at: Date, n: number) => new Date(at.getTime() + n * 60_000)
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const unescape = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
-Before({ tags: "@pbi-140 or @pbi-302" }, function ({ pickle }) {
+Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301" }, function ({ pickle }) {
   const c = ctx(this);
   c.steps = pickle.steps.map((s) => s.text);
   const originals = { log: console.log, warn: console.warn, error: console.error };
@@ -107,7 +107,7 @@ Before({ tags: "@pbi-140 or @pbi-302" }, function ({ pickle }) {
   (this as { controlStart?: () => Promise<void> }).controlStart = () => clearRestartOnStart(need().pool);
 });
 
-Before({ tags: "(@pbi-140 or @pbi-302) and @db", ...long }, async function () {
+Before({ tags: "(@pbi-140 or @pbi-302 or @pbi-301) and @db", ...long }, async function () {
   await testDb();
   const pool = need().pool;
   await pool.query(`truncate item, "user", backlog_source, repo, webhook_delivery, override cascade`);
@@ -121,7 +121,7 @@ Before({ tags: "(@pbi-140 or @pbi-302) and @db", ...long }, async function () {
   s.repoHost = host as never;
 });
 
-After({ tags: "@pbi-140 or @pbi-302", ...long }, async function () {
+After({ tags: "@pbi-140 or @pbi-302 or @pbi-301", ...long }, async function () {
   const c = ctx(this);
   mock.timers.reset();
   for (const r of c.restore.reverse()) r();
@@ -137,16 +137,20 @@ After({ tags: "@pbi-140 or @pbi-302", ...long }, async function () {
 
 // ---- the cell API, as a running cell reaches it ----
 
-/** The control plane's cell API: PBI 89's server when it runs, otherwise one of the scenario's own on the same database. */
-async function cellBase(world: object): Promise<string> {
+/**
+ * The control plane's cell API: PBI 89's server when it runs, otherwise one of the scenario's own on the same database.
+ * `own` asks for the scenario's own even when PBI 89's runs: PBI 89's knows only its own board, not the backlog source
+ * PBI 17's items are on, so a new cell's context, which reads the item from its board, is read from the scenario's own.
+ */
+async function cellBase(world: object, own = false): Promise<string> {
   const control = p89(world);
-  if (control.origin) return control.origin;
+  if (control.origin && !own) return control.origin;
   const c = ctx(world);
   if (!c.cellServer) {
     const s = p17(world);
     const sop = loadSop(SOP_TEXT);
     c.cellServer = await startServer([cellApi({
-      pool: need().pool, secret: CELL_SECRET, repoHost: s.repoHost as never, backlogFor: () => s.backlog!.adapter as never,
+      pool: need().pool, secret: CELL_SECRET, repoHost: s.repoHost as never, backlogFor: () => (s.backlog ?? (s.backlog = fakeBacklog())).adapter as never,
       stageAfter: (_version, stageId) => stageAfter(sop, stageId), uploadUrl: async (path) => `http://blob.test/${path}`,
       gateway: { upstream: "http://model.test", ownerToken: () => "unused" }, webToolsOf: () => [],
       now: () => s.now ?? new Date(),
@@ -156,7 +160,7 @@ async function cellBase(world: object): Promise<string> {
 }
 
 /** The run and generation of the cell with this execution name. Its run's repo is pinned, as the claim that started it did. */
-async function cellRun(cell: string): Promise<{ runId: string; generation: number }> {
+export async function cellRun(cell: string): Promise<{ runId: string; generation: number }> {
   const pool = need().pool;
   const r = await pool.query<{ run_id: string; generation: number }>(
     `select r.id as run_id, i.lease_generation as generation from run r join item i on i.id = r.item_id
@@ -168,8 +172,8 @@ async function cellRun(cell: string): Promise<{ runId: string; generation: numbe
   return { runId: r.rows[0].run_id, generation: r.rows[0].generation };
 }
 
-async function call(world: object, run: { runId: string; generation: number }, method: "GET" | "POST", route: string, body?: unknown): Promise<Answer> {
-  const res = await fetch(`${await cellBase(world)}/internal/cells/${run.runId}/${route}`, {
+export async function call(world: object, run: { runId: string; generation: number }, method: "GET" | "POST", route: string, body?: unknown, own = false): Promise<Answer> {
+  const res = await fetch(`${await cellBase(world, own)}/internal/cells/${run.runId}/${route}`, {
     method,
     headers: { authorization: `Bearer ${runToken(CELL_SECRET, run.runId, run.generation)}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -294,14 +298,14 @@ When("the operator prepares a restart with the reason {string}", long, async fun
 });
 
 When("the operator resumes the factory with the reason {string}", long, async function (reason: string) {
-  // A running cell's renewal just before the Resume shows the restart was telling it to stop, so a carry-on after the
-  // Resume is the Resume's doing.
+  // A running cell's renewal just before the Resume shows the restart was telling it a restart is being prepared
+  // (PBI 301), so a renewal that no longer says so after the Resume is the Resume's doing.
   const running = await need().pool.query<{ execution_name: string }>(
     "select r.execution_name from item i join run r on r.item_id = i.id and r.ended_at is null where i.state = 'InProgress' and r.execution_name is not null limit 1");
   if (running.rowCount) {
     const run = await cellRun(running.rows[0].execution_name);
     const probe = await call(this, run, "POST", "lease", { generation: run.generation });
-    ctx(this).stopBeforeResume = probe.status === 200 && probe.body.stop === true;
+    ctx(this).restartingBeforeResume = probe.status === 200 && probe.body.restarting === true;
   }
   await postOverride(this, { kind: "resume", reason });
 });
@@ -374,27 +378,22 @@ function lastRenewal(c: Ctx): Answer {
   return r.answer;
 }
 
-Then("both renewals are answered and tell the cell to stop", function () {
-  const rs = ctx(this).renewals.slice(-2);
-  assert.equal(rs.length, 2, "two cells didn't renew");
-  for (const r of rs) {
-    assert.equal(r.answer.status, 200, `${r.cell}'s renewal wasn't answered`);
-    assert.equal(r.answer.body.stop, true, `${r.cell}'s renewal didn't tell it to stop`);
-  }
+Then("the renewal tells the cell to carry on", function () {
+  assert.equal(lastRenewal(ctx(this)).body.stop, false, "the renewal told the cell to stop");
 });
 
-Then("the renewal tells the cell to carry on", function () {
+Then("the renewal no longer says a restart is being prepared", function () {
   const c = ctx(this);
-  if (c.stopBeforeResume !== undefined) assert.equal(c.stopBeforeResume, true, "the restart never told the cell to stop, so carrying on after Resume proves nothing");
-  assert.equal(lastRenewal(c).body.stop, false);
+  assert.equal(c.restartingBeforeResume, true, "the renewal before Resume never said a restart was being prepared, so this proves nothing");
+  assert.equal(lastRenewal(c).body.restarting, undefined, "the renewal still says a restart is being prepared");
 });
 
 Then("the renewal tells the cell to stop", function () {
   assert.equal(lastRenewal(ctx(this)).body.stop, true, "the renewal didn't tell the cell to stop");
 });
 
-Then("the cell API answers the renewal and tells the cell to stop", function () {
-  assert.equal(lastRenewal(ctx(this)).body.stop, true, "the renewal didn't tell the cell to stop");
+Then("the cell API answers the renewal and tells the cell to carry on", function () {
+  assert.equal(lastRenewal(ctx(this)).body.stop, false, "the renewal told the cell to stop");
 });
 
 Then("the cell API answers it", function () {
@@ -411,13 +410,13 @@ Then("item {string}'s run records that green attempt as stopped", long, async fu
   assert.equal(await attemptStatus(p17(this).items[name], "green", 1), "stopped");
 });
 
-Then("cell {string}'s next renewal tells it to stop", long, async function (cell: string) {
+Then("cell {string}'s next renewal tells it to carry on", long, async function (cell: string) {
   const a = await renew(this, cell);
   assert.equal(a.status, 200, `the renewal wasn't answered: ${JSON.stringify(a)}`);
-  assert.equal(a.body.stop, true, "the renewal didn't tell the cell to stop");
+  assert.equal(a.body.stop, false, "the renewal told the cell to stop");
 });
 
-async function attemptStatus(itemId: string, stageId: string, attempt: number): Promise<string | undefined> {
+export async function attemptStatus(itemId: string, stageId: string, attempt: number): Promise<string | undefined> {
   return (await need().pool.query<{ status: string }>(
     "select s.status from stage_run s join run r on r.id = s.run_id where r.item_id = $1 and s.stage_id = $2 and s.attempt = $3",
     [itemId, stageId, attempt])).rows[0]?.status;
@@ -577,9 +576,9 @@ function startedFor(world: object, name: string): Record<string, string> {
   return env;
 }
 
-async function newCellContext(world: object, name: string): Promise<Record<string, any>> {
+export async function newCellContext(world: object, name: string): Promise<Record<string, any>> {
   const env = startedFor(world, name);
-  const a = await call(world, { runId: env.RUN_ID, generation: Number(env.GENERATION) }, "GET", "context");
+  const a = await call(world, { runId: env.RUN_ID, generation: Number(env.GENERATION) }, "GET", "context", undefined, true);
   assert.equal(a.status, 200, `the new cell's context: ${JSON.stringify(a)}`);
   return a.body;
 }
@@ -589,7 +588,16 @@ Then("item {string}'s run resumes at {word}", long, async function (name: string
   assert.equal(env.RESUME_FROM, stage);
   const context = await newCellContext(this, name);
   assert.equal(context.nextStage, stage);
-  assert.equal(context.resume?.stageId, stage, `the new cell isn't told it resumes ${stage}'s stopped attempt: ${JSON.stringify(context.resume)}`);
+  // A stage whose last attempt a stop cut short resumes that attempt (PBI 140). One that never started, because the cell
+  // before ended at the stage boundary (PBI 301), starts fresh.
+  const last = (await need().pool.query<{ status: string }>(
+    `select s.status from stage_run s join run r on r.id = s.run_id where r.item_id = $1 and s.stage_id = $2 order by s.attempt desc limit 1`,
+    [p17(this).items[name], stage])).rows[0]?.status;
+  if (last === "stopped") {
+    assert.equal(context.resume?.stageId, stage, `the new cell isn't told it resumes ${stage}'s stopped attempt: ${JSON.stringify(context.resume)}`);
+  } else {
+    assert.equal(context.resume ?? null, null, `the new cell is told it resumes an attempt at ${stage}, which never started: ${JSON.stringify(context.resume)}`);
+  }
 });
 
 Then("green's attempt is recorded as passed", long, async function () {
@@ -743,10 +751,15 @@ Given("a run for item {int} that is at green with a commit it hasn't pushed and 
 });
 
 Given("a run for item {int} that is at green's first attempt", function (_item: number) {
+  // PBI 301's scenarios run a cell of their own, through `atStage`.
+  const own = (this as { atStage?: (stage: string) => void }).atStage;
+  if (own) return own("green");
   newEngine(this, "uncommitted");
 });
 
 Given("the factory is preparing to restart", function () {
+  const own = (this as { preparingRestart?: () => void }).preparingRestart;
+  if (own) return own();
   // The cell learns of it only through its lease renewals: from now on each one says stop, unless a later step
   // scripts another answer, such as a lost lease, which the control plane's 409 gives ahead of the stop.
   const e = engine(this);

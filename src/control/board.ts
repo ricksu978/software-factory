@@ -4,6 +4,7 @@
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
+import { effectsDone, recordEffect } from "../store/outbox.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 
 export type BoardDeps = { pool: pg.Pool; backlogFor: (sourceId: string) => BacklogAdapter; repoHost: RepoHost };
@@ -30,14 +31,18 @@ export function splitStatus(fieldMap: Row["field_map"]): string | null {
 
 /**
  * What a mirror needs from the event behind it: its id, which every idempotency key comes from, so a row handled again
- * after a crash repeats no comment, and the question the item was asked as it moved, from the event's payload.
+ * after a crash repeats no comment, and the question the item was asked as it moved, from the event's payload. `seq` is
+ * the board mirror outbox row's: each effect that succeeds is recorded against it, and one already recorded is skipped,
+ * so a row handled again repeats no board call (PBI 220).
  */
-export type MirrorEvent = { eventId: string; question?: string | null };
+export type MirrorEvent = { eventId: string; seq: string; question?: string | null };
 
 /**
  * Mirrors one committed transition onto the item's board, and closes its open PR when the item is withdrawn. Each
  * effect runs on its own, so one failed call can't skip the rest, and each failure is logged. Once all have run, it
- * throws if any failed, so the worker keeps the row and tries it again. Every effect is safe to repeat.
+ * throws if any failed, so the worker keeps the row and tries it again. An effect that succeeded is recorded against the
+ * row and skipped when the row is handled again, so a retry runs only what failed. A crash between an effect and its
+ * record repeats that one effect, which can undo a change a person made on the board in that window.
  */
 export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, event: ItemEvent | "override", e: MirrorEvent): Promise<void> {
   const r = await deps.pool.query<Row>(
@@ -54,9 +59,12 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
   const board = deps.backlogFor(row.source_id);
   const id = row.external_id;
   const failed: string[] = [];
+  const done = await effectsDone(deps.pool, e.seq);
   const attempt = async (what: string, fn: () => Promise<unknown>) => {
+    if (done.has(what)) return;
     try {
       await fn();
+      await recordEffect(deps.pool, e.seq, what);
     } catch (err) {
       failed.push(what);
       console.error(`board mirroring: ${what} failed for item ${itemId}:`, err);
