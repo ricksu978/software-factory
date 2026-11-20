@@ -9,6 +9,7 @@
     "test": "node --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "bdd": "cucumber-js --import \"features/steps/**/*.ts\" --format message:reports/bdd.ndjson",
+    "bdd:repeat": "node scripts/bdd-repeat.ts",
     "start:control": "node src/main.ts",
     "start:cell": "node src/cell/main.ts",
     "aspire:start": "npm --prefix aspire-apphost run aspire:start",
