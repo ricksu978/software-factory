@@ -1209,7 +1209,7 @@ describe("runCell", () => {
     h.deps.api.checks = async () => (rerun ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
     h.deps.api.ciChecks = async () => [
       { name: "lint", conclusion: "success", url: "https://ci/lint" },
-      { name: "unit", conclusion: rerun ? "success" : "failure", url: "https://ci/unit" },
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
     ];
     h.deps.api.rerunFailedChecks = async (sha, checks) => { reruns.push({ sha, checks }); rerun = true; };
     assert.equal(await h.run(), "done");
@@ -1220,6 +1220,30 @@ describe("runCell", () => {
     assert.equal(openPr.body.status, "passed");
     assert.match(openPr.body.message, new RegExp(`The check "unit" failed on ${reruns[0].sha.slice(0, 7)}, so the factory re-ran it once, and it passed on the re-run\\.`));
     assert.doesNotMatch(openPr.body.message, /CI failed on/);
+  });
+
+  test("CI read right after a re-run that still shows the old failed run is waited past until the re-run reports", async () => {
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({});
+    // GitHub hasn't registered the re-run yet on the first two reads after it's asked for: the old failed run still shows.
+    const fresh = () => rerun && readsSinceRerun > 2;
+    h.deps.api.checks = async () => {
+      if (rerun) readsSinceRerun++;
+      return fresh() ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] };
+    };
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: fresh() ? "success" : "failure", url: fresh() ? "https://ci/unit/2" : "https://ci/unit" }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    assert.ok(readsSinceRerun >= 3, `CI was read ${readsSinceRerun} times after the re-run`);
+    const greens = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started");
+    assert.equal(greens.length, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.doesNotMatch(openPr.body.message, /CI failed on|failed again/);
   });
 
   test("CI failing at open-pr whose re-run is refused is charged to the attempt, saying the check couldn't be re-run", async (t) => {

@@ -112,7 +112,9 @@ function checksNow(world: object, sha: string, read: boolean): CiCheck[] {
     const k = `${sha}#${x.name}`;
     const n = c.readsSince.get(k) ?? 0;
     if (read) c.readsSince.set(k, n + 1);
-    return n < r.runningReads ? { ...base, conclusion: "pending", failingTests: [] } : { ...base, conclusion: "success", failingTests: [] };
+    // A re-run is a new run on GitHub, so it has its own URL.
+    const url = `${x.url}/rerun`;
+    return n < r.runningReads ? { ...base, url, conclusion: "pending", failingTests: [] } : { ...base, url, conclusion: "success", failingTests: [] };
   });
 }
 
