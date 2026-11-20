@@ -8,6 +8,7 @@
   "scripts": {
     "test": "node --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-spa.ts",
     "bdd": "cucumber-js --import \"features/steps/**/*.ts\" --format message:reports/bdd.ndjson",
     "start:control": "node src/main.ts",
     "start:cell": "node src/cell/main.ts",

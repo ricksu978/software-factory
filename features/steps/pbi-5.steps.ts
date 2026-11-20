@@ -8,10 +8,10 @@ import { parse } from "yaml";
 
 const repo = process.cwd();
 
-type Result = { status: number | null; out: string };
+export type Result = { status: number | null; out: string };
 type Ctx = { result?: Result; scratch?: string; doc?: unknown; cleanup: string[] };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi5?: Ctx };
   w.pbi5 ??= { cleanup: [] };
   return w.pbi5;
@@ -27,7 +27,7 @@ function run(command: string, cwd: string): Result {
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
-function tail(out: string): string {
+export function tail(out: string): string {
   return out.split("\n").slice(-30).join("\n");
 }
 
