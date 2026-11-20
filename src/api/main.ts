@@ -9,7 +9,6 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Server } from "node:http";
 import type pg from "pg";
-import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
 import { decide, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
 import { activity, BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
@@ -18,11 +17,11 @@ import { createPool, withTx } from "../store/db.ts";
 import { moveInQueue } from "../store/items.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readinessSpend } from "../store/readiness-checks.ts";
-import { handleWebhook } from "../watcher/webhook.ts";
 import { activityLog } from "./activity.ts";
 import { bearerVerifier, discoverJwks, type VerifyBearer } from "./auth.ts";
 import { eventFeed, STREAM_MS } from "./events.ts";
 import { itemDetail } from "./items.ts";
+import { webhookIntake } from "./webhook.ts";
 
 /** The API's port when PORT doesn't set one (design §10). */
 export const API_PORT = 7402;
@@ -126,7 +125,7 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     bodyLimit({ maxSize, onError: () => { throw new Refused(413, `the ${what} is over ${maxSize / (1024 * 1024)} MiB`); } });
   app.post("/webhooks/github", capped(MAX_WEBHOOK, "payload"), async (c) => {
     const rawBody = Buffer.from(await c.req.arrayBuffer());
-    const { status } = await handleWebhook({ pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook }, { headers: c.req.header(), rawBody });
+    const { status } = await webhookIntake({ pool: d.pool, secret: d.webhookSecret }, { headers: c.req.header(), rawBody });
     return c.body(null, status);
   });
 

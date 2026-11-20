@@ -52,7 +52,8 @@ export type CellContext = {
 type Recorded = StageId | "merge";
 
 export type Policies = { scenarios: Policy; prReview: Policy; risk: Policy; dod: Policy };
-export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited";
+/** `restarting`: the cell finished its stage while a restart was being prepared and ended its claim there (PBI 301). */
+export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited" | "restarting";
 
 export type CellDeps = {
   api: CellApi; ctx: CellContext; agent: (a: AgentArgs) => Promise<AgentResult>; git: Git; dir: string;
@@ -78,6 +79,8 @@ const run = promisify(execFile);
 
 // How a run leaves runCell early. Each maps to one exit in `finish`.
 class Stop extends Error {}
+/** A restart is being prepared and the cell's stage has ended, so it starts no further stage (PBI 301). */
+class Restarting extends Error {}
 class Blocked extends Error {}
 /**
  * PBI 215: a Definition of Done line fails the same tests on the base commit, so the base is at fault, not the item.
@@ -523,11 +526,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const fence = new AbortController();
 
   // The lease renewal loop. stop:true aborts the agent, and a 409 or 3 failed renewals in a row end the run.
+  // `restarting` holds the latest lease answer's word on a restart being prepared. It never cuts a stage short: the
+  // cell reads it at each stage boundary, and ends its claim there instead of starting the next stage (PBI 301).
   let failedRenewals = 0;
   let lost = false;
+  let restarting = false;
   const renew = setInterval(() => {
     api.lease({ once: true }).then(
-      (r) => { failedRenewals = 0; if (r.stop) abort.abort(new Stop("stopped by the control plane")); },
+      (r) => {
+        failedRenewals = 0;
+        restarting = r.restarting === true;
+        if (r.stop) abort.abort(new Stop("stopped by the control plane"));
+      },
       (e) => {
         if (e instanceof LeaseLost) { lost = true; fence.abort(e); abort.abort(e); }
         else if (++failedRenewals >= RENEW_GIVE_UP) {
@@ -581,7 +591,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Checks the generation before every push and transition. A stop reply ends the run here.
   const guard = async () => {
-    if ((await api.lease()).stop) throw new Stop("stopped by the control plane");
+    const r = await api.lease();
+    restarting = r.restarting === true;
+    if (r.stop) throw new Stop("stopped by the control plane");
+  };
+  // PBI 301: at a stage boundary, a cell told a restart is being prepared starts no further stage. The lease is
+  // checked afresh: a stage's last check may be a push, a stage report and its uploads back, or a CI wait.
+  const atBoundary = async () => {
+    await guard();
+    if (restarting) throw new Restarting("a restart is being prepared");
   };
   const transition = async (b: TransitionBody) => {
     await guard();
@@ -1434,6 +1452,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // The PR already holds its body and its reviewers, so a clean review only hands it back to them.
     const back = () => transition({ event: "pr_opened", prNumber: ctx.prNumber! });
     if (!reviews) { await back(); return null; }
+    // PBI 301: pr-review is a further stage. The run stays at address, so a restarted cell runs address again.
+    await atBoundary();
     return prReview({ number: ctx.prNumber!, url: `https://github.com/${ctx.repo}/pull/${ctx.prNumber}` }, async () => { await end("passed"); await back(); });
   };
 
@@ -1512,24 +1532,29 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const back = await address();
       if (!back) return "done";
       carried = back;
+      await atBoundary();
     }
     if (start === "understand" || start === "specify") {
-      if (start === "understand") await understand();
+      if (start === "understand") { await understand(); await atBoundary(); }
       await specify();
       return "waiting";
     }
     const order = ["red", "green", "self-review", "open-pr"];
     const resumed = start === "address";
     if (!resumed && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
-    if (start === "red") await red();
+    if (start === "red") { await red(); await atBoundary(); }
     let from = resumed ? 1 : Math.max(order.indexOf(start), 1);
     for (;;) {
-      if (from <= 1) await green(carried);
-      if (from <= 2) await selfReview();
-      const back = (await openPr()) ?? (reviews ? await prReview(opened!, handOverOpened) : null);
+      if (from <= 1) { await green(carried); await atBoundary(); }
+      if (from <= 2) { await selfReview(); await atBoundary(); }
+      let back = await openPr();
+      // Open-pr passed and pr-review is next, in this cell. A claim ended here resumes at open-pr, as a stop's does.
+      if (!back && reviews) { await atBoundary(); back = await prReview(opened!, handOverOpened); }
       if (!back) return "done";
       carried = back;
       from = 1;
+      // Back to green, from open-pr's or pr-review's findings: green is a further stage.
+      await atBoundary();
     }
   } catch (e) {
     try {
@@ -1584,6 +1609,16 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (e instanceof LeaseLost || lost) return "stopped"; // fenced: no push and no further calls
     if (e instanceof RenewalFailed) throw e;
     if (e instanceof Stop) return wrapUp();
+    // PBI 301: the claim ends at a stage boundary with no attempt open, so there's no work in progress to push. The
+    // release sends the item back to Queued until the restart is done, at the stage the run records. That is the next
+    // stage after understand, red, green or self-review passes. After open-pr passes it stays open-pr, and after address
+    // passes it stays address, so the restarted cell runs that stage again before pr-review. Back to green the last
+    // attempt failed, so it stays at open-pr or address: the restarted cell runs that stage again and reads CI
+    // again, and the findings carried to green here aren't kept.
+    if (e instanceof Restarting) {
+      await api.release();
+      return "restarting";
+    }
     if (e instanceof Limited) {
       await git.commitAll("work in progress, usage limit").catch(() => {});
       await end("failed");

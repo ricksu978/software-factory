@@ -402,6 +402,8 @@ async function tickAndRun(world: object, name: string, mode: Engine["mode"]): Pr
     async transition(b: Record<string, any>) { e.calls.push({ route: "/transition", body: b }); },
     async policyResults(b: Record<string, any>) { e.calls.push({ route: "/policy-results", body: b }); },
     async pr(b: Record<string, any>) { e.calls.push({ route: "/pr", body: b }); },
+    // A stop the lease check at the boundary after green finds leaves no attempt open, so the cell releases its claim.
+    async release() { e.calls.push({ route: "/release", body: {} }); },
     async checks() { return "success"; },
     async upload() {},
   };
