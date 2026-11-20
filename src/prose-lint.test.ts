@@ -14,6 +14,13 @@ test("a sentence ends at a stop followed by a capital, a digit, § or an opening
   assert.equal(sentenceBreaks("One. Two! 3 apples? §4 is \"quoted\". (Then) more.").length, 4);
 });
 
+test("a sentence ends inside Markdown emphasis too, and the next may open with it", () => {
+  assert.equal(sentenceBreaks("One test.** Two here.").length, 1);
+  assert.equal(sentenceBreaks("**Goal.** Build it. _Then._ Ship. One. **Two.**").length, 5);
+  assert.deepEqual(sentences("One test.** Two here.\n", ".md", PLAN).map(([l]) => l), [1]);
+  assert.equal(reflow("**Goal.** Build it.\n", ".md"), "**Goal.**\nBuild it.\n");
+});
+
 test("abbreviations, initials and dots inside words don't end a sentence", () => {
   for (const s of ["Use e.g. Node here.", "Node 26.13.0 runs at 0.5 vCPU.", "Ask J. Smith first.", "Read i.e. This.", "A vs. B is fine."]) {
     assert.deepEqual(sentenceBreaks(s), [], s);

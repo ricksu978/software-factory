@@ -18,10 +18,10 @@ export const ONE_SENTENCE_FILES = [
 ];
 const oneSentenceFile = (path) => ONE_SENTENCE_FILES.some((f) => `/${path.replaceAll("\\", "/")}`.endsWith(`/${f}`));
 
-// A sentence ends at ".", "!" or "?", after any closing quote or bracket, followed by whitespace and a capital, a digit,
-// "§" or an opening quote or bracket. "e.g.", "i.e.", "etc.", "vs.", "cf." and a lone capital initial don't end one.
+// A sentence ends at ".", "!" or "?", after any closing quote, bracket or Markdown emphasis ("*", "_"), followed by
+// whitespace and a capital, a digit, "§" or an opening quote, bracket or emphasis. "e.g.", "i.e.", "etc.", "vs.", "cf." and a lone capital initial don't end one.
 const ABBREVIATION = /(?:\b(?:e\.g|i\.e|etc|vs|cf)|(?:^|[\s(])[A-Z])$/;
-const SENTENCE_END = /([.!?])['"”’)\]]*\s+(?=['"“‘(\[]*[A-Z0-9§])/g;
+const SENTENCE_END = /([.!?])[*_'"”’)\]]*\s+(?=[*_'"“‘(\[]*[A-Z0-9§])/g;
 
 /** Where each sentence after the first starts in `text`. */
 export function sentenceBreaks(text) {

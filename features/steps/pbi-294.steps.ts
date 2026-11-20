@@ -73,7 +73,7 @@ const blank = (m: string) => m.replace(/[^\n]/g, " ");
 /** Inline code reads as one word, padded to keep columns. */
 const word = (m: string) => (m.includes("\n") ? blank(m) : "Code".padEnd(m.length, " ").slice(0, Math.max(m.length, 1)));
 const ABBREVIATION = /(?:\b(?:e\.g|i\.e|etc|vs|cf)|(?:^|[\s(])[A-Z])$/;
-const SENTENCE_END = /([.!?])['"”’)\]]*\s+(?=['"“‘(\[]*[A-Z0-9§])/g;
+const SENTENCE_END = /([.!?])[*_'"”’)\]]*\s+(?=[*_'"“‘(\[]*[A-Z0-9§])/g;
 
 /** Where each sentence after the first starts in `text`. */
 export function sentenceBreaks(text: string): number[] {

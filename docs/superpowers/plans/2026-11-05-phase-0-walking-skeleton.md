@@ -1,10 +1,12 @@
 # Software Factory Phase 0 Implementation Plan
 
-> **For agentic workers.** REQUIRED SUB-SKILL:
+> **For agentic workers.**
+  REQUIRED SUB-SKILL:
   Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
   Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal.** Build the Phase 0 walking skeleton from spec §13,
+**Goal.**
+Build the Phase 0 walking skeleton from spec §13,
 in two stages.
 Phase 0a,
 Tasks 1 to 18,
@@ -27,7 +29,8 @@ drain,
 stop a run,
 hold an item and re-queue one.
 
-**Architecture.** One TypeScript codebase with two entry points.
+**Architecture.**
+One TypeScript codebase with two entry points.
 The control plane runs the watcher,
 scheduler,
 dashboard and cell API in one process:
@@ -41,7 +44,8 @@ They talk to the control plane's cell API with a per-run token fenced by the lea
 Postgres is the only state store,
 and every state change appends to the `event` table.
 
-**Tech Stack.** Node 26.13.0 LTS running `.ts` files directly through type stripping,
+**Tech Stack.**
+Node 26.13.0 LTS running `.ts` files directly through type stripping,
 `node:test`,
 TypeScript 7.0.2 for type checks only,
 `pg` 8.23.1,
@@ -56,7 +60,8 @@ TypeScript 7.0.2 for type checks only,
 `@types/node` 26.6.6 and `@types/pg` 8.23.1 for the type check,
 Bicep for infrastructure.
 
-**Spec.** `docs/superpowers/specs/2026-11-05-software-factory-design.html`,
+**Spec.**
+`docs/superpowers/specs/2026-11-05-software-factory-design.html`,
 as revised on this plan's branch with the 14 flow-review fixes.
 §13's Phase 0 row is the scope.
 §14 lists the settled decisions this plan does not reopen.
@@ -197,7 +202,8 @@ as revised on this plan's branch with the 14 flow-review fixes.
   Scenarios that need the owner's machine carry `@local`,
   which cells and CI both skip (Task 4).
 - **A database in every test,
-  inside the cell (PBI 22).** The cell image carries the Postgres 17 server binaries from the PostgreSQL apt repository,
+  inside the cell (PBI 22).**
+  The cell image carries the Postgres 17 server binaries from the PostgreSQL apt repository,
   the version `startTestDb` uses in CI,
   with Debian's default `main` cluster turned off in `/etc/postgresql-common/createcluster.conf`.
   The image sets `FACTORY_PG_BIN` to `/usr/lib/postgresql/17/bin`,
@@ -223,7 +229,8 @@ as revised on this plan's branch with the 14 flow-review fixes.
   PBI 22 then drops `FACTORY_DB_TESTS=skip` and the `not @db` filter from `.factory/dod.md` and `.factory/config.yml`.
   An item with an `@db` scenario no longer fails Red with "not run in the cell".
   - **Two cells,
-    or two test files in one cell.** Every `startTestDb` call has its own server,
+    or two test files in one cell.**
+    Every `startTestDb` call has its own server,
     so nothing is shared:
     no rows,
     no database,
@@ -235,13 +242,15 @@ as revised on this plan's branch with the 14 flow-review fixes.
     One shared server per cell would not do,
     because roles span a whole server and `migrate`'s advisory lock spans one database,
     so parallel files would race on `create role factory_app`.
-  - **Who runs them.** The engine runs `commands.test`,
+  - **Who runs them.**
+    The engine runs `commands.test`,
     `bdd.run` and every `dod.md` command itself,
     through `sh -c` outside the agent's sandbox (Run contract 11),
     so the gates always reach their servers.
     A test the agent runs from its own Bash may sit inside the sandbox where Azure turns it on,
     and Task 19 Step 9 checks whether it can still start a server there.
-  - **The factory's own database.** Locally it is Aspire's `pg` container.
+  - **The factory's own database.**
+    Locally it is Aspire's `pg` container.
     A cell sits on the internal `factory-cells` network,
     and the egress proxy refuses every Postgres port (Task 13),
     so the cell can't reach it.
@@ -286,22 +295,27 @@ as revised on this plan's branch with the 14 flow-review fixes.
 
 ## Review Focus
 
-1. **Planted instructions in PBI text.** An item body that asks for secrets,
+1. **Planted instructions in PBI text.**
+   An item body that asks for secrets,
    CI changes or access outside the repo is flagged NotReady by the gate,
    and no cell token can post a status or check.
    Tests in Task 9 and Task 7.
-2. **Zombie cell after lease expiry.** An old cell whose lease was re-claimed gets 409 on every cell API write,
+2. **Zombie cell after lease expiry.**
+   An old cell whose lease was re-claimed gets 409 on every cell API write,
    so it can't push,
    comment or move state.
    Test in Task 12.
-3. **Duplicate or replayed webhook deliveries.** The same `X-GitHub-Delivery` id processed twice yields one event.
+3. **Duplicate or replayed webhook deliveries.**
+   The same `X-GitHub-Delivery` id processed twice yields one event.
    A bad or missing signature yields 401 and no event.
    Tests in Task 7.
-4. **Spoofed identity headers.** A request that carries `X-MS-CLIENT-PRINCIPAL` on an auth-excluded path never authenticates a dashboard action,
+4. **Spoofed identity headers.**
+   A request that carries `X-MS-CLIENT-PRINCIPAL` on an auth-excluded path never authenticates a dashboard action,
    and an unknown signed-in subject gets the no-access page.
    Tests in Task 15,
    plus a live check in Task 19.
-5. **Control plane restart mid-run.** A fresh scheduler process sees the running cell's live lease and starts no second cell for that item.
+5. **Control plane restart mid-run.**
+   A fresh scheduler process sees the running cell's live lease and starts no second cell for that item.
    Test in Task 13.
 
 ## Run contract
@@ -309,7 +323,8 @@ as revised on this plan's branch with the 14 flow-review fixes.
 These rules hold across every task.
 A task that touches one of them follows this section and does not restate it.
 
-1. **Resume pointer.** `run.next_stage` names the stage the next cell runs,
+1. **Resume pointer.**
+   `run.next_stage` names the stage the next cell runs,
    and the scheduler passes it to the cell as `RESUME_FROM`.
    These are its only writers:
    - `/stage` with `passed` sets it to the next stage in the pinned SOP;
@@ -324,7 +339,8 @@ A task that touches one of them follows this section and does not restate it.
    - `requeued` sets it to `open-pr` when `prState` reports the run's PR closed without a merge,
      so `openOrUpdatePr` opens a fresh PR from the kept branch;
    - a new run starts it at `understand`.
-2. **Leases and generations.** `lease_generation` goes up by 1 exactly twice in a lease's life:
+2. **Leases and generations.**
+   `lease_generation` goes up by 1 exactly twice in a lease's life:
    when a claim moves an item into InProgress,
    and when any transition moves an item out of InProgress.
    The second bump fences the old cell,
@@ -332,7 +348,8 @@ A task that touches one of them follows this section and does not restate it.
    Leaving InProgress also clears `lease_owner` and `lease_expires`.
    `expireLeases` looks only at InProgress items.
    No other transition touches the generation.
-3. **Waiting on people.** The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered,
+3. **Waiting on people.**
+   The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered,
    plus every InReview item.
    Answered and Abandoned items don't count.
    The brake gates only claims that start new work:
@@ -345,7 +362,8 @@ A task that touches one of them follows this section and does not restate it.
    `usage_limited` or a late answer.
    So answering never deadlocks the line,
    and an address run never waits behind the brake.
-4. **Item scope.** Specify tags every feature file it writes with `@pbi-<externalId>` at Feature level.
+4. **Item scope.**
+   Specify tags every feature file it writes with `@pbi-<externalId>` at Feature level.
    - `redGate` and `traceability` consider only scenarios carrying that tag.
      Among them,
      `redGate` needs a `@regression` scenario green rather than red (Task 10).
@@ -355,7 +373,8 @@ A task that touches one of them follows this section and does not restate it.
      `run.locked_files` records the files carrying the tag,
      and `matchesLock` diffs only those files.
      So other items merged into the base never trip the lock.
-5. **Cell context.** The cell's env holds only `RUN_ID`,
+5. **Cell context.**
+   The cell's env holds only `RUN_ID`,
    `ITEM_ID`,
    `GENERATION`,
    `RUN_TOKEN`,
@@ -431,7 +450,8 @@ A task that touches one of them follows this section and does not restate it.
      as PBI 140 has it.
      A later claim's `lease_expired` says nothing about the attempt,
      since that claim's cell may have opened no attempt at the stage.
-6. **CI status.** Only the control plane reads checks,
+6. **CI status.**
+   Only the control plane reads checks,
    with the App's own `RepoHost`.
    The cell reports its PR through `POST /pr` as soon as the PR exists.
    After every push,
@@ -465,7 +485,8 @@ A task that touches one of them follows this section and does not restate it.
    Cell tokens keep the permissions in Global Constraints.
    The cell's own repo calls go through `cellRepoHost`,
    which opens PRs and requests reviewers with the token from `/github-token`.
-7. **Branches and runs.** A run's branch is `factory/pbi-<externalId>-r<runNumber>`.
+7. **Branches and runs.**
+   A run's branch is `factory/pbi-<externalId>-r<runNumber>`.
    These start a new run on a new branch from the base:
    - `criteria_changed`;
    - a re-queue of an item whose PR already merged.
@@ -473,7 +494,8 @@ A task that touches one of them follows this section and does not restate it.
    The previous PR,
    if still open,
    is closed with a comment that names the kept branch.
-8. **Board mirroring.** Every committed transition and override is mirrored onto the item's board.
+8. **Board mirroring.**
+   Every committed transition and override is mirrored onto the item's board.
    Since PBI 219 the worker does it from the event's board mirror outbox row,
    not from a hook in the process that made the change.
    - It writes `fieldMap.statusFor[to]` through `setStatus`.
@@ -496,7 +518,8 @@ A task that touches one of them follows this section and does not restate it.
      the PR is closed with a comment that names the kept branch.
      The poller already closes it when it withdraws an item (Task 8),
      so the hook skips a PR that's no longer open.
-9. **End-of-stage order.** A stage ends with these calls in this order:
+9. **End-of-stage order.**
+   A stage ends with these calls in this order:
    `/stage` with `passed`,
    then every `/upload-url` upload,
    then `/pr` when the stage opened a PR,
@@ -506,7 +529,8 @@ A task that touches one of them follows this section and does not restate it.
    A stopped attempt (PBI 140) sends its uploads first and `/stage` with `stopped` last,
    because during a restart that report ends the claim and raises the generation too.
    Its row already exists from its `started` report.
-10. **Review triggers.** Requested changes count only when a review from an allowlisted login was submitted after `run.reviews_seen_at` and either requests changes or leaves a comment in a thread that is still unresolved.
+10. **Review triggers.**
+    Requested changes count only when a review from an allowlisted login was submitted after `run.reviews_seen_at` and either requests changes or leaves a comment in a thread that is still unresolved.
     The second case covers a review that only comments,
     such as the PR reviewer's,
     whose findings are inline threads.
@@ -570,7 +594,8 @@ A task that touches one of them follows this section and does not restate it.
     GitHub's aggregate `reviewDecision` isn't used,
     because it can stay `CHANGES_REQUESTED` after the fix is pushed.
 
-    **Trusted reviewers.** The repo is public,
+    **Trusted reviewers.**
+    The repo is public,
     and "Anyone with read access can review and comment on proposed changes" ([GitHub](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/about-pull-request-reviews)).
     So a review,
     and each review comment,
@@ -615,20 +640,23 @@ A task that touches one of them follows this section and does not restate it.
     and without them a second round would see a reviewer's follow-up but not the reply it answers.
     The engine gives the addresser that list and nothing else from the PR,
     so an untrusted comment never reaches its brief.
-11. **Policy files.** The factory hard-codes no quality criteria.
+11. **Policy files.**
+    The factory hard-codes no quality criteria.
     Spec §6 "Policy files" defines five files:
     `dor.md`,
     `scenarios.md`,
     `pr-review.md`,
     `risk.md` and `dod.md`.
-    - **Loading.** The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`.
+    - **Loading.**
+      The factory reads them from the repo's `.factory/` at the run's pinned `config_sha`.
       Readiness has no run yet,
       so it reads the default branch head.
       A read that returns 404 means the file is absent.
       Any other read error throws,
       and the step retries on its next turn.
       A read error never falls back to a default.
-    - **Defaults.** An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`,
+    - **Defaults.**
+      An absent file falls back to `$FACTORY_POLICY_DIR/<name>.md`,
       except `dod.md`,
       which has no default.
       A `Policy.sha` is the SHA-256 of its raw text,
@@ -647,7 +675,8 @@ A task that touches one of them follows this section and does not restate it.
       so an uncommitted edit or a local commit in the checkout never counts,
       and a failed fetch leaves the defaults at the commit last fetched.
       Cells pass no reader and read their image's `/app/policy`.
-    - **Criteria.** Only `dor.md`,
+    - **Criteria.**
+      Only `dor.md`,
       `pr-review.md` and `dod.md` have criteria,
       one per top-level `- [ ]` line,
       numbered from 1 in file order.
@@ -665,7 +694,8 @@ A task that touches one of them follows this section and does not restate it.
       a fail wins.
       `scenarios.md` and `risk.md` are guidance,
       given whole to the agent that uses them.
-    - **Commands.** A criterion holding `` `run: <command>` `` is allowed only in `dod.md`.
+    - **Commands.**
+      A criterion holding `` `run: <command>` `` is allowed only in `dod.md`.
       `loadPolicy` rejects it in any other file with `PolicyError`.
       The cell runs `dod.md` commands at the end of green,
       in the checkout,
@@ -695,7 +725,8 @@ A task that touches one of them follows this section and does not restate it.
       This repo's is `npm ci`.
       Without it,
       a cell that resumes past green runs its first gate command with nothing installed.
-    - **CI checks (PBI 229).** A `dod.md` criterion may also hold `` `ci: <check name>` ``,
+    - **CI checks (PBI 229).**
+      A `dod.md` criterion may also hold `` `ci: <check name>` ``,
       which `parseCriteria` reads into `Criterion.ci`,
       and `loadPolicy` rejects it outside `dod.md` with `PolicyError`,
       as it does `run:`.
@@ -723,7 +754,8 @@ A task that touches one of them follows this section and does not restate it.
       so the engine adds that note to the attempt's `/stage` message,
       and the stage fails only on failed lines.
       This repo's `dod.md` line 1 names its `ci` job.
-    - **Base failures (PBI 215).** A `run:` line that fails is run again,
+    - **Base failures (PBI 215).**
+      A `run:` line that fails is run again,
       before the failure counts against the item,
       on the run's base commit,
       `origin/<base>` as the claim's merge fetched it.
@@ -778,7 +810,8 @@ A task that touches one of them follows this section and does not restate it.
       such as a missing `origin/<base>` or a worktree that can't be added:
       the engine logs the error and treats the base as sharing no failing test,
       so the cell carries on instead of ending.
-    - **CI failures go back to Green (PBI 292).** `src/cell/ci-failure.ts` holds the pieces.
+    - **CI failures go back to Green (PBI 292).**
+      `src/cell/ci-failure.ts` holds the pieces.
       When CI fails on a head open-pr,
       address or pr-review's fix pushed,
       `ciFailed` reads `GET /ci-checks` on it into a `CiFailure`,
@@ -818,7 +851,8 @@ A task that touches one of them follows this section and does not restate it.
       Green running out of retries still fails the item,
       as PBI 128 has it.
       An address retry whose head is one CI already failed on goes back to Green without reading CI again.
-    - **Fresh DoD.** Self-review and address can push code after green,
+    - **Fresh DoD.**
+      Self-review and address can push code after green,
       and CI may not run a `run:` line such as `run: npm run e2e`.
       So each `dod.md` verdict records the commit it was checked at,
       in `policy_result.checked_sha`.
@@ -831,11 +865,13 @@ A task that touches one of them follows this section and does not restate it.
       counted against green's retries,
       and counts as a failed address attempt.
       The PR checklist names the commit its verdicts were checked at.
-    - **Results.** Every result is stored in `policy_result`,
+    - **Results.**
+      Every result is stored in `policy_result`,
       with `source` set to `repo` or `default`.
       The control plane writes readiness rows itself,
       and the cell sends its rows through `POST /policy-results` (Task 12).
-    - **Re-gating.** `readinessSha(texts)` (Task 9) is the SHA-256 over every file the readiness check reads:
+    - **Re-gating.**
+      `readinessSha(texts)` (Task 9) is the SHA-256 over every file the readiness check reads:
       the five policy files and `.factory/config.yml`.
       Each file contributes its raw text as read,
       or the default's text when the repo has none,
@@ -867,15 +903,18 @@ A task that touches one of them follows this section and does not restate it.
       the poller re-runs the gate on the item.
       An item in a repo the factory doesn't know gets a sha over the logic alone,
       so a logic change re-checks it too.
-    - **Engine rules.** The rules no policy file can weaken are the list under "What stays in the engine" in spec §6.
+    - **Engine rules.**
+      The rules no policy file can weaken are the list under "What stays in the engine" in spec §6.
       They live in code and prompts that the factory owns.
-12. **Network retries (PBI 259).** `withRetries` in `src/cell/retry.ts` tries a call again after 10,
+12. **Network retries (PBI 259).**
+    `withRetries` in `src/cell/retry.ts` tries a call again after 10,
     20,
     40 and 80 seconds (`RETRY_WAITS_MS`) while the failure is transient,
     then throws `NetworkError`,
     whose message is `<call> failed on a network or GitHub error after <n> tries: <last error>`.
     Any other failure is thrown at once.
-    - **Cell API calls.** `httpCellApi` retries every call on a 5xx answer or a fetch that rejects,
+    - **Cell API calls.**
+      `httpCellApi` retries every call on a 5xx answer or a fetch that rejects,
       which covers a refused or reset connection and a try with no answer within `CALL_TIMEOUT_MS`,
       90 seconds.
       Each try sends the same request.
@@ -887,7 +926,8 @@ A task that touches one of them follows this section and does not restate it.
       the engine's renewal loop uses it,
       so its tolerance of 3 failed renewals stays 3 minutes.
       The lease check before a push or a transition retries like any call.
-    - **git.** `shellGit` runs `push` and `fetch` with a 10-minute limit (`REMOTE_TIMEOUT_MS`) and retries them when `gitNetworkFault` holds:
+    - **git.**
+      `shellGit` runs `push` and `fetch` with a 10-minute limit (`REMOTE_TIMEOUT_MS`) and retries them when `gitNetworkFault` holds:
       the command was killed by its limit,
       or its stderr shows a host that can't be resolved or reached,
       a reset,
@@ -906,7 +946,8 @@ A task that touches one of them follows this section and does not restate it.
       such as `RenewalFailed`,
       so `finish` acts on the fence and makes no further control-plane calls.
       The clone in `src/cell/main.ts` isn't retried.
-    - **The lease fence.** `withRetries` takes a `RetryFence`,
+    - **The lease fence.**
+      `withRetries` takes a `RetryFence`,
       `{ signal?, beforeRetry? }`.
       An aborted `signal` ends the loop with its reason,
       before a try,
@@ -925,13 +966,15 @@ A task that touches one of them follows this section and does not restate it.
       and the push of work in progress passes `api.lease()`,
       so a lease check is one command before every push try,
       retries included.
-    - **The cell API.** A route that throws Octokit's error for GitHub answering 5xx,
+    - **The cell API.**
+      A route that throws Octokit's error for GitHub answering 5xx,
       or for a request to GitHub that got no answer (status 500,
       or an `AbortError`),
       answers 503 with `{ error: "GitHub failed: <message>" }`,
       through `githubFailed` in `src/adapters/github/errors.ts`.
       A GitHub 4xx and the cell API's own faults still answer 500.
-    - **The GitHub time limit.** Every Octokit client the factory builds for GitHub is `TimedOctokit` from `src/adapters/github/timed.ts`,
+    - **The GitHub time limit.**
+      Every Octokit client the factory builds for GitHub is `TimedOctokit` from `src/adapters/github/timed.ts`,
       whose `fetch` aborts a request after `GITHUB_REQUEST_TIMEOUT_MS`,
       30 seconds.
       That covers the Apps that the cell API,
@@ -1039,7 +1082,8 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   Expected:
   1 pass.
 - [ ] **Step 4:
-  Write the item's scenarios.** PBI 1's own feature file,
+  Write the item's scenarios.**
+  PBI 1's own feature file,
   `features/pbi-5-project-skeleton.feature`,
   holds one scenario per acceptance criterion,
   and `features/steps/pbi-5.steps.ts` defines their steps.
@@ -1050,7 +1094,8 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   every scenario passes,
   and `reports/bdd.ndjson` holds a `testCaseFinished` message for each. cucumber-js 13.3.0 loads the `.ts` step files through Node 26's type stripping with no loader.
 - [ ] **Step 5:
-  Run `npm run typecheck`.** Expected:
+  Run `npm run typecheck`.**
+  Expected:
   exit 0.
 - [ ] **Step 6:
   Write `.factory/config.yml`** in the shape Task 9's `parseRepoConfig` reads.
@@ -1110,14 +1155,16 @@ Azure comes in Task 19.
   11 and 14 read before they start.
 
 - [ ] **Step 1:
-  Install Node 26.13.0 locally.** The plan pins Node 26,
+  Install Node 26.13.0 locally.**
+  The plan pins Node 26,
   while the machine has v24.20.0 (`node --version`).
   Aspire's own prerequisite is "Node.js 20.19+,
   22.13+,
   or 24+" ([aspire.dev](https://aspire.dev/get-started/prerequisites/)),
   so Node 26 meets both.
 - [ ] **Step 2:
-  Scaffold the AppHost.** Run `aspire init --language typescript --non-interactive --suppress-agent-init --skills none --skill-locations none` at the repo root.
+  Scaffold the AppHost.**
+  Run `aspire init --language typescript --non-interactive --suppress-agent-init --skills none --skill-locations none` at the repo root.
   Aspire CLI 13.6.4 creates `aspire-apphost/apphost.mts` in its own npm package,
   writes `aspire.config.json` at the root,
   and adds `aspire:*` scripts to the root `package.json`.
@@ -1311,7 +1358,8 @@ Azure comes in Task 19.
     `src/apphost/start.test.ts`,
     `src/apphost/node-start.test.ts` and `features/pbi-206-apphost-cell-image-resource.feature` cover it.
 - [ ] **Step 4:
-  Wire the environment.** Both `migrate` and `control` get:
+  Wire the environment.**
+  Both `migrate` and `control` get:
   - `FACTORY_ENV=local` and `FACTORY_DEV_LOGIN` from `dev-login`,
     set only when `executionContext().isRunMode()` is true ([aspire.dev](https://aspire.dev/app-host/typescript-apphost/)),
     so nothing published from this AppHost carries them.
@@ -1417,7 +1465,8 @@ Azure comes in Task 19.
     Aspire prompts for any parameter left without a value:
     "If no value is found,
     the dashboard or CLI prompts for the value" ([aspire.dev](https://aspire.dev/fundamentals/external-parameters/)).
-  - **Bot assignment probe.** Try to assign the App's bot user to an issue in this repo:
+  - **Bot assignment probe.**
+    Try to assign the App's bot user to an issue in this repo:
     `gh api repos/<o>/<r>/issues/<n>/assignees -f assignees[]=<app-slug>[bot]` with an installation token.
     Record whether GitHub accepts it.
     Task 6 reads the result.
@@ -1453,7 +1502,8 @@ Azure comes in Task 19.
     `query()` with `sandbox: { enabled: true, failIfUnavailable: true, network: { allowedDomains: ["api.github.com", "github.com", "registry.npmjs.org"], strictAllowlist: true } }`,
     asking it to run `curl -sI https://example.com` and then `curl -sI https://api.github.com`.
 - [ ] **Step 7:
-  Run it.** `aspire run`.
+  Run it.**
+  `aspire run`.
   Expected:
   - The Postgres and Azurite containers are healthy.
   - `migrate` exits 0.
@@ -1464,7 +1514,8 @@ Azure comes in Task 19.
   Record in the spike file the exact env var names each resource received for the database and blobs,
   and whether the TypeScript AppHost carried every resource above.
 - [ ] **Step 8:
-  Cell container probes.** Write `cell/Dockerfile` on `node:26.13.0-bookworm` with `git`,
+  Cell container probes.**
+  Write `cell/Dockerfile` on `node:26.13.0-bookworm` with `git`,
   `curl`,
   `bubblewrap` and `socat`.
   Build it for this machine's own architecture:
@@ -1501,7 +1552,8 @@ Azure comes in Task 19.
     Operation not permitted",
     under the default `docker run` and with `--security-opt seccomp=unconfined` too.
 - [ ] **Step 9:
-  Record and commit.** Write each probe's expected and actual result to `docs/superpowers/spikes/2026-11-local-platform.md`,
+  Record and commit.**
+  Write each probe's expected and actual result to `docs/superpowers/spikes/2026-11-local-platform.md`,
   then commit `chore: local platform on Aspire`.
 
 ---
@@ -1528,7 +1580,8 @@ Azure comes in Task 19.
     The caller logs it as an override event.
 
 - [ ] **Step 1:
-  Write the failing table test.** It asserts every edge in the spec §5 diagram,
+  Write the failing table test.**
+  It asserts every edge in the spec §5 diagram,
   plus the withdrawal and criteria-change moves that §5's "Backlog changes" bullet describes in prose:
 
 ```ts
@@ -1580,13 +1633,15 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   to Done,
   once every child filed for it is Done (PBI 226).
 - [ ] **Step 2:
-  Run `node --test src/core/states.test.ts`.** Expected:
+  Run `node --test src/core/states.test.ts`.**
+  Expected:
   FAIL,
   module not found.
 - [ ] **Step 3:
   Implement `next` and `overrideTo`** in `src/core/states.ts` as a lookup table keyed `` `${from}:${event}` ``.
 - [ ] **Step 4:
-  Run the test.** Expected:
+  Run the test.**
+  Expected:
   every case passes.
 - [ ] **Step 5:
   Commit** `feat(core): PBI state machine`.
@@ -1973,17 +2028,21 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `transitionItem` on `Done` with `claimed` throws `IllegalTransition`,
     and both the item and the event table are unchanged.
   - `upsertItem` called twice with the same `(source_id, external_id)` returns the same id.
-  - **Generations.** A transition out of InProgress raises `lease_generation` by 1 and clears `lease_owner` and `lease_expires`.
+  - **Generations.**
+    A transition out of InProgress raises `lease_generation` by 1 and clears `lease_owner` and `lease_expires`.
     A transition between two non-InProgress states leaves all three untouched.
-  - **Append-only.** Connected as `factory_app`,
+  - **Append-only.**
+    Connected as `factory_app`,
     an `UPDATE event` fails with a permission error.
-  - **Migrate entry point.** Running `migrate-cli.ts` twice with `FACTORY_ENV=local`,
+  - **Migrate entry point.**
+    Running `migrate-cli.ts` twice with `FACTORY_ENV=local`,
     `FACTORY_DEV_LOGIN=octo` and a sources file with one entry leaves one `repo` row,
     one `backlog_source` row and one owner `octo` with `product_owner` and `github_login = 'octo'`.
     Without `FACTORY_ENV`,
     it seeds no user.
 - [ ] **Step 3:
-  Run `node --test src/store/items.test.ts`.** Expected:
+  Run `node --test src/store/items.test.ts`.**
+  Expected:
   FAIL.
 - [ ] **Step 4:
   Implement** `db.ts`,
@@ -1991,7 +2050,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   the item functions in `items.ts`,
   and the empty `runs.ts` exports used later.
 - [ ] **Step 5:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 6:
   Commit** `feat(store): schema, transitions and event log`.
@@ -2022,7 +2082,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
 
 - [ ] **Step 1:
   Write failing tests:**
-  - **Claim order.** `claimNext` picks the bug item of a `main_break` that still stands before anything else (PBI 255).
+  - **Claim order.**
+    `claimNext` picks the bug item of a `main_break` that still stands before anything else (PBI 255).
     Then it picks an item with an active `start_now` override,
     then the final-stage group,
     then the rest,
@@ -2049,12 +2110,15 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     which is any item whose `blocked_by` isn't empty.
     An answered item with a newer open question isn't claimable.
     It moves the claimed item to InProgress through `transitionItem(..., "claimed")`.
-  - **Generations.** Each claim sets `lease_generation` to the previous value plus 1,
+  - **Generations.**
+    Each claim sets `lease_generation` to the previous value plus 1,
     and `lease_expires = now + 300s`.
     That is the claim half of Run contract 2.
-  - **Renewal.** `renewLease` with the current generation returns `"ok"` and pushes `lease_expires` out.
+  - **Renewal.**
+    `renewLease` with the current generation returns `"ok"` and pushes `lease_expires` out.
     With an older generation it returns `"lost"` and changes nothing.
-  - **Expiry.** `expireLeases(now + 301s)` returns the item,
+  - **Expiry.**
+    `expireLeases(now + 301s)` returns the item,
     moves it to Queued through `lease_expired`,
     and leaves `run.next_stage` unchanged,
     so a new cell resumes there.
@@ -2065,10 +2129,12 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     Rows that already ended keep what they had.
     A stopped attempt uses up none of the stage's retries (PBI 239).
     An expired `lease_expires` on an item that isn't InProgress is ignored.
-  - **Concurrency.** Two concurrent `claimNext` calls with one Queued item return one claim and one null.
+  - **Concurrency.**
+    Two concurrent `claimNext` calls with one Queued item return one claim and one null.
     Use `SELECT ... FOR UPDATE SKIP LOCKED`.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
   Implement** the four functions.
@@ -2088,7 +2154,8 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   `config_sha` and `repo_id` right after the claim,
   in Task 13.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(store): leases with generation fencing`.
@@ -2172,7 +2239,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
   It also exports `OPT_IN_LABEL = "factory"` and `CLAIM_MARKER = "factory:in-progress"`.
 
 - [ ] **Step 1:
-  Write the contract suite.** Each case runs against the adapter that `make` returns:
+  Write the contract suite.**
+  Each case runs against the adapter that `make` returns:
   - `listEligible` returns only open items carrying the opt-in label.
     A closed item,
     such as one the factory closed at Done,
@@ -2219,7 +2287,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
   The claim marker is a `factory:in-progress` label.
   The bot assignment probe in Task 2 Step 5 decides whether the GitHub adapter also assigns the App.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(adapters): interfaces, fake adapter, contract suite`.
@@ -2251,30 +2320,35 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     It resolves the project's node id once,
     through GraphQL `user(login:)` or `organization(login:)` and `projectV2(number:)`,
     so `config/sources.yml` holds only the number the board's URL shows.
-    - **Events.** Issue,
+    - **Events.**
+      Issue,
       PR,
       check and dependency events come from the App webhook.
       Project item changes come only through the 5-minute poll.
       A user-owned project has no `projects_v2_item` webhook,
       and an organization's names an item node rather than an issue number,
       so `parseWebhook` maps it to `ignored` and the next poll picks the change up.
-    - **Tokens.** Board reads and writes use `projectToken` when `owner.type` is `user`,
+    - **Tokens.**
+      Board reads and writes use `projectToken` when `owner.type` is `user`,
       and the App's installation token when it's `org`.
       Issue comments,
       labels and closing go through the App in both cases.
-    - **Test.** A user-owned config with a null `projectToken` throws at construction,
+    - **Test.**
+      A user-owned config with a null `projectToken` throws at construction,
       naming the missing secret.
   - `githubRepoHost(app: App, installationId: number): RepoHost`,
     used only in the control plane,
     which holds the App key.
-    - **`onBranch`.** `GET /repos/{o}/{r}/compare/{sha}...{branch}` answers `status: "ahead"` when the branch contains the sha and `"identical"` at its head,
+    - **`onBranch`.**
+      `GET /repos/{o}/{r}/compare/{sha}...{branch}` answers `status: "ahead"` when the branch contains the sha and `"identical"` at its head,
       and `"diverged"` or `"behind"` otherwise,
       so only the first two are true.
       The probe on this repo:
       `compare/5d86133...main` gave `ahead` and `compare/9a850c6...main`,
       a commit only on a factory branch,
       gave `diverged`.
-    - **CI on a red main (PBI 255).** `checkRuns` reads one page of 100 check runs,
+    - **CI on a red main (PBI 255).**
+      `checkRuns` reads one page of 100 check runs,
       and a completed run passes when its conclusion is `success`,
       `neutral` or `skipped`.
       It reports a completed run that was `cancelled` as `cancelled`,
@@ -2302,7 +2376,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
       or NotReady's.
       A retry finds the App's own issue with that marker through `findIssues` and files none,
       but still adds it to the board.
-    - **`commitsAfter` (PBI 260).** The same compare,
+    - **`commitsAfter` (PBI 260).**
+      The same compare,
       `{sha}...{branch}`,
       lists the commits the branch holds after the sha when its `status` is `"ahead"`.
       Any other status,
@@ -2319,10 +2394,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
       which hold the newest.
       `fakeRepoHost` treats its `branches` list as the first-parent line and returns the entries after the sha in it for `repo@branch`,
       and none for a sha that isn't there.
-    - **`checksOnSha` and `none`.** `none` means `GET .../commits/{sha}/check-runs` and `GET .../commits/{sha}/status` both report `total_count: 0`.
+    - **`checksOnSha` and `none`.**
+      `none` means `GET .../commits/{sha}/check-runs` and `GET .../commits/{sha}/status` both report `total_count: 0`.
       A `githubRepoHost` that never returns `none` leaves the cell API answering `pending` for good,
       instead of `none` after 10 minutes.
-    - **`failedChecksOnSha` (PBI 232).** A failed check is a check run that completed with a conclusion other than `success`,
+    - **`failedChecksOnSha` (PBI 232).**
+      A failed check is a check run that completed with a conclusion other than `success`,
       `neutral` or `skipped`,
       as `checksOnSha` reads it.
       Its URL is `html_url`,
@@ -2421,7 +2498,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     a dismissal,
     an empty summary and mixed-case logins.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
   Implement.**
@@ -2434,10 +2512,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     `<!-- factory:KEY -->`,
     and checks for it before posting.
 - [ ] **Step 4:
-  Run the unit tests.** Expected:
+  Run the unit tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
-  Run the contract suite against GitHub.** `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account,
+  Run the contract suite against GitHub.**
+  `backlog.contract.test.ts` calls `backlogContract("github", ...)` against a sandbox Project on your personal account,
   using `github-project-token`,
   and only when `FACTORY_GH_CONTRACT=1` is set.
   It seeds issues in `FACTORY_GH_REPO`,
@@ -2516,18 +2596,21 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
   - The cursor persists in `backlog_source.cursor`,
     so a second `pollOnce` with no changes upserts nothing.
   - A paused `backlog_source` is skipped.
-  - **Dependencies.** A Queued item whose `openDependencies` returns `["12"]` gets `blocked_by = {12}`,
+  - **Dependencies.**
+    A Queued item whose `openDependencies` returns `["12"]` gets `blocked_by = {12}`,
     and the next poll,
     with the list empty,
     clears it.
-  - **Gate.** An Eligible item that passes `gate` moves to Queued through `ready`,
+  - **Gate.**
+    An Eligible item that passes `gate` moves to Queued through `ready`,
     with `item.blocked_by` set to its `openDependencies` in the same write,
     so a blocked item is never claimable before the next poll reads them (PBI 237).
     One that fails moves to NotReady through `readiness_failed` with a reasons comment.
     The gate's `configValid` comes from `parseRepoConfig` on the repo's `.factory/config.yml` at the default branch.
     Its `dor` comes from `loadPolicy` on the same commit,
     and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
-  - **Criteria change.** An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`.
+  - **Criteria change.**
+    An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`.
     In the same transaction:
     - `item.criteria_hash` takes the new value,
       so the next poll sees no change and fires nothing more;
@@ -2545,7 +2628,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     InProgress,
     SignOff and NeedsInput,
     and a second `pollOnce` after the change fires nothing.
-  - **Withdrawal.** An InProgress item returned by `getItem` with the label gone,
+  - **Withdrawal.**
+    An InProgress item returned by `getItem` with the label gone,
     or with `closed: true`,
     moves to Abandoned through `withdrawn`,
     which fences its cell.
@@ -2553,24 +2637,30 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Either way the poller closes the run's PR if it's still open,
     with a comment that names the kept branch,
     since Run contract 8's hook only arrives in Task 12.
-  - **Withdrawal before the queue.** An Eligible or NotReady item with the label gone,
+  - **Withdrawal before the queue.**
+    An Eligible or NotReady item with the label gone,
     or closed,
     moves to Abandoned through `withdrawn` and is never gated.
     Given its label back,
     an item withdrawn from NotReady moves to Eligible through `returned` and is gated in the same poll.
     One withdrawn from Queued stays Abandoned (PBI 168).
-  - **Conflict or requested changes.** An InReview item whose PR reports `mergeable: false`,
+  - **Conflict or requested changes.**
+    An InReview item whose PR reports `mergeable: false`,
     or a `lastChangesRequestedAt` after `run.reviews_seen_at`,
     moves to Queued through `changes_requested`,
     with `run.next_stage = "address"`.
     Two tests cover the edges:
-    - **Addressed review.** After address has run,
+    - **Addressed review.**
+      After address has run,
       a review older than its claim leaves the item in InReview on the next poll.
-    - **Review during address.** A review submitted while address was running requeues the item on the first poll after it returns to InReview.
-    - **Stranger's review.** A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview,
+    - **Review during address.**
+      A review submitted while address was running requeues the item on the first poll after it returns to InReview.
+    - **Stranger's review.**
+      A changes-requested review from a login that maps to no allowlisted user leaves the item in InReview,
       because the poller passes only allowlisted `github_login` values to `prState`.
       The same review from the dev owner's login requeues the item to address.
-  - **Policy change.** After any readiness input changes on the default branch,
+  - **Policy change.**
+    After any readiness input changes on the default branch,
     so `readinessSha` no longer matches `item.readiness_policy_sha`,
     the next `pollOnce` moves every NotReady item to Eligible through `policy_changed`.
     The gate then runs as usual,
@@ -2591,13 +2681,15 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     or fixing a `pr-review.md` that held a `run:` line,
     re-gates too,
     and posts a fresh comment.
-  - **Judge failure.** A `judge` that throws,
+  - **Judge failure.**
+    A `judge` that throws,
     as `haikuJudge` does on a usage limit (Task 11),
     leaves that item in Eligible with no comment.
     The same `pollOnce` still gates the other items,
     reads every `prState` and saves its cursor,
     so a limit that lasts days never stops merge or withdrawal detection.
-  - **Unanswered split.** When `gate` returns an oversized item's split with `splitUnanswered(out.split)` true,
+  - **Unanswered split.**
+    When `gate` returns an oversized item's split with `splitUnanswered(out.split)` true,
     a coding-model run that failed or threw,
     `pollOnce` throws for that item before `move`,
     so it stays Eligible,
@@ -2612,7 +2704,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     The coding model answers on the third poll,
     which posts one proposal and a readiness comment without the no-answer line,
     and moves the item to NotReady.
-  - **Missed merge.** An InReview item whose PR reports `merged: true` moves to Accepted through `merged`,
+  - **Missed merge.**
+    An InReview item whose PR reports `merged: true` moves to Accepted through `merged`,
     recording `merge_sha`.
     An InProgress item whose open run has a `pr_number` does the same,
     as the `pr_merged` webhook does in Task 17 when a person merges during address (PBI 142).
@@ -2625,7 +2718,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so the dashboard stops asking for an answer (PBI 194).
     The PRs of all three states are read before withdrawal,
     so a merge that closed the board item still counts as a merge.
-  - **Closed PR.** An InReview,
+  - **Closed PR.**
+    An InReview,
     InProgress or NeedsInput item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`,
     as the `pr_closed` webhook does in Task 17.
     Without this,
@@ -2638,7 +2732,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     A NeedsInput item withdrawn this way keeps its open question,
     and a re-queue closes it and resumes at open-pr (the Re-queue variants in Task 13),
     so the next poll doesn't withdraw it again over the same closed PR (PBI 194).
-  - **Base passed (PBI 260).** A NeedsInput item that isn't held,
+  - **Base passed (PBI 260).**
+    A NeedsInput item that isn't held,
     whose open `needs_input` question carries a `base_failure`,
     is re-queued once CI passes on a newer commit of its base.
     The poller asks `commitsAfter(repo, base, sha)` for the commits after the one the cell failed on and reads `checksOnSha` on up to the 20 newest of them,
@@ -2668,7 +2763,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so the first poll after its release answers it.
     A question with no `base_failure` waits for a person,
     as before.
-  - **No review text (PBI 305).** In step 2,
+  - **No review text (PBI 305).**
+    In step 2,
     a NeedsInput item that isn't held,
     whose open `needs_input` question is `NO_REVIEW_TEXT` ("no trusted review text to address",
     from `src/core/questions.ts`,
@@ -2695,7 +2791,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     The scheduler claims the answered item as it claims any.
     A question on anything else keeps the item waiting,
     as before.
-  - **An older "CI failed" question (PBI 317).** In the same branch of step 2,
+  - **An older "CI failed" question (PBI 317).**
+    In the same branch of step 2,
     a NeedsInput item that isn't held,
     whose newest open `needs_input` question passes `olderCiFailedQuestion` from `src/core/questions.ts`,
     is re-queued at green.
@@ -2738,7 +2835,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and its findings are `ciFindings` of the failed checks,
     as for a new failure under PBI 292.
     A head whose CI names no failed check leaves Green with no findings.
-  - **The factory's merge.** An InReview or NeedsInput item (PBI 262) that isn't held,
+  - **The factory's merge.**
+    An InReview or NeedsInput item (PBI 262) that isn't held,
     whose PR neither merged,
     closed nor went back to address in this poll,
     and whose board item is still eligible with the criteria it was signed off on (`criteriaHash` matches `criteria_hash`,
@@ -2796,7 +2894,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Until Phase 1 enforces the risk tiers,
     branch protection's single approval is the bar for every PR,
     whatever its shadow tier.
-  - **Abandoned split parent (PBI 228).** A parent split by the poller has its `split_filed` event removed and is withdrawn from NotReady to Abandoned,
+  - **Abandoned split parent (PBI 228).**
+    A parent split by the poller has its `split_filed` event removed and is withdrawn from NotReady to Abandoned,
     as a parent split before PBI 225 was.
     With its label back,
     the next two polls move it to Split once through `split_filed`,
@@ -2804,7 +2903,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and once both children are Done it moves on to Done and is closed.
     It stays Abandoned when one child is missing from its sub-issues,
     or when its last move to Abandoned was a timeout.
-  - **Split parent done (PBI 226).** A Split parent whose two filed children are Done,
+  - **Split parent done (PBI 226).**
+    A Split parent whose two filed children are Done,
     each with a run whose PR merged,
     gets one comment opening with `SPLIT_DONE_HEADING` that pairs each child with its PR,
     is closed,
@@ -2835,7 +2935,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     A poll with no board to look on,
     or a parent with no kept split,
     leaves it Split too.
-  - **Split into kept late (PBI 227).** A Split parent with no `split_child` rows,
+  - **Split into kept late (PBI 227).**
+    A Split parent with no `split_child` rows,
     as one split before PBI 227 or moved to Split without filing,
     gets the children step 5 finds for it kept with `keepSplitChildren`,
     in the order of the split:
@@ -2852,10 +2953,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and the same rows come back,
     with the parent still Split.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
-  Implement `pollOnce`.** The control plane calls it every 5 minutes and also on each `item_changed` webhook event,
+  Implement `pollOnce`.**
+  The control plane calls it every 5 minutes and also on each `item_changed` webhook event,
   which Task 7's intake stores as an event of kind `webhook` whose `payload.event.kind` is `item_changed`.
   - The eligibility label is `fieldMap.optInLabel` from `backlog_source.field_map`,
     the field Task 7's adapter lists by,
@@ -2922,7 +3025,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Task 13 writes `item.criteria_hash` with it,
     and the poller skips the criteria check while it's null.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(watcher): polling with cursor`.
@@ -3067,22 +3171,27 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     - `parseJudgement` on a reply that omits index 2 marks criterion 2 failed with "not judged",
       even when the model paraphrased the criterion's text elsewhere.
     - A reply with index 1 both passed and failed records a fail.
-  - **Command placement.** A `dor.md` holding a `run:` line makes `loadPolicy` throw `PolicyError`,
+  - **Command placement.**
+    A `dor.md` holding a `run:` line makes `loadPolicy` throw `PolicyError`,
     and the item stays NotReady with "dor.md:
     run:
     lines are allowed only in dod.md".
-  - **Read errors.** A `read` that throws a 500 makes `loadPolicy` throw,
+  - **Read errors.**
+    A `read` that throws a 500 makes `loadPolicy` throw,
     and it never returns the default.
-  - **Readiness hash.** `readinessSha` changes when any one of the six texts changes,
+  - **Readiness hash.**
+    `readinessSha` changes when any one of the six texts changes,
     including a `pr-review.md` that `loadPolicy` rejects,
     and stays the same when none does.
     A null `dod.md` and an empty `dod.md` give different hashes.
-  - **Repo wording.** With a repo `dor.md` whose only line is "Has a Size of 5 or less",
+  - **Repo wording.**
+    With a repo `dor.md` whose only line is "Has a Size of 5 or less",
     and an item whose readiness field Size is 8,
     the fake judge's failure for that line becomes the item's NotReady comment,
     word for word.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
   Implement.**
@@ -3118,7 +3227,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     which on GitHub reads `GET /repos/{owner}/{repo}/installation` and names each of `CELL_PERMISSIONS` the installation holds below the level asked.
     A repo missing any adds them to its readiness sha,
     so the owner granting one re-gates the items it failed.
-  - **Oversized items (PBI 143).** The judge's last line is `{"flags":[...],"oversized":true|false}`.
+  - **Oversized items (PBI 143).**
+    The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
     and only a literal `true` counts.
     It never becomes a verdict,
@@ -3186,7 +3296,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     That map lives only in memory,
     so a filing's split is also kept in the database (see "Filing a split").
     `main.ts` builds one `split: { sop, agent: runAgent, seen: new Map() }` and passes it to every poll.
-  - **Filing a split (PBI 144).** With `ctx.split.file` set and `ctx.splits` given,
+  - **Filing a split (PBI 144).**
+    With `ctx.split.file` set and `ctx.splits` given,
     the gate first reads the split kept for the item's text with `ctx.splits.get(item)`.
     A kept split is the one filed,
     and the coding model isn't asked,
@@ -3323,7 +3434,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     then `statusFor.NotReady`,
     and returns nothing when neither is set.
     `main.ts` passes each source's filing deps as `split.file`.
-  - **Gating split children (PBI 264).** With `ctx.split.file` set,
+  - **Gating split children (PBI 264).**
+    With `ctx.split.file` set,
     a split that isn't kept yet goes through `checkChildren` in `src/gate/readiness.ts` before it's kept or filed.
     Each child is judged with `ctx.judge` and the parent's `ctx.dor` as the issue it would be filed as:
     external id `<parent>/split-<n>`,
@@ -3365,7 +3477,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and each `userContentEdits` editor from GraphQL,
     with the App's own bot login,
     and `editBody` patches the issue's body.
-  - **Readiness checks (PBI 132).** The gate's two AI calls,
+  - **Readiness checks (PBI 132).**
+    The gate's two AI calls,
     the judge and the split proposal for an oversized item,
     each go through one `recorded` helper.
     It takes the time from `ctx.now` before the call and passes a `spent` callback:
@@ -3386,7 +3499,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so the call's own reply or error is what the gate sees:
     a reply isn't thrown away and paid for again on the next poll,
     and a usage limit still reads as one.
-  - **Readiness check verdicts (PBI 348).** A judge call's check also carries its `verdict`,
+  - **Readiness check verdicts (PBI 348).**
+    A judge call's check also carries its `verdict`,
     a `CheckVerdict` from `src/store/readiness-checks.ts`:
     `{ outcome: "passed" }`,
     `{ outcome: "failed", lines, flags }` with each failed `dor.md` line as `{ criterion, reason }` and each flag's text,
@@ -3401,7 +3515,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Migration `016_readiness_check_verdict.sql` adds the nullable `verdict jsonb` and `child text` columns,
     and `readinessChecks` leaves a null one off the check it returns,
     so a check recorded before the migration has no verdict.
-  - **Validate everything at readiness.** The caller also runs `loadPolicy` on `scenarios`,
+  - **Validate everything at readiness.**
+    The caller also runs `loadPolicy` on `scenarios`,
     `pr-review` and `risk`.
     A `PolicyError` from any of the five files fails the item,
     with the error as a named reason,
@@ -3409,7 +3524,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     The caller passes each message in `ctx.policyErrors`,
     and passes `dor: null` when `dor.md` was the file that threw.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(gate): repo config, SOP loader, readiness gate`.
@@ -3475,7 +3591,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     The caller commits.
 
 - [ ] **Step 1:
-  Write fixtures.** `fixtures/verdicts.ndjson` is a real cucumber-js run,
+  Write fixtures.**
+  `fixtures/verdicts.ndjson` is a real cucumber-js run,
   trimmed to the `pickle`,
   `testCase`,
   `testCaseStarted` and `testStepFinished` messages,
@@ -3513,10 +3630,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
   `Action` or `Outcome`).
   Both are defined in `cucumber/messages` `jsonschema/messages.schema.json`.
 - [ ] **Step 2:
-  Write failing tests.** Each fixture maps to the verdict above.
+  Write failing tests.**
+  Each fixture maps to the verdict above.
   - `redGate` fails with the finding "scenario passes before any behaviour exists: <name>" when any scenario is green at Red,
     which is spec §6 Red proof.
-  - **`@regression`.** A scenario that also carries `@regression` restates behaviour that already holds,
+  - **`@regression`.**
+    A scenario that also carries `@regression` restates behaviour that already holds,
     so `redGate` needs it green.
     A red or crashed one fails Red with "regression scenario doesn't pass before the build: <name>: <verdict>: <reason>".
     So a new-behaviour scenario tagged `@regression` still fails Red,
@@ -3540,7 +3659,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so it never gets this finding (PBI 185).
   - `traceability` with three criteria and `@pbi-482` scenarios tagged only `@ac-1` and `@ac-3` returns `["@ac-2"]`,
     even when an `@pbi-481` scenario carries `@ac-2`.
-  - **Second item.** `redGate(results, "@pbi-482", ["<each @pbi-482 scenario name>"])` is ok when the `@pbi-482` scenarios are red and an earlier item's `@pbi-481` scenarios are green.
+  - **Second item.**
+    `redGate(results, "@pbi-482", ["<each @pbi-482 scenario name>"])` is ok when the `@pbi-482` scenarios are red and an earlier item's `@pbi-481` scenarios are green.
     This is the case that would otherwise block every item after the first.
   - `matchesLock` returns false after a test commit edits a locked `.feature` file.
     It returns true after a commit that only adds a step definition,
@@ -3550,11 +3670,13 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so `matchesLock` is true once the caller commits.
     When the lock holds it returns an empty list and stages nothing (PBI 152).
 - [ ] **Step 3:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 4:
   Implement.**
-  - **`classify`.** Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`.
+  - **`classify`.**
+    Join `testCase.testSteps[].pickleStepId` to `pickle.steps[].type`.
     A scenario is red when its first non-`PASSED` step is `FAILED` and of type `Outcome`.
     A hook step has no pickle step,
     so a failed hook is a crash.
@@ -3563,24 +3685,29 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     as when a killed runner leaves the report cut short,
     is a crash,
     so a truncated report never yields a false red or green.
-  - **`redGate`.** Besides its findings above,
+  - **`redGate`.**
+    Besides its findings above,
     a crashed scenario of the item fails Red with "scenario crashed instead of failing on a Then: <name>: <reason>".
     It counts names rather than only matching them,
     because a Scenario Outline's rows share one name and an Examples-level `@db` tag can keep some rows out of the cell.
     An item with no scenarios in either list fails with "no scenario carries <tag>".
-  - **`greenGate`.** A report with no scenarios fails with "the report holds no scenarios".
-  - **`matchesLock`.** Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`.
+  - **`greenGate`.**
+    A report with no scenarios fails with "the report holds no scenarios".
+  - **`matchesLock`.**
+    Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`.
     Exit 1 means a locked file changed or was deleted.
     It throws on any other git error,
     such as an unknown `lockSha`,
     and on an empty file list,
     which would diff the whole tree.
-  - **`restoreLock`.** Run `git diff --name-only -z --no-renames <lockSha> HEAD -- <files...>`,
+  - **`restoreLock`.**
+    Run `git diff --name-only -z --no-renames <lockSha> HEAD -- <files...>`,
     then `git checkout <lockSha> -- <changed...>` when any differ.
     It throws on an empty file list,
     as `matchesLock` does.
 - [ ] **Step 5:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 6:
   Commit** `feat(bdd): red and green from Cucumber Messages, lock check`.
@@ -3644,7 +3771,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   so a usage limit never reads as the item failing readiness,
   and the poller tries again on its next poll.
 
-  **Judge spend (PBI 132).** Before it reads the run's outcome,
+  **Judge spend (PBI 132).**
+  Before it reads the run's outcome,
   `haikuJudge` hands `spent` the run's `{ model, tokensIn, tokensOut, costUsd }`,
   so a call that failed on a usage limit,
   an API error or its timeout reports what it spent.
@@ -3688,10 +3816,12 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     and `runAgent` passes `AgentArgs.onMessage` through,
     so a stage's transcript so far can be uploaded while the call runs (PBI 209).
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
-  Implement `runAgent`.** Call `query({ prompt, options })` with `model`,
+  Implement `runAgent`.**
+  Call `query({ prompt, options })` with `model`,
   `cwd`,
   `maxTurns` and the `AbortController` behind `signal`,
   plus the options for its mode.
@@ -3755,10 +3885,12 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   The CLI emits the same message shapes,
   so nothing else changes.
 - [ ] **Step 4:
-  Run the unit tests.** Expected:
+  Run the unit tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
-  Run the live test.** `run.live.test.ts` runs only with `CLAUDE_CODE_OAUTH_TOKEN` set.
+  Run the live test.**
+  `run.live.test.ts` runs only with `CLAUDE_CODE_OAUTH_TOKEN` set.
   It asks Haiku for one word and asserts `ok`,
   `costUsd > 0` and `model === "claude-haiku-5-5"`.
   Run it in the cell image.
@@ -4035,7 +4167,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   Every refusal is the gateway's 401,
   so a fenced cell can't reach the model either.
   The gateway already refuses any path outside its allowlist with 404.
-  - **Request check.** `verify` changes from a boolean to `{ webTools: WebTool[] } | null`,
+  - **Request check.**
+    `verify` changes from a boolean to `{ webTools: WebTool[] } | null`,
     where null refuses.
     `webTools` is the run's pinned repo config,
     read once per run with `RepoHost.readFile(repo, config_sha, ".factory/config.yml")` and `parseRepoConfig`,
@@ -4081,14 +4214,16 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
 
 - [ ] **Step 1:
   Write failing tests** against `startTestDb()` and a request helper:
-  - **Model gateway.** With a fake upstream,
+  - **Model gateway.**
+    With a fake upstream,
     a stand-in for the current generation reaches it with the owner's token.
     A forged stand-in,
     one from the previous generation after a re-claim,
     and a malformed one (no dots,
     a non-numeric generation) each get 401,
     and the fake upstream receives nothing.
-  - **Request check.** In `model-gateway.test.ts`,
+  - **Request check.**
+    In `model-gateway.test.ts`,
     with `verify` returning `{ webTools: [] }`:
     - a body whose `tools` holds a custom tool and whose messages hold a base64 image reaches the upstream;
     - a body reaches the upstream when a custom tool's `input_schema` has a `source` property,
@@ -4116,12 +4251,14 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     since only the request body is buffered.
   - With the current generation's token,
     `/stage` writes one `stage_run` row.
-  - **Review Focus 2.** After a re-claim bumps the generation,
+  - **Review Focus 2.**
+    After a re-claim bumps the generation,
     each of the nine routes with the old token returns 409,
     and the `stage_run`,
     `event`,
     `item` and `policy_result` tables are unchanged.
-  - **End-of-stage order.** Calls in Run contract 9 order all succeed.
+  - **End-of-stage order.**
+    Calls in Run contract 9 order all succeed.
     A `/stage` sent after the stage's own `/transition` gets 409,
     which is why the order is fixed.
   - `/transition` with `scenarios_written`,
@@ -4130,14 +4267,16 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     It inserts the question,
     stores the sha and files on the run,
     and releases the lease.
-  - **Every exit releases.** Each of `pr_opened`,
+  - **Every exit releases.**
+    Each of `pr_opened`,
     `blocked`,
     `retries_exhausted` and `usage_limited` leaves the item with no `lease_owner` and a generation one higher,
     per Run contract 2.
     `pr_opened` with `tier` writes `run.risk_tier` and `run.tier_reasons`.
   - `/context` after an approved sign-off returns `nextStage: "red"`,
     the `lockSha` and the `lockedFiles`.
-  - **Trusted comments.** For an address run on a PR whose one unresolved thread holds a comment by an allowlisted user's `github_login`,
+  - **Trusted comments.**
+    For an address run on a PR whose one unresolved thread holds a comment by an allowlisted user's `github_login`,
     a reply by the App's bot user and a reply by a stranger,
     `/context` returns `trustedComments` with the first two comments only,
     and `threadCommentCounts` counts all three for that thread (PBI 258).
@@ -4152,7 +4291,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   - `/lease` returns `stop: true` while a factory `pause` override is active.
   - `/stage` with `usage: { utilization: 0.72, resetsAt }` sets `usage_paused_until` to that reset time,
     and with `utilization: 0.5` leaves it unchanged.
-  - **Board mirroring.** Run contract 8,
+  - **Board mirroring.**
+    Run contract 8,
     asserted against the fake adapter:
     - each transition writes `statusFor[to]`,
       and a null entry writes nothing;
@@ -4167,7 +4307,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     - SignOff,
       NeedsInput and Failed also post a comment that names what the item is waiting for.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
   Implement** the routes in `src/http/server.ts` and mount them,
@@ -4181,7 +4322,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   the scheduler,
   the cell API and the dashboard all mirror the same way.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(control): cell API fenced by lease generation`.
@@ -4309,21 +4451,25 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
       the egress variables below,
       no bare `-e CLAUDE_CODE_OAUTH_TOKEN`,
       and no argv word containing the owner's token or any other control plane secret.
-    - **Egress.** The owner chose this on 2026-11-06,
+    - **Egress.**
+      The owner chose this on 2026-11-06,
       because bubblewrap can't start in a local cell (Task 2 Step 8).
-      - **Boot step.** `ensureEgress(cfg): Promise<void>`,
+      - **Boot step.**
+        `ensureEgress(cfg): Promise<void>`,
         exported from `src/scheduler/launcher.ts`,
         sets up the network and the proxy below.
         Task 15's `main.ts` awaits it once at control plane boot in local mode,
         before the first `tick`.
         It never runs in Azure and never per cell.
-      - **Network.** `ensureEgress` makes sure the Docker network `factory-cells` exists,
+      - **Network.**
+        `ensureEgress` makes sure the Docker network `factory-cells` exists,
         created with `--internal`.
         An "already exists" answer counts as success.
         Containers on it reach no other network and get no outside DNS.
         Docker's docs say they can still reach the network's gateway and "appropriately configured host services",
         which is why the egress test probes the gateway.
-      - **Proxy.** It also makes sure a container `factory-egress` runs on that network and on the default bridge network.
+      - **Proxy.**
+        It also makes sure a container `factory-egress` runs on that network and on the default bridge network.
         That container is an allowlisting HTTP proxy,
         `src/scheduler/egress-proxy.mjs`,
         that admits only `github.com`,
@@ -4335,7 +4481,9 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         The control plane's port gets plain HTTP only,
         since every route checks the run token.
         Azurite's port gets plain HTTP only for a request that carries a SAS `sig=` and no `Authorization` header,
-        so no tunnel reaches either port and no shared-key request gets through. **Forged SAS.** That rule can't tell a SAS the control plane issued from one a cell forged,
+        so no tunnel reaches either port and no shared-key request gets through.
+        **Forged SAS.**
+        That rule can't tell a SAS the control plane issued from one a cell forged,
         so the forger must lack the key.
         Aspire's Azurite runs on the `devstoreaccount1` account,
         whose default key is public,
@@ -4376,7 +4524,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         the running proxy stays,
         because rebuilding it would cut every live cell's open connections,
         the agent's model stream included.
-      - **Cell variables.** Cells run with `--network factory-cells`.
+      - **Cell variables.**
+        Cells run with `--network factory-cells`.
         Both cases of each proxy variable,
         `HTTPS_PROXY`,
         `https_proxy`,
@@ -4395,7 +4544,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off telemetry,
         and `ENABLE_CLAUDEAI_MCP_SERVERS=false` stops the agent from fetching the owner's claude.ai connectors,
         a call the gateway's allowlist would refuse anyway.
-    - **First run.** Check these,
+    - **First run.**
+      Check these,
       and record the results in `docs/superpowers/spikes/2026-11-local-platform.md`:
       - Pick the proxy,
         either tinyproxy with a default-deny filter or a small Node CONNECT proxy,
@@ -4412,7 +4562,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         such as `platform.claude.com`,
         record it and route it through the gateway,
         never through the allowlist.
-    - **Egress test.** From a cell container on `factory-cells`,
+    - **Egress test.**
+      From a cell container on `factory-cells`,
       with the egress variables set:
       - `curl https://api.github.com` succeeds;
       - `curl -X POST $CONTROL_URL/internal/cells/ping` gets 204;
@@ -4516,7 +4667,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     so the board sees a stopped run fail.
     An override into SignOff or NeedsInput puts the body of the item's newest open question of that kind in the event's payload as `question`,
     so the board's waiting comment quotes it (PBI 219).
-  - **Claim keys (PBI 320).** `CLAIM_KEYS` in `src/store/items.ts` is the recursive CTE `claim_key` that `claimNext`,
+  - **Claim keys (PBI 320).**
+    `CLAIM_KEYS` in `src/store/items.ts` is the recursive CTE `claim_key` that `claimNext`,
     `nextUp` and `moveInQueue` join,
     and `claimKeys(c, ids?)` reads it for Floor and Run detail.
     The poller writes `item.board_priority` on each poll through `boardPriority(fields)`:
@@ -4564,11 +4716,13 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
 
 - [ ] **Step 1:
   Write failing tests** with `fakeLauncher` and the test DB:
-  - **Fixed WIP.** With one InProgress item that holds a live lease and one Queued item,
+  - **Fixed WIP.**
+    With one InProgress item that holds a live lease and one Queued item,
     `tick` starts nothing.
     Once the lease expires,
     `tick` moves the old item to Queued and starts one cell.
-  - **Live WIP (PBI 177).** `tick` reads `current_wip` each time and starts a cell for each free slot,
+  - **Live WIP (PBI 177).**
+    `tick` reads `current_wip` each time and starts a cell for each free slot,
     so with one item running,
     `current_wip` raised to 3 and three items Queued,
     one `tick` starts two and leaves the third Queued.
@@ -4576,13 +4730,16 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     `tick` starts nothing and stops no cell.
     A pin failure or a start that throws ends that tick's starts,
     so an item sent back to Queued isn't claimed again in the same tick.
-  - **Review Focus 5.** A second `tick` from a new process,
+  - **Review Focus 5.**
+    A second `tick` from a new process,
     with the same DB and a live lease,
     starts nothing.
-  - **Kill switch.** A `kill` override,
+  - **Kill switch.**
+    A `kill` override,
     or `killFlag: true`,
     makes `tick` call `stop` for every execution with a live lease and start nothing.
-  - **Drain and pause.** Neither starts anything.
+  - **Drain and pause.**
+    Neither starts anything.
     Under drain the running cell's `/lease` reply has `stop: false`,
     and under pause it has `stop: true`.
     While the factory drains,
@@ -4596,7 +4753,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     (PBI 316).
     Both lines read one count,
     so they agree.
-  - **Prepare restart (PBI 140).** A factory `restart` override starts nothing,
+  - **Prepare restart (PBI 140).**
+    A factory `restart` override starts nothing,
     however long it has been set and whatever current WIP is,
     an answered item included,
     and every running cell's `/lease` reply has `stop: false` and `restarting: true`,
@@ -4623,18 +4781,22 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     it shows "Ready to restart.
     No cell is running,
     so it's safe to restart the factory or stop Docker."
-  - **Hold.** A `hold` item override keeps that item out of `claimNext`.
-  - **Cell env.** The env passed to `start` holds exactly the six variables in Run contract 5,
+  - **Hold.**
+    A `hold` item override keeps that item out of `claimNext`.
+  - **Cell env.**
+    The env passed to `start` holds exactly the six variables in Run contract 5,
     so a cell learns its base,
     branch and lock only from `/context`.
-  - **CI poll.** Each `tick` runs `pollMergedCi`,
+  - **CI poll.**
+    Each `tick` runs `pollMergedCi`,
     which reads the checks on every Accepted item's `merge_sha` through the App's `RepoHost`.
     `success` moves the item to Done through `dod_verified`.
     A merge commit with no checks reported 60 minutes after the merge moves the item to Failed through `dod_failed`,
     with a comment that CI didn't run on main.
     Open PR heads need no poll,
     because Task 12's `/checks` asks `RepoHost` live on every call.
-  - **A red main (PBI 255).** On `failure`,
+  - **A red main (PBI 255).**
+    On `failure`,
     `pollMergedCi` compares the merge commit's `checkRuns` with its `firstParent`'s,
     through `compareWithParent` in `src/scheduler/main-break.ts`.
     When a check failed that the first parent passed or never ran,
@@ -4724,7 +4886,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     and is read again after that so a re-run turned green is seen.
     A commit that hasn't failed is read every pass,
     and an Accepted item's own merge commit is always read afresh.
-  - **Re-checking Failed items (PBI 369).** After `pollMergedCi`,
+  - **Re-checking Failed items (PBI 369).**
+    After `pollMergedCi`,
     each `tick` runs `recheckFailed`.
     It looks at every Failed item whose last move to Failed,
     a `transition` or `override` event,
@@ -4764,7 +4927,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     as above.
     A `charge` or `not yet` verdict leaves the item Failed with no comment,
     no new break and no bug item.
-  - **Pin failure.** An item that names no repo,
+  - **Pin failure.**
+    An item that names no repo,
     or names one `repo` doesn't hold,
     can never be pinned.
     The claim rolls back,
@@ -4774,37 +4938,46 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     Any other failure while pinning,
     such as GitHub being down,
     rolls back and leaves the item as it was for the next tick.
-  - **Start after commit.** The claim and its pins commit before `launcher.start` runs.
+  - **Start after commit.**
+    The claim and its pins commit before `launcher.start` runs.
     A start that throws moves the item out of InProgress through `lease_expired`,
     which raises the generation,
     so a cell the launcher half-started can never hold a valid `RUN_TOKEN`.
     Starting inside the claim's transaction would let a rollback hand the same generation,
     and so the same token,
     to the next cell.
-  - **Isolation.** Each cell stop,
+  - **Isolation.**
+    Each cell stop,
     item override,
     question and merged item runs on its own.
     One that throws is logged and retried next tick,
     so the kill switch still reaches every other cell,
     and a stuck override never stops leases expiring.
-  - **Reminder keys.** A reminder's dedupe key holds the question's `asked_at`,
+  - **Reminder keys.**
+    A reminder's dedupe key holds the question's `asked_at`,
     so the reminders after a re-queue resets the clock aren't taken for the first round's and skipped.
-  - **Stop a run.** A `stop_run` override stops the execution,
+  - **Stop a run.**
+    A `stop_run` override stops the execution,
     moves the item to Failed through `overrideTo`,
     sets `held = true`,
     and comments the branch name on the PBI.
-  - **Usage limit.** An item that came back through `usage_limited` has `run.resume_at` in the future.
+  - **Usage limit.**
+    An item that came back through `usage_limited` has `run.resume_at` in the future.
     It is skipped,
     and nothing at all starts before the earliest `resume_at`,
     as spec §7 requires.
-  - **Expiry.** Item overrides end when the item reaches Done,
+  - **Expiry.**
+    Item overrides end when the item reaches Done,
     Failed,
     Abandoned or Split (PBI 225).
-  - **Timeouts.** SignOff and NeedsInput items whose open question is older than 5 days move to Abandoned through `timed_out`.
-  - **Reminders.** A question 2 days old with `reminders_sent = 0` gets a comment on the item and `reminders_sent = 1`.
+  - **Timeouts.**
+    SignOff and NeedsInput items whose open question is older than 5 days move to Abandoned through `timed_out`.
+  - **Reminders.**
+    A question 2 days old with `reminders_sent = 0` gets a comment on the item and `reminders_sent = 1`.
     At 4 days it gets the second.
     A second `tick` the same hour sends nothing more.
-  - **Waiting on people.** With one SignOff,
+  - **Waiting on people.**
+    With one SignOff,
     one NeedsInput and one InReview item,
     all unanswered,
     and `review_capacity = 3`,
@@ -4823,11 +4996,13 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     - With the count at 3 and two Queued items,
       a fresh one ranked first and one back from `changes_requested` with `next_stage = "address"`,
       `tick` claims the address item and leaves the fresh one waiting.
-  - **Usage reserve.** With `usage_paused_until` in the future,
+  - **Usage reserve.**
+    With `usage_paused_until` in the future,
     `tick` starts nothing,
     and running cells' `/lease` replies keep `stop: false`,
     so they finish.
-  - **Re-queue.** A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`,
+  - **Re-queue.**
+    A `requeue` item override clears `held` and moves a Failed or Abandoned item to Queued through `requeued`,
     so a stopped run can be restarted.
     Four variants:
     - An Abandoned item whose question is still open goes back to SignOff or NeedsInput,
@@ -4858,9 +5033,11 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
       goes back to Eligible through `returned`,
       as the poller's return does,
       so it meets the readiness gate again and never reaches Queued without passing it (PBI 168).
-  - **Criteria hash.** A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria,
+  - **Criteria hash.**
+    A claim that opens a new run writes `item.criteria_hash` from the item's current acceptance criteria,
     through `criteriaHash` from Task 8.
-  - **Egress boot.** `ensureEgress` with a stubbed `execFile`,
+  - **Egress boot.**
+    `ensureEgress` with a stubbed `execFile`,
     in three cases:
     - `docker network create` answers "already exists",
       and `ensureEgress` still succeeds;
@@ -4869,10 +5046,12 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     - the label differs,
       and the old proxy is removed and a new one starts with the new label.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
-  Implement.** A run can be created by a claim,
+  Implement.**
+  A run can be created by a claim,
   by `criteria_changed` in Task 8,
   or by a re-queue after a merge.
   So the scheduler pins on the first claim of any run whose `config_sha` is still null,
@@ -4903,7 +5082,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   `mode = 'fixed'` with `current_wip = 1`,
   and the scheduler reads it each tick.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(scheduler): fixed WIP, launcher, Phase 0 overrides`.
@@ -5097,7 +5277,8 @@ from spec §6 rows 1 to 7:
 | address | Runs only when `ctx.nextStage` is `address`. It first asks `prState` about `ctx.prNumber`, and a merged PR ends the attempt failed with a message naming the PR, with no agent call, no reply and no transition, as at open-pr (PBI 194). `factory-pr-addresser` replies to or fixes each comment in `ctx.trustedComments` (Run contract 10), and the branch merges cleanly with the base. It writes each reply as a JSON line `{"threadId","body"}` to a file outside the checkout that the brief names, and once the attempt passes the engine calls `/lease`, then posts each reply, only to an entry in `ctx.trustedComments`. A reply to a thread goes through `replyToThread`, and a reply to a summary goes through `commentOnPr` as one PR comment that quotes the summary. The addresser marks a thread it fixed with a line `{"threadId","fixed":true}` in the same file. A `fixed` line counts only when HEAD moved since address started, which `git.head()` reads before the first attempt. With no commit there's no fix for CI to pass on, so a `fixed` line alone resolves nothing: the thread needs a reply, or it stays open (PBI 258). Once CI has passed on the pushed commit and the replies are posted, the engine resolves each person's thread it replied to or fixed, through `resolveThread`, and leaves every other thread unresolved (PBI 258). CI takes minutes, and a reviewer may reply in a thread meanwhile, so the engine first reads the PR's threads again with `openReviewComments`. `/context` sends `threadCommentCounts`, each open thread's comment count at the claim, every author's. A thread with more comments now than that count, plus one for the reply address posted in it, stays open: address never read the newer comment, which postdates `reviews_seen_at`, so the poller sends the item back for it. A thread missing from the fresh read is already resolved and gets no call. When the fresh read fails, or the repo host has no `openReviewComments`, nothing is resolved, since a thread left open is only asked about again (PBI 258). Then `GET /checks?sha=<git.head()>` for the pushed commit reaches `success`, `dod.md` is checked again when HEAD moved since `ctx.dodCheckedSha`, and, when the repo host can post reviews, the pr-review stage runs on that head in the same cell, with the person's threads left to the person (PBI 130). As at every first pr-review pass in a claim, it starts by taking up each of the factory's threads still open on the PR, with the trusted bot's replies in it, and carries its rounds on from the factory's last review (PBI 318). Its clean review ends it `passed` and posts `pr_opened` again, which returns the item to InReview, without writing the PR body again or asking for reviewers. Its findings, its blocks and a fix CI fails on go as after open-pr. With no review methods, the engine posts `pr_opened` once address passes. `failure` on the pushed commit fails the attempt, the owner's call at PBI 14's sign-off. CI still pending 60 minutes after the cell began waiting on the pushed commit is `blocked`, naming the pending checks, as at open-pr (PBI 234) | 2 retries, then `blocked` |
 
 - [ ] **Step 1:
-  Write `sop/default.yml`.** Copy the spec's SOP YAML,
+  Write `sop/default.yml`.**
+  Copy the spec's SOP YAML,
   keep stages understand to open-pr,
   set self-review's agent to `factory-self-reviewer`,
   add `address` with `agent: factory-pr-addresser`,
@@ -5148,7 +5329,8 @@ from spec §6 rows 1 to 7:
   It also says a `@regression` scenario must pass at Red,
   so its step definitions call the code that already exists and no stub replaces behaviour it relies on.
 - [ ] **Step 2:
-  Write the agent definitions.** Copy `~/.claude/agents/self-reviewer.md` into `cell/claude/agents/` as `factory-self-reviewer.md`,
+  Write the agent definitions.**
+  Copy `~/.claude/agents/self-reviewer.md` into `cell/claude/agents/` as `factory-self-reviewer.md`,
   with `name:` set to match.
   Write `factory-pr-addresser.md` fresh instead of copying `~/.claude/agents/pr-addresser.md`.
   That file only points to a skill loop that fetches every review thread itself,
@@ -5212,7 +5394,8 @@ from spec §6 rows 1 to 7:
 - [ ] **Step 3:
   Write failing engine tests** with a scripted fake agent,
   a fake `Git` and a recording `CellApi`:
-  - **Happy path.** A fresh run with `ctx.nextStage = "understand"` executes understand and specify,
+  - **Happy path.**
+    A fresh run with `ctx.nextStage = "understand"` executes understand and specify,
     posts `scenarios_written` with `scenariosSha` and `lockedFiles`,
     and returns `waiting`.
     A second run with `ctx.nextStage = "red"` and a lock in `ctx` runs red,
@@ -5223,30 +5406,37 @@ from spec §6 rows 1 to 7:
     PBI 15b adds that each `passed` call carries the text of the stage's prompted call as `message`.
     With `config.webTools: ["WebSearch"]`,
     every `mode: "cell"` call the fake agent records carries `webTools: ["WebSearch"]`.
-  - **Checkpoint resume.** With `ctx.nextStage = "red"`,
+  - **Checkpoint resume.**
+    With `ctx.nextStage = "red"`,
     it never calls the agent for understand or specify.
-  - **Changes asked.** With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`,
+  - **Changes asked.**
+    With `ctx.nextStage = "specify"` and `ctx.decision = { kind: "changes", text: "split AC 2" }`,
     the specify prompt contains the note.
-  - **Base merge.** Every run fetches the base once with `fetchBase` and merges that commit with `mergeAt` before its first stage.
+  - **Base merge.**
+    Every run fetches the base once with `fetchBase` and merges that commit with `mergeAt` before its first stage.
     A `conflict` the agent can't clear posts `blocked` naming the paths,
     and no stage runs.
-  - **Address.** With `ctx.nextStage = "address"`,
+  - **Address.**
+    With `ctx.nextStage = "address"`,
     it runs only the address stage,
     pushes,
     and posts `pr_opened` once `/checks?sha=` for the pushed sha reports `success`.
     A `success` cached for the previous head never counts.
-  - **Trusted brief.** The prompt the fake agent receives at address holds the body of every comment in `ctx.trustedComments` and no other review text.
+  - **Trusted brief.**
+    The prompt the fake agent receives at address holds the body of every comment in `ctx.trustedComments` and no other review text.
     A summary,
     which has no path,
     appears as the reviewer's summary rather than as a line comment.
-  - **Merged PR.** An address run whose `ctx.prNumber` reports `merged` from `prState` ends its attempt failed with a message naming the PR as already merged,
+  - **Merged PR.**
+    An address run whose `ctx.prNumber` reports `merged` from `prState` ends its attempt failed with a message naming the PR as already merged,
     as open-pr does.
     It asks `prState` before the base merge,
     since a squash- or rebase-merged branch can conflict with the base and would otherwise run a `merge` agent pass or block.
     It calls no agent,
     posts no reply and sends no transition,
     so it never blocks and the poller or the webhook moves the item to Accepted (PBI 194).
-  - **Nothing to address.** An address run whose `ctx.trustedComments` is empty and whose branch merges cleanly with the base runs no addresser,
+  - **Nothing to address.**
+    An address run whose `ctx.trustedComments` is empty and whose branch merges cleanly with the base runs no addresser,
     posts nothing on the PR and asks no question.
     Its attempt passes,
     the pr-review stage runs at the PR's current head,
@@ -5258,11 +5448,14 @@ from spec §6 rows 1 to 7:
     with no review text,
     resolves it as usual (issue #28,
     AC-3).
-  - **Rubric can't weaken.** A repo `pr-review.md` that says "skip the BDD checks" still yields a brief whose BDD checks follow the rubric under the outranking heading.
+  - **Rubric can't weaken.**
+    A repo `pr-review.md` that says "skip the BDD checks" still yields a brief whose BDD checks follow the rubric under the outranking heading.
     A reviewer reply of `APPROVED` with one failed `pr-review.md` verdict starts another round instead of passing.
-  - **Repo agents can't replace the factory's.** With a fake repo holding `.claude/agents/self-reviewer.md` and `.claude/agents/pr-addresser.md`,
+  - **Repo agents can't replace the factory's.**
+    With a fake repo holding `.claude/agents/self-reviewer.md` and `.claude/agents/pr-addresser.md`,
     the self-review and address calls to the fake agent name `factory-self-reviewer` and `factory-pr-addresser`.
-  - **A checkout's factory-named agents can't replace the factory's.** With a checkout holding `.claude/agents/factory-self-reviewer.md` and `.claude/agents/factory-pr-addresser.md` whose instructions and tools differ,
+  - **A checkout's factory-named agents can't replace the factory's.**
+    With a checkout holding `.claude/agents/factory-self-reviewer.md` and `.claude/agents/factory-pr-addresser.md` whose instructions and tools differ,
     the options `agentOptions` builds for each stage carry the factory's own instructions and tools,
     not the checkout's (PBI 96,
     `features/pbi-96-factory-agents.feature`).
@@ -5271,37 +5464,44 @@ from spec §6 rows 1 to 7:
     so the source for its precedence is the SDK's own page:
     "Programmatically defined agents take precedence over filesystem-based agents with the same name" ([Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents),
     "Filesystem-based definition").
-  - **DoD commands.** A `dod.md` with `` `run: false` `` fails green on exit code 1,
+  - **DoD commands.**
+    A `dod.md` with `` `run: false` `` fails green on exit code 1,
     and the command's env holds no `CLAUDE_CODE_OAUTH_TOKEN` and no `RUN_TOKEN`.
     `` `run: true && true` `` passes,
     which proves the `sh -c` path.
-  - **DoD lines for a person.** A `dod.md` line "Deployed to staging" judged `person` doesn't fail green,
+  - **DoD lines for a person.**
+    A `dod.md` line "Deployed to staging" judged `person` doesn't fail green,
     and appears in the PR body as an unticked line marked for the person who merges.
-  - **Policy load.** A `pr-review.md` holding a `run:` line,
+  - **Policy load.**
+    A `pr-review.md` holding a `run:` line,
     and separately a missing `dod.md` at `ctx.configSha`,
     each post `blocked` naming the file,
     and `runCell` never starts.
-  - **Stale DoD.** At open-pr with HEAD equal to `ctx.dodCheckedSha`,
+  - **Stale DoD.**
+    At open-pr with HEAD equal to `ctx.dodCheckedSha`,
     no `dod.md` command runs again.
     With `ctx.nextStage = "address"`,
     a `dod.md` holding `` `run: false` `` and a fix that moves HEAD,
     the address attempt fails before `pr_opened`.
     Every `/policy-results` call carries the head it checked,
     and the PR checklist names that sha.
-  - **Policy in prompts.** With a repo `scenarios.md` and `pr-review.md`,
+  - **Policy in prompts.**
+    With a repo `scenarios.md` and `pr-review.md`,
     the specify prompt contains the repo's `scenarios.md` text and the self-review brief contains its `pr-review.md` text,
     each word for word.
     Without them,
     the factory defaults appear instead.
     The engine's BDD checks appear in the self-review brief either way.
-  - **Open PR.** The PR body contains `Refs #482` and never `Closes`,
+  - **Open PR.**
+    The PR body contains `Refs #482` and never `Closes`,
     and lists each `dod.md` criterion as a `- [ ]` line,
     `POST /pr` comes before the first `GET /checks`,
     and `requestReviewers` is called once with `config.reviewers`,
     after the last `postReview` and before pr-review's `/stage passed`.
     On a repo host with no review methods it is called at the end of open-pr instead,
     before its `/stage passed`.
-  - **PR body chatter (PBI 216).** `cleanSummary` keeps a fenced body's contents,
+  - **PR body chatter (PBI 216).**
+    `cleanSummary` keeps a fenced body's contents,
     drops text before the first `## ` heading,
     leaves a code block inside the body alone,
     and returns a reply that starts with `## Problem` unchanged.
@@ -5329,15 +5529,18 @@ from spec §6 rows 1 to 7:
     `summaryOf` cleans a successful call's reply the same way,
     and gives a failed call a finding that says the agent call failed,
     not that the body lacks `## Problem`.
-  - **Call order.** At the end of every stage the recording `CellApi` sees `/stage passed`,
+  - **Call order.**
+    At the end of every stage the recording `CellApi` sees `/stage passed`,
     then the uploads,
     then `/transition`,
     per Run contract 9,
     and the run returns `waiting` or `done` rather than `stopped`.
-  - **Red proof.** A red stage whose report has a green scenario retries twice,
+  - **Red proof.**
+    A red stage whose report has a green scenario retries twice,
     then posts `blocked` with "scenario passes before any behaviour exists".
     A green `@regression` scenario beside a red one passes Red.
-  - **Locked files at every gate.** These cases use a real temporary repo and a real `Git`,
+  - **Locked files at every gate.**
+    These cases use a real temporary repo and a real `Git`,
     because `matchesLock` runs `git diff` and a fake `Git` writes no commits.
     A red stage whose agent edits a locked feature file and leaves it uncommitted retries twice,
     then posts `blocked`.
@@ -5349,12 +5552,14 @@ from spec §6 rows 1 to 7:
     with no question to the owner.
     A red stage whose agent left a clean tree passes,
     with HEAD unchanged by `commitAll`.
-  - **Usage limit.** An agent result with `limit.resetsAt` makes the engine commit,
+  - **Usage limit.**
+    An agent result with `limit.resetsAt` makes the engine commit,
     post `/stage failed`,
     post `/transition` with `usage_limited` and `resumeAt`,
     and return `limited`.
     That attempt doesn't count against retries.
-  - **Stop.** A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`,
+  - **Stop.**
+    A `/lease` reply of `{ stop: true }` during any stage aborts the agent through `signal`,
     commits the work in progress,
     and returns `stopped`.
     Before it returns,
@@ -5382,7 +5587,8 @@ from spec §6 rows 1 to 7:
     In this test the fake agent answers the abort as `runAgent` does.
     It resolves with `ok: false` and never rejects,
     so an engine that waits for a throw fails here.
-  - **Restarting (PBI 301).** The engine keeps the last `/lease` reply's `restarting`,
+  - **Restarting (PBI 301).**
+    The engine keeps the last `/lease` reply's `restarting`,
     from the renewal loop and from the check before each push.
     It never aborts the agent.
     A cell told `restarting` starts no further stage:
@@ -5428,10 +5634,12 @@ from spec §6 rows 1 to 7:
     The findings this cell was carrying to green aren't kept;
     green works from what the rerun stage finds.
     A reply with `restarting` gone by the stage's end lets the cell go on.
-  - **Lost lease.** A 409 from any API call makes the engine stop at once,
+  - **Lost lease.**
+    A 409 from any API call makes the engine stop at once,
     with no push and no further calls.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 5:
   Implement `engine.ts`,
@@ -5470,7 +5678,8 @@ from spec §6 rows 1 to 7:
   It relies on this step's `factory` user,
   because `initdb` refuses root (Global Constraints).
 - [ ] **Step 7:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 8:
   Commit** `feat(cell): SOP engine for stages 1 to 7 and address`.
@@ -5732,7 +5941,8 @@ from spec §6 rows 1 to 7:
   `ensureEgress`,
   `handleWebhook`,
   the cell API and `pollOnce`.
-- **Split.** PBI 15 builds the parts that don't need Task 13:
+- **Split.**
+  PBI 15 builds the parts that don't need Task 13:
   sign-in,
   the no-access page,
   Floor,
@@ -5771,7 +5981,8 @@ from spec §6 rows 1 to 7:
       `HttpOnly` and `SameSite=Strict`.
       `identify` returns `{ provider: "dev", subject: FACTORY_DEV_LOGIN }` only for a request carrying that cookie.
       Local mode never reads principal headers.
-  - **Origin check.** Every dashboard POST must carry an `Origin` header equal to the dashboard's own origin,
+  - **Origin check.**
+    Every dashboard POST must carry an `Origin` header equal to the dashboard's own origin,
     or it gets 403,
     in both modes.
     Built-in auth and the dev token both ride on cookies,
@@ -5784,7 +5995,8 @@ from spec §6 rows 1 to 7:
     Without `DASHBOARD_ORIGIN`,
     `dashboardOrigin` in `src/main.ts` falls back to `PORT`,
     then to `CELL_CONTROL_URL`'s port.
-  - **Dev identity guard.** `main.ts` refuses to start in three cases:
+  - **Dev identity guard.**
+    `main.ts` refuses to start in three cases:
     `FACTORY_DEV_LOGIN` is set and `FACTORY_ENV` isn't `local`;
     `FACTORY_ENV` is `local` and `FACTORY_DEV_LOGIN` is empty;
     or either is set while `CONTAINER_APP_NAME` is set.
@@ -5973,11 +6185,13 @@ from spec §6 rows 1 to 7:
     so the two channels can't drift.
     It records `d.kind` in `question.decision` and `d.text` in `question.answer`,
     which is what Task 12's `/context` hands the cell as `decision`.
-    - **Roles.** `decide` owns the role rules.
+    - **Roles.**
+      `decide` owns the role rules.
       `approve` and `changes` need `product_owner`,
       and `answer` needs operator or product owner.
       The routes only check that the user is signed in and allowlisted.
-    - **Effects.** It answers the open question and applies Run contract 1.
+    - **Effects.**
+      It answers the open question and applies Run contract 1.
       On approve it copies `scenarios_sha` into `features_lock_sha`.
       On an Abandoned item it revives the item through `requeued`.
   - `parseCommand(body: string): { kind: "approve" | "changes" | "answer"; text: string } | null`,
@@ -6041,7 +6255,8 @@ from spec §6 rows 1 to 7:
       so a comment maps to at most one user,
       and `POST /users` answers 400 for a login another user holds.
     - Run detail shows the signed-off feature files at `features_lock_sha`.
-    - **Issue numbers (PBI 131).** Floor's four lists,
+    - **Issue numbers (PBI 131).**
+      Floor's four lists,
       the Run detail heading,
       the Phase 0 report and Activity show each item's external id as `#N` before its title.
       `issueRef` in `views.ts` renders it.
@@ -6055,7 +6270,8 @@ from spec §6 rows 1 to 7:
       Otherwise it's plain text,
       never a link to a guessed repo.
       The title stays a separate link to Run detail.
-    - **PR links (PBI 145).** An InReview item shows `PR #N` as its own link under "Waiting on you",
+    - **PR links (PBI 145).**
+      An InReview item shows `PR #N` as its own link under "Waiting on you",
       in the "In flight" table,
       and after the state on Run detail's state line.
       `prLink` in `views.ts` renders it from the open run's `pr_number` and `pr_url`,
@@ -6072,10 +6288,12 @@ from spec §6 rows 1 to 7:
       even with every principal header set.
     - A dashboard request whose subject isn't in `user` gets 403 and the page "You don't have access to this factory.
       Ask an owner to add you."
-    - **Guard.** `main.ts` exits non-zero at startup with `FACTORY_DEV_LOGIN` set and `FACTORY_ENV` unset,
+    - **Guard.**
+      `main.ts` exits non-zero at startup with `FACTORY_DEV_LOGIN` set and `FACTORY_ENV` unset,
       with `FACTORY_ENV=local` and no `FACTORY_DEV_LOGIN`,
       and with both set plus `CONTAINER_APP_NAME=ca-factory-control`.
-    - **Dev token.** Locally,
+    - **Dev token.**
+      Locally,
       a dashboard request without the `factory_dev` cookie,
       or with a wrong one,
       gets no identity,
@@ -6083,16 +6301,20 @@ from spec §6 rows 1 to 7:
       `GET /dev-login` with a wrong token sets no cookie.
       With the right cookie the request is the dev user,
       and a request to `/internal/cells/x` still gets no identity.
-    - **Origin.** A signed-in `POST /items/:id/signoff` with `Origin: https://evil.example`,
+    - **Origin.**
+      A signed-in `POST /items/:id/signoff` with `Origin: https://evil.example`,
       or with no `Origin`,
       gets 403 and changes nothing.
-  - **Roles.** A viewer posting `/overrides` gets 403.
+  - **Roles.**
+    A viewer posting `/overrides` gets 403.
     An operator posting `/overrides` with an empty reason gets 400.
-  - **Sign-off.** A sign-off from a user without `product_owner` gets 403.
+  - **Sign-off.**
+    A sign-off from a user without `product_owner` gets 403.
     A sign-off from a product owner answers the open `sign_off` question,
     comments the decision on the PBI,
     and logs an event with `actor: "human"` and the user id.
-  - **Floor.** Floor lists every InProgress,
+  - **Floor.**
+    Floor lists every InProgress,
     SignOff,
     NeedsInput and InReview item.
     Each row shows the current stage,
@@ -6110,7 +6332,8 @@ from spec §6 rows 1 to 7:
     such as `$13.5412`,
     so hovering shows it as on Run detail.
     `costCell` in `views.ts` renders the Cost cells on both pages (PBI 263).
-  - **Run detail.** Run detail shows:
+  - **Run detail.**
+    Run detail shows:
     - for a Split parent,
       a "Split into" heading under the state line,
       then the same list of its children as Floor's "Split" strip shows.
@@ -6156,7 +6379,8 @@ from spec §6 rows 1 to 7:
       or "No verdict was recorded" for a check with none.
       A call on a split child starts "On the proposed child “title”:".
       A split proposal's cell is empty (PBI 348);
-    - **Readable numbers and local times (PBI 189).** Both tables show tokens as is under 1,000,
+    - **Readable numbers and local times (PBI 189).**
+      Both tables show tokens as is under 1,000,
       else in thousands or millions to 1 decimal place,
       such as `12.8k` or `2.1m`.
       They show cost to the cent,
@@ -6235,7 +6459,8 @@ from spec §6 rows 1 to 7:
       Moves logged at the same instant follow their chain,
       each starting from the state the one before left.
       An ended item's end cuts short any spell or question still open.
-  - **Token expiry.** A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
+  - **Token expiry.**
+    A banner appears when the Claude token expires within 30 days of `CLAUDE_TOKEN_CREATED_AT` + 365 days.
   - **Comment decisions.**
     - A `/approve` comment from a login mapped to a product owner signs off,
       exactly like the dashboard route.
@@ -6250,7 +6475,8 @@ from spec §6 rows 1 to 7:
       with `next_stage = "red"` and the lock set.
     - `/answer` from a mapped user with only the viewer role returns `forbidden`,
       exactly as the dashboard route does for that user.
-  - **Floor strips.** Floor shows:
+  - **Floor strips.**
+    Floor shows:
     - "Waiting on you",
       with every SignOff and NeedsInput item oldest first,
       plus each InReview PR and how long it has waited,
@@ -6287,7 +6513,8 @@ from spec §6 rows 1 to 7:
       or "Not in the factory" when `splitChildren` gives none (PBI 227);
     - the waiting count beside the WIP number,
       as "3 of 3 waiting".
-  - **Sign-off view.** For a SignOff item,
+  - **Sign-off view.**
+    For a SignOff item,
     Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it,
     and marks a criterion with no scenario "no scenario".
     It also marks each `@regression` scenario "expected to pass at Red",
@@ -6301,10 +6528,12 @@ from spec §6 rows 1 to 7:
     A file absent there shows "(missing at this commit)".
     All of it comes before the Approve and Ask for changes buttons.
     An Abandoned item that timed out and still shows the sign-off form shows the same view.
-  - **Re-queue.** Failed and Abandoned items in Run detail show a Re-queue button that posts a `requeue` override,
+  - **Re-queue.**
+    Failed and Abandoned items in Run detail show a Re-queue button that posts a `requeue` override,
     which needs a reason.
   - **Start now,
-    Move up and Move down (PBI 265).** Run detail's Controls show Start now on an Eligible,
+    Move up and Move down (PBI 265).**
+    Run detail's Controls show Start now on an Eligible,
     NotReady or Queued item,
     or one whose question was answered,
     and Move up and Move down on a Queued or answered item.
@@ -6318,13 +6547,15 @@ from spec §6 rows 1 to 7:
     to anyone who opens it.
     When the board's order ended the item's latest `move_up` or `move_down`,
     Run detail says that move was ended by a change to the board's order (PBI 311).
-  - **Priority and final stage (PBI 320).** Run detail says `Priority N.`,
+  - **Priority and final stage (PBI 320).**
+    Run detail says `Priority N.`,
     or `Priority N, from #E, which depends on it.` with the item's own priority beside it.
     A final-stage item's page says it's final-stage,
     and one in the group only through a dependent says `Final-stage because #E depends on it`.
     A page whose item isn't final-stage never has the word on it.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
   Implement.**
@@ -6344,7 +6575,8 @@ from spec §6 rows 1 to 7:
   - The kill switch is `FACTORY_KILL=1` in the app's env or a `kill` override from the dashboard.
     Either one stops every cell on the next tick.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(dashboard): sign-in allowlist, Floor, Run detail, overrides`.
@@ -6385,32 +6617,40 @@ from spec §6 rows 1 to 7:
 
 - [ ] **Step 1:
   Write failing tests:**
-  - **Path floor.** `pathFloor` gives Medium for `.github/workflows/ci.yml`,
+  - **Path floor.**
+    `pathFloor` gives Medium for `.github/workflows/ci.yml`,
     `.factory/config.yml`,
     `.factory/dod.md`,
     `.claude/agents/self-reviewer.md`,
     `AGENTS.md`,
     `src/CLAUDE.md` and a file matching `src/billing/**`,
     and gives Low for `docs/readme.md`.
-  - **Person lines.** A docs-only diff that the fake agent calls Low,
+  - **Person lines.**
+    A docs-only diff that the fake agent calls Low,
     with one `dod.md` verdict "Deployed to staging" judged `person`,
     yields Medium with that reason.
-  - **Repo risk.** A repo `risk.md` that calls any change to `src/payments/**` High makes the fake agent's prompt carry that text,
+  - **Repo risk.**
+    A repo `risk.md` that calls any change to `src/payments/**` High makes the fake agent's prompt carry that text,
     and a diff there comes back High.
     A `risk.md` that calls `.factory/` changes Low still yields Medium,
     because of the floor.
-  - **No lowering.** A fake agent answering Low for a diff that touches `.factory/config.yml` still yields Medium,
+  - **No lowering.**
+    A fake agent answering Low for a diff that touches `.factory/config.yml` still yields Medium,
     with both reasons kept.
-  - **Second pass.** A second pass that answers "needs a person" raises Low to Medium.
-  - **Unreadable output.** Output that doesn't parse yields High,
+  - **Second pass.**
+    A second pass that answers "needs a person" raises Low to Medium.
+  - **Unreadable output.**
+    Output that doesn't parse yields High,
     with the reason "classifier output unreadable".
     A wrong Low lets code skip review,
     so failure raises the tier.
 - [ ] **Step 2:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   FAIL.
 - [ ] **Step 3:
-  Implement.** Match globs with `matchesPath` from `src/core/glob.ts`.
+  Implement.**
+  Match globs with `matchesPath` from `src/core/glob.ts`.
   It wraps `path.matchesGlob`,
   which on its own never lets `*` match a leading dot,
   so `**` would skip `.github/` and `.factory/` (found in PR #73).
@@ -6437,7 +6677,8 @@ from spec §6 rows 1 to 7:
   and the PR body gains a "Shadow risk tier" section.
   No status check is posted.
 - [ ] **Step 4:
-  Run the tests.** Expected:
+  Run the tests.**
+  Expected:
   PASS.
 - [ ] **Step 5:
   Commit** `feat(risk): shadow-mode tier classifier`.
@@ -6515,7 +6756,8 @@ from spec §6 rows 1 to 7:
 
 - [ ] **Step 1:
   Write the failing end-to-end test:**
-  - **The full path.** Seed one labelled item with two criteria in a repo whose fake files include `.factory/config.yml` and `.factory/dod.md`,
+  - **The full path.**
+    Seed one labelled item with two criteria in a repo whose fake files include `.factory/config.yml` and `.factory/dod.md`,
     and no other policy file,
     so the defaults run.
     Then tick:
@@ -6528,12 +6770,14 @@ from spec §6 rows 1 to 7:
     - A `review` webhook with `changes_requested` sends it to Queued.
       The next claim runs the address stage,
       which returns it to InReview.
-    - **Second item.** A second item is then taken through the same path to Done,
+    - **Second item.**
+      A second item is then taken through the same path to Done,
       so its Red stage runs with the first item's scenarios already green on main.
     - A `pr_merged` webhook moves InReview to Accepted,
       and green checks on the merge commit move it to Done.
       The fake adapter shows status Done and `closed: true`.
-  - **Event trail.** The `event` table holds every transition in order,
+  - **Event trail.**
+    The `event` table holds every transition in order,
     and once both items are Done,
     `/phase0` reports 2 merged PRs,
     each with its own cost.
@@ -6542,19 +6786,23 @@ from spec §6 rows 1 to 7:
     2 runs with a `merge_sha`,
     oldest first,
     each with a cost summed from its `stage_run` rows.
-  - **Sign-off by comment.** A copy of the full path signs off with a `/approve` comment instead of the dashboard,
+  - **Sign-off by comment.**
+    A copy of the full path signs off with a `/approve` comment instead of the dashboard,
     and reaches the same states.
-  - **NotReady recovery.** A second item with no acceptance criteria goes to NotReady with a reasons comment.
+  - **NotReady recovery.**
+    A second item with no acceptance criteria goes to NotReady with a reasons comment.
     Editing it re-runs the gate.
 - [ ] **Step 2:
-  Run the test.** Expected:
+  Run the test.**
+  Expected:
   FAIL,
   until the wiring gaps it exposes are closed.
 - [ ] **Step 3:
   Close the gaps** in the modules the failure names.
   Don't add new modules.
 - [ ] **Step 4:
-  Run `npm test`.** Expected:
+  Run `npm test`.**
+  Expected:
   every test passes.
 - [ ] **Step 5:
   Commit** `test: walking skeleton end to end`.
@@ -6573,7 +6821,8 @@ end to end.
   `docs/superpowers/runbooks/phase-0.md`
 
 - [ ] **Step 1:
-  Name the board and sign in.** Write `config/sources.yml` with one entry:
+  Name the board and sign in.**
+  Write `config/sources.yml` with one entry:
   repo `ricksu978/software-factory`,
   the installation id from Task 2 Step 5,
   owner `{ type: user, login: ricksu978 }`,
@@ -6610,7 +6859,8 @@ end to end.
     turn off the built-in workflows that set status,
     including "Item closed" and "Pull request merged".
     The factory owns status.
-  - **Branch protection.** Confirm `main` still requires a PR,
+  - **Branch protection.**
+    Confirm `main` still requires a PR,
     one approving review,
     `lint` and Task 1's CI job (Global Constraints).
     Shadow mode posts no `risk-approval`,
@@ -6618,7 +6868,8 @@ end to end.
   - Confirm the GitHub App is installed on this repo only.
 - [ ] **Step 3:
   Run one PBI live,
-  locally.** With `aspire run` up,
+  locally.**
+  With `aspire run` up,
   take the next PBI from this repo's own backlog,
   labelled `factory` on the personal Project.
   Expected:
@@ -6642,7 +6893,8 @@ end to end.
   From here the factory builds the backlog's factory-labelled PBIs,
   still running locally.
 - [ ] **Step 4:
-  Test the five overrides locally.** Hold a second item,
+  Test the five overrides locally.**
+  Hold a second item,
   pause,
   drain,
   stop a run,
@@ -6651,7 +6903,8 @@ end to end.
   using event timestamps against the moment of the click.
   Press the kill switch and record that every cell container stopped within a minute.
 - [ ] **Step 5:
-  Restart mid-run.** While a cell is in Green,
+  Restart mid-run.**
+  While a cell is in Green,
   stop `aspire run` and start it again within 2 minutes.
   Expected:
   the item,
@@ -6660,7 +6913,8 @@ end to end.
   no second cell starts,
   and the old sign-in cookie is refused until you open the new link.
 - [ ] **Step 6:
-  Write `docs/superpowers/runbooks/phase-0.md`.** It covers how to start the factory with `aspire run`,
+  Write `docs/superpowers/runbooks/phase-0.md`.**
+  It covers how to start the factory with `aspire run`,
   set its parameters,
   sign in,
   add users,
@@ -6816,11 +7070,13 @@ then records what happened.
     granting job start and execution stop.
     Find the exact action names with `az provider operation show --namespace Microsoft.App`.
 - [ ] **Step 2:
-  Run `az bicep build --file infra/main.bicep`.** Expected:
+  Run `az bicep build --file infra/main.bicep`.**
+  Expected:
   no errors.
   Then run `az deployment group what-if` against the resource group and read the resource list against Step 1.
 - [ ] **Step 2b:
-  Bootstrap once.** The deploy identity can't create itself.
+  Bootstrap once.**
+  The deploy identity can't create itself.
   So the first deploy is yours,
   from your own `az login`:
   `az deployment group create -g rg-software-factory-aue -f infra/main.bicep -p infra/main.bicepparam`.
@@ -6828,7 +7084,8 @@ then records what happened.
   and create the repo's `production` environment with yourself as its required reviewer and `main` as its only deployment branch.
   Every later deploy runs through `deploy.yml`.
 - [ ] **Step 3:
-  Write `deploy.yml`.** It authenticates to Azure through OIDC federated credentials,
+  Write `deploy.yml`.**
+  It authenticates to Azure through OIDC federated credentials,
   never a stored secret.
   It runs in this order,
   and each step waits for the one before:
@@ -6860,18 +7117,21 @@ then records what happened.
 
   So the new app code never runs before its migration.
 - [ ] **Step 4:
-  Deploy the spike.** Run `deploy.yml` with `control_image` empty.
+  Deploy the spike.**
+  Run `deploy.yml` with `control_image` empty.
   The app serves `spike/hello.ts` from Task 2,
   and its `GET /probe/sas` route stays off,
   because Azure doesn't set `FACTORY_ENV=local`.
 - [ ] **Step 5:
-  Sign-in test.** Sign in with a Google account,
+  Sign-in test.**
+  Sign in with a Google account,
   a personal Microsoft account and a work account from another tenant.
   Record each case's `x-ms-client-principal-idp` and `x-ms-client-principal-id`.
   Expected:
   all three reach `/` and show distinct ids.
 - [ ] **Step 6:
-  Header spoofing test.** Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out.
+  Header spoofing test.**
+  Send `curl -H "X-MS-CLIENT-PRINCIPAL-ID: forged" https://<app>/` while signed out.
   Expected:
   a redirect to login,
   not a 200.
@@ -6883,7 +7143,8 @@ then records what happened.
   not a login redirect,
   which proves the exclusion above took effect.
 - [ ] **Step 7a:
-  Turn on the App webhook.** The factory GitHub App was registered in Task 2 Step 5 with its webhook inactive.
+  Turn on the App webhook.**
+  The factory GitHub App was registered in Task 2 Step 5 with its webhook inactive.
   Point it at `https://<app>/webhooks/github`,
   set its secret,
   and subscribe it to issues,
@@ -6896,14 +7157,16 @@ then records what happened.
   Personal accounts get no `projects_v2_item` webhook,
   so board changes still come through the 5-minute poll.
 - [ ] **Step 7:
-  Webhook test.** Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery.
+  Webhook test.**
+  Point a GitHub App webhook at `https://<app>/webhooks/github` and trigger a delivery.
   Expected:
   204 in the App's delivery log,
   and no login redirect.
   Change the secret on one side,
   then expect 401.
 - [ ] **Step 8:
-  SDK probe in Azure.** The cell job holds no Claude token,
+  SDK probe in Azure.**
+  The cell job holds no Claude token,
   so the probe goes through a gateway,
   as every real cell will.
   - Before Step 4's deploy,
@@ -6926,7 +7189,8 @@ then records what happened.
     Record which one works.
     §14 already names the headless CLI as the fallback.
 - [ ] **Step 9:
-  Sandbox egress probe in Azure.** Run `spike/sdk-oauth.ts sandbox` in the same job,
+  Sandbox egress probe in Azure.**
+  Run `spike/sdk-oauth.ts sandbox` in the same job,
   with the same two variables as Step 8.
   - Expected:
     example.com blocked,
@@ -6935,7 +7199,8 @@ then records what happened.
     record that.
     The egress allowlist then needs another mechanism,
     which is a pending decision.
-  - **Test database (PBI 22).** This probe needs PBI 22 merged,
+  - **Test database (PBI 22).**
+    This probe needs PBI 22 merged,
     and a cell image built from it that `deploy.yml` has pushed.
     Before that,
     `startTestDb` always starts a Testcontainers Postgres and the image has no Postgres binaries,
@@ -6969,7 +7234,8 @@ then records what happened.
     its `cwd` is `<dir>`,
     the clone,
     and it takes the same options as `sandbox`.
-  - **The factory's database (PBI 22).** In one more execution,
+  - **The factory's database (PBI 22).**
+    In one more execution,
     request an Entra token for `https://ossrdbms-aad.database.windows.net/.default`,
     the scope `createPool` uses (Task 4),
     as `id-factory-cell`,
@@ -6979,7 +7245,8 @@ then records what happened.
     A failed token request doesn't count as a pass,
     because it shows only that the identity is missing.
 - [ ] **Step 10:
-  Job override probe.** Start one `caj-factory-migrate` execution with `--image` and `--args`,
+  Job override probe.**
+  Start one `caj-factory-migrate` execution with `--image` and `--args`,
   then read its resolved template with `az containerapp job execution show`.
   Record whether the job's env vars survived,
   such as the identity client id and the Postgres host.
@@ -7028,7 +7295,8 @@ now on the platform Task 19 built.
   so the sign-in check waits for Step 2.6.
   Take the subject id from the Task 19 Step 5 spike record.
 - [ ] **Step 2:
-  Move the factory to Azure.** The Azure database starts empty,
+  Move the factory to Azure.**
+  The Azure database starts empty,
   so nothing in flight may cross over.
   1. In the local dashboard,
      set drain.
@@ -7064,7 +7332,8 @@ now on the platform Task 19 built.
      plus sign-off by a `/approve` comment,
      now that the webhook is on.
 - [ ] **Step 3:
-  Test the five overrides in Azure.** Repeat Task 18 Step 4 against the deployed factory.
+  Test the five overrides in Azure.**
+  Repeat Task 18 Step 4 against the deployed factory.
   The kill switch must stop every job execution within a minute.
 - [ ] **Step 4:
   Extend the runbook** with the Azure deploy,

@@ -2,7 +2,7 @@
   "note": "PBI 294's merge replay: each file merge under replay/ through git merge-file, as node scripts/merge-replay.ts run writes it. replayed and conflicted are for the new layout.",
   "replayed": 47,
   "conflicted": 18,
-  "hunks": 22,
+  "hunks": 21,
   "old": {
     "conflicted": 47,
     "hunks": 62
