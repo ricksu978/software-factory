@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { exactName, parseRepeatArgs, repeat, type RunResult } from "./repeat.ts";
+import { exactName, parseRepeatArgs, repeat, runArgs, type RunResult } from "./repeat.ts";
 
 test("--times and --name are read in either order", () => {
   assert.deepEqual(parseRepeatArgs(["--times", "3", "--name", "Counts to three"]), { times: 3, name: "Counts to three" });
@@ -73,4 +73,10 @@ test("failed runs are named with their output, later runs still go ahead, and th
   assert.match(out, /output of run 2/);
   assert.doesNotMatch(out, /output of run 3/);
   assert.equal(lines.at(-1), "3 of 5 runs passed. Runs 2 and 4 failed.");
+});
+
+test("a run selects the scenario by its exact name and exits once cucumber-js has finished, without waiting on idle handles", () => {
+  const args = runArgs("Counts to three");
+  assert.deepEqual(args.slice(args.indexOf("--name"), args.indexOf("--name") + 2), ["--name", exactName("Counts to three")]);
+  assert.ok(args.includes("--force-exit"), JSON.stringify(args));
 });

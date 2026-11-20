@@ -76,9 +76,18 @@ export async function countScenarios(c: Cucumber, name: string): Promise<number>
   return r.output.split("\n").filter((line) => line.startsWith('{"testCase":')).length;
 }
 
+/**
+ * The arguments of one run. --force-exit ends the process once cucumber-js has run every hook and reported, so a run
+ * doesn't sit out the 10 seconds an idle pg pool client keeps the event loop alive. Over the 15 inner runs PBI 376's
+ * scenarios make, that wait alone would cost two and a half minutes of the 15 a cell gives `npm run bdd`.
+ */
+export function runArgs(name: string): string[] {
+  return ["--name", exactName(name), "--force-exit"];
+}
+
 /** One run of the scenario. It passes when cucumber-js exits 0. */
 export async function runScenario(c: Cucumber, name: string): Promise<RunResult> {
-  const r = await cucumber(c, ["--name", exactName(name)]);
+  const r = await cucumber(c, runArgs(name));
   return { passed: r.code === 0, output: r.output };
 }
 

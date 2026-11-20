@@ -23,7 +23,7 @@
 // - "late": the same, but the test's session gives the lock back 45 seconds after the first worker's lock session ended.
 // - "first-keeps-working": the first worker's lock connection hides its own end from the worker, so the worker keeps
 //   ticking without the lock.
-import { After, AfterStep, Before, BeforeStep, Given, Then, When } from "@cucumber/cucumber";
+import { After, AfterAll, AfterStep, Before, BeforeStep, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -127,26 +127,67 @@ function runList(text: string): number[] {
 
 // ---- Running the script ----
 
-async function repeat(world: object, args: string[]): Promise<void> {
-  const c = ctx(world);
+type Result = NonNullable<Ctx["result"]>;
+type Run = Promise<Result>;
+
+/** Starts `npm run bdd:repeat -- <args>` from the repo root, with the practice project and the fault in its environment. */
+function startRepeat(args: string[], opts: { practiceDir?: string; fault?: Fault }): Run {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env[FAULT_ENV];
   delete env.BDD_REPEAT_CWD;
-  if (c.practice) {
-    env.BDD_REPEAT_CWD = c.practice.dir;
-    env.PBI376_PRACTICE_DIR = c.practice.dir;
+  if (opts.practiceDir) {
+    env.BDD_REPEAT_CWD = opts.practiceDir;
+    env.PBI376_PRACTICE_DIR = opts.practiceDir;
   }
-  if (c.fault) env[FAULT_ENV] = c.fault;
+  if (opts.fault) env[FAULT_ENV] = opts.fault;
   const child = spawn("npm", ["run", "--silent", "bdd:repeat", "--", ...args], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
   const out: string[] = [];
-  for (const s of [child.stdout, child.stderr]) s.on("data", (b: Buffer) => {
-    out.push(b.toString());
-    process.stdout.write(b);
-  });
-  c.result = await new Promise((resolve, reject) => {
+  for (const s of [child.stdout, child.stderr]) s.on("data", (b: Buffer) => out.push(b.toString()));
+  const promise = new Promise<Result>((resolve, reject) => {
     child.on("error", reject);
     child.on("close", (code, signal) => resolve({ code, signal, out: out.join("") }));
   });
+  promise.catch(() => {});
+  return promise;
+}
+
+// The @ac-4 scenarios each run the takeover scenario 3 times under one fault, and each of those runs waits out the
+// whole 30 seconds before it fails, so the three one after another would take over 5 minutes of the 15 a cell gives
+// `npm run bdd`. The faults don't touch each other: every inner run starts its own Postgres and its own workers. So
+// the first of them starts the script for every fault with the same arguments, and each scenario reads the run made
+// with its own fault. Each script still runs its scenario back to back; only the three scripts overlap. A run no
+// scenario reads, as when only one of them is selected, is waited for once the suite ends. It isn't killed, because
+// the Postgres server each inner run starts outlives a killed run.
+const FAULTS: Fault[] = ["never", "late", "first-keeps-working"];
+/** The runs started ahead that no scenario has read yet, by fault and arguments. */
+const ahead = new Map<string, Run>();
+/** The arguments the runs for every fault have been started with, so a later scenario doesn't start them again. */
+const startedAhead = new Set<string>();
+const aheadKey = (fault: Fault, args: string[]) => JSON.stringify([fault, args]);
+
+function faultRun(fault: Fault, args: string[]): Run {
+  const argsKey = JSON.stringify(args);
+  if (!startedAhead.has(argsKey)) {
+    startedAhead.add(argsKey);
+    for (const f of FAULTS) ahead.set(aheadKey(f, args), startRepeat(args, { fault: f }));
+  }
+  const key = aheadKey(fault, args);
+  const run = ahead.get(key) ?? startRepeat(args, { fault });
+  ahead.delete(key);
+  return run;
+}
+
+AfterAll({ timeout: REPEAT_TIMEOUT_MS }, async function () {
+  const left = [...ahead.values()];
+  ahead.clear();
+  await Promise.allSettled(left);
+});
+
+async function repeat(world: object, args: string[]): Promise<void> {
+  const c = ctx(world);
+  const run = c.fault && !c.practice ? faultRun(c.fault, args) : startRepeat(args, { practiceDir: c.practice?.dir, fault: c.fault });
+  c.result = await run;
+  process.stdout.write(c.result.out);
 }
 
 function result(world: object): NonNullable<Ctx["result"]> {
