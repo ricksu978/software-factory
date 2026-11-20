@@ -198,8 +198,8 @@ async function requeue(d: TickDeps, itemId: string) {
     await c.query("update item set held = false where id = $1", [itemId]);
     await clearItemOverrides(c, itemId);
     if (!row || (row.state !== "Failed" && row.state !== "Abandoned")) return;
-    const open = await c.query<{ id: string; kind: string }>(
-      "select id, kind from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1",
+    const open = await c.query<{ id: string; kind: string; body: string }>(
+      "select id, kind, body from question where item_id = $1 and answer is null and closed_at is null order by asked_at desc limit 1",
       [itemId],
     );
     // A person closed the PR, by hand or by the poller or webhook's withdrawal, so the item resumes at open-pr as it
@@ -209,7 +209,9 @@ async function requeue(d: TickDeps, itemId: string) {
       await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [itemId]);
     } else if (row.state === "Abandoned" && open.rowCount) {
       const event: ItemEvent = open.rows[0].kind === "sign_off" ? "reopened_signoff" : "reopened_question";
-      await transitionItem(c, itemId, event, system);
+      // The worker quotes the question on the board from the transition's payload, so the person sees what they are
+      // asked again (PBI 219).
+      await transitionItem(c, itemId, event, system, { question: open.rows[0].body });
       await c.query("update question set asked_at = $2, reminders_sent = 0 where id = $1", [open.rows[0].id, d.now]);
       return;
     }

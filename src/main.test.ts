@@ -10,6 +10,7 @@ import { createAuth } from "./http/auth.ts";
 import { startServer } from "./http/server.ts";
 import { controlHandlers, dashboardOrigin } from "./main.ts";
 import { dbTest, startTestDb } from "./store/test-db.ts";
+import { workOutbox } from "./worker/outbox.ts";
 
 /** Starts src/main.ts with only `env` (and PATH, so node runs), and returns how it ended. */
 const start = (env: Record<string, string>) =>
@@ -86,7 +87,7 @@ describe("control plane handlers", dbTest, () => {
     await db.stop();
   });
 
-  test("an /approve comment that arrives as a signed GitHub webhook signs off the scenarios", async () => {
+  test("an /approve comment that arrives as a signed GitHub webhook signs off the scenarios once the worker runs it", async () => {
     const ext = await fake.seed({ title: "t", repo: "octo/repo", acceptanceCriteria: ["it works"] });
     const item = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, $2, 't', 'SignOff') returning id", [sourceId, ext])).rows[0].id;
     await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha) values ($1, 1, 'sign-off', 'abc')", [item]);
@@ -105,13 +106,11 @@ describe("control plane handlers", dbTest, () => {
       },
     });
     assert.equal(r.status, 204);
-    // The comment is applied after the 204, so wait for it.
-    let decision: string | null = null;
-    for (let i = 0; i < 50 && !decision; i++) {
-      decision = (await db.pool.query("select decision from question where item_id = $1", [item])).rows[0].decision;
-      if (!decision) await new Promise((res) => setTimeout(res, 100));
-    }
-    assert.equal(decision, "approve");
+    const decision = async () => (await db.pool.query("select decision from question where item_id = $1", [item])).rows[0].decision;
+    // The control plane only records it. The worker runs it from its outbox row (PBI 219).
+    assert.equal(await decision(), null);
+    await workOutbox({ pool: db.pool, backlogFor: () => fake.adapter, repoHost: fakeRepoHost() });
+    assert.equal(await decision(), "approve");
     assert.match((await fake.comments(ext))[0], /signed off/);
   });
 
