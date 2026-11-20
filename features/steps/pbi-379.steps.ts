@@ -15,7 +15,7 @@ import { setOverride } from "../../src/store/overrides.ts";
 import { ctx as p140, renew } from "./pbi-140.steps.ts";
 import { ctx as p17, newItem } from "./pbi-17.steps.ts";
 import type { Ctx as Pbi18 } from "./pbi-18.steps.ts";
-import { ctx as p301, events, finished, pbi18, runAsCell, runCell, stageCalls } from "./pbi-301.steps.ts";
+import { ctx as p301, events, finished, pbi18, ranStage, runAsCell, runCell, stageCalls } from "./pbi-301.steps.ts";
 import { ctx as p89, open } from "./pbi-89.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
@@ -224,24 +224,30 @@ Given("item {string} is at self-review in cell {string} with a live lease", long
   assert.ok(r.rows[0].lease_expires && r.rows[0].lease_expires > now, `item ${name}'s lease isn't live`);
 });
 
-// The cell runs its stage to the end through the real cell API. How it ended isn't judged here: the Thens read what
-// the control plane holds after it.
+// The cell runs its stage to the end through the real cell API. Each step checks the cell didn't fail and reported the
+// stage as its wording says. How the item ended up isn't judged here: the Thens read what the control plane holds.
 When("cell {string} runs self-review to the end and self-review passes", long, async function (cell: string) {
   await runAsCell(this, cell);
+  ranStage(this, "self-review");
 });
 
 Given("cell {string} ran self-review to the end and self-review passed", long, async function (cell: string) {
   await runAsCell(this, cell);
+  ranStage(this, "self-review");
 });
 
 When("green passes and cell {string} ends its claim at the stage boundary", long, async function (cell: string) {
   await runAsCell(this, cell);
+  const p = ranStage(this, "green");
+  const passed = p.calls.findIndex((x) => x.route === "/stage" && x.body.stageId === "green" && x.body.status === "passed");
+  assert.ok(p.calls.slice(passed + 1).some((x) => x.route === "/release"), `${cell} didn't end its claim after green`);
 });
 
 When("cell {string} runs green, whose first attempt fails and whose second attempt passes", long, async function (cell: string) {
   const c = ctx(this);
   c.outcomes.set("green", ["fail", "pass"]);
   await runAsCell(this, cell, (p) => script(this, p));
+  ranStage(this, "green", ["failed", "passed"]);
 });
 
 When("cell {string} renews its lease while green's agent works", long, async function (cell: string) {

@@ -357,13 +357,27 @@ export async function runAsCell(world: object, cell: string, prepare?: (p: Pbi18
   }
 }
 
+/**
+ * The cell ran without failing and reported `stage` with these statuses, attempt by attempt: by default, one attempt
+ * that passed. It's what a step that says the stage passed checks of the run `runAsCell` just made.
+ */
+export function ranStage(world: object, stage: string, statuses: string[] = ["passed"]): Pbi18 {
+  const p = finished(world);
+  const ended = stageCalls(p).filter((x) => x.body.stageId === stage && x.body.status !== "started");
+  assert.deepEqual(ended.map((x) => [x.body.attempt, x.body.status]), statuses.map((s, i) => [i + 1, s]),
+    `the cell didn't report ${stage}'s attempts as ${statuses.join(", then ")}`);
+  return p;
+}
+
 When("cell {string} runs green to the end and green passes", long, async function (cell: string) {
   await runAsCell(this, cell);
+  ranStage(this, "green");
 });
 
 Given("cell {string} ran green to the end and green passed", long, async function (cell: string) {
   // How the cell ended isn't judged here: the scenario's Thens read what the control plane holds after it.
   await runAsCell(this, cell);
+  ranStage(this, "green");
 });
 
 async function itemRow(world: object, name: string) {
