@@ -9,7 +9,10 @@ Feature: The PBI 157 standby takeover scenario passes every time, so a flake sto
   failed.
   The scenarios for the script itself run it against practice scenarios whose passes and failures the test
   sets, so cells and CI both run them. Scenarios tagged @db repeat PBI 157's scenarios, which need Postgres,
-  started by each test for itself, so cells and CI both run them too.
+  started by each test for itself. Unless a scenario is also tagged @local, cells and CI both run it, so those
+  repeat a scenario only 3 times. The 20-run scenarios are tagged @local, because 20 takeover runs of up to
+  30 seconds each would add many minutes to every build and multiply any flake left by 20. The owner runs
+  them once and the PR records the run.
 
   Rule: bdd:repeat runs one scenario n times back to back and exits 0 only when every run passes
 
@@ -68,17 +71,29 @@ Feature: The PBI 157 standby takeover scenario passes every time, so a flake sto
         | "three"  |
         | missing  |
 
-  Rule: PBI 157's standby takeover scenario passes 20 times in a row
+  Rule: PBI 157's standby takeover scenario passes every time it is repeated
 
     @ac-2 @db
+    Scenario: The takeover scenario passes on each of 3 runs back to back
+      When the owner runs `npm run bdd:repeat -- --times 3 --name "When the working worker loses its lock connection, the standby takes over within 30 seconds"`
+      Then the script exits with code 0
+      And the script reports that 3 of 3 runs passed
+
+    @ac-2 @db @local
     Scenario: The takeover scenario passes on each of 20 runs back to back
       When the owner runs `npm run bdd:repeat -- --times 20 --name "When the working worker loses its lock connection, the standby takes over within 30 seconds"`
       Then the script exits with code 0
       And the script reports that 20 of 20 runs passed
 
-  Rule: PBI 157's second worker scenario passes 20 times in a row
+  Rule: PBI 157's second worker scenario passes every time it is repeated
 
     @ac-3 @db
+    Scenario: The second worker scenario passes on each of 3 runs back to back
+      When the owner runs `npm run bdd:repeat -- --times 3 --name "A second worker claims no item while the first one runs"`
+      Then the script exits with code 0
+      And the script reports that 3 of 3 runs passed
+
+    @ac-3 @db @local
     Scenario: The second worker scenario passes on each of 20 runs back to back
       When the owner runs `npm run bdd:repeat -- --times 20 --name "A second worker claims no item while the first one runs"`
       Then the script exits with code 0
