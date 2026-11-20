@@ -27,11 +27,16 @@ type Ctx = {
   insideEventId?: string;
   /** Each delivery's id by the issue its comment is on, in delivery order. */
   deliveries: { issue: string; id: string }[];
+  /** The repo a board's items are in, by board name, where a scenario gives a board a repo of its own. */
+  repos: Map<string, string>;
+  /** Whether an item waiting for sign-off got there by the cell's move from InProgress, whose board mirror row is still
+   * in the outbox (PBI 221), rather than being put there with no outbox row. */
+  signOffByMove?: boolean;
 };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi218?: Ctx };
-  w.pbi218 ??= { deliveries: [] };
+  w.pbi218 ??= { deliveries: [], repos: new Map() };
   return w.pbi218;
 }
 
@@ -44,6 +49,16 @@ export const REPO = "acme/app";
 
 class RolledBack extends Error {
   override name = "RolledBack";
+}
+
+/** Has an item waiting for sign-off get there by the cell's move, leaving that move's board mirror row in the outbox. */
+export function signOffByMove(world: object): void {
+  ctx(world).signOffByMove = true;
+}
+
+/** Puts the items newItem adds to the board `boardName` in `repo`, in place of REPO. */
+export function boardRepo(world: object, boardName: string, repo: string): void {
+  ctx(world).repos.set(boardName, repo);
 }
 
 export function board(world: object, name: string): string {
@@ -59,7 +74,7 @@ export async function item(world: object, issue: string, boardName: string): Pro
 }
 
 /**
- * The item, and the same item on the board's fake as the board would show it: in REPO, with the status the field map
+ * The item, and the same item on the board's fake as the board would show it: in REPO, or the board's own repo, with the status the field map
  * names for its state and, while it's InProgress, the factory's claim. PBI 219's worker mirrors onto it.
  */
 export async function newItem(world: object, issue: string, boardName: string, state: ItemState): Promise<string> {
@@ -73,7 +88,7 @@ export async function newItem(world: object, issue: string, boardName: string, s
   )).rows[0]?.status;
   const fake = p156(world).boards.find((b) => b.id === sourceId)!.fake;
   await fake.seed({
-    externalId: num(issue), title: `item ${issue}`, repo: REPO, ...(status ? { status } : {}),
+    externalId: num(issue), title: `item ${issue}`, repo: ctx(world).repos.get(boardName) ?? REPO, ...(status ? { status } : {}),
     labels: state === "InProgress" ? [OPT_IN_LABEL, CLAIM_MARKER] : [OPT_IN_LABEL],
   });
   return r.rows[0].id;
@@ -134,7 +149,12 @@ Given("item {string} on board {string} is {string}", long, async function (issue
 });
 
 Given("item {string} on board {string} is waiting in {string} for its scenarios to be signed off", long, async function (issue: string, boardName: string, state: ItemState) {
-  const id = await newItem(this, issue, boardName, state);
+  const byMove = ctx(this).signOffByMove;
+  const id = await newItem(this, issue, boardName, byMove ? "InProgress" : state);
+  if (byMove) {
+    const to = await withTx(pool(), (c) => transitionItem(c, id, "scenarios_written", { actor: "system", actorId: "cell" }));
+    assert.equal(to, state);
+  }
   await pool().query("insert into run (item_id, next_stage, scenarios_sha) values ($1, 'specify', 'abc123')", [id]);
   await pool().query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Please sign off the scenarios.')", [id]);
 });

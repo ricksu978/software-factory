@@ -165,7 +165,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
         ...calls.filter((c) => c.route === "/repo/replyToThread").map((c) => ({ threadId: c.body.threadId, path: "app.txt", line: 1, author: "factory[bot]", body: c.body.body }))]),
     },
     sop: SOP,
-    config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
+    config: { sensitivePaths: [], reviewers: ["owner"], webTools: [], failedRecheckHours: 8,
       bdd: { parse: `mkdir -p reports && cp "${fwd(join(fixtures, "parse.ndjson"))}" reports/bdd.ndjson`,
         run: `sh "${fwd(join(fixtures, "run.sh"))}"`, report: "reports/bdd.ndjson" },
       commands: { test: "true", lint: "true" } },

@@ -54,9 +54,12 @@ type Ctx = {
   /** The bug item a Given put in place: its external id on the board and its row's id. */
   bug?: { externalId: string; itemId: string };
   nextUrl: number;
+  /** PBI 369: the repo the scenario's commits and CI are on, when it isn't "acme/widgets". */
+  repo?: string;
 };
 
-function ctx(world: object): Ctx {
+/** Exported for PBI 369's steps, which hold their items here so this file's "item <n> waits on" reads them. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi255?: Ctx };
   w.pbi255 ??= { items: new Map(), claims: [], nextUrl: 950 };
   return w.pbi255;
@@ -99,8 +102,8 @@ async function harness(world: object): Promise<{ c: PollCtx; mine: Ctx }> {
   return { c, mine };
 }
 
-function mainCommits(c: PollCtx): string[] {
-  const key = `${REPO}@${MAIN}`;
+function mainCommits(c: PollCtx, repo = REPO): string[] {
+  const key = `${repo}@${MAIN}`;
   const list = c.host!.branches.get(key) ?? [];
   c.host!.branches.set(key, list);
   return list;
@@ -117,14 +120,14 @@ function land(c: PollCtx, sha: string, after: string): void {
 }
 
 /** Puts `parent` on main right before `sha`, as its first parent. */
-function parentOf(c: PollCtx, sha: string, parent: string): void {
-  const list = mainCommits(c);
+function parentOf(c: PollCtx, sha: string, parent: string, repo = REPO): void {
+  const list = mainCommits(c, repo);
   const at = list.indexOf(sha);
   assert.ok(at >= 0, `commit "${sha}" isn't on main`);
-  const old = c.host!.parents.get(`${REPO}@${sha}`);
-  if (old) c.host!.parents.set(`${REPO}@${parent}`, old);
+  const old = c.host!.parents.get(`${repo}@${sha}`);
+  if (old) c.host!.parents.set(`${repo}@${parent}`, old);
   list.splice(at, 0, parent);
-  c.host!.parents.set(`${REPO}@${sha}`, parent);
+  c.host!.parents.set(`${repo}@${sha}`, parent);
 }
 
 async function holdItem(world: object, n: number, state: string, extra: { priority?: number; rank?: number; title?: string } = {}): Promise<string> {
@@ -173,7 +176,7 @@ function ci(world: object, sha: string, set: { name: string; status: CheckRun["s
   const c = pollCtx(world);
   assert.ok(c.host, "the fake repo host isn't set up");
   const mine = ctx(world);
-  const key = `${REPO}@${sha}`;
+  const key = `${mine.repo ?? REPO}@${sha}`;
   const runs = c.host.runs.get(key) ?? [];
   for (const s of set) {
     const run: CheckRun = { name: s.name, status: s.status, url: s.url ?? urlFor(mine) };
@@ -213,7 +216,7 @@ Given("the factory holds item {int} in state {string} after its PR {int} merged 
 
 Given("commit {string}'s first parent on {string} is commit {string}", function (sha: string, branch: string, parent: string) {
   assert.equal(branch, MAIN);
-  parentOf(pollCtx(this), sha, parent);
+  parentOf(pollCtx(this), sha, parent, ctx(this).repo);
 });
 
 Given("commit {string} lands on {string} after commit {string}", function (sha: string, branch: string, after: string) {

@@ -26,6 +26,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Split", "children_done", "Done"],
   // PBI 228: a parent withdrawn to Abandoned after its split was filed, before PBI 225, moves to Split.
   ["Abandoned", "split_filed", "Split"],
+  // PBI 369: a re-check that no longer finds the merge broke main sends the item back to Accepted.
+  ["Failed", "rechecked", "Accepted"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -42,3 +44,6 @@ test("split_filed moves only a NotReady or Abandoned item", () => {
   for (const s of ["Eligible", "Queued", "Failed", "Done", "Split"] as ItemState[]) assert.equal(next(s, "split_filed"), null);
 });
 test("override goes anywhere", () => assert.equal(overrideTo("Done", "Queued"), "Queued"));
+test("rechecked moves only a Failed item", () => {
+  for (const s of ["Accepted", "Abandoned", "Done", "Queued"] as ItemState[]) assert.equal(next(s, "rechecked"), null);
+});

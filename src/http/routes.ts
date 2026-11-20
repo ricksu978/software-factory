@@ -18,6 +18,7 @@ import { readCellImage } from "../store/cell-image.ts";
 import { splitChildren } from "../store/splits.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
+import { failedOnMain } from "../store/rechecks.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
 import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
 import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type MainBreakRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
@@ -178,12 +179,14 @@ export async function floor(pool: pg.Pool) {
     "select id, external_id, title, state from item where id = any($1::uuid[])", [finalIds],
   )).rows;
   const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split].map((r) => r.id));
+  // PBI 369: each item that failed its Definition of Done on main, and when the factory last re-checked it.
+  const failed = await failedOnMain(pool);
+  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split, ...failed].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
     active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
     keys, finalStage: withRepo(finalStage),
-    baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split),
+    baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split), failed: withRepo(failed),
     restart, running, cellImage: await readCellImage(pool),
   };
 }
@@ -347,7 +350,15 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
     claim,
     durations,
     splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
+    recheck: await recheckOf(pool, id, item.state),
   };
+}
+
+/** PBI 369: when a Failed item that failed its Definition of Done on main was last re-checked. Null for any other item. */
+async function recheckOf(pool: pg.Pool, id: string, state: string): Promise<RunDetail["recheck"]> {
+  if (state !== "Failed") return null;
+  const row = (await failedOnMain(pool, id))[0];
+  return row ? { last: row.rechecked } : null;
 }
 
 /** Where the item's time went (PBI 187): its moves, every run's stage attempts and its questions, read up to `now`. */
@@ -465,7 +476,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
     const banner = tokenBanner(env);
 
     if (req.method === "GET" && path === "/") {
-      send(res, 200, floorPage({ ...(await floor(deps.pool)), canOperate: requireRole(user, "operator") }, banner));
+      send(res, 200, floorPage({ ...(await floor(deps.pool)), canOperate: requireRole(user, "operator"), zone: zoneFrom(req.headers.cookie) }, banner));
       return true;
     }
     if (req.method === "GET" && path === "/activity") {
