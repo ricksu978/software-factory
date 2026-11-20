@@ -1615,6 +1615,23 @@ describe("runCell", () => {
     ended(h, "address", "failed");
   });
 
+  test("a cell told restarting whose address passes starts no pr-review and releases its claim", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] }, lease: told });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "address", "passed");
+    assert.ok(!h.routes().includes("/repo/postReview"));
+  });
+
+  test("a restart prepared during green's push still ends the cell at the boundary", async () => {
+    let on = false;
+    const h = harness({ nextStage: "green", lease: async () => ({ stop: false, restarting: on }) });
+    const push = h.deps.git.push;
+    h.deps.git = { ...h.deps.git, push: async (...args: Parameters<typeof push>) => { const r = await push(...args); on = true; return r; } };
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(h.started(), ["green"]);
+    assert.equal(h.routes().at(-1), "/release");
+  });
+
   test("a restart cleared before the stage ends lets the cell go on to the next stage (PBI 301)", async () => {
     mock.timers.enable({ apis: ["setInterval"] });
     let restarting = true;

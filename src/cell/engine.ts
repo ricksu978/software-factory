@@ -590,21 +590,16 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   };
 
   // Checks the generation before every push and transition. A stop reply ends the run here.
-  // Every stage that passes pushes first, so the lease answer `restarting` is read from is at most one command old.
   const guard = async () => {
     const r = await api.lease();
     restarting = r.restarting === true;
     if (r.stop) throw new Stop("stopped by the control plane");
   };
-  // PBI 301: at a stage boundary, a cell told a restart is being prepared starts no further stage.
-  const boundary = () => {
-    if (restarting) throw new Restarting("a restart is being prepared");
-  };
-  // The same, after a stage whose last lease check may be a long way back: understand never pushes, open-pr waits for
-  // CI, and address and pr-review end on GitHub calls. A fresh check makes the answer at most one command old.
+  // PBI 301: at a stage boundary, a cell told a restart is being prepared starts no further stage. The lease is
+  // checked afresh: a stage's last check may be a push, a stage report and its uploads back, or a CI wait.
   const atBoundary = async () => {
     await guard();
-    boundary();
+    if (restarting) throw new Restarting("a restart is being prepared");
   };
   const transition = async (b: TransitionBody) => {
     await guard();
@@ -1457,6 +1452,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // The PR already holds its body and its reviewers, so a clean review only hands it back to them.
     const back = () => transition({ event: "pr_opened", prNumber: ctx.prNumber! });
     if (!reviews) { await back(); return null; }
+    // PBI 301: pr-review is a further stage. The run stays at address, so a restarted cell runs address again.
+    await atBoundary();
     return prReview({ number: ctx.prNumber!, url: `https://github.com/${ctx.repo}/pull/${ctx.prNumber}` }, async () => { await end("passed"); await back(); });
   };
 
@@ -1545,11 +1542,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const order = ["red", "green", "self-review", "open-pr"];
     const resumed = start === "address";
     if (!resumed && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
-    if (start === "red") { await red(); boundary(); }
+    if (start === "red") { await red(); await atBoundary(); }
     let from = resumed ? 1 : Math.max(order.indexOf(start), 1);
     for (;;) {
-      if (from <= 1) { await green(carried); boundary(); }
-      if (from <= 2) { await selfReview(); boundary(); }
+      if (from <= 1) { await green(carried); await atBoundary(); }
+      if (from <= 2) { await selfReview(); await atBoundary(); }
       let back = await openPr();
       // Open-pr passed and pr-review is next, in this cell. A claim ended here resumes at open-pr, as a stop's does.
       if (!back && reviews) { await atBoundary(); back = await prReview(opened!, handOverOpened); }
