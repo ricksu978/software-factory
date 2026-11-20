@@ -1,5 +1,5 @@
 // The software factory's local platform (plan Task 2). `aspire run` from the repo root starts it.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createBuilder, EndpointProperty, refExpr } from './.aspire/modules/aspire.mjs';
 
@@ -23,13 +23,32 @@ const postgres = await builder.addPostgres('pg').withImageTag('17').withDataVolu
 const db = await postgres.addDatabase('factory-db', { databaseName: 'factory' });
 const dbUri = await db.uriExpression();
 
+// Azurite runs on an account key of its own (PBI 84). Its default devstoreaccount1 key is published, so a cell could
+// sign its own SAS with it, and the egress proxy lets any SAS through to Azurite. AZURITE_ACCOUNTS names
+// devstoreaccount1 with a new key, which replaces the published one, so only the holders of FACTORY_BLOB can sign.
+// The key is 64 random bytes, new at each start: Azurite keys its stored blobs on the account name, not the key, so
+// the data volume keeps working, and every SAS from an earlier start stops working. Aspire's blobs connection string
+// still carries the published key, so FACTORY_BLOB is built here from the new key and Azurite's blob port instead.
+// Aspire's own health check for the storage resource signs with that string too, so the dashboard shows it unhealthy.
+// No resource waits on it. `aspire publish` uses Azure Storage, whose key is Azure's, so it keeps Aspire's blobs.
+const azuriteKey = runMode ? randomBytes(64).toString('base64') : null;
 const storage = await builder.addAzureStorage('storage').runAsEmulator({
   configureContainer: async (azurite) => {
     await azurite.withDataVolume();
     if (!floatPorts) await azurite.withBlobPort(7410);
+    if (azuriteKey) await azurite.withEnvironment('AZURITE_ACCOUNTS', `devstoreaccount1:${azuriteKey}`);
   },
 });
 const blobs = await storage.addBlobs('blobs');
+// The key goes into the expression's text, not in as a value, so refExpr only ever interpolates Aspire's references.
+const blobConnection = async (key: string) => {
+  const blobPort = await storage.getEndpoint('blob').property(EndpointProperty.Port);
+  const parts = [
+    `DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=${key};BlobEndpoint=http://127.0.0.1:`,
+    '/devstoreaccount1;',
+  ];
+  return refExpr(Object.assign(parts, { raw: parts }) as unknown as TemplateStringsArray, blobPort);
+};
 
 // Keycloak is the local sign-in provider (redesign step 5a). It is pinned to 7430 even under FACTORY_FLOAT_PORTS,
 // because the issuer URL contains the port and users are keyed on the issuer. Under FACTORY_FLOAT_PORTS=1 migrate still
@@ -69,7 +88,6 @@ const control = await builder.addNodeApp('control', repo, 'src/main.ts')
   .withNpm({ install: false })
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7400, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
-  .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
   .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
@@ -89,7 +107,6 @@ const cellApi = await builder.addNodeApp('cell-api', repo, 'src/cell-api/main.ts
   .withNpm({ install: false })
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7401, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
-  .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
   .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
@@ -124,7 +141,6 @@ const cellImage = runMode
 const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withNpm({ install: false })
   .withEnvironment('FACTORY_DB_URI', dbUri)
-  .withEnvironment('FACTORY_BLOB', blobs)
   .withEnvironment('CLAUDE_CODE_OAUTH_TOKEN', claudeToken)
   .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
   .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
@@ -135,6 +151,12 @@ const worker = await builder.addNodeApp('worker', repo, 'src/worker/main.ts')
   .withEnvironment('CELL_CONTROL_URL', cellControlUrl)
   .waitForCompletion(migrate, { exitCode: 0 });
 if (cellImage) await worker.waitForCompletion(cellImage, { exitCode: 0 });
+// FACTORY_BLOB: Azurite's own key under `aspire run`, as above, and Aspire's blobs connection once published.
+const runBlob = azuriteKey ? await blobConnection(azuriteKey) : null;
+for (const app of [control, cellApi, worker]) {
+  if (runBlob) await app.withEnvironment('FACTORY_BLOB', runBlob);
+  else await app.withEnvironment('FACTORY_BLOB', blobs);
+}
 
 // The BFF (redesign step 7a, src/bff/main.ts): signs people in and keeps sessions in Postgres as factory_bff. It runs
 // on 7403 beside today's dashboard on 7400 until the cut-over moves it, and floats with the others under
@@ -144,8 +166,17 @@ if (cellImage) await worker.waitForCompletion(cellImage, { exitCode: 0 });
 const bffSessionKey = await secret('bff-session-key');
 const bffIssuer = runMode ? 'http://localhost:7430/realms/factory' : await builder.addParameter('oidc-issuer');
 const bffClientSecret = runMode ? '' : await secret('oidc-client-secret');
+// The SPA (redesign step 8a): the BFF serves web/dist, which `npm run build` (scripts/build-spa.ts) type-checks and
+// builds with Vite. Under `aspire run` a resource of its own builds it from this checkout, after the start checks' pull,
+// and the BFF waits for it to exit with 0, so 7403 never serves a missing or stale build. A type error exits non-zero,
+// so the dashboard shows it as failed with tsc's output in its console, and the BFF never starts. `aspire publish` runs
+// the same script through withBuildScript. The build needs the devDependencies (Vite, React, Tailwind).
+const spaBuild = runMode
+  ? await builder.addNodeApp('spa-build', repo, 'scripts/build-spa.ts').withNpm({ install: false })
+  : null;
 const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
   .withNpm({ install: false })
+  .withBuildScript('build')
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7403, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('OIDC_ISSUER', bffIssuer)
@@ -154,6 +185,7 @@ const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
   .withEnvironment('OIDC_SCOPES', 'openid')
   .withEnvironment('BFF_SESSION_KEY', bffSessionKey)
   .waitForCompletion(migrate, { exitCode: 0 });
+if (spaBuild) await bff.waitForCompletion(spaBuild, { exitCode: 0 });
 // The address the browser reaches the BFF on, built from its own endpoint so it follows the port.
 const bffPort = await bff.getEndpoint('http').property(EndpointProperty.Port);
 await bff.withEnvironment('BFF_ORIGIN', refExpr`http://localhost:${bffPort}`);

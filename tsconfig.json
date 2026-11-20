@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "features", "spike"]
+  "include": ["src", "features", "spike", "web/src/**/*.test.ts", "web/vite.config.ts", "scripts/build-spa.ts"]
 }

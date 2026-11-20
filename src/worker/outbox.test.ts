@@ -7,7 +7,7 @@ import { withTx } from "../store/db.ts";
 import { overrideItem, transitionItem } from "../store/items.ts";
 import { writeOutboxRows } from "../store/outbox.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { backoffMs, runRowEffects, workOutbox, type OutboxRow } from "./outbox.ts";
+import { backoffMs, MAX_ATTEMPTS, runRowEffects, workOutbox, type OutboxRow } from "./outbox.ts";
 
 const system = { actor: "system" as const, actorId: "test" };
 
@@ -108,6 +108,30 @@ describe("workOutbox", dbTest, () => {
     await workOutbox(deps());
     assert.equal(await statuses("1"), "Sign-off");
     assert.deepEqual(await outbox(), []);
+  });
+
+  test("a row that fails its tenth attempt is marked failed and set aside, and its item's later rows run", async () => {
+    const a = await item("1", "Queued");
+    refused.add("1");
+    await withTx(db.pool, (c) => transitionItem(c, a, "claimed", system));
+    const failedAt = async () => (await db.pool.query<{ attempts: number; failed: boolean }>(
+      "select attempts, failed_at is not null as failed from outbox order by seq limit 1",
+    )).rows[0];
+    for (let n = 1; n <= MAX_ATTEMPTS - 1; n++) {
+      await db.pool.query("update outbox set next_attempt_at = now()");
+      await workOutbox(deps());
+    }
+    assert.deepEqual(await failedAt(), { attempts: MAX_ATTEMPTS - 1, failed: false });
+    await withTx(db.pool, (c) => transitionItem(c, a, "scenarios_written", system));
+    await db.pool.query("update outbox set next_attempt_at = now()");
+    await workOutbox(deps());
+    assert.deepEqual(await failedAt(), { attempts: MAX_ATTEMPTS, failed: true });
+    // Set aside, it's no longer tried even when due, and the item's later row is no longer held back.
+    refused.clear();
+    await db.pool.query("update outbox set next_attempt_at = now()");
+    await workOutbox(deps());
+    assert.equal(await statuses("1"), "Sign-off");
+    assert.deepEqual((await outbox()).map((r) => [r.item_id, r.attempts]), [[a, MAX_ATTEMPTS]]);
   });
 
   const mirrorRow = async (id: string): Promise<OutboxRow> => {
