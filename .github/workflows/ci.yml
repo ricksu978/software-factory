@@ -17,6 +17,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Runs the build script when package.json has one, so an item can add the SPA's Vite build and type check
+      # (redesign step 8) without touching this file, which no factory cell may change. Before the tests, which serve
+      # the built files.
+      - run: npm run --if-present build
       # The AppHost is its own npm project, and its types come from .aspire/modules, which aspire restore generates and
       # git ignores. The root typecheck never sees it (PBI 303). Keep the CLI at sdk.version in aspire.config.json.
       - run: npm install -g @microsoft/aspire-cli@13.6.4
