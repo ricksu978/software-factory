@@ -854,8 +854,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // PBI 292: every CI failure on the run's own commits in this cell, oldest first, by the commit it failed on. A head
   // CI failed on is never read again, so no attempt is charged for the same failure twice.
+  // PBI 315: a head CI failed on in an earlier claim of the run counts as failed here too, until a new commit moves on.
   const ciFailures: CiFailure[] = [];
-  const failedHeads = new Map<string, CiFailure>();
+  const failedHeads = new Map<string, CiFailure>((ctx.failedCiHeads ?? []).map((f) => [f.sha, f]));
   // PBI 232: each failed check's log, as `/checks` named it, by the commit CI failed on, for Green's findings.
   const failedLogs = new Map<string, FailedCheck[]>();
   // The CI failure the next Green pass is sent back to fix, and the one the pass in flight fixes, for its reports.
@@ -1190,6 +1191,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Returns findings that send the item back to green, or null once the PR is open and CI passed. The item stays
   // InProgress: the PR review moves it to InReview once it passes (PBI 128), or open-pr does when there's no review.
   const openPr = async (): Promise<string[] | null> => {
+    // PBI 315: a head CI already failed on, in an earlier claim of the run, goes back to Green before open-pr starts,
+    // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
+    const known = failedHeads.get(await git.head());
+    if (known) return backToGreen(known);
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.

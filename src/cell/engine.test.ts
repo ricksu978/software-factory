@@ -1450,6 +1450,24 @@ describe("runCell", () => {
     assert.equal(fixing[1], reads[0]);
   });
 
+  // PBI 315: a head CI failed on in an earlier claim of the run counts as failed in this one too.
+  test("a claim that starts on a head an earlier claim saw CI fail on goes back to Green without reading CI on it or charging open-pr", async () => {
+    const reads: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: "Try once more" } } });
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failure = { sha: head, checks: [{ name: "ci", url: "https://ci.example/7201", failingTests: ["totals include VAT"] }] };
+    h.deps.ctx.failedCiHeads = [failure];
+    h.deps.api.checks = async (sha) => (reads.push(sha), h.calls.push({ route: "/checks", body: { sha } }), ({ status: "failure", failedChecks: [] }));
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(reads, []);
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
+    assert.deepEqual(green, [null, head]);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr"));
+    const brief = h.agentCalls.filter((a) => a.stage === "green" && !String(a.prompt).startsWith("# Definition of Done")).at(-1)!.prompt;
+    assert.ok(brief.includes(`CI failed on ${head}`) && brief.includes("https://ci.example/7201") && brief.includes("totals include VAT"));
+    assert.match(h.transitions().at(-1).question.body, /gave up/);
+  });
+
   // PBI 317: the factory's answer to an older "Address failed" question naming only CI failures sends the run to Green.
   test("a claim at green on the factory's CI answer gives Green the failed checks of the PR's head, read before the base merge", async () => {
     const asked: string[] = [];

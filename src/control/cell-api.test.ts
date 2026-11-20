@@ -283,6 +283,7 @@ describe("cell API", dbTest, () => {
       threadCommentCounts: {},
       trustedBot: "factory[bot]",
       stageAttempts: { specify: 2 },
+      failedCiHeads: [],
       resume: null,
     });
   });
@@ -432,6 +433,19 @@ describe("cell API", dbTest, () => {
     assert.equal((await runRow(cell.runId)).sop_version, "default@1");
     assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 409);
     assert.equal((await db.pool.query("select 1 from event where kind = 'sop_moved'")).rowCount, 0);
+  });
+
+  test("context hands the next claim each head CI failed on in the run's earlier claims, oldest first, once each (PBI 315)", async () => {
+    const cell = await claimed("green");
+    const a = { sha: "c0ffee1", checks: [{ name: "ci", url: "https://github.com/acme/widgets/actions/runs/1", failingTests: ["totals"] }] };
+    const b = { sha: "c0ffee2", checks: [] };
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, ci_failure, started_at) values
+         ($1, 'green', 1, 'passed', null, now() - interval '3 minutes'), ($1, 'green', 2, 'failed', $2, now() - interval '2 minutes'),
+         ($1, 'green', 3, 'failed', $2, now() - interval '1 minute'), ($1, 'green', 4, 'failed', $3, now())`,
+      [cell.runId, JSON.stringify(a), JSON.stringify(b)],
+    );
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a, b]);
   });
 
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
