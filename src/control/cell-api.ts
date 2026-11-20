@@ -182,8 +182,10 @@ function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string 
   });
 }
 
-/** What's set over a running cell when it renews its lease: a pause of the factory or of its backlog, the kill switch, a restart being prepared, an operator's stop on its run. */
-export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean };
+/** What's set over a running cell when it renews its lease: a pause of the factory or of its backlog, the kill switch, a restart being prepared, a drain, an operator's stop on its run. */
+export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean;
+  /** The factory drains (PBI 379). Not yet read: a drain still tells the cell nothing. */
+  drain?: boolean };
 
 /**
  * What a lease renewal tells a running cell. `stop` cuts the cell's stage short now: a pause, the kill switch or an

@@ -22,13 +22,15 @@ import { long, need } from "./pbi-8.steps.ts";
 const RENEW_MS = 60_000;
 
 /** What happens while the agent works at the run's stage, in order: renewals, and a restart prepared or cleared. */
-type Event = { renewals: number } | { restarting: boolean };
+type Event = { renewals: number } | { restarting: boolean } | { draining: boolean };
 
 type Ctx = {
   /** The stage the run is at when its cell starts. */
   stage?: string;
   /** A restart is being prepared, as the fake control plane's renewals see it. */
   restarting: boolean;
+  /** The factory drains, as the fake control plane's renewals see it (PBI 379). */
+  draining: boolean;
   events: Event[];
   played: boolean;
   /** Each agent call, by the stage it ran at, and whether a stop had cut it short by the time it would return. */
@@ -38,13 +40,13 @@ type Ctx = {
   roots: string[];
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi301?: Ctx };
-  w.pbi301 ??= { restarting: false, events: [], played: false, agentCalls: [], ran: false, roots: [] };
+  w.pbi301 ??= { restarting: false, draining: false, events: [], played: false, agentCalls: [], ran: false, roots: [] };
   return w.pbi301;
 }
 
-const pbi18 = (world: object): Pbi18 => {
+export const pbi18 = (world: object): Pbi18 => {
   const c = (world as { pbi18?: Pbi18 }).pbi18;
   assert.ok(c, "no cell was set up");
   return c;
@@ -56,7 +58,7 @@ const flush = async () => {
 
 const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
-Before({ tags: "@pbi-301 and not @db" }, function () {
+Before({ tags: "(@pbi-301 or @pbi-379) and not @db" }, function () {
   // PBI 140's "a run for item 482 that is at green's first attempt" and "the factory is preparing to restart", and PBI
   // 173's "green passes", reach this file's cell through these.
   Object.assign(this, {
@@ -70,7 +72,7 @@ Before({ tags: "@pbi-301 and not @db" }, function () {
   });
 });
 
-After({ tags: "@pbi-301" }, function () {
+After({ tags: "@pbi-301 or @pbi-379" }, function () {
   mock.timers.reset();
   const c = ctx(this);
   const last = (this as { pbi18?: Pbi18 }).pbi18?.root;
@@ -79,7 +81,7 @@ After({ tags: "@pbi-301" }, function () {
 
 // ---- the cell engine against a fake control plane ----
 
-function atStage(world: object, stage: string): void {
+export function atStage(world: object, stage: string): void {
   const c = ctx(world);
   c.stage = stage;
   c.roots.push(setUp(world, stage, true).root);
@@ -89,13 +91,13 @@ function record(p: Pbi18, route: string, body: Record<string, any> = {}): void {
   p.calls.push({ route, body, at: Date.now() } as never);
 }
 
-/** The fake control plane: a renewal answers as the cell API's lease route does for what's set, which here is only a restart. */
+/** The fake control plane: a renewal answers as the cell API's lease route does for what's set, which here is a restart or a drain. */
 function fakeApi(world: object, p: Pbi18) {
   const c = ctx(world);
   return {
     async lease() {
       record(p, "/lease");
-      return leaseAnswer({ kill: false, pause: false, restart: c.restarting, stopRun: false });
+      return leaseAnswer({ kill: false, pause: false, restart: c.restarting, drain: c.draining, stopRun: false });
     },
     async stage(b: Record<string, any>) {
       record(p, "/stage", b);
@@ -123,6 +125,7 @@ function playingAgent(world: object) {
       c.played = true;
       for (const e of c.events) {
         if ("restarting" in e) c.restarting = e.restarting;
+        else if ("draining" in e) c.draining = e.draining;
         else for (let i = 0; i < e.renewals; i++) {
           mock.timers.tick(RENEW_MS);
           await flush();
@@ -137,7 +140,7 @@ function playingAgent(world: object) {
 }
 
 /** Runs the cell over the run set up at its stage, with the renewal timer mocked. A failure lands in PBI 18's ctx.error. */
-async function runCell(world: object): Promise<void> {
+export async function runCell(world: object): Promise<void> {
   const c = ctx(world);
   assert.ok(c.stage, "no run was set up");
   assert.equal(c.ran, false, "the cell already ran");
@@ -158,16 +161,16 @@ async function stagePasses(world: object, stage: string): Promise<void> {
   await runCell(world);
 }
 
-function finished(world: object): Pbi18 {
+export function finished(world: object): Pbi18 {
   assert.ok(ctx(world).ran, "the cell never ran");
   const p = pbi18(world);
   assert.equal(p.error, null, `the cell failed: ${String(p.error)}`);
   return p;
 }
 
-const stageCalls = (p: Pbi18) => p.calls.filter((x) => x.route === "/stage");
+export const stageCalls = (p: Pbi18) => p.calls.filter((x) => x.route === "/stage");
 
-function events(world: object, stage: string): Event[] {
+export function events(world: object, stage: string): Event[] {
   const c = ctx(world);
   assert.equal(c.stage, stage, `the run is at ${c.stage}, not ${stage}`);
   assert.equal(c.ran, false, "the cell already ran");
@@ -313,9 +316,10 @@ When("an operator's stop on item {string}'s run is set", long, async function (n
 /**
  * The cell in `cell` runs its stage to the end: the real engine, with PBI 18's scripted agent, whose stage's work passes.
  * Its lease, stage and release calls go to the real cell API as that cell's run, and a 409 is a lost lease, as the cell's
- * own client has it. Anything else it calls is the fake's.
+ * own client has it. Anything else it calls is the fake's. `prepare` scripts the cell further before it runs, as PBI
+ * 379's retries do.
  */
-async function runAsCell(world: object, cell: string): Promise<void> {
+export async function runAsCell(world: object, cell: string, prepare?: (p: Pbi18) => void): Promise<void> {
   const run = await cellRun(cell);
   const stage = (await need().pool.query<{ next_stage: string }>("select next_stage from run where id = $1", [run.runId])).rows[0].next_stage;
   const c = ctx(world);
@@ -345,6 +349,7 @@ async function runAsCell(world: object, cell: string): Promise<void> {
     },
   };
   p.agent = playingAgent(world) as never;
+  prepare?.(p);
   try {
     await runTheCell(world);
   } finally {
