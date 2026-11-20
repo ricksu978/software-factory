@@ -53,7 +53,9 @@ export type Event =
   | { kind: "start"; resource: string; commit: string; at: number }
   | { kind: "build-start"; seen: BuildSeen; at: number }
   | { kind: "build-end"; seen: BuildSeen; at: number }
-  | { kind: "resource-end"; resource: string; state: string; at: number };
+  | { kind: "resource-end"; resource: string; state: string; at: number }
+  /** git asked for an answer at the console, as a remote that wants a username and password makes it (PBI 208). */
+  | { kind: "prompt"; args: string[] };
 
 /** A resource as the fake Aspire's dashboard shows it. */
 export type Shown = { state: "Waiting" | "Running" | "Finished" | "Failed"; log: string[] };
@@ -87,6 +89,10 @@ export type Ctx = {
   build: { ms: number; failure: string | null };
   images: Map<string, Image>;
   dashboard: Map<string, Shown>;
+  /** The environment the AppHost starts with (PBI 208). */
+  env: { FACTORY_FLOAT_PORTS?: string };
+  /** The remote asks for a username and password before it answers (PBI 208). */
+  remoteAsks: boolean;
 };
 
 export function appHostCtx(world: object): Ctx {
@@ -130,7 +136,7 @@ export const sha = (c: Ctx, name: string) => {
   return s;
 };
 export const head = (c: Ctx) => git(c.checkout, "rev-parse", "HEAD");
-export { git };
+export { git, pushToRemote };
 /** Brings the seed clone to `origin`'s `main`, commits `name` there and pushes it. */
 function pushToRemote(c: Ctx, name: string, paths?: string[]) {
   git(c.seed, "fetch", "-q", "origin");
@@ -139,7 +145,7 @@ function pushToRemote(c: Ctx, name: string, paths?: string[]) {
   git(c.seed, "push", "-q", "origin", "HEAD:main");
 }
 
-Before({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
+Before({ tags: "(@pbi-205 or @pbi-206 or @pbi-208) and not @local" }, function () {
   const root = mkdtempSync(join(tmpdir(), "pbi-205-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -153,6 +159,7 @@ Before({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
     clock: Date.UTC(2026, 10, 15, 9, 0, 0), launchedAt: null, events: [], said: [], warned: [],
     stopped: null, stoppedAt: null, ran: false,
     dockerStopsAfterCheck: false, build: { ms: 30_000, failure: null }, images: new Map(), dashboard: new Map(),
+    env: {}, remoteAsks: false,
   };
   commit(c, seed, "base", ["sop/sop.yml", "src/main.ts", "cell/Dockerfile"]);
   git(seed, "push", "-q", "-u", "origin", "main");
@@ -160,7 +167,7 @@ Before({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
   (this as { pbi205?: Ctx }).pbi205 = c;
 });
 
-After({ tags: "(@pbi-205 or @pbi-206) and not @local" }, function () {
+After({ tags: "(@pbi-205 or @pbi-206 or @pbi-208) and not @local" }, function () {
   const c = (this as { pbi205?: Ctx }).pbi205;
   if (c) rmSync(c.root, { recursive: true, force: true });
 });
@@ -264,7 +271,16 @@ Given("Docker will not answer after Docker Desktop is launched", function () {
 function deps(c: Ctx): StartDeps {
   const startedAt = c.clock;
   return {
+    env: { ...c.env },
     git(args) {
+      // A remote that wants credentials makes git ask at the console. The fake records the ask, then fails as git does
+      // when no one answers.
+      if (c.remoteAsks && /^(pull|fetch|ls-remote|push)$/.test(args[0] ?? "")) {
+        c.events.push({ kind: "prompt", args: [...args] });
+        const r = { status: 128, stdout: "", stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n" };
+        c.events.push({ kind: "git", args: [...args], status: r.status, stderr: r.stderr });
+        return r;
+      }
       const r = args[0] === "pull" && c.pullFailure !== null
         ? { status: 1, stdout: "", stderr: `${c.pullFailure}\n` }
         : gitRun(c.checkout, args);
@@ -379,8 +395,8 @@ async function fakeAspire(c: Ctx, resources: AppHostResource[]): Promise<void> {
   }
 }
 
-When("the AppHost starts", async function () {
-  const c = ctx(this);
+/** Runs the AppHost's start against the fakes, recording where it stopped, if it did. */
+export async function runStart(c: Ctx): Promise<void> {
   try {
     await startAppHost(deps(c));
   } catch (e) {
@@ -389,6 +405,10 @@ When("the AppHost starts", async function () {
     c.stoppedAt = c.clock;
   }
   c.ran = true;
+}
+
+When("the AppHost starts", async function () {
+  await runStart(ctx(this));
 });
 
 // ---- Thens ----
@@ -598,7 +618,7 @@ export const lctx = (world: object): Local => {
   return w.pbi205local;
 };
 
-After({ tags: "(@pbi-205 or @pbi-206) and @local" }, function () {
+After({ tags: "(@pbi-205 or @pbi-206 or @pbi-208) and @local" }, function () {
   const l = (this as { pbi205local?: Local }).pbi205local;
   if (l?.run) {
     sh(`aspire stop ${APPHOST}`);

@@ -181,6 +181,18 @@ function restartStatus(r: Restart): string {
 }
 
 /**
+ * Floor's line for a drain (PBI 316): how many cells still run, counted as Prepare restart counts them, then, once none
+ * runs, that the drain is done and it's safe to restart. Without a count, the drain shows its reason alone.
+ */
+function drainStatus(reason: string, running: number | undefined): string {
+  if (running === undefined) return `<p class="banner" role="status">Draining: ${escapeHtml(reason)}</p>`;
+  const text = running > 0
+    ? `Draining: ${plural(running, "cell", "cells")} still running.`
+    : "Drain done. No cell is running, so it's safe to restart the factory or stop Docker.";
+  return `<p class="banner" role="status">${escapeHtml(text)} Reason: ${escapeHtml(reason)}.</p>`;
+}
+
+/**
  * Why a blocked item waits. A blocker shows as plain "#N", not a link: GitHub may list a blocker from another repo, and
  * a link to the wrong issue is worse than none.
  */
@@ -272,14 +284,18 @@ function mainRedNotice(rows: MainBreakRow[]): string {
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
 export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
+  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null;
+  /** PBI 316: the cells still running, InProgress with a live lease, as Prepare restart counts them. */
+  running?: number; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
   split?: SplitRow[];
   /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
   keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
   const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
-    + f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
+    + f.factory.filter((o) => factoryState[o.kind]).map((o) => o.kind === "drain"
+      ? drainStatus(o.reason, f.running)
+      : `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate

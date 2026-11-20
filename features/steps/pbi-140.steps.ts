@@ -89,7 +89,7 @@ const minutesFrom = (at: Date, n: number) => new Date(at.getTime() + n * 60_000)
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const unescape = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
-Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301" }, function ({ pickle }) {
+Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316" }, function ({ pickle }) {
   const c = ctx(this);
   c.steps = pickle.steps.map((s) => s.text);
   const originals = { log: console.log, warn: console.warn, error: console.error };
@@ -107,7 +107,7 @@ Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301" }, function ({ pickle }) {
   (this as { controlStart?: () => Promise<void> }).controlStart = () => clearRestartOnStart(need().pool);
 });
 
-Before({ tags: "(@pbi-140 or @pbi-302 or @pbi-301) and @db", ...long }, async function () {
+Before({ tags: "(@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316) and @db", ...long }, async function () {
   await testDb();
   const pool = need().pool;
   await pool.query(`truncate item, "user", backlog_source, repo, webhook_delivery, override cascade`);
@@ -121,7 +121,7 @@ Before({ tags: "(@pbi-140 or @pbi-302 or @pbi-301) and @db", ...long }, async fu
   s.repoHost = host as never;
 });
 
-After({ tags: "@pbi-140 or @pbi-302 or @pbi-301", ...long }, async function () {
+After({ tags: "@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316", ...long }, async function () {
   const c = ctx(this);
   mock.timers.reset();
   for (const r of c.restore.reverse()) r();

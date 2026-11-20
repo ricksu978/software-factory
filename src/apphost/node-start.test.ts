@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { dockerBuild, dockerBuildArgs, dockerDesktopPaths, nodeStartDeps } from "./node-start.ts";
 import { APPHOST_CHANGED, startAppHost } from "./start.ts";
 
-test("it looks for Docker Desktop where scripts/factory.ps1 looks", () => {
+test("it looks for Docker Desktop where Windows installs it, per user and machine-wide", () => {
   assert.deepEqual(dockerDesktopPaths({ LOCALAPPDATA: "L", ProgramFiles: "P" }), [
     join("L", "Programs", "DockerDesktop", "Docker Desktop.exe"),
     join("P", "Docker", "Docker", "Docker Desktop.exe"),
@@ -110,4 +110,10 @@ test("a docker CLI that can't be run logs why and resolves to 1", async () => {
   const exit = await dockerBuild(".", { tag: "t", dockerfile: "f", context: ".", labels: {} }, (l) => void log.push(l), "no-such-docker-cli-206");
   assert.equal(exit, 1);
   assert.match(log.join("\n"), /no-such-docker-cli-206/);
+});
+
+test("the real deps take the AppHost's environment, the process's by default", () => {
+  assert.deepEqual(nodeStartDeps(".", { FACTORY_FLOAT_PORTS: "1" }).env, { FACTORY_FLOAT_PORTS: "1" });
+  assert.deepEqual(nodeStartDeps(".", {}).env, { FACTORY_FLOAT_PORTS: undefined });
+  assert.equal(nodeStartDeps(".").env?.FACTORY_FLOAT_PORTS, process.env.FACTORY_FLOAT_PORTS);
 });
