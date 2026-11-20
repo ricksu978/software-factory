@@ -18,7 +18,7 @@ import { haikuJudge, runAgent } from "../agent/run.ts";
 import type { SplitDeps } from "../gate/split.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
-import { tick, TICK_MS, type CiMemo } from "../scheduler/scheduler.ts";
+import { tick, TICK_MS, type CiMemo, type RecheckHoursMemo } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
@@ -266,12 +266,13 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
   let ticked = false;
   const ciMemo: CiMemo = new Map();
+  const recheckHours: RecheckHoursMemo = new Map();
   const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
     const now = (d.now ?? (() => new Date()))();
     try {
       await tick({
         pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo, recheckHours,
       });
     } finally {
       // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,
