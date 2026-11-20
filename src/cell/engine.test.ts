@@ -1201,6 +1201,165 @@ describe("runCell", () => {
     assert.ok(!finding.includes("named no failed check"), finding);
   });
 
+  // PBI 233: a red CI's failed checks are re-run once before the failure is charged to the attempt.
+  test("CI failing at open-pr re-runs only the failed checks once, and a pass on the re-run goes on without Green", async () => {
+    let rerun = false;
+    const h = harness({});
+    const reruns: { sha: string; checks: string[] }[] = [];
+    h.deps.api.checks = async () => (rerun ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => [
+      { name: "lint", conclusion: "success", url: "https://ci/lint" },
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+    ];
+    h.deps.api.rerunFailedChecks = async (sha, checks) => { reruns.push({ sha, checks }); rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(reruns.map((r) => r.checks), [["unit"]]);
+    const greens = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started");
+    assert.equal(greens.length, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, new RegExp(`The check "unit" failed on ${reruns[0].sha.slice(0, 7)}, so the factory re-ran it once, and it passed on the re-run\\.`));
+    assert.doesNotMatch(openPr.body.message, /CI failed on/);
+  });
+
+  test("CI read right after a re-run that still shows the old failed run is waited past until the re-run reports", async () => {
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({});
+    // GitHub hasn't registered the re-run yet on the first two reads after it's asked for: the old failed run still shows.
+    const fresh = () => rerun && readsSinceRerun > 2;
+    h.deps.api.checks = async () => {
+      if (rerun) readsSinceRerun++;
+      return fresh() ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] };
+    };
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: fresh() ? "success" : "failure", url: fresh() ? "https://ci/unit/2" : "https://ci/unit" }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    assert.ok(readsSinceRerun >= 3, `CI was read ${readsSinceRerun} times after the re-run`);
+    const greens = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started");
+    assert.equal(greens.length, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.doesNotMatch(openPr.body.message, /CI failed on|failed again/);
+  });
+
+  test("CI failing while other checks still run waits for them to finish, then re-runs every check that failed", async () => {
+    let reads = 0;
+    let rerun = false;
+    const h = harness({});
+    const reruns: string[][] = [];
+    // "unit" fails at once while "e2e" still runs; "e2e" fails too on the third read. Both pass on the re-run.
+    h.deps.api.checks = async () => (rerun ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => {
+      if (!rerun) reads++;
+      return [
+        { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+        { name: "e2e", conclusion: rerun ? "success" : reads < 3 ? "pending" : "failure", url: rerun ? "https://ci/e2e/2" : "https://ci/e2e" },
+      ];
+    };
+    h.deps.api.rerunFailedChecks = async (_sha, checks) => { reruns.push(checks); rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(reruns, [["unit", "e2e"]]);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+  });
+
+  test("a re-run check that fails again fast is read only once the other re-run checks finish, so a running one isn't called passed", async () => {
+    let greens = 0;
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    // After the re-run, "unit" fails again at once while "e2e" runs for three more reads, then fails too.
+    const e2eDone = () => readsSinceRerun > 3;
+    h.deps.api.checks = async () => {
+      if (greens >= 2) return { status: "success", failedChecks: [] };
+      if (rerun) readsSinceRerun++;
+      return {
+        status: "failure",
+        failedChecks: rerun && e2eDone()
+          ? [{ name: "unit", url: "https://ci/unit/2", log: "unit boom" }, { name: "e2e", url: "https://ci/e2e/2", log: "e2e boom" }]
+          : [{ name: "unit", url: rerun ? "https://ci/unit/2" : "https://ci/unit", log: "unit boom" }],
+      };
+    };
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      { name: "e2e", conclusion: !rerun ? "failure" : e2eDone() ? "failure" : "pending", url: rerun ? "https://ci/e2e/2" : "https://ci/e2e" },
+    ];
+    h.deps.api.rerunFailedChecks = async () => { rerun = true; };
+    assert.equal(await h.run(), "done");
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it failed again on the re-run\./);
+    assert.doesNotMatch(failed.body.message, /"e2e"[^.]*passed on the re-run/);
+    const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
+    assert.match(retry, /e2e boom/);
+  });
+
+  test("a re-requested check that finishes again under the same URL counts as re-run once it finished after its old run", async () => {
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({});
+    const fresh = () => rerun && readsSinceRerun > 1;
+    h.deps.api.checks = async () => {
+      if (rerun) readsSinceRerun++;
+      return fresh() ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] };
+    };
+    h.deps.api.ciChecks = async () => [{
+      name: "external", url: "https://ci/external", conclusion: fresh() ? "success" : "failure",
+      completedAt: fresh() ? "2026-11-20T10:05:00Z" : "2026-11-20T10:00:00Z",
+    }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "external" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+  });
+
+  test("CI failing at open-pr whose re-run is refused is charged to the attempt, saying the check couldn't be re-run", async (t) => {
+    t.mock.method(console, "error", () => {});
+    let checks = 0;
+    let greens = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (++checks === 1 ? { status: "failure", failedChecks: [] } : { status: "success", failedChecks: [] });
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: checks === 1 ? "failure" : "success", url: "https://ci/unit" }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; throw new Error("403 Forbidden"); };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /CI failed on [0-9a-f]{40}: the check "unit" failed/);
+    assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(403 Forbidden\)/);
+  });
+
+  test("CI failing at open-pr with a partial re-run waits only on the checks re-run and charges the refused one as it stands (PBI 233)", async () => {
+    let greens = 0;
+    let rerun = false;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (greens >= 2 ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      // e2e wasn't re-run, so it keeps its old failed run: waiting on it would wait out the cap.
+      { name: "e2e", conclusion: "failure", url: "https://ci/e2e" },
+    ];
+    const asked: string[][] = [];
+    h.deps.api.rerunFailedChecks = async (_sha, checks) => {
+      asked.push(checks);
+      rerun = true;
+      return { rerun: ["unit"], refused: [{ check: "e2e", reason: "already running" }] };
+    };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(asked, [["unit", "e2e"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(already running\)/);
+    assert.doesNotMatch(failed.body.message, /The check "unit"[^.]*couldn't re-run/);
+  });
+
   test("CI failing at open-pr with `/ci-checks` unreadable doesn't say no check was named while `/checks` named some (PBI 232)", async () => {
     let checks = 0;
     let greens = 0;

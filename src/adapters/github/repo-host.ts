@@ -3,7 +3,7 @@
 import { TimedOctokit } from "./timed.ts";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
-import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type RerunAnswer, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -326,11 +326,12 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; completed_at?: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
   return Promise.all(runs.map(async (c) => {
     const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
     const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion !== "pending" && c.completed_at) check.completedAt = c.completed_at;
     if (conclusion === "failure" && c.app?.slug === "github-actions") {
       const tests = await failingTestsOfJob(gh, r, c.id);
       if (tests.length) check.failingTests = tests;
@@ -354,6 +355,53 @@ async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: str
     console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);
     return [];
   }
+}
+
+/**
+ * PBI 233: re-runs each named check that failed on `sha`. A named check that didn't fail on `sha` is refused before any
+ * re-run starts. A GitHub Actions check run's id is its job's id. Re-running one job starts a new attempt of its whole
+ * workflow run, and GitHub won't re-run another job of that run while the attempt runs, so the failed jobs are grouped
+ * by their workflow run and each run gets one `rerun-failed-jobs`, which needs the App's `actions: write`. That re-runs
+ * every failed job of the run, which are the checks the cell names, since it names each check that failed. A check from
+ * another app is re-requested from that app. Each re-run is asked for apart, so one refused leaves the others started;
+ * the answer says which checks were re-run and which were refused, and it rejects only when none was re-run.
+ */
+async function rerunChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string, names: string[]): Promise<RerunAnswer> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
+    (GhCheckRun & { app?: { slug?: string } | null })[];
+  const failed = runs.filter(failedRun);
+  const missing = names.filter((n) => !failed.some((c) => c.name === n));
+  if (missing.length) throw new Error(`no failed check named ${missing.join(", ")} on ${sha}`);
+  const rerun = new Set<string>();
+  const refused = new Map<string, string>();
+  const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0].trim();
+  const byWorkflowRun = new Map<number, string[]>();
+  for (const c of failed.filter((x) => names.includes(x.name))) {
+    try {
+      if (c.app?.slug === "github-actions") {
+        const runId = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}", { ...r, job_id: c.id })).data.run_id as number;
+        byWorkflowRun.set(runId, [...(byWorkflowRun.get(runId) ?? []), c.name]);
+      } else {
+        await gh.request("POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", { ...r, check_run_id: c.id });
+        rerun.add(c.name);
+      }
+    } catch (e) {
+      refused.set(c.name, why(e));
+    }
+  }
+  for (const [runId, checks] of byWorkflowRun) {
+    try {
+      await gh.request("POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", { ...r, run_id: runId });
+      for (const x of checks) rerun.add(x);
+    } catch (e) {
+      for (const x of checks) refused.set(x, why(e));
+    }
+  }
+  // A name two check runs share counts as re-run when either was.
+  for (const x of rerun) refused.delete(x);
+  if (!rerun.size) throw new Error([...refused].map(([check, reason]) => `${check}: ${reason}`).join("; ") || `nothing to re-run on ${sha}`);
+  return { rerun: [...rerun], refused: [...refused].map(([check, reason]) => ({ check, reason })) };
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
@@ -409,6 +457,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async ciChecksOnSha(repo, sha) {
       return namedChecksOn(await client(), split(repo), sha);
+    },
+
+    async rerunChecksOnSha(repo, sha, checks) {
+      return rerunChecksOn(await client(), split(repo), sha, checks);
     },
 
     async checksOnHead(repo, prNumber) {
