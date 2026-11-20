@@ -57,6 +57,36 @@ const d = await secret('every-d');
   assert.deepEqual(names(src), ["run-a", "every-d"]);
 });
 
+test("a ?? in a ternary's run arm doesn't make the publish arm count", () => {
+  const src = `${HEAD}const x = runMode ? process.env.X ?? 'd' : await secret('publish-only');\n`;
+  assert.deepEqual(names(src), []);
+});
+
+test("every else if block after if (runMode), and the else that ends the chain, don't count", () => {
+  const src = `${HEAD}
+if (runMode) {
+  await secret('run-a');
+} else if (x) {
+  await secret('pub-elseif');
+} else if (f(y)) {
+  await builder.addParameter('pub-elseif-2');
+} else {
+  await secret('pub-else');
+}
+await secret('every-d');
+if (runMode) {
+} else if (z) {
+  await secret('pub-elseif-3');
+}
+`;
+  assert.deepEqual(names(src), ["run-a", "every-d"]);
+});
+
+test("an else without braces after if (runMode) fails loudly", () => {
+  assert.throws(() => declaredParameters(`${HEAD}if (runMode) {\n} else await secret('p');\n`), /without braces/);
+  assert.throws(() => declaredParameters(`${HEAD}if (runMode) {\n} else if (x) await secret('p');\n`), /without braces/);
+});
+
 test("a declaration in a comment doesn't count", () => {
   const src = `${HEAD}// await secret('commented')\n/* builder.addParameter('blocked') */\nconst a = await secret('a');\n`;
   assert.deepEqual(names(src), ["a"]);

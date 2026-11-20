@@ -68,9 +68,34 @@ function closing(bare: string, open: number): number {
 }
 
 /**
+ * The end of the `else` chain after the block that closes at `close`: the `else { … }` block, or for
+ * `else if (…) { … }` every block up to the last one in the chain. Null when no `else` follows. Throws on an `else`
+ * without braces, so the check fails loudly instead of asking for a parameter nothing reads.
+ */
+function elseChainEnd(bare: string, close: number): number | null {
+  let at = close + 1;
+  let end: number | null = null;
+  for (;;) {
+    const rest = bare.slice(at);
+    const block = /^\s*else\s*\{/.exec(rest);
+    if (block) return closing(bare, at + block[0].length - 1) + 1;
+    const elseIf = /^\s*else\s+if\s*\(/.exec(rest);
+    if (!elseIf) {
+      if (/^\s*else\b/.test(rest)) throw new Error("an else without braces after if (runMode) in apphost.mts");
+      return end;
+    }
+    const condClose = closing(bare, at + elseIf[0].length - 1);
+    const open = /^\s*\{/.exec(bare.slice(condClose + 1));
+    if (!open) throw new Error("an else if without braces after if (runMode) in apphost.mts");
+    end = closing(bare, condClose + open[0].length) + 1;
+    at = end;
+  }
+}
+
+/**
  * The ranges of the AppHost's source that run only outside `aspire run`: the publish arm of a `runMode ? … : …`
- * ternary (the first arm of a `!runMode ? … : …` one), the `else` block of an `if (runMode) { … }`, and the block of
- * an `if (!runMode) { … }`.
+ * ternary (the first arm of a `!runMode ? … : …` one), the `else` chain of an `if (runMode) { … }` (`else if` blocks
+ * included), and the block of an `if (!runMode) { … }`.
  */
 function publishOnlyRanges(bare: string): [number, number][] {
   const ranges: [number, number][] = [];
@@ -86,7 +111,7 @@ function publishOnlyRanges(bare: string): [number, number][] {
       else if (CLOSE.includes(c)) {
         if (depth === 0) { end = i; break; }
         depth--;
-      } else if (depth === 0 && c === "?" && bare[i + 1] !== "." && bare[i + 1] !== "?") nested++;
+      } else if (depth === 0 && c === "?" && bare[i - 1] !== "?" && bare[i + 1] !== "." && bare[i + 1] !== "?") nested++;
       else if (depth === 0 && c === ":") {
         if (colon === -1 && nested === 0) colon = i;
         else if (nested > 0) nested--;
@@ -102,11 +127,8 @@ function publishOnlyRanges(bare: string): [number, number][] {
       ranges.push([open, close]);
       continue;
     }
-    const after = /^\s*else\s*\{/.exec(bare.slice(close + 1));
-    if (after) {
-      const elseOpen = close + after[0].length;
-      ranges.push([elseOpen, closing(bare, elseOpen)]);
-    }
+    const chainEnd = elseChainEnd(bare, close);
+    if (chainEnd !== null) ranges.push([close + 1, chainEnd]);
   }
   return ranges;
 }
