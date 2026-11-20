@@ -3,7 +3,7 @@
 // fake git, fake Docker, fake clock and fake resources), or they read the repo's own files.
 // - The start command comes from the README's "Run it" section. What it runs before `aspire run` begins is read from
 //   the project's npm scripts and from any PowerShell script they run, up to that script's `aspire run`. That part is
-//   read, not run, because scripts/factory.ps1 moves to the repo root and would pull the real checkout.
+//   read, not run, because a script like the old scripts/factory.ps1 would pull the real checkout.
 // - A test run is a start whose environment has FACTORY_FLOAT_PORTS set to "1", handed to the start as StartDeps.env.
 // - The @local scenarios run the owner's real `aspire run`, Docker Desktop and secrets, so the owner runs them.
 import { Given, Then, When } from "@cucumber/cucumber";
