@@ -64,6 +64,20 @@ class Refused extends Error {
   }
 }
 
+/**
+ * Whether `raw`, a request's path as it arrived, is the path the API routes on. Dot segments normalise to another
+ * path, an encoded dot, slash or backslash would, and Hono decodes any other percent-escape before it routes, so
+ * "/%761/floor" would reach /v1/floor. A malformed escape is refused too.
+ */
+export function cleanPath(raw: string): boolean {
+  if (raw !== new URL(raw, "http://api").pathname || /%2e|%2f|%5c/i.test(raw)) return false;
+  try {
+    return decodeURI(raw) === raw;
+  } catch {
+    return false;
+  }
+}
+
 /** The request's JSON object body, or a 400. */
 async function body(c: Context<Env>): Promise<Record<string, unknown>> {
   let b: unknown;
@@ -97,11 +111,10 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
   });
   app.notFound((c) => c.json({ error: "not found" }, 404));
 
-  // A path whose dot segments or encoding normalise to something else is refused before any route sees it, as the
-  // dashboard does, so no request can pass as one route to a proxy and land on another here (design §05).
+  // A path the API would read differently from how it arrived is refused before any route or sign-in check sees it,
+  // so no request can pass as one route to a proxy and land on another here (design §05).
   app.use("*", async (c, next) => {
-    const raw = (c.env?.incoming?.url ?? new URL(c.req.url).pathname).split("?")[0];
-    if (raw !== new URL(raw, "http://api").pathname || /%2e|%2f|%5c/i.test(raw)) throw new Refused(400, "bad path");
+    if (!cleanPath((c.env?.incoming?.url ?? new URL(c.req.url).pathname).split("?")[0])) throw new Refused(400, "bad path");
     await next();
   });
 

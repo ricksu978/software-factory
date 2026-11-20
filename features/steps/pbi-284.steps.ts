@@ -20,6 +20,7 @@
 // - POST /v1/items/{id}/decisions takes {kind, text}, kind being approve, changes or answer, under decide's rules.
 // - POST /webhooks/github is today's handleWebhook, checked by its signature and never by a bearer token.
 // - startApi rejects, before it listens, when the issuer's discovery document has no jwks_uri, naming jwks_uri.
+// PBI 285's steps (features/steps/pbi-285.steps.ts) share this context, these hooks and the steps above.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
@@ -30,8 +31,8 @@ import pg from "pg";
 import { ctx as pbi175 } from "./pbi-175.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
-const PORT = 7402;
-const WEBHOOK_SECRET = "pbi-284-webhook-secret";
+export const PORT = 7402;
+export const WEBHOOK_SECRET = "pbi-284-webhook-secret";
 const OTHER_ISSUER = "http://other-issuer.test/realms/elsewhere";
 const KID = "pbi-284-key";
 
@@ -85,7 +86,7 @@ function signingKeys() {
   return keys;
 }
 
-Before({ tags: "@pbi-284 and @db" }, function () {
+Before({ tags: "(@pbi-284 or @pbi-285) and @db" }, function () {
   ctx(this).db = true;
 });
 
@@ -99,7 +100,7 @@ export async function stopAll(world: object): Promise<void> {
   }
 }
 
-After({ tags: "@pbi-284", ...long }, async function () {
+After({ tags: "@pbi-284 or @pbi-285", ...long }, async function () {
   await stopAll(this);
 });
 
@@ -119,7 +120,7 @@ async function sign(c: Ctx, claims: Claims, key: "published" | "unpublished" = "
 }
 
 /** A valid token for `name`, remembered as their last one. */
-async function validToken(c: Ctx, name: string): Promise<string> {
+export async function validToken(c: Ctx, name: string): Promise<string> {
   const token = await sign(c, { sub: name });
   c.tokens.set(name, token);
   return token;
@@ -205,7 +206,7 @@ async function fresh(c: Ctx, items: { name: string; state: string; question?: "s
   }
 }
 
-function itemId(c: Ctx, name: string): string {
+export function itemId(c: Ctx, name: string): string {
   const id = c.items.get(name);
   assert.ok(id, `no item "${name}"`);
   return id;

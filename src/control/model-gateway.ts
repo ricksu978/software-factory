@@ -4,6 +4,7 @@
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { pipeline } from "node:stream";
+import { seconds, SLOW_REQUEST_MS, watch, type Slow, type Watch } from "./slow-work.ts";
 
 // Claude Code sends CLAUDE_CODE_OAUTH_TOKEN as "Authorization: Bearer <token>", and the prefix marks it as a
 // subscription token, so the cell's own anthropic-beta carries the OAuth capability the upstream needs.
@@ -19,7 +20,11 @@ const MAX_BODY = 32 * 1024 * 1024;
 
 export type WebTool = "WebSearch" | "WebFetch";
 /** What a verified run may use: the web tools its pinned repo config allows. */
-export type Grant = { webTools: WebTool[] };
+export type Grant = {
+  webTools: WebTool[];
+  /** The run the stand-in credential belongs to, which the gateway's slow line names (PBI 154). */
+  runId?: string;
+};
 
 /** Thrown by `verify` when it can't decide right now, such as a failed config read. The cell gets 503, not 401. */
 export class GatewayUnavailable extends Error {
@@ -31,6 +36,12 @@ export type GatewayConfig = {
   ownerToken: () => string;
   /** The run's grant for a stand-in credential, or null to refuse it. */
   verify: (credential: string) => Grant | null | Promise<Grant | null>;
+  /**
+   * Where the gateway's slow line goes and the clock that times it (PBI 154). A request whose upstream hasn't sent
+   * its response headers SLOW_REQUEST_MS after the gateway forwarded it logs one line, in the format
+   * src/control/slow-work.ts documents. Without it the line goes to console.warn on the real clock.
+   */
+  slow?: Slow;
 };
 
 /** The model variables for a cell's environment: the gateway's URL and a stand-in token for the run, never the owner's. */
@@ -121,6 +132,7 @@ function refuse(req: IncomingMessage, res: ServerResponse, status: number): void
  * It never throws: a malformed request gets 400, so one cell can't crash the process that hosts it.
  */
 export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessage, res: ServerResponse, path = req.url ?? "/"): Promise<void> {
+  let w: Watch | undefined;
   try {
     const grant = await allowed(cfg, req.headers.authorization);
     if (grant === "unavailable") return refuse(req, res, 503);
@@ -151,7 +163,13 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
       headers["content-length"] = String(body.length);
     }
     const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+    // A request whose upstream hasn't sent its headers 60 seconds after the forward warns once (PBI 154). Headers,
+    // an upstream error or the cell disconnecting all end the watch, so a long stream that started in time is quiet.
+    const name = `${req.method} ${target.pathname}`;
+    const run = grant.runId ? ` for run ${grant.runId}` : "";
+    w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the model gateway request ${name}${run} has had no upstream answer for ${seconds(ms)}`, cfg.slow);
     const up = send(target, { method: req.method, headers }, (upRes) => {
+      w?.end();
       res.writeHead(upRes.statusCode ?? 502, upRes.headers);
       // pipeline, not pipe: an upstream reset mid-stream errors upRes, not `up`, and pipeline then destroys res, so
       // a cut-off stream never ends cleanly for the cell.
@@ -160,9 +178,11 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     // A cell that disconnects, or is stopped, cancels its upstream call instead of leaving it running on the
     // owner's subscription.
     res.on("close", () => {
+      w?.end();
       if (!res.writableFinished) up.destroy();
     });
     up.on("error", () => {
+      w?.end();
       // After the headers went out, a clean end would make a cut-off stream look complete, so it's destroyed.
       if (res.headersSent) res.destroy();
       else res.writeHead(502).end();
@@ -170,6 +190,9 @@ export async function handleModelRequest(cfg: GatewayConfig, req: IncomingMessag
     if (body) up.end(body);
     else req.pipe(up);
   } catch {
+    // http.request throws synchronously on a header it can't send (an owner token ending in a newline, say). That
+    // request never reached the upstream and is answered here, so its watch ends rather than blaming the upstream.
+    w?.end();
     refuse(req, res, 400);
   }
 }
