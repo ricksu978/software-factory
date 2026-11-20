@@ -187,8 +187,7 @@ When("the same browser calls GET {string}", async function (path: string) {
 When("a browser with no session opens each script and stylesheet the SPA's page names", async function () {
   const c = ctx(this);
   c.scripted = [];
-  const page = builtPage();
-  if (page === undefined) return;
+  const page = needBuiltPage();
   const { scripts, styles } = named(page);
   for (const path of [...scripts, ...styles]) {
     const seen = await openOnBff(shared(this), path);
@@ -297,12 +296,22 @@ Then("neither of the other answers holds the file's contents", function () {
 
 // ---- Reading the SPA's source ----
 
+/** Checks a read of the SPA's source found files, among them its page. */
+function assertSourceRead(src: Map<string, string>) {
+  assert.ok(src.size, `found no source under ${WEB}`);
+  assert.ok(src.has("index.html"), `the source read has no ${WEB}/index.html`);
+}
+
 When("I read the SPA's source", function () {
-  ctx(this).source = spaSource();
+  const src = spaSource();
+  assertSourceRead(src);
+  ctx(this).source = src;
 });
 
 When("I read the SPA's source outside its shadcn\\/ui components", function () {
-  ctx(this).source = new Map([...spaSource()].filter(([rel]) => !isUi(rel)));
+  const src = new Map([...spaSource()].filter(([rel]) => !isUi(rel)));
+  assertSourceRead(src);
+  ctx(this).source = src;
 });
 
 function source(world: object): Map<string, string> {
@@ -419,7 +428,9 @@ Then("its badges use the shadcn\\/ui badge component", function () {
 });
 
 When("I read the SPA's built stylesheet", function () {
-  ctx(this).css = builtStylesheet();
+  const css = builtStylesheet();
+  assert.ok(css.trim().length, "the build wrote no stylesheet the SPA's page loads, or it's empty");
+  ctx(this).css = css;
 });
 
 /** The custom properties a CSS rule sets, for rules whose selector list holds `selector`. */
@@ -554,11 +565,14 @@ Given("the SPA has started", async function () {
 });
 
 When("the operating system's colour scheme changes to {word}", async function (scheme: string) {
+  assert.ok(scheme === "dark" || scheme === "light", `no colour scheme ${scheme}`);
   const f = fake(this);
   f.changedFrom = f.osDark;
   f.markedBeforeChange = f.classes.has("dark");
   f.osDark = scheme === "dark";
-  for (const l of [...f.listeners]) l({ matches: f.osDark });
+  const listeners = [...f.listeners];
+  assert.ok(listeners.length, "the SPA doesn't listen for the operating system's colour scheme changing");
+  for (const l of listeners) l({ matches: f.osDark });
   await settle();
 });
 
@@ -658,12 +672,20 @@ Then("it offers no control that switches between dark and light", function () {
 
 // ---- Session handling ----
 
+/** Sets the status the stand-in BFF answers the SPA's calls with, and checks it kept it. */
+function answerWith(world: object, status: number) {
+  assert.ok(Number.isInteger(status) && status >= 100 && status <= 599, `${status} isn't an HTTP status`);
+  const f = fake(world);
+  f.status = status;
+  assert.equal(f.status, status, `the stand-in BFF answers ${f.status}, not ${status}`);
+}
+
 Given("the BFF answers {int} to the SPA's calls", function (status: number) {
-  fake(this).status = status;
+  answerWith(this, status);
 });
 
 Given("the BFF answers the SPA's calls with {int}", function (status: number) {
-  fake(this).status = status;
+  answerWith(this, status);
 });
 
 Given("the SPA has started with a session", async function () {
@@ -673,7 +695,7 @@ Given("the SPA has started with a session", async function () {
 });
 
 Given("the BFF now answers {int} to the SPA's calls", function (status: number) {
-  fake(this).status = status;
+  answerWith(this, status);
 });
 
 When("the SPA makes its next call to {string}", async function (path: string) {
