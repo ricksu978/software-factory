@@ -26,3 +26,17 @@ export async function writeOutboxRows(c: pg.ClientBase, consumer: Consumer, even
     [consumer, eventId, itemIds],
   );
 }
+
+/** The effects of the outbox row `seq` that already took place, by the names `recordEffect` was given (PBI 220). */
+export async function effectsDone(c: pg.Pool | pg.ClientBase, seq: string): Promise<Set<string>> {
+  const r = await c.query<{ effect: string }>("select effect from outbox_effect where seq = $1", [seq]);
+  return new Set(r.rows.map((x) => x.effect));
+}
+
+/**
+ * Records that the effect `effect` of the outbox row `seq` took place, so handling the row again skips it (PBI 220). The
+ * record goes when the row does. Recording an effect twice is harmless.
+ */
+export async function recordEffect(c: pg.Pool | pg.ClientBase, seq: string, effect: string): Promise<void> {
+  await c.query("insert into outbox_effect (seq, effect) values ($1, $2) on conflict do nothing", [seq, effect]);
+}
