@@ -32,7 +32,7 @@ Feature: A head CI failed on stays failed across claims, so the next claim doesn
       And the next claim's cell runs from Green
       Then the first claim ended on the question saying the factory gave up fixing CI on "c0ffee1"
       And the next claim started on the commit "c0ffee1"
-      And the factory read CI on "c0ffee1" no more than 1 time after it failed
+      And in the next claim the factory read CI on "c0ffee1" 0 times
       And exactly 1 attempt in the run says CI failed on "c0ffee1"
 
     @ac-1
@@ -58,7 +58,7 @@ Feature: A head CI failed on stays failed across claims, so the next claim doesn
       Then the next claim ended on the question saying the factory gave up fixing CI on "c0ffee1"
       And the item moves to NeedsInput
       And the item doesn't move to Failed
-      And the factory read CI on "c0ffee1" no more than 1 time after it failed
+      And in the next claim the factory read CI on "c0ffee1" 0 times
 
     @ac-1
     Scenario: Green fixing the failure in the next claim takes the item to review, with the earlier head read only once
@@ -69,7 +69,7 @@ Feature: A head CI failed on stays failed across claims, so the next claim doesn
       When the first claim's cell runs
       And the owner answers the question "Try once more"
       And the next claim's cell runs from Green
-      Then the factory read CI on "c0ffee1" no more than 1 time after it failed
+      Then in the next claim the factory read CI on "c0ffee1" 0 times
       And exactly 1 attempt in the run says CI failed on "c0ffee1"
       And the factory read CI on "c0ffee2"
       And the owner is asked exactly 1 question
@@ -88,7 +88,7 @@ Feature: A head CI failed on stays failed across claims, so the next claim doesn
       When the first claim's cell runs
       And the owner answers the question "Try once more"
       And the next claim's cell runs from Green
-      Then the factory read CI on "c0ffee1" no more than 1 time after it failed
+      Then in the next claim the factory read CI on "c0ffee1" 0 times
       And exactly 1 attempt in the run says CI failed on "c0ffee1"
       And exactly 1 attempt in the run says CI failed on "c0ffee2"
       And in the next claim Green's third brief names the check "ci" and "https://github.com/acme/widgets/actions/runs/7202"
