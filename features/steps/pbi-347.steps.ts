@@ -125,19 +125,26 @@ function ghRepo(): string {
  */
 const ghAgent = new https.Agent({ keepAlive: false, proxyEnv: process.env });
 
-function get(url: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+function get(url: string, headers: Record<string, string>): Promise<{ status: number; body: string; etag?: string }> {
   return new Promise((done, fail) => {
     const req = https.get(url, { agent: ghAgent, headers, timeout: 30_000 }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => (body += chunk));
-      res.on("end", () => done({ status: res.statusCode ?? 0, body }));
+      res.on("end", () => done({ status: res.statusCode ?? 0, body, etag: res.headers.etag }));
       res.on("error", fail);
     });
     req.on("timeout", () => req.destroy(new Error(`GET ${url} timed out`)));
     req.on("error", fail);
   });
 }
+
+/**
+ * Each path's last 200 body and its ETag. A cell has no GitHub token, and GitHub allows an address 60 requests an hour
+ * without one, shared by every cell behind the same egress. A request that sends the ETag back and gets 304 Not Modified
+ * doesn't count against that limit, so polling a run that hasn't changed costs nothing.
+ */
+const ghSeen = new Map<string, { etag: string; body: string }>();
 
 async function gh<T>(path: string): Promise<T> {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
@@ -147,10 +154,17 @@ async function gh<T>(path: string): Promise<T> {
     "user-agent": "software-factory-bdd",
     ...(token ? { authorization: `Bearer ${token}` } : {}),
   };
+  const seen = ghSeen.get(path);
   // A network error or a 5xx gets up to two more tries; a 4xx doesn't.
   for (let attempt = 1; ; attempt++) {
-    const res = await get(`https://api.github.com${path}`, headers).catch((e: Error) => ({ status: 0, body: e.message }));
-    if (res.status >= 200 && res.status < 300) return JSON.parse(res.body) as T;
+    const res = await get(`https://api.github.com${path}`, seen ? { ...headers, "if-none-match": seen.etag } : headers).catch(
+      (e: Error) => ({ status: 0, body: e.message, etag: undefined }),
+    );
+    if (res.status === 304 && seen) return JSON.parse(seen.body) as T;
+    if (res.status >= 200 && res.status < 300) {
+      if (res.etag) ghSeen.set(path, { etag: res.etag, body: res.body });
+      return JSON.parse(res.body) as T;
+    }
     if ((res.status >= 400 && res.status < 500) || attempt >= 3) throw new Error(`GET ${path}: ${res.status || "network error"} ${res.body}`);
     await new Promise((r) => setTimeout(r, 2_000 * attempt));
   }
@@ -164,11 +178,16 @@ function isThisRun(run: GhRun): boolean {
   return process.env.GITHUB_ACTIONS === "true" && String(run.id) === process.env.GITHUB_RUN_ID;
 }
 
+/** CI's finished run on each commit, read once. */
+const finishedRuns = new Map<string, CiRun>();
+
 /**
  * The run of the "ci" workflow on `sha`, with its jobs, or what stopped us reading it: the run these scenarios run
  * inside, if they run inside one on `sha`, else the latest.
  */
 async function ciRunOn(sha: string): Promise<CiRun> {
+  const finished = finishedRuns.get(sha);
+  if (finished) return finished;
   try {
     const r = ghRepo();
     const { workflow_runs } = await gh<{ workflow_runs: GhRun[] }>(`/repos/${r}/actions/runs?head_sha=${sha}&per_page=100`);
@@ -176,6 +195,8 @@ async function ciRunOn(sha: string): Promise<CiRun> {
     const run = runs.find(isThisRun) ?? runs[0];
     if (!run) return { sha };
     const { jobs } = await gh<{ jobs: GhJob[] }>(`/repos/${r}/actions/runs/${run.id}/jobs?per_page=100`);
+    // A finished run doesn't change, so every scenario after the first reads it from here.
+    if (run.status === "completed" && !isThisRun(run)) finishedRuns.set(sha, { sha, run, jobs });
     return { sha, run, jobs };
   } catch (e) {
     return { sha, error: (e as Error).message };
@@ -232,7 +253,7 @@ function everyStep(jobs: GhJob[]): { job: string; step: GhStep }[] {
 }
 
 /** How long the When waits for CI's run on HEAD to finish, when it has one that's still going. */
-const ciWait = { totalMs: 15 * 60_000, everyMs: 20_000 };
+const ciWait = { totalMs: 15 * 60_000, everyMs: 30_000 };
 
 When("CI has finished its run on the commit this checkout is at", { timeout: ciWait.totalMs + 120_000 }, async function () {
   const sha = git("rev-parse", "HEAD");
