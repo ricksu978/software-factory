@@ -532,7 +532,10 @@ Given("a {string} container has asked the cell API for an upload URL for its run
 Given("a {string} container has uploaded its run's log to an upload URL from the cell API", long, async function (_image: string) {
   await askUploadUrl(this);
   const l = local(this);
-  if (l.url && l.log) curlInCell(["-X", "PUT", "-H", "x-ms-blob-type: BlockBlob", "--data-binary", l.log.text, l.url]);
+  assert.ok(l.url, "the cell API gave the container no upload URL");
+  assert.ok(l.log, "no log was named for the upload");
+  const r = curlInCell(["-X", "PUT", "-H", "x-ms-blob-type: BlockBlob", "--data-binary", l.log.text, l.url]);
+  assert.equal(r.status, 201, `the container's PUT of its log to the upload URL got ${r.status ?? "no response"}, not 201: ${r.body}`);
 });
 
 When("the container PUTs the log to that upload URL through the egress proxy", long, function () {
