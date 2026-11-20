@@ -6,7 +6,8 @@
 // - "the unit tests": npm test
 // - "the scenarios that aren't tagged @local": npm run bdd -- --tags "not @local"
 // The scenarios about CI's run read it from GitHub's Actions API: the latest run of the "ci" workflow on the commit this
-// checkout's HEAD is at. A commit CI hasn't run on, or a run that hasn't finished, fails the Then that reads it.
+// checkout's HEAD is at, through the proxy the environment names. The When waits for a run on HEAD that's still going. A
+// commit CI hasn't run on, or a run that still hasn't finished, fails the Then that reads it.
 // Where aspire restore can't reach NuGet (a factory cell), the AppHost's compile and lint come from CI's run on HEAD, which
 // runs them the same way (appHostAsCiRanIt).
 // Under Actions the scenarios run inside CI's run on HEAD, which can't finish before they do, so they read that run as it
@@ -15,6 +16,7 @@ import { Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { readFileSync } from "node:fs";
+import https from "node:https";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
 
@@ -117,14 +119,41 @@ function ghRepo(): string {
   return m[1];
 }
 
+/**
+ * Reaches GitHub through the proxy the environment names, if any. A factory cell's commands get HTTPS_PROXY but not
+ * NODE_USE_ENV_PROXY, so fetch() would go direct, and a cell has no direct egress: the agent uses the proxy itself.
+ */
+const ghAgent = new https.Agent({ keepAlive: false, proxyEnv: process.env });
+
+function get(url: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+  return new Promise((done, fail) => {
+    const req = https.get(url, { agent: ghAgent, headers, timeout: 30_000 }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (body += chunk));
+      res.on("end", () => done({ status: res.statusCode ?? 0, body }));
+      res.on("error", fail);
+    });
+    req.on("timeout", () => req.destroy(new Error(`GET ${url} timed out`)));
+    req.on("error", fail);
+  });
+}
+
 async function gh<T>(path: string): Promise<T> {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) throw new Error(`GET ${path}: ${res.status} ${await res.text()}`);
-  return (await res.json()) as T;
+  const headers = {
+    accept: "application/vnd.github+json",
+    "x-github-api-version": "2022-11-28",
+    "user-agent": "software-factory-bdd",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
+  // A network error or a 5xx gets up to two more tries; a 4xx doesn't.
+  for (let attempt = 1; ; attempt++) {
+    const res = await get(`https://api.github.com${path}`, headers).catch((e: Error) => ({ status: 0, body: e.message }));
+    if (res.status >= 200 && res.status < 300) return JSON.parse(res.body) as T;
+    if ((res.status >= 400 && res.status < 500) || attempt >= 3) throw new Error(`GET ${path}: ${res.status || "network error"} ${res.body}`);
+    await new Promise((r) => setTimeout(r, 2_000 * attempt));
+  }
 }
 
 /**
@@ -202,8 +231,19 @@ function everyStep(jobs: GhJob[]): { job: string; step: GhStep }[] {
   return jobs.flatMap((j) => (j.steps ?? []).map((step) => ({ job: j.name, step })));
 }
 
-When("CI has finished its run on the commit this checkout is at", { timeout: 120_000 }, async function () {
-  ctx(this).ci = await ciRunOn(git("rev-parse", "HEAD"));
+/** How long the When waits for CI's run on HEAD to finish, when it has one that's still going. */
+const ciWait = { totalMs: 15 * 60_000, everyMs: 20_000 };
+
+When("CI has finished its run on the commit this checkout is at", { timeout: ciWait.totalMs + 120_000 }, async function () {
+  const sha = git("rev-parse", "HEAD");
+  const until = Date.now() + ciWait.totalMs;
+  let ci = await ciRunOn(sha);
+  // A run still going on HEAD (not the one these scenarios run inside) is waited for; the Thens judge it once it ends.
+  while (ci.run && ci.run.status !== "completed" && !isThisRun(ci.run) && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, ciWait.everyMs));
+    ci = await ciRunOn(sha);
+  }
+  ctx(this).ci = ci;
 });
 
 Then("the job {string} passed on that commit", function (name: string) {
