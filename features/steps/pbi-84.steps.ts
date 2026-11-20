@@ -365,9 +365,9 @@ const published = new StorageSharedKeyCredential(DEV_ACCOUNT, PUBLISHED_KEY);
 const soon = () => new Date(Date.now() + 15 * 60_000);
 
 /** A blob SAS URL a cell could sign for itself with the published key, as the cell container reaches Azurite. */
-function forgedBlobSas(world: object, container: string, path: string, permissions: string): string | undefined {
+function forgedBlobSas(world: object, container: string, path: string, permissions: string): string {
   const endpoint = cellBlobEndpoint(world);
-  if (!endpoint) return undefined;
+  assert.ok(endpoint, "couldn't read Azurite's blob endpoint from the control resource's FACTORY_BLOB in `aspire describe`");
   const sas = generateBlobSASQueryParameters(
     { containerName: container, blobName: path, permissions: BlobSASPermissions.parse(permissions), expiresOn: soon() }, published,
   ).toString();
@@ -378,34 +378,38 @@ Given("a {string} container has signed its own write SAS for a blob under {strin
   const l = local(this);
   l.log = { container, path: `pbi-84/${randomUUID()}.txt`, text: "" };
   l.url = forgedBlobSas(this, container, l.log.path, "cw");
+  assert.ok(l.url, "no forged write SAS URL was made");
 });
 
 Given("a run's log has been uploaded to Azurite", long, async function () {
   const l = local(this);
   const runId = randomUUID();
   l.log = { container: "transcripts", path: `${runId}/red-1.jsonl`, text: `{"pbi-84":"the log of run ${runId}"}\n` };
-  if (!controlBlob(this)) return;
+  assert.ok(controlBlob(this), "couldn't read the control resource's FACTORY_BLOB from `aspire describe`");
   const client = service(this).getContainerClient(l.log.container);
   await client.createIfNotExists();
   await client.getBlockBlobClient(l.log.path).upload(l.log.text, Buffer.byteLength(l.log.text));
+  assert.equal(await readLog(this), l.log.text, "the log uploaded to Azurite doesn't read back as written");
 });
 
 Given("a {string} container has signed its own read SAS for that log, with the published development key", function (_image: string) {
   const l = local(this);
   assert.ok(l.log, "no log was uploaded");
   l.url = forgedBlobSas(this, l.log.container, l.log.path, "r");
+  assert.ok(l.url, "no forged read SAS URL was made");
 });
 
 Given("a {string} container has signed its own write SAS for that log, with the published development key", function (_image: string) {
   const l = local(this);
   assert.ok(l.log, "no log was uploaded");
   l.url = forgedBlobSas(this, l.log.container, l.log.path, "cw");
+  assert.ok(l.url, "no forged write SAS URL was made");
 });
 
 Given("a {string} container has signed its own account SAS that allows listing, with the published development key", function (_image: string) {
   const l = local(this);
   const endpoint = cellBlobEndpoint(this);
-  if (!endpoint) return;
+  assert.ok(endpoint, "couldn't read Azurite's blob endpoint from the control resource's FACTORY_BLOB in `aspire describe`");
   const sas = generateAccountSASQueryParameters({
     services: AccountSASServices.parse("b").toString(),
     resourceTypes: AccountSASResourceTypes.parse("s").toString(),
@@ -413,6 +417,7 @@ Given("a {string} container has signed its own account SAS that allows listing, 
     expiresOn: soon(),
   }, published).toString();
   l.url = `${endpoint}/?comp=list&${sas}`;
+  assert.ok(l.url.includes("sig="), "the forged account SAS URL carries no signature");
 });
 
 function send(world: object, method: "PUT" | "GET", data?: string): void {
@@ -471,10 +476,11 @@ Then("the log in Azurite still holds its original text", long, async function ()
 // ---- @ac-3: the cell API's upload URLs ----
 
 /** Seeds an item with a run in progress at lease generation 1 in the factory's database, and returns its credential. */
-async function seedRun(world: object): Promise<{ runId: string; credential: string } | null> {
+async function seedRun(world: object): Promise<{ runId: string; credential: string }> {
   const dbUri = envOf("cell-api", "FACTORY_DB_URI");
   const secret = envOf("cell-api", "CELL_SECRET");
-  if (!dbUri || !secret) return null;
+  assert.ok(dbUri, "couldn't read the cell-api resource's FACTORY_DB_URI from `aspire describe`");
+  assert.ok(secret, "couldn't read the cell-api resource's CELL_SECRET from `aspire describe`");
   const client = new pg.Client({ connectionString: dbUri });
   await client.connect();
   try {
@@ -509,24 +515,27 @@ After({ tags: "@pbi-84 and @local" }, async function () {
 /** Asks the cell API, from a cell container through the egress proxy, for an upload URL for the run's transcript. */
 async function askUploadUrl(world: object): Promise<void> {
   const l = local(world);
-  if (!p6(world).imageBuilt) return;
+  assert.ok(p6(world).imageBuilt, "the image factory-cell:local isn't built");
   const cellApi = findKey(describe("cell-api"), /^urls$/);
   const url = Array.isArray(cellApi) ? (cellApi[0] as { url?: string } | undefined)?.url : undefined;
+  assert.ok(url, "couldn't read the cell-api resource's URL from `aspire describe`");
   const run = await seedRun(world);
-  if (!url || !run) return;
   const base = url.replace(/\/$/, "").replace("localhost", "host.docker.internal");
   const r = curlInCell([
     "-X", "POST", "-H", `Authorization: Bearer ${run.credential}`, "-H", "content-type: application/json",
     "--data", JSON.stringify({ kind: "transcript", stageId: "red", attempt: 1 }), `${base}/internal/cells/${run.runId}/upload-url`,
   ]);
-  if (r.status !== 200) return;
-  l.url = (JSON.parse(r.body) as { url: string }).url;
+  assert.equal(r.status, 200, `the cell API answered the upload-URL request with ${r.status ?? "no response"}, not 200: ${r.body}`);
+  l.url = (JSON.parse(r.body) as { url?: string }).url;
   const text = `{"pbi-84":"the log of run ${run.runId}"}\n`;
   l.log = { container: "transcripts", path: `${run.runId}/red-1.jsonl`, text };
 }
 
 Given("a {string} container has asked the cell API for an upload URL for its run's log", long, async function (_image: string) {
   await askUploadUrl(this);
+  const l = local(this);
+  assert.ok(l.url, "the cell API gave the container no upload URL");
+  assert.ok(l.log, "no log was named for the upload");
 });
 
 Given("a {string} container has uploaded its run's log to an upload URL from the cell API", long, async function (_image: string) {
