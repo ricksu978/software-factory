@@ -2,10 +2,11 @@
 Feature: Prepare restart lets local cells wrap up, so each item resumes where it stopped
   An owner who wants to restart the factory or stop Docker needs the cells to stop cleanly first. Prepare
   restart is a factory override on the dashboard's Controls, and like every override it needs a reason.
-  While a restart is being prepared, the scheduler starts nothing, and every live cell is told to stop at
-  its next lease renewal, as a pause does. A cell stopped this way pushes its work-in-progress commit
-  before it exits. The cell API keeps answering, so a cell that is wrapping up can renew, push and
-  report. The factory never stops a cell itself, however long it runs: PBI 300 took away the stop that
+  While a restart is being prepared, the scheduler starts nothing. Since PBI 301, a live cell's lease
+  renewal tells it to carry on, so it finishes the stage it's in and ends its claim at that stage
+  boundary. A pause, the kill switch or an operator's stop still tells a cell to stop, and a cell stopped
+  while a restart is being prepared pushes its work-in-progress commit before it exits. The cell API
+  keeps answering, so a cell that is wrapping up can renew, push and report. The factory never stops a cell itself, however long it runs: PBI 300 took away the stop that
   ended the wrap-up after FACTORY_RESTART_WAIT_MINUTES. Once no cell runs, Floor says it's safe to
   restart. A control plane that starts clears a restart override left from before, and so does Resume.
   After the restart, each item carries on at the stage it was in, from the commit it pushed. An attempt
@@ -79,27 +80,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       Then Floor shows "Preparing to restart: 1 cell still running. The factory won't stop it."
       And Floor doesn't show "minutes left"
 
-  Rule: Every live cell is told to stop at its next lease renewal, and the cell API keeps answering it
-
-    @ac-3 @db
-    Scenario: Every live cell's next renewal tells it to stop
-      Given a fresh factory database with WIP 2 and a review capacity of 3
-      And item "A" is running in cell "cell-a" with a live lease
-      And item "D" is running in cell "cell-d" with a live lease
-      When an operator prepares a restart with the reason "upgrading Docker"
-      And cell "cell-a" renews its lease
-      And cell "cell-d" renews its lease
-      Then both renewals are answered and tell the cell to stop
-
-    @ac-3 @db
-    Scenario: The same renewal told the cell to carry on before the restart was prepared
-      Given a fresh factory database with WIP 2 and a review capacity of 3
-      And item "A" is running in cell "cell-a" with a live lease
-      When cell "cell-a" renews its lease
-      Then the renewal tells the cell to carry on
-      When an operator prepares a restart with the reason "upgrading Docker"
-      And cell "cell-a" renews its lease
-      Then the renewal tells the cell to stop
+  Rule: The cell API keeps answering every live cell while a restart is being prepared
 
     @ac-3 @db
     Scenario: A cell that is wrapping up can renew, push its branch and report that its stage stopped
@@ -107,7 +88,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And item "A" is running in cell "cell-a" with a live lease
       And an operator prepared a restart 2 minutes ago
       When cell "cell-a" renews its lease
-      Then the cell API answers the renewal and tells the cell to stop
+      Then the cell API answers the renewal and tells the cell to carry on
       When cell "cell-a" asks for what it needs to push its branch
       Then the cell API answers it
       When cell "cell-a" reports that its green attempt stopped
@@ -121,7 +102,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And an operator prepared a restart 1 minute ago
       When the scheduler ticks
       Then no cell is stopped
-      And cell "cell-a"'s next renewal tells it to stop
+      And cell "cell-a"'s next renewal tells it to carry on
 
   Rule: A cell stopped for a restart pushes its work in progress, and a cell that lost its lease pushes nothing
 
@@ -228,7 +209,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       And a cell starts for item "B"
 
     @ac-7 @db
-    Scenario: After Resume, a running cell's renewal tells it to carry on
+    Scenario: After Resume, a running cell's renewal no longer says a restart is being prepared
       Given the control plane is running with a fake board
       And an operator is signed in
       And item "A" is running in cell "cell-a" with a live lease
@@ -236,6 +217,7 @@ Feature: Prepare restart lets local cells wrap up, so each item resumes where it
       When the operator resumes the factory with the reason "changed my mind"
       And cell "cell-a" renews its lease
       Then the renewal tells the cell to carry on
+      And the renewal no longer says a restart is being prepared
 
   Rule: After the restart, an item a wrap-up stopped resumes at its stage, from the commit it pushed
 
