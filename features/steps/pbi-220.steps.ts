@@ -6,6 +6,7 @@
 // board's fake directly, so it isn't counted as the factory's.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
+import { CLAIM_MARKER } from "../../src/adapters/contract.ts";
 import type { ItemState } from "../../src/core/states.ts";
 import { withTx } from "../../src/store/db.ts";
 import * as items from "../../src/store/items.ts";
@@ -55,7 +56,13 @@ Given("item {string} on board {string} is {string} with a merged PR", long, asyn
     merged: true, mergeSha: "merge-41", mergeable: true, reviewers: [], comments: [], reviews: [],
   });
   // The factory claimed it when it started the run, and keeps the claim until the item is done.
-  await boardNamed(this, boardName).fake.adapter.claim(ext);
+  const adapter = boardNamed(this, boardName).fake.adapter;
+  await adapter.claim(ext);
+  const run = await pool().query("select pr_number from run where item_id = $1", [id]);
+  assert.deepEqual(run.rows.map((r) => r.pr_number), [41], `item ${issue} has no run for PR 41`);
+  const found = await adapter.getItem(ext);
+  assert.ok(found, `board "${boardName}" holds no item ${issue}`);
+  assert.ok(found.labels.includes(CLAIM_MARKER), `board item ${issue} isn't claimed`);
 });
 
 // ---- moves ----
@@ -67,7 +74,11 @@ When("item {string} on board {string} moves to {string} on a verified definition
 });
 
 When("a person moves item {string} to the status {string} on the board", long, async function (issue: string, status: string) {
-  await boardNamed(this, MAIN).fake.adapter.setStatus(num(issue), status);
+  const adapter = boardNamed(this, MAIN).fake.adapter;
+  await adapter.setStatus(num(issue), status);
+  const found = await adapter.getItem(num(issue));
+  assert.ok(found, `the board holds no item ${issue}`);
+  assert.equal(found.status, status, `the board shows item ${issue} as "${found.status}", not "${status}"`);
 });
 
 // ---- the worker ----
