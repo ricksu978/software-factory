@@ -7,7 +7,8 @@
 //   <code>, <script>, <style> and comments. HTML tags read as spaces. A Markdown list marker or blockquote marker at
 //   the start of a line isn't a sentence end, and a Markdown table row is left out, since its cells can't span lines.
 // - The before-text is features/fixtures/pbi-294/before-text.json. Both sides compare with whitespace collapsed, and
-//   whitespace between two tags dropped, since "</td><td>" and "</td>\n<td>" render the same.
+//   whitespace between two tags dropped, since "</td><td>" and "</td>\n<td>" render the same, and whitespace before a
+//   <cite> dropped, since the spec shows a blockquote's <cite> as a block.
 // - AC-2 copies every .md and .html file git knows, with scripts/prose-lint.mjs, to a temp directory and runs the lint
 //   there the way .github/workflows/prose.yml does, then reads its "<file>:<line>: <message>" findings.
 // - AC-3 replays the committed inputs under features/fixtures/pbi-294/replay/ through scripts/merge-replay.ts, and reads
@@ -105,7 +106,9 @@ function multiSentenceLines(text: string, html: boolean): string[] {
   return out;
 }
 
-const collapse = (s: string) => s.replace(/\s+/g, " ").trim().replace(/> </g, "><");
+// Whitespace before a <cite> is dropped too: the spec styles "blockquote cite" as a block, so a line break between a
+// quote's closing mark and its <cite> renders the same, and it's the only place such a quote's last sentence can end a line.
+const collapse = (s: string) => s.replace(/\s+/g, " ").trim().replace(/> </g, "><").replace(/ <cite>/g, "<cite>");
 
 function before(): Before {
   const path = join(repo, FIXTURES, "before-text.json");

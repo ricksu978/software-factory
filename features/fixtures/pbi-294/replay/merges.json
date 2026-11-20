@@ -1,0 +1,707 @@
+[
+ {
+  "name": "9a173e9-spec",
+  "merge": "9a173e9de327afb1be834cfb5e65c52dce2964bd",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "125c64651dba99f2",
+   "ours": "1f3672fe92e7846e",
+   "theirs": "d87f49650e02aaac"
+  },
+  "new": {
+   "base": "7a67f0fa9d9ca630",
+   "ours": "d76671d9371abcd5",
+   "theirs": "05f8514e58531574"
+  }
+ },
+ {
+  "name": "ea12fdf-spec",
+  "merge": "ea12fdf9da047387293649df3007e622dd3ce540",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "125c64651dba99f2",
+   "ours": "2ed1c0f1251cd87b",
+   "theirs": "d87f49650e02aaac"
+  },
+  "new": {
+   "base": "7a67f0fa9d9ca630",
+   "ours": "d13c8910e716d0ea",
+   "theirs": "05f8514e58531574"
+  }
+ },
+ {
+  "name": "1edce7f-spec",
+  "merge": "1edce7ff259b76b5b7a7d274e241e9fb06131e9a",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "d87f49650e02aaac",
+   "ours": "8152e702ea3a7d25",
+   "theirs": "2cdc6b2ed240d716"
+  },
+  "new": {
+   "base": "05f8514e58531574",
+   "ours": "a49f5eed2d805f13",
+   "theirs": "0eb272a172b2a727"
+  }
+ },
+ {
+  "name": "1edce7f-plan",
+  "merge": "1edce7ff259b76b5b7a7d274e241e9fb06131e9a",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "b508b14df04bfdb3",
+   "ours": "3d7d233ddefd30f7",
+   "theirs": "9909268aa0906bbe"
+  },
+  "new": {
+   "base": "82c7884b82f4376f",
+   "ours": "7c63966c0c0249f1",
+   "theirs": "8a31fd603375760a"
+  }
+ },
+ {
+  "name": "4d8262c-spec",
+  "merge": "4d8262c4a085b5c3496b3b9495eee924fab968d7",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "2cdc6b2ed240d716",
+   "ours": "55a5147cbc653551",
+   "theirs": "9de8818f32baa9c0"
+  },
+  "new": {
+   "base": "0eb272a172b2a727",
+   "ours": "ac96aab6a51285c9",
+   "theirs": "9574fe43563e6e4a"
+  }
+ },
+ {
+  "name": "7729a49-spec",
+  "merge": "7729a492527695667d040bdee4415bd243fb9ad3",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "9de8818f32baa9c0",
+   "ours": "a4754db66f231f84",
+   "theirs": "fc98787bbb6f27c2"
+  },
+  "new": {
+   "base": "9574fe43563e6e4a",
+   "ours": "5dca2fbf7288bb24",
+   "theirs": "30e13e9b375829dd"
+  }
+ },
+ {
+  "name": "eca4083-spec",
+  "merge": "eca4083211ad2d2753dcdadff39d1e0074b09bf1",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "afd375868cdc202e",
+   "ours": "6d5527422866306b",
+   "theirs": "248cba9f9d24afda"
+  },
+  "new": {
+   "base": "6431dcf34c044c19",
+   "ours": "69074b6abec0c57e",
+   "theirs": "814b8b8a6a8354ab"
+  }
+ },
+ {
+  "name": "7651c06-plan",
+  "merge": "7651c060bf1f8ef38ad510521ca9fcc0bc11a2cb",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "65e162ab69b37aae",
+   "ours": "2a79df6a99c2a7f7",
+   "theirs": "e90f2213e1119f55"
+  },
+  "new": {
+   "base": "74c8d3829d3b5546",
+   "ours": "2afbd30f9de17aa4",
+   "theirs": "d469c32d26b52b54"
+  }
+ },
+ {
+  "name": "59d307f-spec",
+  "merge": "59d307f6114fb1b8d0332f9cd7186189073baf0b",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "afd375868cdc202e",
+   "ours": "e099363c64c8b978",
+   "theirs": "248cba9f9d24afda"
+  },
+  "new": {
+   "base": "6431dcf34c044c19",
+   "ours": "f55a7847bcc305a7",
+   "theirs": "814b8b8a6a8354ab"
+  }
+ },
+ {
+  "name": "777cce4-spec",
+  "merge": "777cce4bb8b9ae05d1276645db0784b57a1469b7",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "3968b13ec04f6f64",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "bf349ac77caf37f7",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "db22c2b-spec",
+  "merge": "db22c2b002a4d09172bff5bb1b5b64918c5ff979",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "afd375868cdc202e",
+   "ours": "e775a3df4a648e8b",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "6431dcf34c044c19",
+   "ours": "44cce60f94828d7e",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "db22c2b-plan",
+  "merge": "db22c2b002a4d09172bff5bb1b5b64918c5ff979",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "65e162ab69b37aae",
+   "ours": "0498c59437ed32bc",
+   "theirs": "dd977df8393f937d"
+  },
+  "new": {
+   "base": "74c8d3829d3b5546",
+   "ours": "33f06479fbf8eade",
+   "theirs": "20630804172a2844"
+  }
+ },
+ {
+  "name": "dec36e6-spec",
+  "merge": "dec36e6feced44f74f465b4d14736ee7276c51be",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "97f9d98287fdc1e3",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "f446e942debdc09b",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "dec36e6-plan",
+  "merge": "dec36e6feced44f74f465b4d14736ee7276c51be",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "e90f2213e1119f55",
+   "ours": "99bbf33da3efcf82",
+   "theirs": "dd977df8393f937d"
+  },
+  "new": {
+   "base": "d469c32d26b52b54",
+   "ours": "0c06cf1c5c516bf9",
+   "theirs": "20630804172a2844"
+  }
+ },
+ {
+  "name": "bf0ce77-spec",
+  "merge": "bf0ce77784538fc45d71f9cecb6effc0be3bb57d",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "afd375868cdc202e",
+   "ours": "d610acb107a8bbe0",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "6431dcf34c044c19",
+   "ours": "b73dd47f60a2888b",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "169f75b-spec",
+  "merge": "169f75b53126cbf10901da2bc43a36ea11f31598",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "3af0dd78d7d7f4f6",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "4d4fe0477fe0c57c",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "693e463-spec",
+  "merge": "693e4630b1101336cf62fd99d2b8cc1691401cb3",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "51c3d551e46b2946",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "9760ebed56d355e1",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "693e463-plan",
+  "merge": "693e4630b1101336cf62fd99d2b8cc1691401cb3",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "e90f2213e1119f55",
+   "ours": "a2407c74cf09825a",
+   "theirs": "dd977df8393f937d"
+  },
+  "new": {
+   "base": "d469c32d26b52b54",
+   "ours": "286cb66f45c88da5",
+   "theirs": "20630804172a2844"
+  }
+ },
+ {
+  "name": "71b42d3-spec",
+  "merge": "71b42d37a2c307f0ba23b7f321e648764f7fc630",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "035b98c663fb1be2",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "92d8efcb5af9e28a",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "71b42d3-plan",
+  "merge": "71b42d37a2c307f0ba23b7f321e648764f7fc630",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "e90f2213e1119f55",
+   "ours": "389c9dfa870e3d65",
+   "theirs": "dd977df8393f937d"
+  },
+  "new": {
+   "base": "d469c32d26b52b54",
+   "ours": "c23dafaee6ce7101",
+   "theirs": "20630804172a2844"
+  }
+ },
+ {
+  "name": "20c85fd-spec",
+  "merge": "20c85fde2adc86513b1355f9b1f4e18d8bd726a9",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "248cba9f9d24afda",
+   "ours": "fca0fb8f6a936f8e",
+   "theirs": "3549f11527a9cba2"
+  },
+  "new": {
+   "base": "814b8b8a6a8354ab",
+   "ours": "a12695d0d994135a",
+   "theirs": "baf542c6365e285f"
+  }
+ },
+ {
+  "name": "20c85fd-plan",
+  "merge": "20c85fde2adc86513b1355f9b1f4e18d8bd726a9",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "e90f2213e1119f55",
+   "ours": "47bed72d8660af92",
+   "theirs": "dd977df8393f937d"
+  },
+  "new": {
+   "base": "d469c32d26b52b54",
+   "ours": "45459bccb1098966",
+   "theirs": "20630804172a2844"
+  }
+ },
+ {
+  "name": "7cba2b8-plan",
+  "merge": "7cba2b8aa723a2a00c74874a70c9bb3e309e503b",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "dd977df8393f937d",
+   "ours": "b3cd2bf8eb0b4608",
+   "theirs": "bf4dc7e959280847"
+  },
+  "new": {
+   "base": "20630804172a2844",
+   "ours": "22d40841ec3ce17e",
+   "theirs": "98e25c52f321af9e"
+  }
+ },
+ {
+  "name": "42d1223-spec",
+  "merge": "42d12230442d1613c20a00cf9f2a2455a470ef52",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "3549f11527a9cba2",
+   "ours": "3e94e9f5485c1104",
+   "theirs": "f721bca8c9e8b1e0"
+  },
+  "new": {
+   "base": "baf542c6365e285f",
+   "ours": "62be0472288c4b54",
+   "theirs": "a75f12e8cfbe4552"
+  }
+ },
+ {
+  "name": "b58d6ff-spec",
+  "merge": "b58d6ff574d2c0a23933f64607b06080038f8db2",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "3549f11527a9cba2",
+   "ours": "e8f26834daee34a3",
+   "theirs": "f721bca8c9e8b1e0"
+  },
+  "new": {
+   "base": "baf542c6365e285f",
+   "ours": "879a938b803cddd4",
+   "theirs": "a75f12e8cfbe4552"
+  }
+ },
+ {
+  "name": "0b6bc77-plan",
+  "merge": "0b6bc77168cc8866786295312f2ca1f0b1fe6d79",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "dd977df8393f937d",
+   "ours": "e9e20d859b9bcd69",
+   "theirs": "bf4dc7e959280847"
+  },
+  "new": {
+   "base": "20630804172a2844",
+   "ours": "68f7c632f2e93b7e",
+   "theirs": "98e25c52f321af9e"
+  }
+ },
+ {
+  "name": "860e161-plan",
+  "merge": "860e16134e19d4905af4a3c4992e0d5676e04f8d",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "bf4dc7e959280847",
+   "ours": "a3be484ed4407256",
+   "theirs": "1031822ad293bd99"
+  },
+  "new": {
+   "base": "98e25c52f321af9e",
+   "ours": "47bb09cce2a49a73",
+   "theirs": "102836510c576baf"
+  }
+ },
+ {
+  "name": "328dd4b-spec",
+  "merge": "328dd4b5047f2a2d9ea42aa78c369e5bb8519dde",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "3549f11527a9cba2",
+   "ours": "9ff047e77d015426",
+   "theirs": "174b182a990664ab"
+  },
+  "new": {
+   "base": "baf542c6365e285f",
+   "ours": "00ff2abf00352084",
+   "theirs": "436f80c18e8abf30"
+  }
+ },
+ {
+  "name": "7f38375-plan",
+  "merge": "7f383759e965e13e130426db678961c018494884",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "dd977df8393f937d",
+   "ours": "dae59e34390be132",
+   "theirs": "1031822ad293bd99"
+  },
+  "new": {
+   "base": "20630804172a2844",
+   "ours": "311e679c30138915",
+   "theirs": "102836510c576baf"
+  }
+ },
+ {
+  "name": "0b8a06c-spec",
+  "merge": "0b8a06cc4438a713dd363371dab9c20e2084b2dc",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "174b182a990664ab",
+   "ours": "48cb3917e19dcb0e",
+   "theirs": "8aa12751cc92d0c8"
+  },
+  "new": {
+   "base": "436f80c18e8abf30",
+   "ours": "54fe10bbfacdce55",
+   "theirs": "683468c8e82c1079"
+  }
+ },
+ {
+  "name": "0b8a06c-plan",
+  "merge": "0b8a06cc4438a713dd363371dab9c20e2084b2dc",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "1031822ad293bd99",
+   "ours": "ae66bd0cec4654aa",
+   "theirs": "370f3a20aee4b87f"
+  },
+  "new": {
+   "base": "102836510c576baf",
+   "ours": "2e9d6f8063d0821d",
+   "theirs": "ecfb3552bc64eaf3"
+  }
+ },
+ {
+  "name": "4b4c4ef-spec",
+  "merge": "4b4c4efa2f34715bc1035540ae43efbde48d6723",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "174b182a990664ab",
+   "ours": "8598dd8d4ec1da0d",
+   "theirs": "5a29e4a6ae0bcf55"
+  },
+  "new": {
+   "base": "436f80c18e8abf30",
+   "ours": "a968a8fc868877bd",
+   "theirs": "8460bad9ae28fb3d"
+  }
+ },
+ {
+  "name": "3ecb38e-spec",
+  "merge": "3ecb38ec92d0df7cf8b98c9a4bf614edd85f067f",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "8aa12751cc92d0c8",
+   "ours": "7b9f028273780aef",
+   "theirs": "138e5be8c8c5ad8c"
+  },
+  "new": {
+   "base": "683468c8e82c1079",
+   "ours": "dfd313f8a3c36448",
+   "theirs": "88e21ae9c4ec07ad"
+  }
+ },
+ {
+  "name": "3ecb38e-plan",
+  "merge": "3ecb38ec92d0df7cf8b98c9a4bf614edd85f067f",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "370f3a20aee4b87f",
+   "ours": "5253500d964afe6f",
+   "theirs": "53874161930d8dee"
+  },
+  "new": {
+   "base": "ecfb3552bc64eaf3",
+   "ours": "5d1b7f68763522e2",
+   "theirs": "13527f8240b446f1"
+  }
+ },
+ {
+  "name": "d212b42-spec",
+  "merge": "d212b425d0270475bba2c1207b7665f0f71a115d",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "8aa12751cc92d0c8",
+   "ours": "35aff7dc8c06e86e",
+   "theirs": "fd45891ac7e8faab"
+  },
+  "new": {
+   "base": "683468c8e82c1079",
+   "ours": "bf303f3a2a4f601e",
+   "theirs": "407466f2173d4fdc"
+  }
+ },
+ {
+  "name": "433f7d4-spec",
+  "merge": "433f7d4a3ef95808c99786e0a815982ac92f5d72",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "8aa12751cc92d0c8",
+   "ours": "7e773262c97608f1",
+   "theirs": "5a29e4a6ae0bcf55"
+  },
+  "new": {
+   "base": "683468c8e82c1079",
+   "ours": "3b72c1c7f2577fd3",
+   "theirs": "8460bad9ae28fb3d"
+  }
+ },
+ {
+  "name": "433f7d4-plan",
+  "merge": "433f7d4a3ef95808c99786e0a815982ac92f5d72",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "370f3a20aee4b87f",
+   "ours": "f6b3253adb6d3263",
+   "theirs": "6c4684507ebc04b4"
+  },
+  "new": {
+   "base": "ecfb3552bc64eaf3",
+   "ours": "64c832f81960d25e",
+   "theirs": "47fb3d210f913333"
+  }
+ },
+ {
+  "name": "3cfd964-spec",
+  "merge": "3cfd9645f27ae96940da5ad2ba2f93f65e3a4687",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "8aa12751cc92d0c8",
+   "ours": "3733206f78291d1f",
+   "theirs": "fd45891ac7e8faab"
+  },
+  "new": {
+   "base": "683468c8e82c1079",
+   "ours": "33436879406c34d1",
+   "theirs": "407466f2173d4fdc"
+  }
+ },
+ {
+  "name": "ca6a897-plan",
+  "merge": "ca6a897fa585254213fcc1676ccab2a25c89bbff",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "370f3a20aee4b87f",
+   "ours": "c3a90138568c42bf",
+   "theirs": "143a38d4f443f083"
+  },
+  "new": {
+   "base": "ecfb3552bc64eaf3",
+   "ours": "1a9d47cf170723b4",
+   "theirs": "d055770e3c2db306"
+  }
+ },
+ {
+  "name": "70e30eb-spec",
+  "merge": "70e30eb31997b0299a3d514741872089334ea0ea",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "8aa12751cc92d0c8",
+   "ours": "43a771218e8ec392",
+   "theirs": "b57d5999488cdafe"
+  },
+  "new": {
+   "base": "683468c8e82c1079",
+   "ours": "4f10d474f5d085a7",
+   "theirs": "33fa78d5d409f16c"
+  }
+ },
+ {
+  "name": "70e30eb-plan",
+  "merge": "70e30eb31997b0299a3d514741872089334ea0ea",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "370f3a20aee4b87f",
+   "ours": "a15dc1dc5cb541c2",
+   "theirs": "26ecb044e7533413"
+  },
+  "new": {
+   "base": "ecfb3552bc64eaf3",
+   "ours": "8444a9c654a79d1c",
+   "theirs": "2d43d7026bd83163"
+  }
+ },
+ {
+  "name": "571b6d0-spec",
+  "merge": "571b6d058bfb2f1928281f34971863eb98e728bf",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "5a29e4a6ae0bcf55",
+   "ours": "173934fd70a33a9e",
+   "theirs": "e2f1f4bff8fca0f2"
+  },
+  "new": {
+   "base": "8460bad9ae28fb3d",
+   "ours": "41ca0208113428a8",
+   "theirs": "e6929394bc3535dc"
+  }
+ },
+ {
+  "name": "571b6d0-plan",
+  "merge": "571b6d058bfb2f1928281f34971863eb98e728bf",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "6c4684507ebc04b4",
+   "ours": "8840799671fe122e",
+   "theirs": "f2923119a3cd9f1b"
+  },
+  "new": {
+   "base": "47fb3d210f913333",
+   "ours": "46ec4cc9a02c30ac",
+   "theirs": "7574eb8f49656a26"
+  }
+ },
+ {
+  "name": "0fb349c-spec",
+  "merge": "0fb349c4bdf502ffa3f6d8376f49fbdae3b34bfe",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "fd45891ac7e8faab",
+   "ours": "7956d698ef189f72",
+   "theirs": "e2f1f4bff8fca0f2"
+  },
+  "new": {
+   "base": "407466f2173d4fdc",
+   "ours": "b05f0fe54e79c0f7",
+   "theirs": "e6929394bc3535dc"
+  }
+ },
+ {
+  "name": "0fb349c-plan",
+  "merge": "0fb349c4bdf502ffa3f6d8376f49fbdae3b34bfe",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "143a38d4f443f083",
+   "ours": "41a0152f2d1d7c75",
+   "theirs": "f2923119a3cd9f1b"
+  },
+  "new": {
+   "base": "d055770e3c2db306",
+   "ours": "505b23a41fed1c02",
+   "theirs": "7574eb8f49656a26"
+  }
+ },
+ {
+  "name": "eaea856-spec",
+  "merge": "eaea856dde24a9b76250ea4276a954442c541e2c",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "fd45891ac7e8faab",
+   "ours": "8d410d5b338a55d1",
+   "theirs": "e2f1f4bff8fca0f2"
+  },
+  "new": {
+   "base": "407466f2173d4fdc",
+   "ours": "5c47d6bd918dee4c",
+   "theirs": "e6929394bc3535dc"
+  }
+ },
+ {
+  "name": "eaea856-plan",
+  "merge": "eaea856dde24a9b76250ea4276a954442c541e2c",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "143a38d4f443f083",
+   "ours": "4d93b67910746bc4",
+   "theirs": "f2923119a3cd9f1b"
+  },
+  "new": {
+   "base": "d055770e3c2db306",
+   "ours": "2ca86cb2bf868042",
+   "theirs": "7574eb8f49656a26"
+  }
+ }
+]

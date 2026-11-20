@@ -200,8 +200,23 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, failedChecks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
-    mergeCalls, runs, logs, parents, permissionsMissing,
+    prs,
+    checks,
+    failedChecks,
+    pendingChecks,
+    ciChecks,
+    files,
+    heads,
+    branches,
+    reviewComments,
+    postedReviews,
+    resolvedThreads,
+    diffs,
+    mergeCalls,
+    runs,
+    logs,
+    parents,
+    permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
