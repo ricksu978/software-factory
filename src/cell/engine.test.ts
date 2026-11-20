@@ -1268,6 +1268,36 @@ describe("runCell", () => {
     assert.match(openPr.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
   });
 
+  test("a re-run check that fails again fast is read only once the other re-run checks finish, so a running one isn't called passed", async () => {
+    let greens = 0;
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    // After the re-run, "unit" fails again at once while "e2e" runs for three more reads, then fails too.
+    const e2eDone = () => readsSinceRerun > 3;
+    h.deps.api.checks = async () => {
+      if (greens >= 2) return { status: "success", failedChecks: [] };
+      if (rerun) readsSinceRerun++;
+      return {
+        status: "failure",
+        failedChecks: rerun && e2eDone()
+          ? [{ name: "unit", url: "https://ci/unit/2", log: "unit boom" }, { name: "e2e", url: "https://ci/e2e/2", log: "e2e boom" }]
+          : [{ name: "unit", url: rerun ? "https://ci/unit/2" : "https://ci/unit", log: "unit boom" }],
+      };
+    };
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      { name: "e2e", conclusion: !rerun ? "failure" : e2eDone() ? "failure" : "pending", url: rerun ? "https://ci/e2e/2" : "https://ci/e2e" },
+    ];
+    h.deps.api.rerunFailedChecks = async () => { rerun = true; };
+    assert.equal(await h.run(), "done");
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it failed again on the re-run\./);
+    assert.doesNotMatch(failed.body.message, /"e2e"[^.]*passed on the re-run/);
+    const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
+    assert.match(retry, /e2e boom/);
+  });
+
   test("a re-requested check that finishes again under the same URL counts as re-run once it finished after its old run", async () => {
     let rerun = false;
     let readsSinceRerun = 0;

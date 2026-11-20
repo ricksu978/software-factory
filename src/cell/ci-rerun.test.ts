@@ -34,6 +34,16 @@ describe("rerunNotes", () => {
     ]);
   });
 
+  test("doesn't call a check whose re-run still runs passed", () => {
+    assert.deepEqual(rerunNotes(SHA, ["ci", "e2e"], "failure", [
+      { name: "ci", conclusion: "failure", url: "v" },
+      { name: "e2e", conclusion: "pending", url: "w" },
+    ]), [
+      `The check "ci" failed on c0ffee1, so the factory re-ran it once, and it failed again on the re-run.`,
+      `The check "e2e" failed on c0ffee1, so the factory re-ran it once, and its re-run hadn't finished when CI was read.`,
+    ]);
+  });
+
   test("falls back on CI's overall answer when the checks couldn't be read", () => {
     assert.deepEqual(rerunNotes(SHA, ["ci"], "failure", null), [
       `The check "ci" failed on c0ffee1, so the factory re-ran it once, and CI was still red after the re-run.`,

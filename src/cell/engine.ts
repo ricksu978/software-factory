@@ -915,10 +915,13 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // A check with neither can't be told apart, so it's taken as it reads.
     const oldRuns = new Map((before ?? [] as CiCheck[]).filter((c) => rerun.includes(c.name) && (c.url || c.completedAt)).map((c) => [c.name, c]));
     // CI that can't be read by name can't show the old runs, so it reads as it stands, as before the re-run.
+    // `/checks` answers failure as soon as one check fails again, so CI is also waited on while any re-run check is
+    // still pending: a check whose re-run hasn't finished must not read as passed, nor go missing from Green's logs.
     const stale = async () => {
-      if (!oldRuns.size) return false;
       const now = await orNull(api.ciChecks!(sha));
-      return !!now && [...oldRuns].some(([name, old]) => !now.some((c) => c.name === name && rerunShown(old, c)));
+      if (!now) return false;
+      if (now.some((c) => rerun.includes(c.name) && c.conclusion === "pending")) return true;
+      return [...oldRuns].some(([name, old]) => !now.some((c) => c.name === name && rerunShown(old, c)));
     };
     const again = await waitForChecks(sha, stale);
     const status = again.status === "failure" ? "failure" : "success";
