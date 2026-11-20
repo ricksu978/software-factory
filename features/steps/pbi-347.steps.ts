@@ -7,6 +7,8 @@
 // - "the scenarios that aren't tagged @local": npm run bdd -- --tags "not @local"
 // The scenarios about CI's run read it from GitHub's Actions API: the latest run of the "ci" workflow on the commit this
 // checkout's HEAD is at. A commit CI hasn't run on, or a run that hasn't finished, fails the Then that reads it.
+// Under Actions the scenarios run inside CI's run on HEAD, which can't finish before they do, so they read that run as it
+// will have finished once they pass (settledThisRun).
 import { Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
@@ -117,12 +119,24 @@ async function gh<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** The latest run of the "ci" workflow on `sha`, with its jobs, or what stopped us reading it. */
+/**
+ * The run of the "ci" workflow these scenarios run inside, when they run under Actions: GITHUB_RUN_ID names it. Its bdd
+ * step is the one running them, so the run can't have finished while they read it.
+ */
+function isThisRun(run: GhRun): boolean {
+  return process.env.GITHUB_ACTIONS === "true" && String(run.id) === process.env.GITHUB_RUN_ID;
+}
+
+/**
+ * The run of the "ci" workflow on `sha`, with its jobs, or what stopped us reading it: the run these scenarios run
+ * inside, if they run inside one on `sha`, else the latest.
+ */
 async function ciRunOn(sha: string): Promise<CiRun> {
   try {
     const r = ghRepo();
     const { workflow_runs } = await gh<{ workflow_runs: GhRun[] }>(`/repos/${r}/actions/runs?head_sha=${sha}&per_page=100`);
-    const run = workflow_runs.filter((w) => w.path === workflowPath || w.name === "ci").sort((a, b) => b.run_number - a.run_number)[0];
+    const runs = workflow_runs.filter((w) => w.path === workflowPath || w.name === "ci").sort((a, b) => b.run_number - a.run_number);
+    const run = runs.find(isThisRun) ?? runs[0];
     if (!run) return { sha };
     const { jobs } = await gh<{ jobs: GhJob[] }>(`/repos/${r}/actions/runs/${run.id}/jobs?per_page=100`);
     return { sha, run, jobs };
@@ -131,12 +145,47 @@ async function ciRunOn(sha: string): Promise<CiRun> {
   }
 }
 
-/** CI's finished run on this commit: the Thens fail when there's none, or it hasn't finished. */
+/** Whether a step GitHub lists by its name ("Run <command>") is the one CI runs for `check`. */
+function stepIs(check: string, step: GhStep): boolean {
+  return checks[check]({ run: step.name.replace(/^Run /, "") });
+}
+
+/**
+ * The run these scenarios run inside, as it will have finished once they pass. Every other job, and every step before
+ * the scenarios' own, must have finished. The scenarios' step is still running, and only the job's post steps may wait
+ * after it. That step's result is the scenarios' own: it passes only when every scenario passes, this one included,
+ * and when it fails the job and the run fail with it. So it counts as passed here, and the job's and the run's
+ * conclusions follow from the steps.
+ */
+function settledThisRun(run: GhRun, jobs: GhJob[]): { run: GhRun; jobs: GhJob[] } {
+  const scenarios = "the scenarios that aren't tagged @local";
+  const open = jobs.filter((j) => j.status !== "completed");
+  assert.deepEqual(open.map((j) => j.name), [process.env.GITHUB_JOB ?? "ci"], `in CI's run ${run.html_url}, which runs these scenarios, only their own job may still be running`);
+  const own = open[0];
+  const steps = own.steps ?? [];
+  const at = steps.findIndex((s) => s.status === "in_progress");
+  assert.ok(at >= 0 && stepIs(scenarios, steps[at]), `in CI's run ${run.html_url}, the step running is ${steps[at]?.name ?? "none"}, not the one that runs ${scenarios}`);
+  const unfinishedBefore = steps.slice(0, at).filter((s) => s.status !== "completed");
+  assert.deepEqual(unfinishedBefore.map((s) => s.name), [], `in CI's run ${run.html_url}, steps before the scenarios haven't finished`);
+  const after = steps.slice(at + 1).filter((s) => s.status !== "completed" && !/^Post /.test(s.name) && s.name !== "Complete job");
+  assert.deepEqual(after.map((s) => s.name), [], `in CI's run ${run.html_url}, checks after the scenarios haven't run`);
+  const ownSteps = [...steps.slice(0, at), { ...steps[at], status: "completed", conclusion: "success" }];
+  const ownJob: GhJob = { ...own, status: "completed", conclusion: ownSteps.every((s) => s.conclusion === "success" || s.conclusion === "skipped") ? "success" : "failure", steps: ownSteps };
+  const settled = jobs.map((j) => (j === own ? ownJob : j));
+  const conclusion = settled.every((j) => j.conclusion === "success") ? "success" : "failure";
+  return { run: { ...run, status: "completed", conclusion }, jobs: settled };
+}
+
+/**
+ * CI's finished run on this commit: the Thens fail when there's none, or it hasn't finished. Under Actions, the run
+ * these scenarios run inside can't finish before they do, so they read it as it will have finished (settledThisRun).
+ */
 function finishedRun(c: Ctx): { run: GhRun; jobs: GhJob[] } {
   const ci = c.ci;
   assert.ok(ci, "no step read CI's run");
   assert.ok(!ci.error, `couldn't read CI's run on ${ci.sha}: ${ci.error}`);
   assert.ok(ci.run && ci.jobs, `CI has no run of ${workflowPath} on commit ${ci.sha}`);
+  if (isThisRun(ci.run)) return settledThisRun(ci.run, ci.jobs);
   assert.equal(ci.run.status, "completed", `CI's run on ${ci.sha} (${ci.run.html_url}) hasn't finished: it's ${ci.run.status}`);
   return { run: ci.run, jobs: ci.jobs };
 }
