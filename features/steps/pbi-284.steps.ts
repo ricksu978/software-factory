@@ -64,6 +64,8 @@ export type Ctx = {
   delivery?: string;
   /** Statuses a When-position "the API answers" expected of the replies it read, checked by every later Then. */
   checks: { status: number; reply: Reply }[];
+  /** The webhook secret the API is given, when a scenario names one (PBI 287). */
+  webhookSecret?: string;
 };
 
 export function ctx(world: object): Ctx {
@@ -91,13 +93,18 @@ Before({ tags: "(@pbi-284 or @pbi-285 or @pbi-286) and @db" }, function () {
   ctx(this).db = true;
 });
 
-After({ tags: "@pbi-284 or @pbi-285 or @pbi-286", ...long }, async function () {
-  const c = ctx(this);
+/** Stops the API and the fake issuer the scenario started. PBI 287's steps share them. */
+export async function stopAll(world: object): Promise<void> {
+  const c = ctx(world);
   await c.api?.stop();
   if (c.issuer) {
     c.issuer.closeAllConnections();
     await new Promise((resolve) => c.issuer!.close(resolve));
   }
+}
+
+After({ tags: "@pbi-284 or @pbi-285 or @pbi-286", ...long }, async function () {
+  await stopAll(this);
 });
 
 // ---- the fake issuer and tokens ----
@@ -143,8 +150,8 @@ async function flawed(c: Ctx, name: string, flaw: string): Promise<string> {
   throw new Error(`no such token flaw: ${flaw}`);
 }
 
-Given("a fake issuer publishing a discovery document and its signing keys", long, async function () {
-  const c = ctx(this);
+/** Starts a fake issuer on a free port that publishes a discovery document and, unless told not to, its key set. */
+export async function startIssuer(c: Ctx): Promise<void> {
   const { jwk } = await signingKeys();
   c.issuer = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
@@ -165,6 +172,10 @@ Given("a fake issuer publishing a discovery document and its signing keys", long
   });
   await new Promise<void>((resolve) => c.issuer!.listen(0, "127.0.0.1", () => resolve()));
   c.issuerUrl = `http://127.0.0.1:${(c.issuer.address() as AddressInfo).port}/realms/factory`;
+}
+
+Given("a fake issuer publishing a discovery document and its signing keys", long, async function () {
+  await startIssuer(ctx(this));
 });
 
 Given("the API is configured with that issuer and the audience {string}", function (audience: string) {
@@ -293,7 +304,7 @@ When("the API starts from src\\/api\\/main.ts", long, async function () {
   c.started = true;
   try {
     c.api = await mod.startApi({
-      pool: apiPool, issuer: c.issuerUrl, audience: c.audience, webhookSecret: WEBHOOK_SECRET,
+      pool: apiPool, issuer: c.issuerUrl, audience: c.audience, webhookSecret: c.webhookSecret ?? WEBHOOK_SECRET,
       readBlob: async (path: string) => c.blobs.get(path) ?? null,
       env: { ...c.env },
       ...(c.now ? { now: () => c.now! } : {}),
@@ -574,9 +585,11 @@ Then("item {string}'s question is still open", long, async function (name: strin
   assert.equal(q.answer, null, "the question was answered");
 });
 
+// With no delivery id sent (PBI 287), every delivery and webhook event counts.
 async function webhookEvents(c: Ctx): Promise<{ deliveries: number; events: number }> {
-  const deliveries = (await pool().query("select count(*)::int as n from webhook_delivery where id = $1", [c.delivery])).rows[0].n;
-  const events = (await pool().query("select count(*)::int as n from event where kind = 'webhook' and payload->>'deliveryId' = $1", [c.delivery])).rows[0].n;
+  const id = c.delivery ?? null;
+  const deliveries = (await pool().query("select count(*)::int as n from webhook_delivery where $1::text is null or id = $1", [id])).rows[0].n;
+  const events = (await pool().query("select count(*)::int as n from event where kind = 'webhook' and ($1::text is null or payload->>'deliveryId' = $1)", [id])).rows[0].n;
   return { deliveries, events };
 }
 

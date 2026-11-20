@@ -76,7 +76,7 @@ export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).repl
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
 export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-284" }, function ({ pickleStep }) {
+BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-284 or @pbi-287" }, function ({ pickleStep }) {
   ctx(this).stepType = pickleStep.type;
 });
 
