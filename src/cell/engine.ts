@@ -43,6 +43,11 @@ export type CellContext = {
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
   /**
+   * PBI 315: each head CI failed on in an earlier claim of this run, with its failed checks, oldest first, as the
+   * run's Green attempts reported them with `ciFailure`. Absent or empty when no earlier claim saw CI fail.
+   */
+  failedCiHeads?: CiFailure[];
+  /**
    * The attempt at the run's next stage that a stop cut short, when the run resumes from the work in progress that
    * attempt pushed (PBI 140). Absent or null when the stage starts fresh.
    */
