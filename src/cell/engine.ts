@@ -21,6 +21,7 @@ import { pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckAnswer, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase, type BaseLine } from "./base-run.ts";
 import { ciFailureOf, ciFindings, ciQuestion, sharedCiLines, type CiFailure } from "./ci-failure.ts";
+import { failedNames, refusedNotes, rerunNotes } from "./ci-rerun.ts";
 import type { Git } from "./git.ts";
 
 /** The body of GET /context (Run contract 5). */
@@ -819,7 +820,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // A person may merge or close the PR while a stage waits for CI on its push. `GET checks` then refuses the commit,
   // since it's gone from the run's branch or is on main too. Only a PR that is no longer open turns that refusal into
   // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
-  const waitForChecks = async (sha: string): Promise<CheckAnswer> => {
+  // PBI 233: `stale`, when given, says CI still shows a run that was there before a re-run, so the answer is the old run's
+  // and is waited past as pending, under the same cap.
+  const waitForChecks = async (sha: string, stale?: () => Promise<boolean>): Promise<CheckAnswer> => {
     const began = d.now().getTime();
     for (;;) {
       const s = await api.checks(sha).catch(async (e: unknown) => {
@@ -836,7 +839,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         if (!state.open) throw new ClosedUnmerged(`PR #${n} for \`${ctx.branch}\` was closed without a merge while the factory waited for CI on ${sha}, so the stage stops here.`);
         throw e;
       });
-      if (s.status !== "pending") return s;
+      if (s.status !== "pending" && !(stale && await stale())) return s;
       const question = await pendingCiQuestion(api, sha, d.now().getTime() - began);
       if (question) throw new Blocked(question);
       await sleep(CHECKS_POLL_MS);
@@ -861,11 +864,69 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Reads CI on a head a stage pushed. A head CI failed on before is never read again: nothing changed for CI to judge,
   // so the factory gives up and asks a person instead.
+  // PBI 233: before a red CI is charged, its failed checks are re-run once, and CI is read again. A pass on the re-run
+  // counts as green. Either way the stage's message says what was re-run and how it ended. A commit's checks are re-run
+  // once at most, and only the ones that failed.
   const readCi = async (sha: string): Promise<CheckAnswer> => {
     if (failedHeads.has(sha)) throw new Blocked(ciQuestion(ciFailures));
-    const ci = await waitForChecks(sha);
+    let ci = await waitForChecks(sha);
+    if (ci.status === "failure") ci = await rerunOnce(sha, ci);
     if (ci.status === "failure") failedLogs.set(sha, ci.failedChecks);
     return ci;
+  };
+  const rerunShas = new Set<string>();
+  // A re-run check shows its re-run once it reads at a new URL, or has finished again after its old run finished.
+  const rerunShown = (old: CiCheck, now: CiCheck) =>
+    (!!old.url && now.url !== old.url) ||
+    (now.conclusion !== "pending" && !!old.completedAt && !!now.completedAt && Date.parse(now.completedAt) > Date.parse(old.completedAt));
+  const ciNotes = (lines: string[]) => { if (current) current.notes = [...(current.notes ?? []), ...lines]; };
+  const rerunOnce = async (sha: string, ci: CheckAnswer): Promise<CheckAnswer> => {
+    if (!api.rerunFailedChecks || !api.ciChecks || rerunShas.has(sha)) return ci;
+    rerunShas.add(sha);
+    // `/checks` answers failure as soon as one check fails, while others may still run. GitHub won't re-run a job
+    // until its workflow run has finished, and a check that fails later must be re-run too, so the failed set is read
+    // only once no check on the commit is still pending, under the same cap.
+    const stillRunning = (checks: CiCheck[] | null) => !!checks && checks.some((c) => c.conclusion === "pending");
+    let before = await orNull(api.ciChecks(sha));
+    if (stillRunning(before)) {
+      ci = await waitForChecks(sha, async () => stillRunning(before = await orNull(api.ciChecks!(sha))));
+      if (ci.status !== "failure") return ci;
+    }
+    const failed = failedNames(before);
+    if (!failed.length) return ci;
+    let rerun = failed;
+    try {
+      const answer = await api.rerunFailedChecks(sha, failed);
+      // A partial re-run: the checks the host refused stand as they failed, and CI is waited on for the rest.
+      if (answer) {
+        rerun = failed.filter((x) => answer.rerun.includes(x));
+        for (const r of answer.refused) ciNotes(refusedNotes(sha, [r.check], new Error(r.reason)));
+      }
+    } catch (e) {
+      if (e instanceof LeaseLost) throw e;
+      console.error(`re-running ${failed.join(", ")} on ${sha} failed, so the red CI stands:`, e);
+      ciNotes(refusedNotes(sha, failed, e));
+      return ci;
+    }
+    if (!rerun.length) return ci;
+    // Each failed check's old run, by its URL and when it finished, so CI is read again only once every re-run check
+    // shows a new run. GitHub may still report the old failed run right after the re-run is asked for. A check another
+    // app re-runs through `/rerequest` may finish again under the same run and URL, so a later finish counts too.
+    // A check with neither can't be told apart, so it's taken as it reads.
+    const oldRuns = new Map((before ?? [] as CiCheck[]).filter((c) => rerun.includes(c.name) && (c.url || c.completedAt)).map((c) => [c.name, c]));
+    // CI that can't be read by name can't show the old runs, so it reads as it stands, as before the re-run.
+    // `/checks` answers failure as soon as one check fails again, so CI is also waited on while any re-run check is
+    // still pending: a check whose re-run hasn't finished must not read as passed, nor go missing from Green's logs.
+    const stale = async () => {
+      const now = await orNull(api.ciChecks!(sha));
+      if (!now) return false;
+      if (now.some((c) => rerun.includes(c.name) && c.conclusion === "pending")) return true;
+      return [...oldRuns].some(([name, old]) => !now.some((c) => c.name === name && rerunShown(old, c)));
+    };
+    const again = await waitForChecks(sha, stale);
+    const status = again.status === "failure" ? "failure" : "success";
+    ciNotes(rerunNotes(sha, rerun, status, await orNull(api.ciChecks(sha))));
+    return again;
   };
 
   // A CI failure on `sha`, the head a stage pushed: each failed check with its URL and failing tests. When the base
