@@ -7782,6 +7782,36 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       §10</td></tr>
 
+      <tr><td>One sentence per line</td>
+
+      <td>The spec and the Phase 0 plan start each sentence on its own line,
+
+      and the spec starts each table cell on its own line too,
+
+      so PRs that change different sentences change different lines and don't conflict.
+
+      A rendered page reads the same,
+
+      since HTML and Markdown join the lines of a paragraph.
+
+      <code>scripts/prose-lint.mjs</code> fails a line in either file that holds more than one sentence,
+
+      or in the spec more than one table cell,
+
+      and names the file and line.
+
+      It applies this rule to those two files only.
+
+      Replaying 47 past file merges in this layout through <code>scripts/merge-replay.ts</code> gives 18 conflicts,
+
+      against 47 in the old layout.
+
+      Decided 2026-11-20 with PBI 294</td>
+
+      <td>This spec,
+
+      the Phase 0 plan</td></tr>
+
       <tr><td>Flow review</td>
 
       <td>All 14 fixes from the Product Owner walk-through,

@@ -268,6 +268,21 @@ as revised on this plan's branch with the 14 flow-review fixes.
   so a cell's push token can't write to `main`.
   Task 1 adds its CI job to the required checks,
   and Task 19 adds the `production` environment.
+- This plan and the spec start each sentence on its own line,
+  and the spec starts each table cell on its own line too (PBI 294).
+  Many PRs edit both files at once,
+  and git merges line by line,
+  so two PRs that change different sentences then change different lines and don't conflict.
+  A rendered page reads the same,
+  since Markdown and HTML join the lines of a paragraph.
+  `scripts/prose-lint.mjs` fails a line in either file that holds more than one sentence,
+  or in the spec more than one table cell,
+  and names the file and line.
+  It applies this rule to those two files only.
+  `scripts/one-sentence-per-line.ts` made the reflow,
+  and `scripts/merge-replay.ts` replays 47 past file merges from committed inputs under `features/fixtures/pbi-294/replay/`.
+  In this layout 18 of them conflict,
+  against 47 in the old one.
 
 ## Review Focus
 

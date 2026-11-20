@@ -8,7 +8,8 @@
 //   the start of a line isn't a sentence end, and a Markdown table row is left out, since its cells can't span lines.
 // - The before-text is features/fixtures/pbi-294/before-text.json. Both sides compare with whitespace collapsed, and
 //   whitespace between two tags dropped, since "</td><td>" and "</td>\n<td>" render the same, and whitespace before a
-//   <cite> dropped, since the spec shows a blockquote's <cite> as a block.
+//   <cite> dropped, since the spec shows a blockquote's <cite> as a block. Its "added" field holds the passages this
+//   item adds to describe its own rule, as the Definition of Done asks, each put in after an anchor before comparing.
 // - AC-2 copies every .md and .html file git knows, with scripts/prose-lint.mjs, to a temp directory and runs the lint
 //   there the way .github/workflows/prose.yml does, then reads its "<file>:<line>: <message>" findings.
 // - AC-3 replays the committed inputs under features/fixtures/pbi-294/replay/ through scripts/merge-replay.ts, and reads
@@ -30,7 +31,8 @@ const RESULT = `${FIXTURES}/replay-result.json`;
 const DOCS = { spec: SPEC, plan: PLAN } as const;
 type Doc = keyof typeof DOCS;
 
-type Before = { spec: string; plan: string; planCodeBlocks: string[][] };
+type Added = { after: string; text: string };
+type Before = { spec: string; plan: string; planCodeBlocks: string[][]; added?: Partial<Record<Doc, Added[]>> };
 type Finding = { file: string; line: number; message: string };
 type Lint = { status: number | null; output: string; findings: Finding[] };
 type Entry = { name: string; line: number };
@@ -166,7 +168,7 @@ Then("no line outside code blocks holds more than one sentence", noMultiSentence
 Then(/^(?:its|the spec's) text, with whitespace collapsed, is the same as the before-text for the (spec|plan)$/, function (doc: Doc) {
   const text = ctx(this).read[doc] ?? readDoc(doc);
   const now = collapse(text);
-  const was = collapse(before()[doc]);
+  const was = withAdded(doc);
   if (now === was) return;
   let i = 0;
   while (now[i] === was[i]) i++;
@@ -175,10 +177,10 @@ Then(/^(?:its|the spec's) text, with whitespace collapsed, is the same as the be
 
 Then("every sentence in the before-text for each file is still in it, word for word", function () {
   const read = ctx(this).read;
-  const was = before();
   for (const doc of ["spec", "plan"] as Doc[]) {
     const now = collapse(read[doc] ?? readDoc(doc));
-    const text = collapse(was[doc]);
+    // With the added passages in, since the spec's goes between two table rows, which a sentence here can span.
+    const text = withAdded(doc);
     const starts = [0, ...sentenceBreaks(text), text.length];
     const missing: string[] = [];
     for (let i = 0; i + 1 < starts.length; i++) {
@@ -193,6 +195,21 @@ Then("every code block in it is the same, line for line, as in the before-text f
   const now = codeBlocks(ctx(this).read.plan ?? readDoc("plan"));
   assert.deepEqual(now, before().planCodeBlocks);
 });
+
+/**
+ * The before-text for a doc, whitespace collapsed, with the passages this item adds to describe its own rule put in.
+ * Each goes right after its anchor, which must occur once, so the rest of the file still has to match the before-text.
+ */
+function withAdded(doc: Doc): string {
+  const b = before();
+  let was = collapse(b[doc]);
+  for (const { after, text } of b.added?.[doc] ?? []) {
+    const at = was.indexOf(after);
+    assert.ok(at >= 0 && was.indexOf(after, at + 1) < 0, `the anchor for an added passage in ${DOCS[doc]} isn't once in its before-text: ${after}`);
+    was = was.slice(0, at + after.length) + text + was.slice(at + after.length);
+  }
+  return was;
+}
 
 // ---- Table cells ----
 
