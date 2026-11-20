@@ -36,6 +36,18 @@ describe("readiness checks", dbTest, () => {
     assert.ok(Math.abs((await readinessSpend(db.pool)) - 0.21) < 1e-12);
   });
 
+  test("a judge call's verdict and the child it judged read back as recorded; a check with neither has no such key (PBI 348)", async () => {
+    await db.pool.query("truncate readiness_check");
+    const id = await item("NotReady");
+    const base = { kind: "judge" as const, model: "claude-haiku-4-5", tokensIn: 1, tokensOut: 1, costUsd: 0.001 };
+    const failed = { ...base, ranAt: new Date("2026-11-09T10:00:00Z"),
+      verdict: { outcome: "failed" as const, lines: [{ criterion: "Names its spec section", reason: "None <b>named</b>." }], flags: ["changes CI"] } };
+    const child = { ...base, ranAt: new Date("2026-11-09T10:01:00Z"), verdict: { outcome: "passed" as const }, child: "Export as CSV" };
+    const legacy = { ...base, ranAt: new Date("2026-11-09T10:02:00Z") };
+    for (const c of [failed, child, legacy]) await recordReadinessCheck(db.pool, id, c);
+    assert.deepEqual(await readinessChecks(db.pool, id), [failed, child, legacy]);
+  });
+
   test("readiness spend sums every item's checks, a turned-away item's included", async () => {
     await db.pool.query("truncate readiness_check");
     assert.equal(await readinessSpend(db.pool), 0);

@@ -28,7 +28,7 @@ import type { Server } from "node:http";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
 import { withTx } from "../../src/store/db.ts";
-import { overrideItem, transitionItem } from "../../src/store/items.ts";
+import { nextUp, overrideItem, transitionItem } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as p89, headers } from "./pbi-89.steps.ts";
@@ -394,15 +394,26 @@ Then(re(`item "([^"]+)"'s page no longer shows it is marked "([^"]+)"`), async f
 
 // ---- Floor ----
 
-async function nextUpNames(world: object): Promise<string[]> {
+export async function nextUpNames(world: object): Promise<string[]> {
   const page = await fetchPage(world, "/", p89(world).login!);
   const start = page.indexOf("<h2>Next up</h2>");
   assert.ok(start >= 0, "Floor has no Next up");
   const end = page.indexOf("<h2>", start + 1);
   const section = page.slice(start, end < 0 ? undefined : end);
   const byId = new Map([...ctx(world).items.entries()].map(([n, it]) => [it.id, n]));
-  return [...section.matchAll(/href="\/items\/([0-9a-f-]{36})"/g)].map((h) => byId.get(h[1]) ?? h[1]);
+  const ids = [...section.matchAll(/href="\/items\/([0-9a-f-]{36})"/g)].map((h) => h[1]);
+  // Floor shows the first FLOOR_NEXT_UP items of the claim order. PBI 311's scenarios name more, so for them the rest
+  // is read from the claim order Floor shows, once Floor's own list is found to be its head.
+  if ((world as { nextUpBeyondFloor?: boolean }).nextUpBeyondFloor && ids.length === FLOOR_NEXT_UP) {
+    const all = (await nextUp(pool(), 100)).map((r) => r.id);
+    assert.deepEqual(ids, all.slice(0, FLOOR_NEXT_UP), "Floor's Next up isn't the head of the claim order");
+    ids.push(...all.slice(FLOOR_NEXT_UP));
+  }
+  return ids.map((id) => byId.get(id) ?? id);
 }
+
+/** How many items Floor's "Next up" shows. */
+const FLOOR_NEXT_UP = 5;
 
 Then(re(`Floor's "Next up" lists ${LIST}, in that order`), async function (list: string) {
   assert.deepEqual(await nextUpNames(this), names(list), "Floor's Next up");

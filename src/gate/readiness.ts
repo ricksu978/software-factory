@@ -1,7 +1,7 @@
 // The readiness gate (plan Task 9): the engine's own rules first, then the judge on every dor.md line.
 import type { BacklogAdapter, FactoryItem } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
-import type { ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
+import type { CheckVerdict, ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { tmpdir } from "node:os";
 import { childBody, factoryFiled, fileSplit, priorFiling, type ChildIssue } from "./file-split.ts";
@@ -75,20 +75,33 @@ function engineRules(item: FactoryItem, ctx: GateContext): Verdict[] {
 }
 
 /**
- * Makes one AI call for the gate, then records what it spent as a readiness check of `kind`, whether it answered or
- * threw (PBI 132). A call that reports no spend records nothing. A check that can't be recorded is logged, so the
- * call's own reply or error is what comes out: a reply isn't thrown away and paid for again on the next poll, and a
- * usage limit still reads as a usage limit.
+ * What a judge call records beside its spend (PBI 348): `verdict` reads what the call decided from what it returned,
+ * and a call that threw records an error verdict. `child` is the title of the proposed child judged for its parent.
  */
-async function recorded<T>(item: FactoryItem, ctx: GateContext, kind: ReadinessCheckKind, call: (spent: (s: JudgeSpend) => void) => Promise<T>): Promise<T> {
+type Judged<T> = { verdict: (r: T) => CheckVerdict; child?: string };
+
+/**
+ * Makes one AI call for the gate, then records what it spent as a readiness check of `kind`, whether it answered or
+ * threw (PBI 132), with its verdict when `judged` says how to read one (PBI 348). A call that reports no spend records
+ * nothing. A check that can't be recorded is logged, so the call's own reply or error is what comes out: a reply isn't
+ * thrown away and paid for again on the next poll, and a usage limit still reads as a usage limit.
+ */
+async function recorded<T>(item: FactoryItem, ctx: GateContext, kind: ReadinessCheckKind, call: (spent: (s: JudgeSpend) => void) => Promise<T>,
+  judged?: Judged<T>): Promise<T> {
   const ranAt = (ctx.now ?? (() => new Date()))();
   let spend: JudgeSpend | null = null;
+  let verdict: CheckVerdict | undefined = judged ? { outcome: "error" } : undefined;
   try {
-    return await call((s) => { spend = s; });
+    const r = await call((s) => { spend = s; });
+    if (judged) verdict = judged.verdict(r);
+    return r;
   } finally {
     if (spend && ctx.recordCheck) {
+      const check: ReadinessCheck = { ...(spend as JudgeSpend), kind, ranAt };
+      if (verdict) check.verdict = verdict;
+      if (judged?.child !== undefined) check.child = judged.child;
       try {
-        await ctx.recordCheck(item, { ...(spend as JudgeSpend), kind, ranAt });
+        await ctx.recordCheck(item, check);
       } catch (e) {
         (ctx.log ?? console.error)(`readiness: couldn't record the ${kind} call's cost for item ${item.externalId}: ${e instanceof Error ? e.message : e}`);
       }
@@ -117,12 +130,10 @@ function recordedSplit(item: FactoryItem, ctx: GateContext, deps: SplitDeps): Pr
   return recorded(item, ctx, "split", (spent) => proposeSplit(item, { ...deps, agent: spending(deps.agent, spent) }, ctx.dor ?? undefined));
 }
 
-/**
- * The judge's verdicts on `subject` against `dor`, with its reading of the subject's size. The call is recorded as a
- * `judge` check against `owner`, the item whose row pays for it: the subject itself, or the parent of a proposed child.
- */
-async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean }> {
-  const reply = await recorded(owner, ctx, "judge", (spent) => ctx.judge(subject, dor, spent));
+type Judgement = { results: Verdict[]; oversized: boolean; verdict: CheckVerdict };
+
+/** Reads the judge's reply on `dor`: its verdicts, its reading of the subject's size, and the call's verdict as recorded. */
+function readJudgement(reply: string, dor: Policy): Judgement {
   // Every flags line counts, so an early or echoed {"flags":[]} can't cancel a real flag later in the reply.
   const flagLines = jsonLines(reply).filter((o) => Array.isArray(o.flags));
   if (flagLines.length === 0) {
@@ -133,14 +144,29 @@ async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, 
         ...dor.criteria.map((c): Verdict => ({ index: c.index, criterion: c.text, status: "failed", reason: "readiness check output unreadable" })),
       ],
       oversized: false,
+      verdict: { outcome: "unreadable" },
     };
   }
   const flags = [...new Set(flagLines.flatMap((o) => (o.flags as unknown[]).map(String)))];
+  const lines = parseJudgement(reply, dor);
+  const failed = lines.filter((r) => r.status !== "passed").map((r) => ({ criterion: r.criterion, reason: r.reason }));
   // Only a literal true on the last flags line counts. Size never becomes a verdict, so it can't fail the item.
   return {
-    results: [...parseJudgement(reply, dor), ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))],
+    results: [...lines, ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))],
     oversized: flagLines.at(-1)!.oversized === true,
+    verdict: failed.length === 0 && flags.length === 0 ? { outcome: "passed" } : { outcome: "failed", lines: failed, flags },
   };
+}
+
+/**
+ * The judge's verdicts on `subject` against `dor`, with its reading of the subject's size. The call is recorded as a
+ * `judge` check against `owner`, the item whose row pays for it: the subject itself, or the parent of a proposed child,
+ * whose check then names the child (PBI 348).
+ */
+async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean }> {
+  const { results, oversized } = await recorded(owner, ctx, "judge", async (spent) => readJudgement(await ctx.judge(subject, dor, spent), dor),
+    { verdict: (j) => j.verdict, child: subject === owner ? undefined : subject.title });
+  return { results, oversized };
 }
 
 const REWRITE_TIMEOUT_MS = 120_000;

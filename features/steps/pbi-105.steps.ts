@@ -1,7 +1,7 @@
 // Step definitions for features/pbi-105-activity-log.feature. The dashboard runs as the real node:http server on a
 // free port, in Azure mode, on PBI 4's shared test database, and people sign in with the headers Container Apps adds.
 // Events are written through src/store where a scenario names a real move, and with plain SQL where it fixes a time.
-// The console scenarios register logTransitions, as the control plane's start does, and read what reaches console.*.
+// The console scenarios read what reaches console.*, where transitionItem writes each committed transition's line.
 //
 // The page's contract these steps read: each listed event is one <tr> of <td> cells, newest first, and a row's time
 // shows as HH:MM in UTC (in its text or in a <time datetime> attribute).
@@ -11,7 +11,6 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { format } from "node:util";
 import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { logTransitions } from "../../src/control/console-log.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import { dashboardRoutes } from "../../src/http/routes.ts";
@@ -39,8 +38,9 @@ type Ctx = {
   lines: string[];
   lineAt?: number;
   restoreConsole?: () => void;
-  stopLogging?: () => void;
   ext?: string;
+  /** PBI 286's GET /v1/activity reply, which the log's Thens read in place of the page when it's set. */
+  api?: { status: number | null; json: unknown; text: string };
 };
 
 function ctx(world: object): Ctx {
@@ -61,7 +61,6 @@ Before({ tags: "@pbi-105 and @db", ...long }, async function () {
 
 After({ tags: "@pbi-105", ...long }, async function () {
   const c = ctx(this);
-  c.stopLogging?.();
   c.restoreConsole?.();
   await c.close?.();
   if (c.server) {
@@ -125,8 +124,27 @@ async function openLog(world: object, login: string): Promise<void> {
   await get(world, "/activity", login);
 }
 
+/**
+ * PBI 286's activity log is the API's JSON, `{ events: [...] }`, newest first. These steps read each event as one row
+ * whose text is its values, so a row's ISO `at` shows its HH:MM in UTC as the page's row does.
+ */
+export function readActivityFromApi(world: object, reply: { status: number | null; json?: unknown; text: string }): void {
+  ctx(world).api = { status: reply.status, json: reply.json, text: reply.text };
+}
+
+function apiRows(api: NonNullable<Ctx["api"]>): string[] {
+  assert.equal(api.status, 200, `GET /v1/activity answered ${api.status}: ${api.text.slice(0, 300)}`);
+  const events = (api.json as { events?: unknown } | undefined)?.events;
+  assert.ok(Array.isArray(events), `the activity log's answer has no events array: ${api.text.slice(0, 300)}`);
+  return events.map((e) => Object.values(e as Record<string, unknown>).filter((v) => v !== null && v !== undefined)
+    .map((v) => escapeText(String(v))).join(" | "));
+}
+
+const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** The page's event rows: every <tr> that holds a <td>, in page order. */
 function rows(c: Ctx): string[] {
+  if (c.api) return apiRows(c.api);
   assert.ok(c.page !== undefined, "no page came back");
   assert.equal(c.status, 200, `the activity log answered ${c.status}: ${c.page.slice(0, 300)}`);
   return [...c.page.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((m) => m[1]).filter((r) => /<td\b/i.test(r));
@@ -339,7 +357,7 @@ Then("the item's row shows {string} and {string}", function (a: string, b: strin
 
 Given("the owner approved item {string}'s sign-off with the text {string}", long, async function (ext: string, t: string) {
   const id = await item(ctx(this), ext, { state: "SignOff" });
-  // The payload decideAndAnnounce records for a sign-off.
+  // The payload decide records for a sign-off.
   await record({ ...human, itemId: id, kind: "decision", payload: { kind: "approve", via: "dashboard", text: t } });
 });
 
@@ -376,7 +394,7 @@ Then("Floor has a link to {string}", function (href: string) {
 
 // ---- the console ----
 
-/** Starts logging transitions, as the control plane does, and keeps every line console.* writes. */
+/** Keeps every line console.* writes, the transitions' lines among them. */
 function watchConsole(c: Ctx): void {
   if (c.restoreConsole) return;
   const methods = ["log", "info", "warn", "error"] as const;
@@ -387,7 +405,6 @@ function watchConsole(c: Ctx): void {
     };
   }
   c.restoreConsole = () => methods.forEach((m, i) => (console[m] = saved[i]));
-  c.stopLogging = logTransitions({ pool: pool() });
 }
 
 // A bare, capitalised state, so PBI 17's `item "B" is queued` and `item "B" is "Queued"` stay theirs alone.

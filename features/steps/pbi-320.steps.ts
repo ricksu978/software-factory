@@ -305,6 +305,8 @@ function syncDependencies(world: object): void {
 Given(re(`the poller (?:reads|has read) the board`), long, async function () {
   syncDependencies(this);
   await poll(this);
+  // PBI 311's steps learn the new issues a poll read, by name.
+  await (this as { afterPoll?: () => Promise<void> }).afterPoll?.();
 });
 
 // ---- WIP ----

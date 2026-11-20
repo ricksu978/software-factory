@@ -312,10 +312,10 @@ describe("gate's readiness checks (PBI 132)", () => {
   }
 
   test("records the judge call's spend and start time against the item, whatever its verdict", async () => {
-    for (const reply of [passAll(1), "I am not sure"]) {
+    for (const [reply, outcome] of [[passAll(1), "passed"], ["I am not sure", "unreadable"]] as const) {
       const { s, checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); return reply; });
       await run;
-      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, kind: "judge", ranAt: at }]);
+      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, kind: "judge", ranAt: at, verdict: { outcome } }]);
     }
   });
 
@@ -347,7 +347,7 @@ describe("gate's readiness checks (PBI 132)", () => {
         recordCheck: async (_i, c) => { checks.push(c); } });
       await gate(s.item, ctx);
       assert.deepEqual(checks, [
-        { ...spend, kind: "judge", ranAt: at },
+        { ...spend, kind: "judge", ranAt: at, verdict: { outcome: "passed" } },
         { model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, kind: "split", ranAt: at },
       ], String(ok));
       checks.length = 0;
@@ -469,5 +469,78 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     assert.equal(out.ready, false);
     assert.deepEqual(s.judged, []);
     assert.match((await s.fake.comments(s.id))[0], /The owner has to grant the factory's App the "issues: write" permission/);
+  });
+});
+
+describe("gate's check verdicts (PBI 348)", () => {
+  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const dorText = "- [ ] Has a title\n- [ ] Names its spec section\n";
+
+  async function checksOf(reply: string | Error) {
+    const s = await setup(dorText);
+    const checks: ReadinessCheck[] = [];
+    const run = gate(s.item, s.ctx("", {
+      judge: async (_i, _d, spent) => { spent?.(spend); if (reply instanceof Error) throw reply; return reply; },
+      recordCheck: async (_i, c) => { checks.push(c); },
+    }));
+    return { checks, run };
+  }
+
+  test("a call that passed every line and raised no flag records Passed", async () => {
+    const { checks, run } = await checksOf(passAll(2));
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{ outcome: "passed" }]);
+  });
+
+  test("a call that failed a line records each failed line with the judge's reason, and each flag", async () => {
+    const reply = [
+      JSON.stringify({ index: 1, status: "passed", reason: "ok" }),
+      JSON.stringify({ index: 2, status: "failed", reason: "No spec section named." }),
+      JSON.stringify({ flags: ["changes the CI workflow"] }),
+    ].join("\n");
+    const { checks, run } = await checksOf(reply);
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{
+      outcome: "failed", lines: [{ criterion: "Names its spec section", reason: "No spec section named." }], flags: ["changes the CI workflow"],
+    }]);
+  });
+
+  test("a call that passed every line but raised a flag records Failed with the flag", async () => {
+    const { checks, run } = await checksOf(passAll(2, ["asks for a password"]));
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{ outcome: "failed", lines: [], flags: ["asks for a password"] }]);
+  });
+
+  test("a reply the gate couldn't read records unreadable, and a call that threw records an error", async () => {
+    const unreadable = await checksOf("I can't say.");
+    await unreadable.run;
+    assert.deepEqual(unreadable.checks.map((c) => c.verdict), [{ outcome: "unreadable" }]);
+    const threw = await checksOf(new Error("API Error: 529"));
+    await assert.rejects(threw.run, /529/);
+    assert.deepEqual(threw.checks.map((c) => c.verdict), [{ outcome: "error" }]);
+  });
+
+  test("a judge call on a proposed child names the child; the parent's own call and the split proposal don't", async () => {
+    const s = await setup(dorText, { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    const checks: ReadinessCheck[] = [];
+    const oversized = [JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ index: 2, status: "passed", reason: "ok" }),
+      JSON.stringify({ flags: [], oversized: true })].join("\n");
+    const children = JSON.stringify({ children: [{ title: "A", body: "a", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
+    const agent = async (a: AgentArgs): Promise<AgentResult> =>
+      ({ ok: true, text: children, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" });
+    const b: SplitBoard = {
+      subIssues: async () => [], findIssues: async () => [],
+      createIssue: async (_r, title) => ({ externalId: title, title, url: "u" }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    await gate(s.item, s.ctx(oversized, {
+      judge: async (i, d, spent) => { spent?.(spend); return i.externalId === s.item.externalId ? oversized : passAll(d.criteria.length); },
+      split: { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board: b, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } },
+      recordCheck: async (_i, c) => { checks.push(c); },
+    }));
+    assert.deepEqual(checks.map((c) => [c.kind, c.child, c.verdict?.outcome]), [
+      ["judge", undefined, "passed"], ["split", undefined, undefined], ["judge", "A", "passed"], ["judge", "B", "passed"],
+    ]);
   });
 });

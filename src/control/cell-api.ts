@@ -440,9 +440,13 @@ const routes: Record<string, Route> = {
       if (files.length === 0) throw new BadRequest("lockedFiles is empty");
       await c.query("update run set scenarios_sha = $2, locked_files = $3 where id = $1", [run.run_id, str(body.scenariosSha, "scenariosSha"), files]);
       await c.query("insert into question (item_id, kind, body) values ($1, 'sign_off', $2)", [run.item_id, q]);
+      // The worker quotes the question on the board from the transition's payload (PBI 219).
+      detail = { question: q };
     } else if (event === "blocked") {
+      const q = question(body.question, "needs_input");
       await c.query("insert into question (item_id, kind, body, base_failure) values ($1, 'needs_input', $2, $3)",
-        [run.item_id, question(body.question, "needs_input"), baseFailure(body.question)]);
+        [run.item_id, q, baseFailure(body.question)]);
+      detail = { question: q };
     } else if (event === "pr_opened") {
       const prNumber = optional(body.prNumber, (v) => int(v, "prNumber")) ?? run.pr_number;
       if (prNumber === null) throw new BadRequest("pr_opened needs a PR: send /pr first, or prNumber and prUrl");

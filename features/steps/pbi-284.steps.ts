@@ -51,6 +51,8 @@ export type Ctx = {
   items: Map<string, string>;
   transcript?: { path: string; text: string };
   heartbeat?: Date;
+  /** The API's clock, fixed by a step that dates something against it, such as the Claude token's creation. */
+  now?: Date;
   api?: Serving;
   startError?: unknown;
   started: boolean;
@@ -86,7 +88,8 @@ function signingKeys() {
   return keys;
 }
 
-Before({ tags: "(@pbi-284 or @pbi-285) and @db" }, function () {
+// PBI 285's and 286's scenarios run on this harness too.
+Before({ tags: "(@pbi-284 or @pbi-285 or @pbi-286) and @db" }, function () {
   ctx(this).db = true;
 });
 
@@ -100,7 +103,7 @@ export async function stopAll(world: object): Promise<void> {
   }
 }
 
-After({ tags: "@pbi-284 or @pbi-285", ...long }, async function () {
+After({ tags: "@pbi-284 or @pbi-285 or @pbi-286", ...long }, async function () {
   await stopAll(this);
 });
 
@@ -235,8 +238,12 @@ Given("item {string}'s run has a stored transcript", long, async function (name:
   c.transcript = { path, text };
 });
 
+// The API's clock is fixed at the moment the token is dated against, so the token is exactly `days` old and the
+// banner's count of days left is exact too.
 Given("the Claude token was created {int} days ago", function (days: number) {
-  ctx(this).env.CLAUDE_TOKEN_CREATED_AT = new Date(Date.now() - days * 86_400_000 - 3_600_000).toISOString();
+  const c = ctx(this);
+  c.now ??= new Date();
+  c.env.CLAUDE_TOKEN_CREATED_AT = new Date(c.now.getTime() - days * 86_400_000).toISOString();
 });
 
 Given("the worker last sent a heartbeat a moment ago", long, async function () {
@@ -300,6 +307,7 @@ When("the API starts from src\\/api\\/main.ts", long, async function () {
       pool: apiPool, issuer: c.issuerUrl, audience: c.audience, webhookSecret: c.webhookSecret ?? WEBHOOK_SECRET,
       readBlob: async (path: string) => c.blobs.get(path) ?? null,
       env: { ...c.env },
+      ...(c.now ? { now: () => c.now! } : {}),
     }, PORT);
   } catch (e) {
     c.startError = e;
@@ -317,7 +325,7 @@ Then("it exits with an error naming jwks_uri", function () {
 
 // ---- requests ----
 
-async function call(world: object, method: string, path: string, opts: { auth?: string; body?: unknown; raw?: Buffer; headers?: Record<string, string> } = {}): Promise<void> {
+export async function call(world: object, method: string, path: string, opts: { auth?: string; body?: unknown; raw?: Buffer; headers?: Record<string, string> } = {}): Promise<void> {
   const c = ctx(world);
   const headers: Record<string, string> = { ...opts.headers };
   if (opts.auth !== undefined) headers.authorization = opts.auth;
@@ -350,7 +358,7 @@ async function firstChunk(r: Response): Promise<string> {
   return new TextDecoder().decode(value);
 }
 
-const bearer = (token: string) => `Bearer ${token}`;
+export const bearer = (token: string) => `Bearer ${token}`;
 
 /** "GET /v1/items/A" as a method and a path, with each item name after /items/ swapped for its id. */
 function route(c: Ctx, text: string): { method: string; path: string } {
@@ -463,7 +471,7 @@ function checked(c: Ctx): void {
   for (const k of c.checks) assert.equal(k.reply.status, k.status, `earlier, the API answered ${said(k.reply)}`);
 }
 
-function reply(c: Ctx): Reply {
+export function reply(c: Ctx): Reply {
   assert.ok(c.started, "the API wasn't started");
   assert.ok(!c.startError, `the API didn't start: ${String((c.startError as Error)?.message ?? c.startError)}`);
   assert.ok(c.reply, "nothing was asked of the API");
@@ -471,7 +479,7 @@ function reply(c: Ctx): Reply {
   return c.reply;
 }
 
-function body(c: Ctx): Record<string, unknown> {
+export function body(c: Ctx): Record<string, unknown> {
   const r = reply(c);
   assert.equal(r.status, 200, `the API answered ${said(r)}`);
   assert.ok(r.json && typeof r.json === "object", `the API's answer isn't a JSON object: ${said(r)}`);
