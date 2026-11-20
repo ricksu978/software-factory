@@ -1611,8 +1611,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (e instanceof Stop) return wrapUp();
     // PBI 301: the claim ends at a stage boundary with no attempt open, so there's no work in progress to push. The
     // release sends the item back to Queued until the restart is done, at the stage the run records. That is the next
-    // stage after understand, red, green or self-review passes. After open-pr passes it stays open-pr, and back to green
-    // the last attempt failed, so it stays at open-pr or address: the restarted cell runs that stage again and reads CI
+    // stage after understand, red, green or self-review passes. After open-pr passes it stays open-pr, and after address
+    // passes it stays address, so the restarted cell runs that stage again before pr-review. Back to green the last
+    // attempt failed, so it stays at open-pr or address: the restarted cell runs that stage again and reads CI
     // again, and the findings carried to green here aren't kept.
     if (e instanceof Restarting) {
       await api.release();
