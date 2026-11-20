@@ -33,10 +33,10 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
       And that account key is not the published development key
 
     @ac-1 @local
-    Scenario: The cell API gets the same key as control
+    Scenario: The cell API and the worker get the same key as control
       Given "aspire run" is up
-      When the owner reads the account key in the "FACTORY_BLOB" of the control resource and of the cell API resource
-      Then both carry the same account key
+      When the owner reads the account key in the "FACTORY_BLOB" of the control, cell API and worker resources
+      Then all three carry the same account key
       And that account key is not the published development key
 
   Rule: A SAS a cell signs with the published key is refused
