@@ -250,15 +250,17 @@ When("the owner runs {string} from the repo root", function (cmd: string) {
   lctx(this).run = spawn(cmd, { cwd: repo, shell: true, stdio: "ignore" });
 });
 
-type Suite = { headBefore: string; behind: number; headAfter: string; controlUp: boolean; started: boolean };
+type Suite = { want: string; branch: string; headBefore: string; behind: number; headAfter: string; controlUp: boolean; started: boolean };
 const suite = (world: object): Suite => {
   const w = world as { pbi208suite?: Suite };
-  w.pbi208suite ??= { headBefore: "", behind: -1, headAfter: "", controlUp: false, started: false };
+  w.pbi208suite ??= { want: "", branch: "", headBefore: "", behind: -1, headAfter: "", controlUp: false, started: false };
   return w.pbi208suite;
 };
 
-Given("the owner's worktree is on branch {string}, one merged commit behind the remote's {string}", function (_branch: string, main: string) {
+Given("the owner's worktree is on branch {string}, one merged commit behind the remote's {string}", function (branch: string, main: string) {
   const s = suite(this);
+  s.want = branch;
+  s.branch = (sh("git branch --show-current").stdout ?? "").trim();
   sh(`git fetch -q origin ${main}`);
   s.headBefore = (sh("git rev-parse HEAD").stdout ?? "").trim();
   s.behind = Number((sh(`git rev-list --count HEAD..origin/${main}`).stdout ?? "").trim());
@@ -283,6 +285,8 @@ Then("the control resource answers without anyone having answered a prompt", fun
 
 Then("the worktree is still at the commit it was on before the suite started", function () {
   const s = suite(this);
+  // Off the scenario's branch the start never pulls anyway, so the run would prove nothing about a test run on it.
+  assert.equal(s.branch, s.want, `the worktree was on branch "${s.branch}", not "${s.want}"`);
   assert.equal(s.behind, 1, `the worktree was ${s.behind} commits behind origin/main, not 1`);
   assert.equal(s.headAfter, s.headBefore, "the suite's start moved the worktree");
 });
