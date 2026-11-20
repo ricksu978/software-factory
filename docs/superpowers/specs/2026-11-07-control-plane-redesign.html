@@ -385,7 +385,7 @@ flowchart LR
   <div class="tbl"><table>
     <thead><tr><th>Part</th><th>Choice</th><th></th></tr></thead>
     <tbody>
-      <tr><td>Runtime</td><td>TypeScript on Node 26, run with no build step, as today (<code>package.json:6</code>)</td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Runtime</td><td>TypeScript on Node 26, run with no build step, as today (<code>package.json:6</code>). The SPA in <code>web/</code> is the one exception since step 8a: <code>npm run build</code> type-checks it and bundles it with Vite into <code>web/dist</code>, which the BFF serves. Everything else still runs as TypeScript with no build step.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Repo</td><td>One package with four entry points: <code>src/bff/main.ts</code>, <code>src/api/main.ts</code>, <code>src/cell-api/main.ts</code>, <code>src/worker/main.ts</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>BFF and API HTTP</td><td>Hono 4.13 with <code>@hono/node-server</code> 2.1</td><td><span class="tag yours">Yours</span></td></tr>
       <tr><td>Cell API HTTP</td><td>Plain <code>node:http</code>, as today</td><td><span class="tag yours">Yours</span></td></tr>
@@ -489,7 +489,7 @@ flowchart LR
       <tr><td>Token separation</td><td>The cell API takes no user token, and the API takes no <code>RUN_TOKEN</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Cell egress</td><td>Only the cell API's port is on the allowlist</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Worker health</td><td>A heartbeat on the floor</td><td><span class="tag call">My call</span></td></tr>
-      <tr><td>Runtime, repo, libraries, data</td><td>Node 26 with no build, one package, <code>openid-client</code>, <code>jose</code>, raw SQL through <code>pg</code></td><td><span class="tag call">My call</span></td></tr>
+      <tr><td>Runtime, repo, libraries, data</td><td>Node 26 with no build except the SPA in <code>web/</code>, which <code>npm run build</code> type-checks and bundles with Vite (step 8a), one package, <code>openid-client</code>, <code>jose</code>, raw SQL through <code>pg</code></td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Migration order</td><td>Nine PBIs, each leaving the factory running. Changed in v0.2 and v0.3: additive schema first, interim board mirroring, new dependencies, a snapshot backfill and the port moves.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Hooks to an outbox</td><td>Outbox rows written with each event, handled by the worker. Added in v0.2, replacing v0.1's event cursor.</td><td><span class="tag call">My call</span></td></tr>
       <tr><td>Claude token in the worker</td><td>The readiness judge keeps running in-process. Added in v0.2.</td><td><span class="tag call">My call</span></td></tr>
