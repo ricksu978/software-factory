@@ -203,6 +203,8 @@ const leaseReply = (a: { stop: boolean; restarting: boolean }) => ({ ok: true, s
 /**
  * Under a restart being prepared, ends the claim of a cell that stopped (PBI 140) or that ended at a stage boundary
  * (PBI 301): the item goes back to Queued at its run's next stage.
+ * Not yet under a drain (PBI 379), which should end the claim the same way, once, with `drain: true` in the
+ * lease_expired transition's payload. A stub: the drain isn't read here yet.
  */
 async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
   const restart = await c.query(

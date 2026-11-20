@@ -380,6 +380,17 @@ Then("item {string} holds no lease", long, async function (name: string) {
   const row = await itemRow(this, name);
   assert.equal(row.lease_owner, null, `item ${name} is still leased to ${row.lease_owner}`);
   assert.equal(row.lease_expires, null, `item ${name}'s lease runs to ${row.lease_expires?.toISOString()}`);
+  // PBI 379: under a drain, the cell's claim ends at the stage boundary once, and the one lease_expired that ends it
+  // records the drain (`drain: true`), alongside a restart's reason when one is being prepared too.
+  const drain = await need().pool.query("select 1 from override where cleared_at is null and scope = 'factory' and kind = 'drain'");
+  if (drain.rowCount) {
+    const r = await need().pool.query<{ payload: Record<string, unknown> }>(
+      `select e.payload from event e join run r on r.item_id = e.item_id
+       where r.id = $1 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired' and e.at >= r.started_at order by e.at`,
+      [row.run_id]);
+    assert.equal(r.rowCount, 1, `item ${name}'s claim was released ${r.rowCount} times, not once: ${JSON.stringify(r.rows.map((x) => x.payload))}`);
+    assert.equal(r.rows[0].payload.drain, true, `item ${name}'s release doesn't record that the drain ended its claim: ${JSON.stringify(r.rows[0].payload)}`);
+  }
 });
 
 Then("item {string}'s run's next stage is {word}", long, async function (name: string, stage: string) {
