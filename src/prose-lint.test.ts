@@ -78,3 +78,15 @@ test("reflow is stable: a reflowed text reflows to itself", () => {
   const once = reflow(text, ".html");
   assert.equal(reflow(once, ".html"), once);
 });
+
+test("reflow starts each clause of a sentence on its own line, after a comma, semicolon or colon", () => {
+  assert.equal(reflow("Above it, three strips: one, two; three.\n", ".md"), "Above it,\nthree strips:\none,\ntwo;\nthree.\n");
+  assert.equal(reflow("- Costs 1,000, at `a, b` most.\n", ".md"), "- Costs 1,000,\n  at `a, b` most.\n");
+});
+
+test("reflow leaves an element the spec styles white-space: pre alone", () => {
+  const text = "<style>.formula { white-space: pre; }</style>\n<div class=\"formula\">a = max(0, b)\nc = d</div>\n<p>One, two.</p>\n";
+  const out = reflow(text, ".html");
+  assert.ok(out.includes("<div class=\"formula\">a = max(0, b)\nc = d</div>"), out);
+  assert.ok(out.includes("<p>One,\ntwo.</p>"), out);
+});

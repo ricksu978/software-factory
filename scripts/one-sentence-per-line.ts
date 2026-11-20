@@ -1,5 +1,7 @@
 // PBI 294: lays out the design spec and the Phase 0 plan one sentence per line, and in the spec one table cell per line,
-// so two PRs that change different sentences change different lines. It finds sentences the way the prose lint does.
+// so two PRs that change different sentences change different lines. Within a sentence it also starts a new line after
+// each comma, semicolon or colon, so two PRs that change different clauses of one long sentence don't conflict either.
+// It finds sentences the way the prose lint does.
 // It only turns a run of spaces into a line break, or puts a line break between two tags, so a page renders the same.
 // Code is left alone: fenced blocks and inline code, and in the spec <pre>, <code>, <script>, <style> and comments.
 // Usage: node scripts/one-sentence-per-line.ts <file>...   rewrites each .md or .html file in place.
@@ -63,10 +65,38 @@ function splitIn(text: string, from: number, to: number, html: boolean): Edit | 
   return { from: a, to: b, insert: `\n${indent(text, a, html)}` };
 }
 
+/**
+ * Where a clause ends inside a sentence: a comma, semicolon or colon followed by a space. Starting each clause on its
+ * own line too means an edit to one clause of a long sentence leaves the lines around it alone, so a PR that changes
+ * that clause and one that adds a sentence beside it don't touch the same lines. Commas inside a number or code don't
+ * count, since no space follows them or the prose view blanks them.
+ */
+const CLAUSE_END = /[,;:][ \t]+(?=\S)/g;
+
 /** True if a Markdown line starting with `rest` would read as something other than paragraph text. */
 const markdownBlockStart = (rest: string) => /^(?:\d+[.)](?:\s|$)|[-*+](?:\s|$)|#|>|\||```|<)/.test(rest);
 
+/**
+ * Where the spec keeps its own line breaks outside <pre>: an element whose class its stylesheet sets to
+ * "white-space: pre", such as the WIP formula. A line break there would show.
+ */
+function preformatted(text: string, html: boolean): [number, number][] {
+  if (!html) return [];
+  const classes = [...text.matchAll(/\.([\w-]+)\s*\{[^}]*white-space:\s*pre\s*[;}]/g)].map((m) => m[1]);
+  const out: [number, number][] = [];
+  for (const c of classes) {
+    const el = new RegExp(`<(\\w+)\\b[^>]*\\bclass="[^"]*\\b${c}\\b[^"]*"[^>]*>[\\s\\S]*?</\\1>`, "g");
+    for (const m of text.matchAll(el)) out.push([m.index!, m.index! + m[0].length]);
+  }
+  return out;
+}
+
 function edits(text: string, html: boolean): Edit[] {
+  const kept = preformatted(text, html);
+  return allEdits(text, html).filter((e) => !kept.some(([a, b]) => e.to > a && e.from < b));
+}
+
+function allEdits(text: string, html: boolean): Edit[] {
   const out: Edit[] = [];
   if (html) {
     const m = markup(text);
@@ -80,7 +110,8 @@ function edits(text: string, html: boolean): Edit[] {
     }
   }
   const prose = proseView(text, html);
-  for (const at of sentenceBreaks(prose)) {
+  const clauses = [...prose.matchAll(CLAUSE_END)].map((m) => m.index! + m[0].length);
+  for (const at of [...sentenceBreaks(prose), ...clauses]) {
     let gapStart = at;
     while (gapStart > 0 && /\s/.test(prose[gapStart - 1])) gapStart--;
     const gap = prose.slice(gapStart, at);
