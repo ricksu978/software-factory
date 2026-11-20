@@ -60,7 +60,8 @@ describe("decisions", dbTest, () => {
     assert.deepEqual(await state(id), { state: "SignOff", next_stage: "specify", features_lock_sha: null });
     const ev = (await db.pool.query("select actor, payload from event where item_id = $1 and kind = 'decision'", [id])).rows[0];
     assert.deepEqual(ev, { actor: "human", payload: { kind: "changes", via: "comment", text: "add the empty month" } });
-    assert.match((await fake.comments(ext))[0], /sent back for changes/);
+    // The worker announces it from the decision's outbox row (PBI 219), so applying it posts nothing.
+    assert.deepEqual(await fake.comments(ext), []);
   });
 
   test("/answer from an operator answers a NeedsInput item and leaves its resume point", async () => {

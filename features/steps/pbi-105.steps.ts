@@ -1,7 +1,7 @@
 // Step definitions for features/pbi-105-activity-log.feature. The dashboard runs as the real node:http server on a
 // free port, in Azure mode, on PBI 4's shared test database, and people sign in with the headers Container Apps adds.
 // Events are written through src/store where a scenario names a real move, and with plain SQL where it fixes a time.
-// The console scenarios register logTransitions, as the control plane's start does, and read what reaches console.*.
+// The console scenarios read what reaches console.*, where transitionItem writes each committed transition's line.
 //
 // The page's contract these steps read: each listed event is one <tr> of <td> cells, newest first, and a row's time
 // shows as HH:MM in UTC (in its text or in a <time datetime> attribute).
@@ -11,7 +11,6 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { format } from "node:util";
 import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { logTransitions } from "../../src/control/console-log.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import { dashboardRoutes } from "../../src/http/routes.ts";
@@ -39,7 +38,6 @@ type Ctx = {
   lines: string[];
   lineAt?: number;
   restoreConsole?: () => void;
-  stopLogging?: () => void;
   ext?: string;
 };
 
@@ -61,7 +59,6 @@ Before({ tags: "@pbi-105 and @db", ...long }, async function () {
 
 After({ tags: "@pbi-105", ...long }, async function () {
   const c = ctx(this);
-  c.stopLogging?.();
   c.restoreConsole?.();
   await c.close?.();
   if (c.server) {
@@ -339,7 +336,7 @@ Then("the item's row shows {string} and {string}", function (a: string, b: strin
 
 Given("the owner approved item {string}'s sign-off with the text {string}", long, async function (ext: string, t: string) {
   const id = await item(ctx(this), ext, { state: "SignOff" });
-  // The payload decideAndAnnounce records for a sign-off.
+  // The payload decide records for a sign-off.
   await record({ ...human, itemId: id, kind: "decision", payload: { kind: "approve", via: "dashboard", text: t } });
 });
 
@@ -376,7 +373,7 @@ Then("Floor has a link to {string}", function (href: string) {
 
 // ---- the console ----
 
-/** Starts logging transitions, as the control plane does, and keeps every line console.* writes. */
+/** Keeps every line console.* writes, the transitions' lines among them. */
 function watchConsole(c: Ctx): void {
   if (c.restoreConsole) return;
   const methods = ["log", "info", "warn", "error"] as const;
@@ -387,7 +384,6 @@ function watchConsole(c: Ctx): void {
     };
   }
   c.restoreConsole = () => methods.forEach((m, i) => (console[m] = saved[i]));
-  c.stopLogging = logTransitions({ pool: pool() });
 }
 
 // A bare, capitalised state, so PBI 17's `item "B" is queued` and `item "B" is "Queued"` stay theirs alone.

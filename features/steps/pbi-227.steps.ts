@@ -2,9 +2,10 @@
 // 144's fake board, scripted repo writes, judge and coding model, with PBI 225's split of the parent into three. Here
 // a parent named "#N Title" is issue N, and the repo files the children under the numbers the Background gives them.
 //
-// A poll is the real poller over Postgres, as in PBI 225, on each board the scenario has. Board mirroring is the real
-// mirrorBoard, registered on the test pool, with each board's fake backlog as its adapter, so a parent's board status
-// is the status its fake issue holds. Every setStatus the factory makes is logged with the state it mirrored.
+// A poll is the real poller over Postgres, as in PBI 225, on each board the scenario has. Board mirroring is the
+// worker's, run from each board mirror outbox row after every poll and override, with each board's fake backlog as its
+// adapter, so a parent's board status is the status its fake issue holds. Every setStatus the factory makes is logged
+// with the state it mirrored.
 //
 // A viewer opens Run detail on the real dashboard routes, served by node:http on a free port, and Floor through PBI
 // 131's "a viewer opens Floor". Both pages are recorded through PBI 19's recordResponse, where PBI 131's page() reads
@@ -21,7 +22,6 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
-import { mirrorBoard } from "../../src/control/board.ts";
 import type { ItemState } from "../../src/core/states.ts";
 import { SPLIT_HEADING } from "../../src/gate/split.ts";
 import type { Policy } from "../../src/policy/policy.ts";
@@ -29,7 +29,9 @@ import { createAuth } from "../../src/http/auth.ts";
 import { dashboardRoutes } from "../../src/http/routes.ts";
 import { startServer } from "../../src/http/server.ts";
 import { withTx } from "../../src/store/db.ts";
-import { onTransition, overrideItem } from "../../src/store/items.ts";
+import { overrideItem } from "../../src/store/items.ts";
+import { CONSUMER } from "../../src/store/outbox.ts";
+import { runRowEffects, type OutboxDeps } from "../../src/worker/outbox.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { baseFiles } from "./pbi-12.steps.ts";
 import { page, render, scope } from "./pbi-131.steps.ts";
@@ -52,7 +54,8 @@ type Ctx = {
   host: Host;
   boards: Board[];
   sets: SetStatus[];
-  off: (() => void)[];
+  /** The worker's deps, with each board's logging adapter. */
+  worker?: OutboxDeps;
   /** The state the transition being mirrored moved to, so each setStatus knows what it mirrors. */
   mirroring: ItemState | "?";
   server?: Server;
@@ -65,7 +68,7 @@ type Ctx = {
 
 function ctx(world: object): Ctx {
   const w = world as { pbi227?: Ctx };
-  w.pbi227 ??= { host: fakeRepoHost(), boards: [], sets: [], off: [], mirroring: "?", heads: 0 };
+  w.pbi227 ??= { host: fakeRepoHost(), boards: [], sets: [], mirroring: "?", heads: 0 };
   return w.pbi227;
 }
 
@@ -103,11 +106,7 @@ Before({ tags: "@pbi-227 and @db", ...long }, async function () {
       },
     };
   };
-  // Registered before mirroring, so it runs first for each transition and tags the setStatus calls that follow.
-  k.off.push(onTransition(async (_id, _from, to) => {
-    k.mirroring = to;
-  }, d.pool));
-  k.off.push(mirrorBoard({ pool: d.pool, backlogFor, repoHost: k.host }));
+  k.worker = { pool: d.pool, backlogFor, repoHost: k.host };
   const world = this;
   c.driver = async (c) => {
     await realPoll(world, main(world));
@@ -120,7 +119,6 @@ After({ tags: "@pbi-227", ...long }, async function () {
   // This feature's own server, and PBI 131's when its "a viewer opens Floor" opened one, since PBI 131's After only
   // runs for its own scenarios.
   const w = this as { pbi227?: Ctx; pbi131?: { server?: Server; close?: () => Promise<void> } };
-  for (const off of w.pbi227?.off ?? []) off();
   for (const s of [w.pbi227, w.pbi131]) {
     if (!s) continue;
     await s.close?.();
@@ -151,6 +149,24 @@ function unlabelledBoard(c: Ctx144): ReturnType<typeof scriptedBoard> {
   return { ...board, createIssue: (repo: string, title: string, body: string) => board.createIssue(repo, title, body, []) };
 }
 
+/**
+ * The worker's board mirroring, one board mirror row at a time in the order they were written, each tagged with the
+ * state its event moved to, so every setStatus it makes knows what it mirrors.
+ */
+async function mirror(world: object): Promise<void> {
+  const k = ctx(world);
+  for (;;) {
+    const r = (await pool().query<{ seq: string; event_id: string; item_id: string; to: ItemState }>(
+      `select o.seq, o.event_id, o.item_id, e.payload->>'to' as to from outbox o join event e on e.id = o.event_id
+       where o.consumer = $1 order by o.seq limit 1`, [CONSUMER.boardMirror],
+    )).rows[0];
+    if (!r) return;
+    k.mirroring = r.to;
+    await runRowEffects(k.worker!, { seq: r.seq, consumer: CONSUMER.boardMirror, eventId: r.event_id, itemId: r.item_id });
+    await pool().query("delete from outbox where seq = $1", [r.seq]);
+  }
+}
+
 /** One pass of the real poller over one board, filing splits on that board with its scripted repo writes. */
 async function realPoll(world: object, b: Board): Promise<void> {
   const k = ctx(world);
@@ -175,6 +191,7 @@ async function realPoll(world: object, b: Board): Promise<void> {
     },
   });
   assert.ok(out && typeof out.seen === "number", "pollOnce returned no result for the source");
+  await mirror(world);
 }
 
 async function stateOf(sourceId: string, externalId: string): Promise<ItemState | null> {
@@ -328,6 +345,7 @@ async function holdChildIn(world: object, n: string, state: ItemState): Promise<
   const id = await itemId(sourceId, n);
   if ((await stateOf(sourceId, n)) !== state) {
     await withTx(pool(), (c) => overrideItem(c, id, state, { actor: "human", actorId: "pbi-227-owner" }, `the scenario holds #${n} in ${state}`));
+    await mirror(world);
   }
   assert.equal(await stateOf(sourceId, n), state, `the factory holds #${n} in another state`);
 }

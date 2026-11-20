@@ -271,16 +271,17 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await db.pool.query("select decision from question where item_id = $1", [id])).rows[0].decision, null);
   });
 
-  test("a product owner's sign-off answers the question, comments the decision on the PBI and logs a human event", async () => {
+  test("a product owner's sign-off answers the question, leaves its announcement to the worker and logs a human event", async () => {
     const userId = (await person("po", "operator", true)).rows[0].id;
     const { ext, id } = await item("SignOff");
     await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha) values ($1, 1, 'sign-off', 'abc')", [id]);
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
     const r = await post(`/items/${id}/signoff`, "po", "decision=approve&note=Looks+right");
     assert.equal(r.status, 303);
-    assert.match((await fake.comments(ext))[0], /signed off[\s\S]*Looks right/);
-    const ev = (await db.pool.query("select actor, actor_id from event where item_id = $1 and kind = 'decision'", [id])).rows[0];
-    assert.deepEqual(ev, { actor: "human", actor_id: userId });
+    // The worker posts the announcement from the decision's outbox row (PBI 219), so the dashboard posts none.
+    assert.deepEqual(await fake.comments(ext), []);
+    const ev = (await db.pool.query("select actor, actor_id, o.consumer from event e join outbox o on o.event_id = e.id where e.item_id = $1 and e.kind = 'decision'", [id])).rows[0];
+    assert.deepEqual(ev, { actor: "human", actor_id: userId, consumer: "decision_announcement" });
   });
 
   test("a path with dot segments never signs in or reaches a dashboard route", async () => {
