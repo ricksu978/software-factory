@@ -173,7 +173,7 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const open = unresolved.flatMap((t) => t.comments.nodes.map((c) => ({ t, c })))
         .filter(({ c }) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
         .map(({ t, c }) => ({ kind: "thread_comment" as const, threadId: t.id, author: authorLogin(c.author), body: c.body, submittedAt: c.pullRequestReview!.submittedAt! }));
-      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" }>>([...requested, ...open]);
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" | "ci_failed" }>>([...requested, ...open]);
       return {
         merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
         mergeable: pr.mergeable ?? null, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause,

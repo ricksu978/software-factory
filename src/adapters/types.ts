@@ -91,12 +91,15 @@ export function withoutFactoryThreads<T extends { threadId: string; author: stri
 
 /**
  * Why an item went back to address, as its `changes_requested` event names it (PBI 258): a trusted review's summary, a
- * trusted comment in a thread that was unresolved when it was read, or GitHub reporting the PR not mergeable.
+ * trusted comment in a thread that was unresolved when it was read, GitHub reporting the PR not mergeable, or CI failing
+ * on the PR's head (PBI 235).
  */
 export type ChangeCause =
   | { kind: "review"; author: string; body: string; submittedAt: string }
   | { kind: "thread_comment"; threadId: string; author: string; body: string; submittedAt: string }
-  | { kind: "not_mergeable" };
+  | { kind: "not_mergeable" }
+  /** PBI 235: CI failed on `sha`, the head of the PR, with each failed check, its URL and the tests it names as failing. */
+  | { kind: "ci_failed"; sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 
 /** The newest of `causes` by `submittedAt`. On a tie a thread comment wins, since it holds the text the review asked with. */
 export function newestCause<T extends { kind: string; submittedAt: string }>(causes: T[]): T | null {

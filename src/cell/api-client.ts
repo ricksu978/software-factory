@@ -5,6 +5,7 @@ import type { CiCheck, FailedCheck, RerunAnswer } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
 import { realSleep, Transient, withRetries } from "./retry.ts";
+import type { CiFailure } from "../core/ci-findings.ts";
 
 /** How long the cell waits for the cell API to answer one try before it counts as a timeout (PBI 259). */
 export const CALL_TIMEOUT_MS = 90_000;
@@ -35,7 +36,7 @@ export type StageReport = {
   ciFailure?: CiFailure;
 };
 /** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
-export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
+export type { CiFailure };
 export type TransitionBody = {
   event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
   /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */

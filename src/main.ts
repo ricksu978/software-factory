@@ -83,7 +83,7 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     }
     if (size > MAX_WEBHOOK) throw new BadRequest("the payload is over 25 MB", 413);
     const { status } = await handleWebhook({
-      pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook,
+      pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook, repoHost: d.repoHost,
     }, { headers: req.headers as Record<string, string | undefined>, rawBody: Buffer.concat(chunks) });
     json(res, status);
     return true;

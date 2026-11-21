@@ -16,6 +16,8 @@ import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Polic
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
+import { headCiFailure, sendBackForCi } from "./ci-head.ts";
+import type { CiFailure } from "../core/ci-findings.ts";
 import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 
@@ -302,8 +304,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
   //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
-  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10). A NeedsInput
-  //    item that waits on "no trusted review text to address" goes back too, once the factory answers it (PBI 305).
+  //    address on a review, a conflict or CI failing on its PR's head (PBI 235), and only reviews by allowlisted users
+  //    count (Run contract 10). A NeedsInput item that waits on "no trusted review text to address" goes back too, once
+  //    the factory answers it (PBI 305).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
   await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
@@ -312,6 +315,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).
     const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
     const pr = await repoHost.prState(repo, row.pr_number, trusted, bot);
+    let failed: CiFailure | null = null;
     if (pr.merged) {
       // A merge the factory asked for whose answer it never got is still logged as the factory's (PBI 181).
       await move(pool, row.id, "merged", async (c) => {
@@ -333,6 +337,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
         const cause: ChangeCause | null = newer(pr.lastChangesRequestedAt, row.reviews_seen_at) ? pr.lastChangesRequested ?? null : { kind: "not_mergeable" };
         await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]), cause ? { cause } : undefined);
       }
+    } else if (row.state === "InReview" && (failed = await headCiFailure(repoHost, repo, row.pr_number))) {
+      // CI failed on the PR's head, so the item goes back to address with the failure detail as its findings (PBI 235).
+      // A failure on an older commit of the PR never counts, so a person's push that CI hasn't judged yet waits.
+      await sendBackForCi(pool, { itemId: row.id, runId: row.run_id! }, failed, system);
     } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
       // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
       // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).

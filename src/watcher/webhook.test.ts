@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { after, before, describe, test } from "node:test";
+import { fakeRepoHost } from "../adapters/fake.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { handleWebhook, verifySignature } from "./webhook.ts";
 
@@ -196,6 +197,32 @@ describe("handleWebhook", dbTest, () => {
       assert.equal(await state(item), "InReview");
       await send(review(pr, "reviewer", "2026-11-06T11:00:00Z"));
       assert.equal(await state(item), "Queued");
+      assert.equal((await db.pool.query("select next_stage from run where item_id = $1", [item])).rows[0].next_stage, "address");
+    });
+
+    test("checks completing on an InReview PR's failed head send the item to address, and on any other commit send nothing (PBI 235)", async () => {
+      const host = fakeRepoHost();
+      const { item, pr } = await inReview(null);
+      host.prs.push({
+        number: pr, repo: "o/r", branch: "b", base: "main", title: "t", body: "", headSha: "h2", open: true, merged: false,
+        mergeSha: null, mergeable: true, reviewers: [], comments: [], reviews: [],
+      });
+      const failed = [{ name: "ci", conclusion: "failure" as const, url: "https://github.com/o/r/actions/runs/1", failingTests: [] }];
+      for (const sha of ["h1", "h2"]) {
+        host.checks.set(`o/r@${sha}`, "failure");
+        host.ciChecks.set(`o/r@${sha}`, failed);
+      }
+      const delivered = (sha: string) => handleWebhook({ pool: db.pool, secret, parse: () => ({ kind: "checks_completed", sha, repo: "o/r" }), repoHost: host },
+        { headers: headers(`d-${++n}`, sign("sha256", body)), rawBody: body });
+      await delivered("h1");
+      assert.equal(await state(item), "InReview");
+      // Without a repo host the delivery is only recorded, and the poller reads the failure.
+      await send({ kind: "checks_completed", sha: "h2", repo: "o/r" });
+      assert.equal(await state(item), "InReview");
+      await delivered("h2");
+      assert.equal(await state(item), "Queued");
+      const ev = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'changes_requested'", [item])).rows;
+      assert.deepEqual(ev.map((r) => r.payload.cause), [{ kind: "ci_failed", sha: "h2", checks: [{ name: "ci", url: "https://github.com/o/r/actions/runs/1", failingTests: [] }] }]);
       assert.equal((await db.pool.query("select next_stage from run where item_id = $1", [item])).rows[0].next_stage, "address");
     });
 
