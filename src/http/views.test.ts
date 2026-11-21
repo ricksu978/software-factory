@@ -684,7 +684,7 @@ describe("runDetailPage's Rule changes (PBI 395)", () => {
     assert.match(html, /data-rule="§6"/);
     assert.match(html, /<blockquote data-side="before">A lease lasts <mark>ten<\/mark> &lt;b&gt;minutes&lt;\/b&gt;\.<\/blockquote>/);
     assert.match(html, /<blockquote data-side="after">A lease lasts <mark>five<\/mark> /);
-    assert.match(html, /<form method="post" action="\/items\/00000000-0000-0000-0000-000000000395\/rule-approval"><p><button>Approve rule change<\/button>/);
+    assert.match(html, /<form method="post" action="\/items\/00000000-0000-0000-0000-000000000395\/rule-approval"><input type="hidden" name="ruleChangesHash" value="[0-9a-f]{64}"><p><button>Approve rule change<\/button>/);
   });
 
   test("no control without the right to approve, an entry's problem and a missing part shown, and the approval once given", () => {

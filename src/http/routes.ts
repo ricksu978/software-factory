@@ -617,10 +617,13 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         send(res, 403, "Only the owner can approve a change to the factory's rules.");
         return true;
       }
+      // The form carries the hash of the rule changes the page showed, so the owner approves only what they saw.
+      const shownHash = (await form(req)).ruleChangesHash ?? "";
       const at = (deps.now ?? (() => new Date()))();
-      const outcome = await withTx(deps.pool, (c) => approveRuleChange(c, { itemId: itemPath[1], userId: user.id, at }));
+      const outcome = await withTx(deps.pool, (c) => approveRuleChange(c, { itemId: itemPath[1], userId: user.id, at, shownHash }));
       if (outcome === "unknown") send(res, 404, "No such item.");
       else if (outcome === "not_waiting") send(res, 409, "That item isn't waiting for the owner's approval of a rule change.");
+      else if (outcome === "stale") send(res, 409, "The item's rule changes changed since the page was shown. Reload it and review them again.");
       else {
         console.log(`rule change: ${identity.subject} approved the rule changes of item ${itemPath[1]}`);
         send(res, 303, "", { location: `/items/${itemPath[1]}` });

@@ -4,7 +4,7 @@ import { formatDuration, type ItemDurations } from "../core/durations.ts";
 import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
-import { placeKey, placeName, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
+import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
@@ -455,7 +455,7 @@ ${c.problem ? `<p class="banner">${escapeHtml(c.problem)}</p>` : ""}<div class="
       ? `<p>This item waits for the owner to approve its rule changes: ${escapeHtml(list)}.</p>`
       : "";
   const form = r.canApprove
-    ? `<form method="post" action="/items/${escapeHtml(id)}/rule-approval"><p><button>Approve rule change</button></p></form>`
+    ? `<form method="post" action="/items/${escapeHtml(id)}/rule-approval"><input type="hidden" name="ruleChangesHash" value="${escapeHtml(ruleChangesHash(r.changes))}"><p><button>Approve rule change</button></p></form>`
     : "";
   return `<h2>Rule changes</h2>${status}\n${entries}\n${form}`;
 }

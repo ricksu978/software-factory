@@ -21,7 +21,7 @@ import type { CiFailure } from "../core/ci-findings.ts";
 import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
-import { approvedRulesHash } from "../store/rule-changes.ts";
+import { approvedRulesHash, ruleChangesChecked } from "../store/rule-changes.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -382,10 +382,14 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     }
     // PBI 395: a Queued item whose "Changes the factory's rules" section no longer reads as the owner approved it, or
     // that gained one since it was gated, meets the readiness check again in step 4, which leaves it waiting for the
-    // owner's approval. An edit anywhere else in the item doesn't move it.
+    // owner's approval. Deleting an approved section is an edit to it too, so the judge checks the item again. An edit
+    // anywhere else in the item doesn't move it.
     if (row.state === "Queued") {
       const changes = parseRuleChanges(fi.body);
-      if (changes.length > 0 && ruleChangesHash(changes) !== (await approvedRulesHash(pool, row.id))) {
+      const edited = changes.length > 0
+        ? ruleChangesHash(changes) !== (await approvedRulesHash(pool, row.id))
+        : !!(await ruleChangesChecked(pool, row.id))?.length;
+      if (edited) {
         await move(pool, row.id, "rules_edited");
         return;
       }

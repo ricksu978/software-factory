@@ -27,7 +27,7 @@
 //   <h2>) holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy file's path,
 //   holding the rule's Before in a <blockquote data-side="before"> and its After in a <blockquote data-side="after">,
 //   each word that changes inside a <mark>. Owner approval is a <button> reading "Approve rule change" in a form that
-//   posts to /items/<id>/rule-approval. A user approves by posting that form: the owner's post answers 303, anyone
+//   posts to /items/<id>/rule-approval with the shown changes' hash in a hidden ruleChangesHash field. A user approves by posting that form: the owner's post answers 303, anyone
 //   else's 403.
 // - The approval is an event of kind "rule_change_approved" whose actor is human, its actor_id the approver's user id,
 //   at the time of the approval, and the item's move to Eligible is a transition whose event is "rule_change_approved".
@@ -41,7 +41,8 @@ import { createAuth } from "../../src/http/auth.ts";
 import { dashboardRoutes } from "../../src/http/routes.ts";
 import { startServer } from "../../src/http/server.ts";
 import type { Policy } from "../../src/policy/policy.ts";
-import { ruleChangesRead, type RuleChange } from "../../src/store/rule-changes.ts";
+import { ruleChangesHash } from "../../src/gate/rule-changes.ts";
+import { ruleChangesChecked, ruleChangesRead, type RuleChange } from "../../src/store/rule-changes.ts";
 import type { FactoryRepo } from "../../src/watcher/poller.ts";
 import { baseFiles, ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { ctx as itemCtx, type Item } from "./pbi-131.steps.ts";
@@ -394,9 +395,12 @@ async function postApproval(world: object, login: string, at?: string): Promise<
   const c = await dashboard(world);
   await user(login, roleOf(c, login));
   c.clock = at ? new Date(at) : undefined;
+  // The form carries the hash of the rule changes the page shows, which are those the last readiness check stored.
+  const shown = ruleChangesHash((await ruleChangesChecked(pool(), item(world).id)) ?? []);
   const r = await fetch(`${c.origin}/items/${item(world).id}/rule-approval`, {
     method: "POST", redirect: "manual",
-    headers: { ...headers(login), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" }, body: "",
+    headers: { ...headers(login), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ ruleChangesHash: shown }).toString(),
   });
   await r.text();
   c.approval = { status: r.status };

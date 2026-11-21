@@ -70,12 +70,15 @@ export async function waitsForApproval(c: pg.Pool | pg.ClientBase, itemId: strin
  * and only one that still waits for that approval is approved. The approval is logged as `rule_change_approved` at `at`,
  * by the owner, and the item moves from NotReady to Eligible through the event of that name, so the next poll runs the
  * rest of the readiness check. Returns "unknown" for no such item and "not_waiting" for one that doesn't wait.
+ * `shownHash` is the hash of the rule changes the owner's page showed: when it isn't the hash of the stored changes,
+ * as after an edit the owner never saw, nothing is approved and the result is "stale".
  */
-export async function approveRuleChange(c: pg.PoolClient, a: { itemId: string; userId: string; at: Date }): Promise<"approved" | "unknown" | "not_waiting"> {
+export async function approveRuleChange(c: pg.PoolClient, a: { itemId: string; userId: string; at: Date; shownHash: string }): Promise<"approved" | "unknown" | "not_waiting" | "stale"> {
   const row = (await c.query<{ rule_changes: RuleChangeRead[] | null }>("select rule_changes from item where id = $1 for update", [a.itemId])).rows[0];
   if (!row) return "unknown";
   if (!row.rule_changes?.length || !(await waitsForApproval(c, a.itemId))) return "not_waiting";
   const changes = row.rule_changes.map(plain);
+  if (a.shownHash !== ruleChangesHash(changes)) return "stale";
   const actor = { actor: "human" as const, actorId: a.userId };
   await appendEvent(c, { ...actor, itemId: a.itemId, kind: RULE_CHANGE_APPROVED, payload: { rulesHash: ruleChangesHash(changes), changes }, at: a.at });
   await transitionItem(c, a.itemId, "rule_change_approved", actor);

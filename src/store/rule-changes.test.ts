@@ -17,6 +17,7 @@ describe("an owner's approval of an item's rule changes (PBI 395)", dbTest, () =
     }
     return id;
   };
+  const shownHash = ruleChangesHash([change as never]);
   const owner = async () => (await db.pool.query<{ id: string }>(`insert into "user" (provider, subject, github_login, role) values ('dev', gen_random_uuid()::text, 'olive-' || gen_random_uuid()::text, 'owner') returning id`)).rows[0].id;
 
   before(async () => {
@@ -36,7 +37,7 @@ describe("an owner's approval of an item's rule changes (PBI 395)", dbTest, () =
     assert.equal(await waitsForApproval(db.pool, id), true);
     const user = await owner();
     const at = new Date("2026-11-21T10:00:00Z");
-    assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: id, userId: user, at })), "approved");
+    assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: id, userId: user, at, shownHash })), "approved");
     assert.equal((await db.pool.query("select state from item where id = $1", [id])).rows[0].state, "Eligible");
     const plain = [{ place: change.place, before: change.before, after: change.after }];
     assert.equal(await approvedRulesHash(db.pool, id), ruleChangesHash(plain as never));
@@ -51,9 +52,20 @@ describe("an owner's approval of an item's rule changes (PBI 395)", dbTest, () =
     const user = await owner();
     const at = new Date();
     for (const id of [await item("NotReady", [["one", "failed"]]), await item("Queued", [[APPROVAL_CRITERION, "failed"]]), await item("NotReady", [[APPROVAL_CRITERION, "failed"]], [])]) {
-      assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: id, userId: user, at })), "not_waiting");
+      assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: id, userId: user, at, shownHash })), "not_waiting");
       assert.equal(await latestApproval(db.pool, id), null);
     }
-    assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: "00000000-0000-0000-0000-000000000000", userId: user, at })), "unknown");
+    assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: "00000000-0000-0000-0000-000000000000", userId: user, at, shownHash })), "unknown");
+  });
+
+  test("an approval of rule changes the page showed before an edit is refused, and nothing is logged", async () => {
+    const id = await item("NotReady", [[APPROVAL_CRITERION, "failed"]]);
+    const user = await owner();
+    const old = ruleChangesHash([{ ...change, after: "An After the owner saw." } as never]);
+    for (const h of [old, ""]) {
+      assert.equal(await withTx(db.pool, (c) => approveRuleChange(c, { itemId: id, userId: user, at: new Date(), shownHash: h })), "stale");
+    }
+    assert.equal(await latestApproval(db.pool, id), null);
+    assert.equal((await db.pool.query("select state from item where id = $1", [id])).rows[0].state, "NotReady");
   });
 });
