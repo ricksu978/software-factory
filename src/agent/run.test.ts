@@ -195,6 +195,9 @@ test("the judge prompt fences the item so its text can't close the fence", () =>
   assert.match(p, /\{"index":1,"criterion":"Has a Size of 5 or less"\}/);
   assert.match(p, /\{"flags":\[\],"oversized":false\}/);
   assert.match(p, /last line \{"flags":\[\.\.\.\],"oversized":true\|false\}/);
+  // PBI 395: the last line names each factory rule the item changes, whether its rules section lists it or not.
+  assert.match(p, /Add "rules":\[\.\.\.\] to that last line too/);
+  assert.match(p, /## Changes the factory's rules/);
 });
 
 test("the readiness logic holds the judge prompt's own words, with no item or dor.md in it, and the readiness version", () => {

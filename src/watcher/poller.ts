@@ -20,6 +20,8 @@ import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
 import type { CiFailure } from "../core/ci-findings.ts";
 import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
+import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
+import { approvedRulesHash, ruleChangesChecked } from "../store/rule-changes.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -46,7 +48,15 @@ export type PollDeps = {
    * directory beside the code.
    */
   defaults?: DefaultPolicies;
+  /**
+   * The factory's own repo, where its spec and policy files live (PBI 395). The readiness check reads each rule an item
+   * says it changes from `main` here, to hold its quoted Before to the rule's text word for word.
+   */
+  factoryRepo?: FactoryRepo;
 };
+
+/** Reads a file of the factory's own repo at `ref`, or null when the file isn't there (PBI 395). */
+export type FactoryRepo = { readFile(ref: string, path: string): Promise<string | null> };
 
 type Row = {
   id: string; external_id: string; state: ItemState; held: boolean; criteria_hash: string | null;
@@ -342,8 +352,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       // A failure on an older commit of the PR never counts, so a person's push that CI hasn't judged yet waits.
       // The failed checks are re-run once first, and only a check still red after its re-run sends the item back (PBI 233).
       await sendBackForCi(pool, { itemId: row.id, runId: row.run_id! }, failed, system);
-    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
-      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
+    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))
+      && !(await rulesEdited(pool, row.id, fi!))) {
+      // An item withdrawn from the board, or whose criteria or rules section changed, is left for step 3 to close its
+      // PR (PBI 181, PBI 395). A
       // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
@@ -368,6 +380,16 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await adapter.comment(fi.externalId, "This item's acceptance criteria changed, so its scenarios need a new sign-off.", `criteria:${hash}`);
       await closeOpenPr(repoHost, fi.repo, row, "This item's acceptance criteria changed, so the factory starts a new run.");
       await restart(pool, row, fi, hash);
+      return;
+    }
+    // PBI 395: an item Queued or later whose "Changes the factory's rules" section no longer reads as the owner
+    // approved it, or that gained one since it was gated, meets the readiness check again in step 4, which leaves it
+    // waiting for the owner's approval. Its PR is closed and its run ended, so nothing built from the edit ships.
+    // Deleting an approved section is an edit to it too, so the judge checks the item again. An edit anywhere else in
+    // the item doesn't move it.
+    if (await rulesEdited(pool, row.id, fi)) {
+      await closeOpenPr(repoHost, fi.repo, row, "This item's \"Changes the factory's rules\" section changed since the owner approved it, so it waits for a new approval.");
+      await regateRules(pool, row);
       return;
     }
     // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
@@ -396,6 +418,14 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
+  // The factory's own spec and policy files on main, each read once per poll, that an item's rule changes are held to (PBI 395).
+  const factoryFiles = new Map<string, Promise<string | null>>();
+  // Only the spec and policy files are ever read: an item names the path, so nothing else of the repo is reachable.
+  const factoryRules = deps.factoryRepo && ((path: string) => {
+    if (!isRulesFile(path)) return Promise.resolve(null);
+    if (!factoryFiles.has(path)) factoryFiles.set(path, deps.factoryRepo!.readFile(RULES_REF, path));
+    return factoryFiles.get(path)!;
+  });
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
   const depsOf = async (fi: FactoryItem) => ((await readinessOf(fi)).repoKnown ? adapter.openDependencies(fi.externalId) : []);
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
@@ -413,6 +443,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
       missingPermissions: r.missingPermissions,
+      ...(factoryRules ? { factoryRules } : {}), ruleApproval: await approvedRulesHash(pool, row.id),
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
@@ -424,7 +455,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // A queued item goes in blocked by its open dependencies, so no claim takes it before step 3 reads them next poll.
     const blockedBy = out.ready ? await depsOf(fi) : [];
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4, rule_changes = $5 where id = $1",
+        [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy, JSON.stringify(out.ruleChanges ?? [])]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)
@@ -736,6 +768,32 @@ function newer(review: string | null, seen: Date | null): boolean {
  * criteria_changed edge to itself, so IllegalTransition can't stop a second poll that read the old hash. The locked
  * re-read does.
  */
+/**
+ * True when the item's "Changes the factory's rules" section no longer reads as the owner last approved it: a section
+ * whose hash isn't the approved one, or none where the last readiness check read one (PBI 395).
+ */
+async function rulesEdited(pool: pg.Pool, itemId: string, fi: FactoryItem): Promise<boolean> {
+  const changes = parseRuleChanges(fi.body);
+  return changes.length > 0
+    ? ruleChangesHash(changes) !== (await approvedRulesHash(pool, itemId))
+    : !!(await ruleChangesChecked(pool, itemId))?.length;
+}
+
+/**
+ * Sends an item Queued or later back to Eligible through `rules_edited` (PBI 395). Its open run ends, so the next claim
+ * starts a new one from understand, and its open questions close. The transition bumps the lease generation, so a cell
+ * still running on the item loses it.
+ */
+async function regateRules(pool: pg.Pool, row: Row): Promise<void> {
+  await withTx(pool, async (c) => {
+    const cur = (await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [row.id])).rows[0];
+    if (cur?.state !== row.state) return;
+    await transitionItem(c, row.id, "rules_edited", system);
+    await c.query("update run set ended_at = now(), outcome = 'rules_edited' where item_id = $1 and ended_at is null", [row.id]);
+    await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [row.id]);
+  });
+}
+
 async function restart(pool: pg.Pool, row: Row, fi: FactoryItem, hash: string): Promise<void> {
   await withTx(pool, async (c) => {
     const cur = (await c.query<{ criteria_hash: string | null }>("select criteria_hash from item where id = $1 for update", [row.id])).rows[0];

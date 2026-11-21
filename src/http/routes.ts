@@ -16,6 +16,8 @@ import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
 import { splitChildren } from "../store/splits.ts";
+import { approveRuleChange, latestApproval, ruleChangesChecked, waitsForApproval } from "../store/rule-changes.ts";
+import { ruleChangesHash } from "../gate/rule-changes.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { failedOnMain } from "../store/rechecks.ts";
@@ -301,7 +303,22 @@ export function fixingCi(state: string, run: { open?: boolean } | null, stages: 
   return newest?.stage_id === "green" ? newest.ci_failure ?? null : null;
 }
 
-async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): Promise<RunDetail | null> {
+/**
+ * PBI 395: the rule changes the item's last readiness check read, whether the item waits for the owner's approval of
+ * them, the approval that matches them as they read now, and whether this viewer may approve. Null when it read none.
+ */
+export async function ruleChangesOf(pool: pg.Pool, id: string, isOwner: boolean): Promise<RunDetail["ruleChanges"]> {
+  const changes = await ruleChangesChecked(pool, id);
+  if (!changes?.length) return null;
+  const waiting = await waitsForApproval(pool, id);
+  const approval = await latestApproval(pool, id);
+  return {
+    changes, waiting, canApprove: waiting && isOwner,
+    approval: approval && approval.rulesHash === ruleChangesHash(changes) ? { by: approval.by, at: approval.at } : null,
+  };
+}
+
+async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, isOwner = false): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
   if (!item) return null;
@@ -331,6 +348,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
     verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
     fixingCi: fixingCi(item.state, run, stages),
     durations: await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))()),
+    ruleChanges: await ruleChangesOf(pool, id, isOwner),
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
 }
@@ -585,12 +603,31 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       await streams.open(req, res);
       return true;
     }
-    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer))?$/.exec(path);
+    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer|rule-approval))?$/.exec(path);
     if (itemPath && req.method === "GET" && !itemPath[2]) {
-      const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"));
+      const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"), requireRole(user, "owner"));
       if (!detail) send(res, 404, "No such item.");
       // Times show in the zone the viewer's browser sent, and a running attempt's time so far runs to now (PBI 189).
       else send(res, 200, runDetailPage({ ...detail, zone: zoneFrom(req.headers.cookie), now: deps.now?.() ?? new Date() }, banner));
+      return true;
+    }
+    // PBI 395: only the owner approves an item's change to the factory's own rules, and only while the item waits for it.
+    if (itemPath && req.method === "POST" && itemPath[2] === "rule-approval") {
+      if (!requireRole(user, "owner")) {
+        send(res, 403, "Only the owner can approve a change to the factory's rules.");
+        return true;
+      }
+      // The form carries the hash of the rule changes the page showed, so the owner approves only what they saw.
+      const shownHash = (await form(req)).ruleChangesHash ?? "";
+      const at = (deps.now ?? (() => new Date()))();
+      const outcome = await withTx(deps.pool, (c) => approveRuleChange(c, { itemId: itemPath[1], userId: user.id, at, shownHash }));
+      if (outcome === "unknown") send(res, 404, "No such item.");
+      else if (outcome === "not_waiting") send(res, 409, "That item isn't waiting for the owner's approval of a rule change.");
+      else if (outcome === "stale") send(res, 409, "The item's rule changes changed since the page was shown. Reload it and review them again.");
+      else {
+        console.log(`rule change: ${identity.subject} approved the rule changes of item ${itemPath[1]}`);
+        send(res, 303, "", { location: `/items/${itemPath[1]}` });
+      }
       return true;
     }
     if (itemPath && req.method === "POST" && itemPath[2]) {

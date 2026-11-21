@@ -784,7 +784,7 @@ flowchart LR
 stateDiagram-v2
   [*] --> Eligible
   Eligible --> NotReady: readiness check fails
-  NotReady --> Eligible: item edited, or a readiness input changed
+  NotReady --> Eligible: item edited, or a readiness input changed, or the owner approved its rule change
   Eligible --> Abandoned: label removed, or item closed
   NotReady --> Abandoned: label removed, or item closed
   Abandoned --> Eligible: label back or re-queued, after a withdrawal from Eligible or NotReady
@@ -792,6 +792,7 @@ stateDiagram-v2
   Abandoned --> Split: split filed before PBI 225, every child among its sub-issues
   Split --> Done: every filed child Done
   Eligible --> Queued: ready
+  Queued --> Eligible: its rules section no longer reads as the owner approved it, as from InProgress, SignOff, NeedsInput and InReview
   Queued --> InProgress: WIP slot + claim
   InProgress --> SignOff: scenarios written
   SignOff --> InProgress: approved, or changes asked
@@ -3789,6 +3790,99 @@ Feature: Export invoices to CSV
 
     A change to the engine rules counts when it raises the readiness version in the code (PBI 149).</li>
 
+    <li><b>Changing the factory's own rules.</b>
+
+    An item says it changes the factory's own rules under the heading <code>## Changes the factory's rules</code> (PBI 395).
+
+    Each rule it changes gets a <code>### Spec §N</code> heading,
+
+    or a heading naming the policy file by its path, such as <code>### .factory/dor.md</code> or <code>### policy/dor.md</code>.
+    The path is the heading's first word, so a description may follow it, as one may follow <code>§N</code>.
+    Only a Markdown file directly under <code>policy/</code> or <code>.factory/</code> counts as a policy file: any other heading gets an entry problem and is never read, so an item can't use the check to probe the factory's other files.
+    Under each heading come
+
+    <b>Before</b>, the rule's current text quoted word for word from <code>main</code>,
+
+    and <b>After</b>, the rule as it will read once the item ships,
+
+    each as a <code>&gt;</code> quote.
+
+    The readiness check reads that section and keeps what it read for the item page.
+
+    An entry with no Before or no After fails the item,
+
+    and so does a Before that isn't in the spec section or policy file on <code>main</code> word for word.
+
+    The comment names each section whose entry is off.
+
+    A spec section is read as prose,
+
+    so inline markup and line breaks don't count,
+
+    and a branch other than <code>main</code> is never read.
+
+    The judge's last line names each rule it finds the item changes.
+
+    A rule it finds that the section doesn't cover fails the <code>dor.md</code> line about the factory's own rules,
+
+    and the finding names each section the item's section should cover.
+
+    An item whose section covers every rule the judge finds,
+
+    and that passes everything else,
+
+    waits in NotReady for the owner's approval,
+
+    and its readiness comment and its item page name the sections it changes.
+
+    The owner approves on the item page,
+
+    which shows each Before beside its After with the words that change marked.
+
+    Only the owner sees the "Approve rule change" control,
+
+    and only on an item that waits for it.
+
+    The approval is logged as a <code>rule_change_approved</code> event with who and when,
+
+    and moves the item from NotReady to Eligible,
+
+    so the next poll runs the rest of the readiness check.
+
+    The approval holds for the section as it read.
+
+    An edit to it sends a NotReady or Eligible item back to waiting,
+
+    and moves an item Queued or later back to Eligible through <code>rules_edited</code>,
+
+    so it waits again.
+
+    An item past Queued has its open PR closed, its run ended and its open questions closed,
+
+    so nothing built from the edited section is merged,
+
+    and the next claim after a new approval starts a new run.
+
+    Deleting an approved section is an edit to it too:
+
+    an item Queued or later goes back to Eligible,
+
+    and the judge checks it again.
+
+    The owner approves only the rule changes the page showed.
+
+    When the section changed after the page was shown,
+
+    the approval is refused and nothing is logged,
+
+    so the owner reloads the page and reviews the changes again.
+
+    An edit anywhere else in the item doesn't ask for approval again,
+
+    and an item that changes no rule and has no such section is checked as before.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Visible results.</b>
 
     Run detail lists every criterion with its result and reason.
@@ -4664,6 +4758,20 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       An item Failed after <code>dod_failed</code> shows under its state when it was last re-checked,
 
       or that it hasn't been re-checked yet (PBI 369).
+
+      An item whose readiness check read a "Changes the factory's rules" section shows a Rule changes section (PBI 395):
+
+      each rule's Before beside its After,
+
+      the words that change marked,
+
+      what's wrong with any entry,
+
+      and whether the item waits for the owner's approval or who approved it and when.
+
+      The owner alone gets the "Approve rule change" control there,
+
+      and only while the item waits for it.
 
       Then the SOP version,
 
