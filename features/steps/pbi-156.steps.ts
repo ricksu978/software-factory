@@ -2,7 +2,9 @@
 // and today's control plane from src/main.ts in this process, on PBI 4's shared test database, with fakes. PBI 17's
 // steps own the items, the launcher's record and the item states, so the worker's launcher records into PBI 17's
 // context. The worker module loads lazily, so while it doesn't exist every scenario fails on a Then.
-// PBI 158's steps run this file's worker too, so its hooks run for @pbi-158.
+// PBI 158's steps run this file's worker too, so its hooks run for @pbi-158. There, and under PBI 157, the worker runs
+// on a fake clock, so the steps that wait for its ticks, polls and outbox passes move that clock on as they wait
+// (features/support/worker-clocks.ts, PBI 396).
 // Each process mirrors only the transitions it commits, so the control plane gets a pool of its own on the same
 // database, as it has in its own process.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
@@ -16,6 +18,7 @@ import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
+import { passUntil } from "../support/worker-clocks.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, freshDb, newItem } from "./pbi-17.steps.ts";
 
@@ -270,15 +273,15 @@ export async function startWorker(world: object, n: number): Promise<void> {
 async function waitFor(world: object, n: number): Promise<void> {
   const c = ctx(world);
   const w = c.worker!;
-  for (const b of c.boards) await until(`the worker polls board ${b.name}`, () => (w.runs.get(`polling source ${b.id}`) ?? 0) >= 1);
+  for (const b of c.boards) await passUntil(world, `the worker polls board ${b.name}`, () => (w.runs.get(`polling source ${b.id}`) ?? 0) >= 1);
   // The tick under way as the poll ended started beside it, so it doesn't count.
   const base = ticks(w) + 1;
-  await until(`the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
+  await passUntil(world, `the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
   // The board shows what those ticks did once the worker has worked through the outbox after them (PBI 219). The pass
   // under way as the last tick ended may have started before it, so it doesn't count.
   const passes = () => w.runs.get("working through the outbox") ?? 0;
   const after = passes() + 1;
-  await until("the worker works through the outbox", () => passes() >= after + 1);
+  await passUntil(world, "the worker works through the outbox", () => passes() >= after + 1);
   await learnItems(world);
 }
 
@@ -436,7 +439,7 @@ When("the worker ticks again", long, async function () {
   await rehome(this);
   const w = c.worker;
   const now = ticks(w);
-  await until("the worker ticks again", () => ticks(w) > now + 1);
+  await passUntil(this, "the worker ticks again", () => ticks(w) > now + 1);
 });
 
 When("the worker starts and polls the board once", long, async function () {

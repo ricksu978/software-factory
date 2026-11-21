@@ -15,22 +15,11 @@
 // "reading the PRs of items in review", "checking the items the factory holds", "checking readiness" and "saving the
 // cursor".
 
+import { realClock, type Clock } from "../clock.ts";
+
 export const SLOW_TICK_MS = 300_000;
 export const SLOW_POLL_MS = 300_000;
 export const SLOW_REQUEST_MS = 60_000;
-
-/** The clock a watch reads and the timers it sets. Tests pass a fake one to move time on by hand. */
-export type Clock = {
-  now(): number;
-  setTimeout(fn: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-};
-
-export const realClock: Clock = {
-  now: () => Date.now(),
-  setTimeout: (fn, ms) => setTimeout(fn, ms).unref(),
-  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
-};
 
 /** Where slow-work warnings go, console.warn by default, and the clock that times them, the real one by default. */
 export type Slow = { log?: (line: string) => void; clock?: Clock };
@@ -45,12 +34,12 @@ export type Watch = { step(name: string): void; end(): void };
 export function watch(firstMs: number, everyMs: number | null, say: (ms: number, step: string) => string, slow: Slow = {}): Watch {
   const clock = slow.clock ?? realClock;
   const log = slow.log ?? ((line: string) => console.warn(line));
-  const started = clock.now();
+  const started = clock.now().getTime();
   let step = "";
   let handle: unknown = null;
   const fire = () => {
     handle = everyMs === null ? null : clock.setTimeout(fire, everyMs);
-    log(say(clock.now() - started, step));
+    log(say(clock.now().getTime() - started, step));
   };
   handle = clock.setTimeout(fire, firstMs);
   return {

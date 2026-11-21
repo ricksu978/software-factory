@@ -2563,6 +2563,58 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Moving time on instead of waiting it out.</b>
+
+    The worker sets every timer it uses,
+
+    and reads every time it records,
+
+    through one clock it's given (PBI 396):
+
+    the scheduler tick,
+
+    the outbox loop,
+
+    each board poll,
+
+    the standby's lock retry,
+
+    the holder's lock check,
+
+    and the slow-work warnings of a tick or a poll.
+
+    Without one it runs on the real clock,
+
+    at the intervals it always has.
+
+    A scenario hands it a fake clock,
+
+    which stands still until the test moves it on.
+
+    Moving it on fires each timer that falls due,
+
+    one at a time and at its own time,
+
+    and waits for the work each one starts before it fires the next.
+
+    A closed lock connection still reaches the worker as an event,
+
+    so a worker whose fake clock never moves still exits when it loses the lock.
+
+    A worker that stops gives the lock back before it closes its lock connection,
+
+    so a standby's next try on its fake clock finds the lock free.
+
+    So PBI 157's and PBI 158's scenarios move their workers' clocks on where they used to sit through real lock retries and ticks,
+
+    and a takeover scenario no longer waits 15 real seconds.
+
+    A Then that gives the workers some seconds still counts real ones,
+
+    so it fails when the behaviour doesn't happen.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Running the suite in parallel.</b>
 
     <code>npm run bdd</code> runs the scenarios in cucumber-js's own parallel workers (PBI 390),

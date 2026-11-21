@@ -4749,6 +4749,9 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   `runProcess` then exits the process with code 1,
   and the platform restarts it.
   A standby whose lock connection closes exits the same way.
+  A worker that stops gives the lock back with `pg_advisory_unlock_all()` before it closes its lock connection.
+  Postgres frees a closed session's locks only once its backend exits,
+  so without the unlock a standby could try a moment too early and wait out another retry.
   `src/worker/main.test.ts` covers the standby,
   the takeover,
   the lost lock and a failed egress set-up,
@@ -4768,6 +4771,42 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   Under `aspire run` the `worker` resource waits for `migrate` to complete with exit code 0,
   and it has no endpoint.
   `src/store/heartbeat.test.ts` and `src/worker/main.test.ts` cover the heartbeat.
+  PBI 396 gives the worker one clock,
+  the `clock` in `WorkerDeps` (`src/clock.ts`),
+  which `realClock` is by default.
+  Each scheduler tick,
+  the outbox loop,
+  each board poll,
+  the standby's lock retry and the holder's lock check set their timers on it,
+  and so do the slow-work warnings of a tick or a poll,
+  which the worker hands it as their `slow.clock`.
+  A tick reads its time from the clock's `now()`,
+  unless `WorkerDeps.now` is set.
+  The holder's lock check is a timer set again once each check has answered,
+  in place of a `setInterval`,
+  still every 5 seconds.
+  Every interval keeps its value.
+  `fakeClock(start)` stands still until `advance(ms)` moves it on.
+  That fires each timer that falls due in the time it moves through,
+  in order,
+  with `now()` reading the timer's own time,
+  and awaits what each timer's callback returns before it fires the next.
+  Each of the worker's timers returns the work it starts,
+  so a tick that awaits the database finishes before the next one fires.
+  Two moves started together run one after the other.
+  `src/clock.test.ts` covers the fake clock,
+  and `src/worker/main.test.ts` a standby,
+  ticks and a lost lock on one.
+  PBI 157's and PBI 158's steps start each worker they run in the test's process on a fake clock from `features/support/worker-clocks.ts`,
+  PBI 156's single worker too.
+  A step that slept or polled for a tick,
+  a poll or a lock retry moves every one of the scenario's clocks on instead,
+  250 ms at a time with a 5 ms real pause between,
+  until what it waits for holds.
+  A Then that gives the workers some seconds keeps a real deadline,
+  so PBI 376's faults still fail it once those seconds are up.
+  `features/support/real-timers.ts` records the timers the factory's own code sets on the real clock,
+  and PBI 396's scenarios check that a worker on a fake clock sets none.
   PBI 210 keeps the cell image current with `main`.
   `src/worker/cell-image.ts` holds `startCellImage`,
   which the holder awaits before the egress proxy,

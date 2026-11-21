@@ -33,6 +33,7 @@ import pg from "pg";
 import { WORKER_LOCK_KEY } from "../../src/worker/main.ts";
 import { long, need } from "./pbi-8.steps.ts";
 import { ctx as p157 } from "./pbi-157.steps.ts";
+import { moved, onFakeClocks } from "../support/worker-clocks.ts";
 
 const repo = process.cwd();
 /** Long enough for 20 runs of the takeover scenario back to back. */
@@ -386,7 +387,9 @@ AfterStep({ tags: "@pbi-157" }, function ({ pickleStep, result }) {
   const m = TAKEOVER_STEP.exec(pickleStep.text);
   const lostAt = p157(this).stoppedAt;
   if (!m || lostAt === undefined) return;
-  process.stderr.write(`PBI376: the takeover Then for item "${m[2]}" waited ${m[1]} seconds and gave up ${Date.now() - lostAt} ms after the lock loss\n`);
+  // On fake clocks (PBI 396) the Then's seconds are the workers' own time, so it gave up when they'd moved that far on.
+  const ms = onFakeClocks(this) ? moved(this) - (p157(this).stoppedMoved ?? 0) : Date.now() - lostAt;
+  process.stderr.write(`PBI376: the takeover Then for item "${m[2]}" waited ${m[1]} seconds and gave up ${ms} ms after the lock loss\n`);
 });
 
 After({ tags: "@pbi-157" }, async function () {
