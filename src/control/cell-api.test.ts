@@ -243,6 +243,19 @@ describe("cell API", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from run_file where run_id = $1", [cell.runId])).rows[0].n, 0);
   });
 
+  test("scenarios_written locking the same file twice stores it once (PBI 224)", async () => {
+    const cell = await claimed();
+    host.files.set(`${repo}@5c3a1f0:features/a.feature`, "Feature: A\n");
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0",
+      lockedFiles: ["features/a.feature", "features/a.feature"],
+    });
+    assert.equal(r.status, 200);
+    assert.equal((await item(cell.itemId)).state, "SignOff");
+    const files = await db.pool.query("select path from run_file where run_id = $1", [cell.runId]);
+    assert.deepEqual(files.rows, [{ path: "features/a.feature" }]);
+  });
+
   test("feature_change_requested stores the request, moves the item to FeatureChangeRequest and posts it on the PBI once (PBI 364)", async () => {
     const cell = await claimed();
     await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);

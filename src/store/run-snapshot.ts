@@ -12,8 +12,8 @@ export class SnapshotMissing extends Error {}
 
 /**
  * Reads the snapshot of `externalId`'s run at `sha`: the item's criteria as the board holds them now, and each of
- * `paths` in `repo` at `sha`. An item the board doesn't hold, or a file the repo doesn't hold at `sha`, throws
- * SnapshotMissing. A failing read throws its own error.
+ * `paths` in `repo` at `sha`, each path once. An item the board doesn't hold, or a file the repo doesn't hold at
+ * `sha`, throws SnapshotMissing. A failing read throws its own error.
  */
 export async function readSnapshot(
   d: { repoHost: RepoHost; backlog: BacklogAdapter },
@@ -21,7 +21,7 @@ export async function readSnapshot(
 ): Promise<Snapshot> {
   const item = await d.backlog.getItem(at.externalId);
   if (!item) throw new SnapshotMissing(`the board holds no item ${at.externalId}`);
-  const files = await Promise.all(at.paths.map(async (path) => {
+  const files = await Promise.all([...new Set(at.paths)].map(async (path) => {
     const text = await d.repoHost.readFile(at.repo, at.sha, path);
     if (text === null) throw new SnapshotMissing(`${at.repo} holds no ${path} at ${at.sha}`);
     return { path, text };
