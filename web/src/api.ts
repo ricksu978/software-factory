@@ -147,8 +147,12 @@ export type Submitted<T> =
   | { outcome: "accepted"; data: T };
 
 /** What each page draws with. `zone` is the viewer's IANA time zone, and `now` the time ages and running attempts count to. */
-export type FloorProps = { data: FloorData; zone: string; now: Date; message?: string | null };
-export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null };
+/** `onSubmit` takes a form's submit, with the button pressed by its text and the form's field as typed. Without it, as
+ * when react-dom/server renders the page, a submit does nothing. */
+export type FormName = "Controls" | "Sign off" | "Answer";
+export type OnSubmit = (form: FormName, button: string, value: string) => void;
+export type FloorProps = { data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
+export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
 export type ActivityProps = { data: ActivityData };
 
@@ -165,24 +169,24 @@ export type RunDetailModule = {
   submitAnswer(call: Call, item: ItemData, button: string, answer: string): Promise<Submitted<ItemData>>;
 };
 
-const NOT_BUILT = "not built yet (PBI 279)";
+/** Reads `path` from the BFF as JSON. Any answer but a 2xx rejects, naming the status and the API's error. */
+async function read<T>(call: Call, path: string): Promise<T> {
+  const r = await call(path);
+  if (!r.ok) {
+    const error = ((await r.json().catch(() => null)) as { error?: string } | null)?.error;
+    throw new Error(`${path} answered ${r.status}${error ? `: ${error}` : ""}`);
+  }
+  return (await r.json()) as T;
+}
 
 /** Floor's one read of the factory. */
-export async function readFloor(_call: Call): Promise<FloorData> {
-  throw new Error(NOT_BUILT);
-}
+export const readFloor = (call: Call) => read<FloorData>(call, "/bff/v1/floor");
 
 /** Run detail's one read of the factory. */
-export async function readItem(_call: Call, _id: string): Promise<ItemData> {
-  throw new Error(NOT_BUILT);
-}
+export const readItem = (call: Call, id: string) => read<ItemData>(call, `/bff/v1/items/${encodeURIComponent(id)}`);
 
 /** The Phase 0 report's one read of the factory. */
-export async function readPhase0(_call: Call): Promise<Phase0Data> {
-  throw new Error(NOT_BUILT);
-}
+export const readPhase0 = (call: Call) => read<Phase0Data>(call, "/bff/v1/phase0");
 
 /** Activity's one read of the factory. */
-export async function readActivity(_call: Call): Promise<ActivityData> {
-  throw new Error(NOT_BUILT);
-}
+export const readActivity = (call: Call) => read<ActivityData>(call, "/bff/v1/activity");

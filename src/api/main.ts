@@ -154,8 +154,10 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
       banner: tokenBanner(d.env, at.getTime()),
     };
     const beat = (await d.pool.query<{ ticked_at: Date }>("select ticked_at from worker_heartbeat limit 1")).rows[0];
+    // The claim keys are a Map in the dashboard's floor, which JSON can't carry, so they go as an object by item id.
+    const f = await floor(d.pool);
     return c.json({
-      ...(await floor(d.pool)), canOperate: requireRole(c.get("user"), "operator"),
+      ...f, keys: Object.fromEntries(f.keys), canOperate: requireRole(c.get("user"), "operator"),
       claudeToken, workerHeartbeat: beat ? beat.ticked_at.toISOString() : null,
     });
   });
@@ -164,7 +166,7 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
 
   app.get("/v1/items/:id", async (c) => {
     const id = c.req.param("id");
-    const detail = UUID.test(id) ? await itemDetail(d.pool, id, requireRole(c.get("user"), "operator"), now()) : null;
+    const detail = UUID.test(id) ? await itemDetail(d.pool, id, requireRole(c.get("user"), "operator"), now(), d.readBlob) : null;
     if (!detail) throw new Refused(404, "no such item");
     return c.json(detail);
   });

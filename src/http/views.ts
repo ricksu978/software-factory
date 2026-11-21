@@ -5,6 +5,7 @@ import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { pauseActive } from "./configuration.ts";
+import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
 export function escapeHtml(value: unknown): string {
@@ -111,7 +112,8 @@ const link = (id: string, title: string) => `<a href="/items/${escapeHtml(id)}">
 export function issueRef(externalId: string | null, repo: string | null): string {
   if (externalId === null) return "";
   const text = `#${escapeHtml(externalId)}`;
-  return repo && /^\d+$/.test(externalId) ? `<a href="https://github.com/${escapeHtml(repo)}/issues/${externalId}">${text}</a>` : text;
+  const url = issueUrl(repo, externalId);
+  return url ? `<a href="${escapeHtml(url)}">${text}</a>` : text;
 }
 
 /**
