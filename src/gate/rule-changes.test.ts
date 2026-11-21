@@ -82,7 +82,7 @@ test("the check holds each Before to main word for word and names the entry that
 test("a heading that isn't a spec section or a policy file is never read", async () => {
   const asked: string[] = [];
   const read = async (path: string) => (asked.push(path), "secret");
-  const paths = ["aspire-apphost/keycloak/factory-realm.json", "policy/../.env", "policy/sub/dor.md", ".factory/dor.md", "policy/dor.md.bak"];
+  const paths = ["aspire-apphost/keycloak/factory-realm.json", "policy/../.env", "policy/sub/dor.md", ".factory/sub/dor.md", "factory/dor.md", "policy/dor.md.bak"];
   const got = await checkRuleChanges(paths.map((path) => ({ place: { kind: "policy" as const, path }, before: "secret", after: "X." })), read);
   assert.deepEqual(asked, []);
   assert.deepEqual(got.map((c) => c.problem), paths.map((p) => `${p} isn't a spec section or a policy file of the factory.`));
@@ -110,4 +110,12 @@ test("the word diff marks only the words that change on each side", () => {
   assert.deepEqual(d.before.filter((w) => w.changed).map((w) => w.text), ["ten", "minute."]);
   assert.deepEqual(d.after.filter((w) => w.changed).map((w) => w.text), ["five", "thirty", "seconds."]);
   assert.equal(d.before.map((w) => w.text).join(" "), "A lease lasts ten minutes and the worker renews it every minute.");
+});
+
+test("a .factory/ policy heading is read by its first word, so a description may follow it", async () => {
+  const body = ["## Changes the factory's rules", "", "### `.factory/dor.md` line 8, the rules criterion", "**Before**", "> The item fits one Sprint.", "**After**", "> The item fits one Sprint or less.", ""].join("\n");
+  const [ch] = parseRuleChanges(body);
+  assert.deepEqual(ch.place, { kind: "policy", path: ".factory/dor.md" });
+  const [c] = await checkRuleChanges([ch], async (p) => (p === ".factory/dor.md" ? "- [ ] The item fits one Sprint.\n" : null));
+  assert.equal(c.problem, undefined);
 });

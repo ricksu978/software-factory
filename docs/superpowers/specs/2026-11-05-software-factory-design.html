@@ -3742,11 +3742,12 @@ Feature: Export invoices to CSV
 
     Each rule it changes gets a <code>### Spec §N</code> heading,
 
-    or a heading naming the policy file by its path, such as <code>### policy/dor.md</code>.
-    Only a Markdown file directly under <code>policy/</code> counts as a policy file: any other heading gets an entry problem and is never read, so an item can't use the check to probe the factory's other files.
+    or a heading naming the policy file by its path, such as <code>### .factory/dor.md</code> or <code>### policy/dor.md</code>.
+    The path is the heading's first word, so a description may follow it, as one may follow <code>§N</code>.
+    Only a Markdown file directly under <code>policy/</code> or <code>.factory/</code> counts as a policy file: any other heading gets an entry problem and is never read, so an item can't use the check to probe the factory's other files.
     Under each heading come
 
-    then <b>Before</b>, the rule's current text quoted word for word from <code>main</code>,
+    <b>Before</b>, the rule's current text quoted word for word from <code>main</code>,
 
     and <b>After</b>, the rule as it will read once the item ships,
 
@@ -3821,8 +3822,6 @@ Feature: Export invoices to CSV
     the approval is refused and nothing is logged,
 
     so the owner reloads the page and reviews the changes again.
-
-    An item already claimed keeps the section it was approved with.
 
     An edit anywhere else in the item doesn't ask for approval again,
 

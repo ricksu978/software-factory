@@ -7,8 +7,8 @@ import type { RuleChange, RulePlace } from "../store/rule-changes.ts";
 export const RULES_HEADING = "## Changes the factory's rules";
 /** The factory's spec, where section §N is the <section> whose <h2> opens with <span class="n">0N</span>. */
 export const SPEC_PATH = "docs/superpowers/specs/2026-11-05-software-factory-design.html";
-/** A policy file of the factory: a Markdown file directly under `policy/`. No other path of the factory's repo is read. */
-export const POLICY_PATH = /^policy\/[A-Za-z0-9_-]+\.md$/;
+/** A policy file of the factory: a Markdown file directly under `policy/` or `.factory/`. No other path of the factory's repo is read. */
+export const POLICY_PATH = /^(policy|\.factory)\/[A-Za-z0-9_-]+\.md$/;
 
 /** True when `path` is a file a rule change may name and the check may read: the spec, or a policy file of the factory. */
 export function isRulesFile(path: string): boolean {
@@ -60,7 +60,7 @@ const squash = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /**
  * Each rule the item's section changes, in its order. A "### Spec §N" heading names a spec section, and any other "###"
- * heading a policy file by its path. Under it, "**Before**" and "**After**" are each followed by their text as "> "
+ * heading a policy file by its path, its first word. Under it, "**Before**" and "**After**" are each followed by their text as "> "
  * quote lines, joined into one line. A part the entry doesn't give is null.
  */
 export function parseRuleChanges(body: string): RuleChange[] {
@@ -80,7 +80,9 @@ export function parseRuleChanges(body: string): RuleChange[] {
       flush();
       const name = h[1].replace(/`/g, "").trim();
       const spec = /^spec\s+§\s*(\d+)/i.exec(name);
-      cur = { place: spec ? { kind: "spec", section: `§${Number(spec[1])}` } : { kind: "policy", path: name }, before: null, after: null };
+      // A policy heading names its file by its first word, so a description may follow it, as one may follow "Spec §N".
+      const path = name.split(/\s+/)[0].replace(/[,:;.]+$/, "");
+      cur = { place: spec ? { kind: "spec", section: `§${Number(spec[1])}` } : { kind: "policy", path }, before: null, after: null };
       part = null;
       continue;
     }
