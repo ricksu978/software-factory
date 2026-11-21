@@ -75,6 +75,15 @@ function addCheck(world: object, sha: string, check: Rule): void {
   rules.set(key, [...(rules.get(key) ?? []), check]);
 }
 
+/** Asserts that `sha:<sha>` now holds `check` as its latest check of that name, and that the commit is named for PBI 292. */
+function assertHolds(world: object, sha: string, check: Rule): void {
+  const c = pbi292(world);
+  assert.deepEqual(c.roles.get(sha), { kind: "sha", sha }, `"${sha}" isn't named as a commit`);
+  const rules = (c.rules as unknown as Map<string, Rule[]>).get(`sha:${sha}`) ?? [];
+  const latest = rules.filter((r) => r.name === check.name).at(-1);
+  assert.deepEqual(latest, check, `"${sha}" doesn't hold the ${check.conclusion} check "${check.name}"`);
+}
+
 /** Puts every commit's checks into the fake repo host, the last check of each name winning. */
 function installCi(world: object): void {
   const host = pbi12(world).host;
@@ -182,15 +191,23 @@ Given("nobody has asked for changes on PR {int}", function (n: number) {
 // ---- CI ----
 
 Given("CI is still running on {string}", function (sha: string) {
-  addCheck(this, sha, { name: "ci", conclusion: "pending", url: "https://github.com/acme/widgets/actions/runs/7299", failingTests: [] });
+  const check: Rule = { name: "ci", conclusion: "pending", url: "https://github.com/acme/widgets/actions/runs/7299", failingTests: [] };
+  addCheck(this, sha, check);
+  assertHolds(this, sha, check);
 });
 
 Given("CI passed on {string}", function (sha: string) {
-  addCheck(this, sha, { name: "ci", conclusion: "success", url: PASSED_URL, failingTests: [] });
+  const check: Rule = { name: "ci", conclusion: "success", url: PASSED_URL, failingTests: [] };
+  addCheck(this, sha, check);
+  assertHolds(this, sha, check);
 });
 
 When("CI on {string} is re-run and reports the check {string} failed at {string}, failing the test {string}", function (sha: string, check: string, url: string, test: string) {
-  addCheck(this, sha, { name: check, conclusion: "failure", url, failingTests: [test] });
+  const before = (pbi292(this).rules as unknown as Map<string, Rule[]>).get(`sha:${sha}`) ?? [];
+  assert.ok(before.length > 0, `CI never reported on "${sha}", so there's nothing to re-run`);
+  const rule: Rule = { name: check, conclusion: "failure", url, failingTests: [test] };
+  addCheck(this, sha, rule);
+  assertHolds(this, sha, rule);
 });
 
 Given("the PR's earlier commit {string} had the check {string} fail at {string}, failing the test {string}", function (sha: string, check: string, url: string, test: string) {
