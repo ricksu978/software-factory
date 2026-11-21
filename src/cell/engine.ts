@@ -526,6 +526,14 @@ export function gateCover(command: string, gateCommands: string[]): { covered: s
   return covered.length ? { covered, rest: parts.filter((p) => !gate.has(p)) } : null;
 }
 
+/** Whether an `&&` part the gate didn't run comes before one it did, so it could change what the gate command reads. */
+function uncoveredFirst(command: string, gateCommands: string[]): boolean {
+  const gate = new Set(gateCommands.map(squash));
+  const parts = andParts(command) ?? [];
+  const first = parts.findIndex((p) => !gate.has(p));
+  return first >= 0 && parts.some((p, i) => i > first && gate.has(p));
+}
+
 /** What a line's reason says of the gate's run that stood in for its covered parts. */
 const gateReason = (g: GateRun, covered: string[]) =>
   `Green's gate passed ${covered.map((c) => `\`${c}\``).join(" and ")} at ${g.sha.slice(0, 7)} with ${g.passed} scenarios passed and ${g.failed} failed.`;
@@ -585,13 +593,25 @@ export async function checkDefinitionOfDone(d: {
   }
   const gate = d.gate && d.gate.sha === head ? d.gate : null;
   for (const c of rest.filter((x) => x.run)) {
-    const cover = gate ? gateCover(c.run!, gate.commands) : null;
+    let cover = gate ? gateCover(c.run!, gate.commands) : null;
     if (cover && !cover.rest.length) {
       verdicts.push({ index: c.index, criterion: c.text, status: "passed", reason: gateReason(gate!, cover.covered) });
       continue;
     }
-    const command = cover ? cover.rest.join(" && ") : c.run!;
-    const r = await sh(command, dir);
+    let command = cover ? cover.rest.join(" && ") : c.run!;
+    // A part before a covered one can write files the gate command after it reads, as a build does before the tests.
+    // When the parts run changed the checkout's files, or that can't be told, the gate's run didn't see what the line
+    // asks for, so the line runs whole as before.
+    const before = cover && uncoveredFirst(c.run!, gate!.commands) ? await sh("git status --porcelain --ignored", dir) : null;
+    let r = await sh(command, dir);
+    if (before && r.code === 0) {
+      const after = await sh("git status --porcelain --ignored", dir);
+      if (before.code !== 0 || after.code !== 0 || before.all !== after.all) {
+        command = c.run!;
+        cover = null;
+        r = await sh(command, dir);
+      }
+    }
     let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
     if (r.code !== 0 && d.onRunFailed) {
       const prefix = await d.onRunFailed({ ...c, run: command }, r);

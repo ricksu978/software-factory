@@ -3089,6 +3089,10 @@ Feature: Export invoices to CSV
 
     A line with a part that changes the shell's state for the parts after it, such as <code>cd web</code> or <code>export X=1</code>, runs whole.
 
+    So does a line whose parts before a gate command change the checkout's files, as <code>npm run build &amp;&amp; npm test</code> does,
+
+    since the gate's tests ran before that build: the check compares <code>git status --porcelain --ignored</code> before and after the parts it runs.
+
     A line joined any other way,
 
     with a pipe, <code>||</code>, <code>;</code> or a subshell,

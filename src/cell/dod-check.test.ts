@@ -2,6 +2,7 @@
 // temporary checkout, where the command leaves a mark file so a test can tell whether it ran.
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -82,9 +83,10 @@ describe("checkDefinitionOfDone with a ci: line", () => {
 // PBI 389: a passing Green gate at the commit being checked stands in for the run: lines its commands cover.
 describe("checkDefinitionOfDone with Green's gate run", () => {
   const gate = (over: Partial<GateRun> = {}): GateRun => ({ sha: "abc1234ffff", commands: ["npm test", `npm run bdd -- --tags "not @local"`, "npm run lint"], passed: 12, failed: 0, ...over });
-  const run = async (lines: string[], g: GateRun | null) => {
+  const run = async (lines: string[], g: GateRun | null, repo = true) => {
     const dir = mkdtempSync(join(tmpdir(), "dod-check-"));
     dirs.push(dir);
+    if (repo) execFileSync("git", ["init", "-q", dir]);
     const text = lines.map((l) => `- [ ] ${l}`).join("\n");
     const dod: Policy = { name: "dod", source: "repo", sha: "s", text, criteria: parseCriteria(text) };
     const r = await checkDefinitionOfDone({ dir, head: "abc1234ffff", dod, ciChecks: null, gate: g, judge: async () => [], store: async () => {} });
@@ -100,11 +102,35 @@ describe("checkDefinitionOfDone with Green's gate run", () => {
   });
 
   test("a line joined with && runs only the parts the gate didn't run", async () => {
-    const r = await run([`Types and tests. \`run: ${mark(0)} && npm test\``], gate());
+    // A part that writes no file, as `tsc --noEmit` writes none.
+    const quiet = `node -e "process.exit(0)"`;
+    const r = await run([`Types and tests. \`run: ${quiet} && npm test\``], gate());
+    assert.equal(r.verdicts[0].status, "passed");
+    assert.match(r.verdicts[0].reason, /Green's gate passed `npm test`/);
+    assert.ok(r.verdicts[0].reason.includes(`\`${quiet}\` exited 0`), r.verdicts[0].reason);
+  });
+
+  // A build that writes a file, and a test that fails once the fresh build is there.
+  const build = `node -e "require('fs').writeFileSync('dist.txt','new')"`;
+  const freshFails = `node -e "process.exit(require('fs').existsSync('dist.txt') ? 1 : 0)"`;
+
+  test("a part before a gate command that changes the checkout's files runs the line whole", async () => {
+    const r = await run([`Builds and tests pass. \`run: ${build} && ${freshFails}\``], gate({ commands: ["npm run bdd", freshFails, "true"] }));
+    assert.equal(r.verdicts[0].status, "failed");
+    assert.match(r.verdicts[0].reason, /^exit 1/);
+    assert.doesNotMatch(r.verdicts[0].reason, /Green's gate/);
+  });
+
+  test("a part after the gate commands that changes files still runs alone", async () => {
+    const r = await run([`Tests pass. \`run: npm test && ${mark(0)}\``], gate());
     assert.equal(r.ran, true);
     assert.equal(r.verdicts[0].status, "passed");
     assert.match(r.verdicts[0].reason, /Green's gate passed `npm test`/);
-    assert.ok(r.verdicts[0].reason.includes(`\`${mark(0)}\` exited 0`), r.verdicts[0].reason);
+  });
+
+  test("outside a git checkout, where changes can't be told, a part before a gate command runs the line whole", async () => {
+    const r = await run([`Builds and tests pass. \`run: ${build} && ${freshFails}\``], gate({ commands: ["npm run bdd", freshFails, "true"] }), false);
+    assert.equal(r.verdicts[0].status, "failed");
   });
 
   test("an uncovered part that fails fails the line with its exit code first", async () => {

@@ -824,6 +824,12 @@ A task that touches one of them follows this section and does not restate it.
       the reason adds that the rest exited 0,
       and when it fails the reason starts `exit <code>` as before,
       and the base re-run of PBI 215 runs only the rest.
+      When a part the gate didn't run comes before one it did,
+      the check snapshots `git status --porcelain --ignored` before and after the rest runs,
+      and when the rest changed a file, or either snapshot fails,
+      it runs the line whole as before,
+      since a build in `npm run build && npm test` changes what the gate's `npm test` read.
+      `tsc --noEmit` writes nothing, so this repo's line 1 still runs only the typecheck.
       A line with no covered part runs whole.
       The gate run lasts only for the claim,
       so a later claim's checks run every line.
