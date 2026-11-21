@@ -3397,7 +3397,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     `ctx.missingPermissions`,
     each permission the App lacks on the repo by GitHub's name,
     fails the item as an engine rule with criterion `app permission`,
-    so `READINESS_VERSION` is 3.
+    which raised `READINESS_VERSION` to 3.
     The poller sets it per repo from `repoHost.missingPermissions`,
     which on GitHub reads `GET /repos/{owner}/{repo}/installation` and names each of `CELL_PERMISSIONS` the installation holds below the level asked.
     A repo missing any adds them to its readiness sha,
@@ -3430,6 +3430,9 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so deleting an approved section has the judge check the item again.
     That check stores no rule changes,
     so the next poll leaves the item Queued.
+    Holding the section's Before to `main` and holding an item that changes the rules for the owner are engine rules,
+    so `READINESS_VERSION` is 4,
+    and the raise re-checks every NotReady item under them.
   - **Oversized items (PBI 143).**
     The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
