@@ -1123,6 +1123,28 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   `npm run bdd` runs every feature file with cucumber-js and writes Cucumber Messages to `reports/bdd.ndjson`,
   the report Task 10 reads.
   Imports use explicit `.ts` extensions.
+  PBI 376 adds `npm run bdd:repeat -- --times <n> --name "<scenario name>"` (`scripts/bdd-repeat.ts`,
+  with its logic in `src/bdd/repeat.ts`).
+  A dry run first checks that a scenario has exactly that name.
+  Then it runs cucumber-js with `npm run bdd`'s `--import` n times,
+  one process per run,
+  in `BDD_REPEAT_CWD` when that's set.
+  It prints "run <i> of <n> failed" with that run's output for each failure,
+  ends with "<passed> of <n> runs passed",
+  and exits 0 only when every run passed.
+  Each run passes `--force-exit`,
+  so it ends once cucumber-js has reported rather than sit out the 10 seconds an idle pg pool client keeps a process alive.
+  A cell kills `npm run bdd` after 15 minutes (`COMMAND_TIMEOUT_MS` in `src/cell/engine.ts`),
+  and PBI 376's @ac-4 scenarios each wait out the takeover's 30 seconds on every run,
+  so the first of them starts the script for all three faults at once and each scenario reads its own fault's run.
+  The flake it found in PBI 157's takeover scenario was in the harness.
+  When the first worker noticed its lost lock late,
+  its board poll could take in a copy of the item PBI 17's steps had just queued.
+  `rehome` in `features/steps/pbi-156.steps.ts` moved that copy to a stray source with no adapter,
+  and the copy still ranked first,
+  so every tick of the standby failed on pinning it.
+  `rehome` now holds each copy it moves,
+  and the scheduler never claims a held item.
 
 - [ ] **Step 1:
   Write `package.json`** with `"type": "module"`,

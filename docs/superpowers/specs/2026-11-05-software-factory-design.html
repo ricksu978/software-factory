@@ -2368,6 +2368,44 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Proving a scenario steady.</b>
+
+    A scenario that fails now and then turns <code>main</code> red and fails items that had nothing to do with it.
+
+    <code>npm run bdd:repeat -- --times &lt;n&gt; --name "&lt;scenario name&gt;"</code> runs the one scenario with exactly that name n times,
+
+    one run after another,
+
+    each in a cucumber-js process of its own,
+
+    as <code>npm run bdd</code> runs it.
+
+    A failed run doesn't stop the runs after it.
+
+    The script names each failed run with its output,
+
+    says how many of the n passed,
+
+    and exits 0 only when every run passed.
+
+    Each run ends as soon as cucumber-js has reported,
+
+    so a handle left open doesn't add to its time.
+
+    A name that matches no scenario fails,
+
+    and so does a run count that isn't a whole number above zero,
+
+    which runs nothing.
+
+    A fix for a flaky scenario shows 20 passing runs in a row,
+
+    and a scenario that waits for something keeps the same deadline,
+
+    so it still fails when the behaviour doesn't happen (PBI 376).
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Reading runner results.</b>
 
     Every runner writes a Cucumber Messages report,
