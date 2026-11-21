@@ -4796,6 +4796,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         The two ports are:
         the control plane's from `CELL_CONTROL_URL`,
         and Azurite's from `FACTORY_BLOB`.
+        **Refused ports (PBI 223, redesign step 4b).**
+        Since step 4a `CELL_CONTROL_URL` names the cell API on 7401.
+        `egressAllow` throws an error naming the port when it names 7400,
+        today's dashboard,
+        or 7402,
+        the orchestrator API,
+        so `ensureEgress` refuses before any `docker` command and no proxy starts.
+        The proxy itself answers 403 to every request,
+        plain or CONNECT,
+        to a port in `EGRESS_REFUSED_PORTS`,
+        whatever its allowlist names.
+        Unset, that list is 7400 and 7402.
+        A test sets it to the free ports that stand for them.
         The proxy carries a SHA-256 of its whole configuration,
         the allowed hosts and both ports,
         in a container label.

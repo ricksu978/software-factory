@@ -1,7 +1,8 @@
 // The cell API as its own service (redesign step 4a, 2026-11-07 design §06 and §12). It answers cells on port 7401:
-// today's cell routes under /internal/cells and the model gateway under /internal/model. Today's control plane,
-// src/main.ts, no longer serves them. The worker mirrors the transitions its routes commit from their outbox rows
-// (PBI 219).
+// today's cell routes under /internal/cells and the model gateway under /internal/model, and on the local platform
+// PBI 2's probes. Today's control plane, src/main.ts, no longer serves the cell routes or the gateway. A cell reaches
+// this service through the egress proxy, and nothing else of the factory's (step 4b). The worker mirrors the
+// transitions its routes commit from their outbox rows (PBI 219).
 import { App } from "@octokit/app";
 import { loadAppKey } from "../adapters/github/app-key.ts";
 import { TimedOctokit } from "../adapters/github/timed.ts";
@@ -12,6 +13,7 @@ import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { stageAfter } from "../config/sop.ts";
 import { blobUploadUrl, cellApi } from "../control/cell-api.ts";
+import { platformProbes } from "../control/probes.ts";
 import { startServer, type Handler } from "../http/server.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { createPool } from "../store/db.ts";
@@ -30,6 +32,8 @@ export type CellApiDeps = {
   /** Where the model gateway sends a cell's model request: https://api.anthropic.com outside a test. */
   modelUpstream: string;
   uploadUrl: (path: string) => Promise<string>;
+  /** On the local platform, the cell API serves PBI 2's probes as well (redesign step 4b). Off by default. */
+  local?: boolean;
 };
 
 /** The cell routes and the model gateway as one handler. Anything else falls through, so the server answers 404. */
@@ -46,8 +50,10 @@ export function cellApiHandler(d: CellApiDeps): Handler {
 
 /** The cell API's handlers on `port`, once its settings are read. */
 export async function serveCellApi(d: CellApiDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
+  // PBI 2's probes come first, so the ping is answered before the cell routes ask for a run token.
+  const handlers = d.local ? [platformProbes(d), cellApiHandler(d)] : [cellApiHandler(d)];
   // Bound on every interface, as the control plane is, so a cell reaches it over IPv4 or IPv6.
-  const server = await startServer([cellApiHandler(d)], { port, host: "::" });
+  const server = await startServer(handlers, { port, host: "::" });
   return {
     server,
     async stop() {
@@ -77,7 +83,7 @@ export async function main(env: Record<string, string | undefined>): Promise<{ s
     const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
     const served = await serveCellApi({
       pool, sources, repoHost, secret, claudeToken, modelUpstream: "https://api.anthropic.com",
-      uploadUrl: blobUploadUrl(blob, env.CELL_BLOB_HOST),
+      uploadUrl: blobUploadUrl(blob, env.CELL_BLOB_HOST), local: env.FACTORY_ENV === "local",
     }, port);
     console.log(`The cell API answers on port ${port}.`);
     return {

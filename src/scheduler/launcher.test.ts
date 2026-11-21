@@ -64,8 +64,8 @@ describe("dockerLauncher", () => {
 });
 
 describe("ensureEgress", () => {
-  const cfg = { image: "factory-cell:local", controlUrl: "http://host.docker.internal:7400", blob: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=KEY;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;" };
-  const allow = "EGRESS_ALLOW=tls:github.com:443,tls:api.github.com:443,tls:registry.npmjs.org:443,http:host.docker.internal:7400,sas:host.docker.internal:7410";
+  const cfg = { image: "factory-cell:local", controlUrl: "http://host.docker.internal:7401", blob: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=KEY;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;" };
+  const allow = "EGRESS_ALLOW=tls:github.com:443,tls:api.github.com:443,tls:registry.npmjs.org:443,http:host.docker.internal:7401,sas:host.docker.internal:7410";
   const verbs = (calls: string[][]) => calls.map((c) => c.slice(1, 3).join(" "));
 
   /** Boots once against an empty Docker to learn this configuration's label. */
@@ -106,8 +106,16 @@ describe("ensureEgress", () => {
     assert.ok(calls[3]!.includes(`factory.egress.config=${label}`));
     // A changed pinned port changes the label.
     const moved = stub((args) => (args[0] === "inspect" ? `true ${label}\n` : ""));
-    await ensureEgress({ ...cfg, controlUrl: "http://host.docker.internal:7401", run: moved.run });
+    await ensureEgress({ ...cfg, controlUrl: "http://host.docker.internal:7404", run: moved.run });
     assert.deepEqual(verbs(moved.calls), ["network create", "inspect --format", "rm -f", "run -d"]);
+  });
+
+  test("refuses a cell API address on the dashboard's port 7400 or the API's port 7402, before running any docker command", async () => {
+    for (const port of [7400, 7402]) {
+      const { calls, run } = stub(() => "");
+      await assert.rejects(ensureEgress({ ...cfg, controlUrl: `http://host.docker.internal:${port}`, run }), new RegExp(`\\b${port}\\b`));
+      assert.deepEqual(calls, []);
+    }
   });
 
   test("any other Docker failure is thrown", async () => {
