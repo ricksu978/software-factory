@@ -46,7 +46,15 @@ export type PollDeps = {
    * directory beside the code.
    */
   defaults?: DefaultPolicies;
+  /**
+   * The factory's own repo, where its spec and policy files live (PBI 395). The readiness check reads each rule an item
+   * says it changes from `main` here, to hold its quoted Before to the rule's text word for word.
+   */
+  factoryRepo?: FactoryRepo;
 };
+
+/** Reads a file of the factory's own repo at `ref`, or null when the file isn't there (PBI 395). */
+export type FactoryRepo = { readFile(ref: string, path: string): Promise<string | null> };
 
 type Row = {
   id: string; external_id: string; state: ItemState; held: boolean; criteria_hash: string | null;
