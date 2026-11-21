@@ -1822,6 +1822,58 @@ describe("runCell", () => {
     assert.ok(!h.routes().includes("/repo/postReview"));
   });
 
+  // PBI 393: under a drain or a restart being prepared, a failed attempt with retries left ends the claim at that
+  // attempt boundary. Its failed report carries the tries the stage spent and its findings, for the next claim.
+  const statuses = (h: ReturnType<typeof harness>, stage: string) =>
+    h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => [c.body.attempt, c.body.status]);
+  test("a cell told restarting whose green attempt fails starts no retry and releases its claim (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", lease: told });
+    h.deps.config.commands.test = "echo 'not ok 1 - totals include VAT'; exit 1";
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.ok(failed.body.retryCarry.findings.some((f: string) => f.includes("totals include VAT")));
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.transitions().length);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+    assert.ok(!git(h.root, "--git-dir", h.origin, "log", "--format=%s", BRANCH).split("\n").some((m) => m.startsWith("work in progress")));
+  });
+
+  test("a cell told restarting whose red attempt fails starts no retry and releases its claim (PBI 393)", async () => {
+    // Red's scenarios pass before any behaviour exists, so its attempt fails.
+    const h = harness({ nextStage: "red", lease: told, script: (_a, stage) => { if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds", "Criterion 2 holds"], "green")); } });
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "red"), [[1, "started"], [1, "failed"]]);
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+  });
+
+  test("a cell told restarting whose green has no retries left fails the item as before (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", lease: told, ctx: { stageAttempts: { green: 3 }, retry: { stageId: "green", tried: 3, findings: ["x"] } } });
+    h.deps.config.commands.test = "false";
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(statuses(h, "green"), [[4, "started"], [4, "failed"]]);
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+  });
+
+  test("a claim after an attempt boundary spends the stage's remaining retries, with the failed attempt's findings in its brief (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", ctx: { stageAttempts: { green: 1 }, retry: { stageId: "green", tried: 1, findings: ["totals include VAT fails"] } } });
+    h.deps.config.commands.test = "false";
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.status === "started").map((c) => c.body.attempt), [2, 3, 4]);
+    const first = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(first.prompt, /## Your last attempt failed\n\n- totals include VAT fails/);
+    assert.doesNotMatch(first.prompt, /Carry on from the earlier work/);
+  });
+
+  test("a carried-over attempt counts only once: a later pass back to green doesn't spend it again (PBI 393)", async () => {
+    const h = harness({ nextStage: "red", ctx: { retry: { stageId: "green", tried: 1, findings: ["old"] } } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
+    const first = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.doesNotMatch(first.prompt, /Your last attempt failed/, "a carry for a stage the claim didn't start at isn't used");
+  });
+
   test("a restart prepared during green's push still ends the cell at the boundary", async () => {
     let on = false;
     const h = harness({ nextStage: "green", lease: async () => ({ stop: false, restarting: on }) });

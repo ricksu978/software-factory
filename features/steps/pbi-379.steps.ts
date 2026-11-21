@@ -26,6 +26,8 @@ type Ctx = {
   outcomes: Map<string, Outcome[]>;
   /** Retries set for a stage, over the SOP's own. */
   retries: Map<string, number>;
+  /** The attempt whose start sets the drain on the fake control plane, as an operator draining mid-retry does (PBI 393). */
+  drainAt?: { stage: string; attempt: number };
 };
 
 export function ctx(world: object): Ctx {
@@ -117,8 +119,12 @@ When("an operator drains the factory", function () {
   events(this, p301(this).stage!).push({ draining: true });
 });
 
-When("an operator drains the factory while red's first attempt runs", function () {
-  events(this, "red").push({ draining: true });
+// PBI 393: the drain is set as the attempt starts, so it holds when the attempt ends, whether or not a renewal came.
+When(/^an operator drains the factory while (\S+)'s (second|third) attempt runs$/, function (stage: string, n: string) {
+  const c = p301(this);
+  assert.equal(c.stage, stage, `the run is at ${c.stage}, not ${stage}`);
+  assert.equal(c.ran, false, "the cell already ran");
+  ctx(this).drainAt = { stage, attempt: ordinal(n) };
 });
 
 Given("red allows {int} retries", function (n: number) {
@@ -137,7 +143,8 @@ export function attemptNow(p: Pbi18): number {
 /**
  * Scripts the cell's stages: each SOP retry the scenario set, and each attempt it scripted to fail. A green attempt
  * that fails leaves the item's scenarios failing, so its checks fail. A red attempt that fails leaves them passing,
- * so they don't fail on a Then. PBI 140's "green allows {int} retry" counts too.
+ * so they don't fail on a Then. PBI 140's "green allows {int} retry" counts too. An attempt an operator drains the
+ * factory during sets the drain as it starts.
  */
 export function script(world: object, p: Pbi18): void {
   const c = ctx(world);
@@ -148,6 +155,7 @@ export function script(world: object, p: Pbi18): void {
     for (const s of sop.stages) if (retries.has(s.id)) s.retries = retries.get(s.id);
   };
   p.wrapAgent = (base) => async (a: any) => {
+    if (c.drainAt && c.drainAt.stage === p.stage && c.drainAt.attempt === attemptNow(p)) p301(world).draining = true;
     const out = await base(a);
     const stage = p.stage;
     const outcome = c.outcomes.get(stage)?.[attemptNow(p) - 1];

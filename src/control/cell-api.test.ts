@@ -285,6 +285,7 @@ describe("cell API", dbTest, () => {
       stageAttempts: { specify: 2 },
       failedCiHeads: [],
       resume: null,
+      retry: null,
     });
   });
 
@@ -504,6 +505,22 @@ describe("cell API", dbTest, () => {
     const a = { sha: "c0ffee3", checks: [{ name: "ci", url: "https://github.com/acme/widgets/actions/runs/2", failingTests: [] }] };
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, ci_failure) values ($1, 'open-pr', 1, 'failed', $2)", [cell.runId, JSON.stringify(a)]);
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a]);
+  });
+
+  test("context hands the next claim the tries and findings of a failed attempt that ended its claim at the attempt boundary (PBI 393)", async () => {
+    const cell = await claimed("green");
+    const report = (attempt: number, status: string, extra: Record<string, unknown> = {}) => send(cell.runId, cell.token, "POST", "/stage",
+      { stageId: "green", attempt, status, model: "m", tokensIn: 0, tokensOut: 0, costUsd: 0, ...extra });
+    assert.equal((await report(1, "started")).status, 200);
+    assert.equal((await report(1, "failed", { retryCarry: { tried: 1, findings: ["totals include VAT fails"] } })).status, 200);
+    const body = (await send(cell.runId, cell.token, "GET", "/context")).body;
+    assert.deepEqual(body.retry, { stageId: "green", tried: 1, findings: ["totals include VAT fails"] });
+    assert.equal(body.resume, null);
+    assert.equal((await report(2, "failed", { retryCarry: { tried: "x" } })).status, 400);
+    // A later attempt that failed within its claim carries nothing over.
+    await report(2, "started");
+    await report(2, "failed");
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.retry, null);
   });
 
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {

@@ -1,8 +1,8 @@
 // Step definitions for features/pbi-393-drain-ends-cells-at-attempt-boundary.feature. They build on PBI 140's, PBI
 // 301's and PBI 379's steps and hooks, which also run for @pbi-393: PBI 140's clock and cell API, PBI 301's cell engine
 // against a fake control plane or, for @db, as the run's cell against the real cell API, and PBI 379's drain and
-// scripted attempts. Only what those have no wording for lives here: an attempt that fails at address or under a drain
-// set mid-retry, the attempt boundary a cell ends its claim at, and the new cell that claims the item once the drain or
+// scripted attempts, the drain set mid-retry included. Only what those have no wording for lives here: an attempt that
+// fails at address, the attempt boundary a cell ends its claim at, and the new cell that claims the item once the drain or
 // restart is cleared, with the brief it writes.
 // A scenario that only scripts its attempts, as "green's first attempt fails its checks" does, has no step that runs
 // the cell. A hook runs it before the scenario's first Then, as the last When would have.
@@ -20,8 +20,6 @@ import { long, need } from "./pbi-8.steps.ts";
 type Brief = { stage: string; attempt: number; prompt: string };
 
 type Ctx = {
-  /** The attempt whose start sets the drain on the fake control plane, as an operator draining mid-retry does. */
-  drainAt?: { stage: string; attempt: number };
   /** The test a green attempt fails, by attempt, named in the report instead of the item's first scenario. */
   failingTest: Map<number, string>;
   /** The prompts the new cell's stages sent its agent, with the attempt each was sent in. A stage's brief is its attempt's first. */
@@ -40,8 +38,7 @@ function ctx(world: object): Ctx {
 const JUDGED = "The change reads well.";
 
 /**
- * PBI 379's scripting, and on top of it: an address attempt scripted to fail, whose DoD check judges a line failed, the
- * drain an operator sets as a scripted attempt starts, a green attempt that fails a named test, and each brief.
+ * PBI 379's scripting, and on top of it: an address attempt scripted to fail, whose DoD check judges a line failed, a green attempt that fails a named test, and each brief.
  */
 function scriptMore(world: object, p: Pbi18): void {
   script(world, p);
@@ -53,7 +50,6 @@ function scriptMore(world: object, p: Pbi18): void {
     return async (a: any) => {
       const stage = p.stage;
       const attempt = attemptNow(p);
-      if (c.drainAt && c.drainAt.stage === stage && c.drainAt.attempt === attempt) p301(world).draining = true;
       const judge = String(a.prompt).startsWith("# Definition of Done");
       if (!judge && !a.agent) c.briefs.push({ stage, attempt, prompt: a.prompt });
       const out = await wrapped(a);
@@ -93,13 +89,6 @@ Given("address allows {int} retries", function (n: number) {
 
 When(/^(green|address)'s first attempt fails$/, function (stage: string) {
   scriptAttempt(this, stage, 1, "fail");
-});
-
-When(/^an operator drains the factory while (\S+)'s (second|third) attempt runs$/, function (stage: string, n: string) {
-  const c = p301(this);
-  assert.equal(c.stage, stage, `the run is at ${c.stage}, not ${stage}`);
-  assert.equal(c.ran, false, "the cell already ran");
-  ctx(this).drainAt = { stage, attempt: ordinal(n) };
 });
 
 Then(/^the cell starts no (second|third) (\S+) attempt$/, function (n: string, stage: string) {

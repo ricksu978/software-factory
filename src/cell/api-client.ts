@@ -34,6 +34,11 @@ export type StageReport = {
    * and each failed check, with its URL and the tests it names as failing. Floor and the item's page show it.
    */
   ciFailure?: CiFailure;
+  /**
+   * PBI 393: set on a failed attempt that ends the claim at the attempt boundary, under a drain or a restart being
+   * prepared: the tries its stage had spent and the attempt's findings, which the next claim's context hands back.
+   */
+  retryCarry?: { tried: number; findings: string[] };
 };
 /** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
 export type { CiFailure };
