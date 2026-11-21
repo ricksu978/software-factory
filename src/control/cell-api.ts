@@ -267,10 +267,11 @@ const routes: Record<string, Route> = {
       "select stage_id, max(attempt) as attempt from stage_run where run_id = $1 group by stage_id",
       [run.run_id],
     );
-    // PBI 315: each head CI failed on in the run's earlier claims, as its Green attempts reported it, oldest first, so
-    // the next claim neither reads CI on it again nor charges an attempt for it.
+    // PBI 315: each head CI failed on in the run's earlier claims, oldest first, so the next claim neither reads CI on
+    // it again nor charges an attempt for it. Any stage's row counts: open-pr, address and pr-review report the failure
+    // they found on their failed attempt, which a claim ending before Green starts would otherwise lose.
     const failed = await c.query<{ ci_failure: CiFailure }>(
-      `select ci_failure from stage_run where run_id = $1 and stage_id = 'green' and ci_failure is not null
+      `select ci_failure from stage_run where run_id = $1 and ci_failure is not null
        order by started_at, attempt`,
       [run.run_id],
     );

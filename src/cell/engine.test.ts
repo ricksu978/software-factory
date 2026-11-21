@@ -1468,6 +1468,29 @@ describe("runCell", () => {
     assert.match(h.transitions().at(-1).question.body, /gave up/);
   });
 
+  // PBI 315: a claim that ends at the boundary after open-pr's CI failure, on a drain or a restart, before Green
+  // starts, still leaves the head on the run, so the next claim on it goes back to Green without reading CI again.
+  test("a claim that ends at the boundary after open-pr's CI failure hands the head to the next claim, which reads no CI on it and charges no open-pr", async () => {
+    let restarting = true;
+    const h = harness({ nextStage: "open-pr", lease: async () => ({ stop: false, restarting }) });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failedOpenPr = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.equal(failedOpenPr.body.ciFailure?.sha, head);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "green"));
+    const mark = h.calls.length;
+    restarting = false;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", failedCiHeads: [failedOpenPr.body.ciFailure], stageAttempts: { "open-pr": 1 } };
+    await h.run();
+    const claim2 = h.calls.slice(mark);
+    assert.equal(claim2.filter((c) => c.route === "/checks" && c.body.sha === head).length, 0);
+    // The first stage the next claim starts is Green, fixing that failure: no open-pr attempt is charged on the head.
+    const firstStarted = claim2.find((c) => c.route === "/stage" && c.body.status === "started")!;
+    assert.equal(firstStarted.body.stageId, "green");
+    assert.equal(firstStarted.body.ciFailure?.sha, head);
+  });
+
   // PBI 317: the factory's answer to an older "Address failed" question naming only CI failures sends the run to Green.
   test("a claim at green on the factory's CI answer gives Green the failed checks of the PR's head, read before the base merge", async () => {
     const asked: string[] = [];

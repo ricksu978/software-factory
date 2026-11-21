@@ -499,6 +499,13 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a, b]);
   });
 
+  test("context hands the next claim a head CI failed on that only open-pr's failed attempt recorded (PBI 315)", async () => {
+    const cell = await claimed("open-pr");
+    const a = { sha: "c0ffee3", checks: [{ name: "ci", url: "https://github.com/acme/widgets/actions/runs/2", failingTests: [] }] };
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, ci_failure) values ($1, 'open-pr', 1, 'failed', $2)", [cell.runId, JSON.stringify(a)]);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a]);
+  });
+
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'red', 1, 'passed'), ($1, 'green', 1, 'stopped')", [cell.runId]);
