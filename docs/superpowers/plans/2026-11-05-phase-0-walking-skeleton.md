@@ -825,8 +825,10 @@ A task that touches one of them follows this section and does not restate it.
       and when it fails the reason starts `exit <code>` as before,
       and the base re-run of PBI 215 runs only the rest.
       When a part the gate didn't run comes before one it did,
-      the check snapshots `git status --porcelain --ignored` before and after the rest runs,
-      and when the rest changed a file, or either snapshot fails,
+      the check records each file and folder in the checkout outside `.git`, ignored ones included,
+      with its size, inode and change times, before and after the rest runs (`fileStamps`),
+      so a rebuild inside an existing ignored `dist/` shows as a change, which `git status` can't show.
+      When the rest created, removed or rewrote a file, or either record can't be read,
       it runs the line whole as before,
       since a build in `npm run build && npm test` changes what the gate's `npm test` read.
       `tsc --noEmit` writes nothing, so this repo's line 1 still runs only the typecheck.
