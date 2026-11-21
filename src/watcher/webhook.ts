@@ -2,7 +2,7 @@
 // acted on once, so a redelivery never produces a second event (spec §10).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import { botKey, loginKey, type ChangeCause, type FactoryWebhookEvent } from "../adapters/types.ts";
+import { botKey, loginKey, type ChangeCause, type FactoryWebhookEvent, type RepoHost } from "../adapters/types.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
@@ -22,6 +22,11 @@ export type WebhookDeps = {
   pool: pg.Pool;
   secret: string;
   parse: (headers: Record<string, string>, body: unknown) => FactoryWebhookEvent;
+  /**
+   * PBI 235: where a `checks_completed` delivery reads the PR's head and the checks CI reported on it, so a failure on
+   * the head of an InReview item's PR sends the item back to address. Unset, such a delivery only records its event.
+   */
+  repoHost?: RepoHost;
 };
 
 /**
