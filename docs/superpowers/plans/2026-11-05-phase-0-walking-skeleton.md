@@ -6206,6 +6206,45 @@ from spec §6 rows 1 to 7:
   so it serves a build of the checkout it runs beside.
   `aspire publish` runs the same script through the BFF's `withBuildScript('build')`,
   and the build needs the devDependencies.
+- Since step 8b (2026-11-07 design,
+  §04 and §05,
+  PBI 279),
+  the SPA has Floor at `/`,
+  Run detail at `/runs/{id}`,
+  Activity at `/activity` and the Phase 0 report at `/phase0`,
+  in `web/src/pages/`,
+  routed by `web/src/routes.ts`,
+  which also names the addresses the pages link to,
+  and drawn by `web/src/App.tsx`.
+  An issue's GitHub address comes from `issueUrl` in `src/core/links.ts`,
+  which today's dashboard uses too.
+  They show what today's pages in `src/http/views.ts` show,
+  in the same words,
+  from one read each through `readFloor`,
+  `readItem`,
+  `readPhase0` and `readActivity` in `web/src/api.ts`.
+  Their sentences are in `web/src/lines.ts`,
+  and their submit handlers in `web/src/forms.ts`:
+  an override goes to `/bff/v1/overrides` and a sign-off or answer to `/bff/v1/items/{id}/decisions`,
+  a reason or an answer left empty or holding only spaces is refused and nothing is sent,
+  an accepted form reads the page again,
+  and if that read fails the page says the factory accepted it and asks for a reload before sending it again,
+  and a refused one shows the API's error as a sentence.
+  Run detail offers the Sign off form only when it has feature files up for sign-off.
+  Until the cell API stores the run's criteria and files at the scenarios sha,
+  it says the scenarios can't be shown here yet and sends the owner to today's dashboard to sign off.
+  `GET /v1/items/{id}` answers the SPA's `ItemData`,
+  filled by the dashboard's own `itemStanding`,
+  `fixingCi`,
+  `verdicts` and `criteriaWithScenarios` in `src/http/routes.ts` and the run's `run_file` snapshots,
+  and `GET /v1/floor` sends its claim keys as an object.
+  `web/src/lines.test.ts`,
+  `web/src/forms.test.ts`,
+  `web/src/routes.test.ts`,
+  `web/src/page.test.ts`,
+  `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
+  and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
+  Today's dashboard keeps serving these pages on 7400 until step 9.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,
