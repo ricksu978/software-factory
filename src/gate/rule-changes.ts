@@ -7,6 +7,14 @@ import type { RuleChange, RulePlace } from "../store/rule-changes.ts";
 export const RULES_HEADING = "## Changes the factory's rules";
 /** The factory's spec, where section §N is the <section> whose <h2> opens with <span class="n">0N</span>. */
 export const SPEC_PATH = "docs/superpowers/specs/2026-11-05-software-factory-design.html";
+/** A policy file of the factory: a Markdown file directly under `policy/`. No other path of the factory's repo is read. */
+export const POLICY_PATH = /^policy\/[A-Za-z0-9_-]+\.md$/;
+
+/** True when `path` is a file a rule change may name and the check may read: the spec, or a policy file of the factory. */
+export function isRulesFile(path: string): boolean {
+  return path === SPEC_PATH || POLICY_PATH.test(path);
+}
+
 /** The branch every Before is held to. */
 export const RULES_REF = "main";
 
@@ -142,7 +150,9 @@ function quotes(text: string, quote: string): boolean {
 }
 
 /**
- * Checks each entry: it gives a Before and an After, and its Before is found word for word in its place on `main`.
+ * Checks each entry: it names a spec section or a policy file of the factory, it gives a Before and an After, and its
+ * Before is found word for word in its place on `main`. A heading naming any other path is never read, so an item can't
+ * use the check to probe the factory's other files.
  * `read` reads a file of the factory's repo on `main`, or null when it isn't there. Without it, no Before can be held
  * to `main`, so every entry that gives one fails. Each spec or policy file is read once.
  */
@@ -157,7 +167,8 @@ export async function checkRuleChanges(changes: RuleChange[], read: ((path: stri
     const name = placeName(ch.place);
     const path = ch.place.kind === "spec" ? SPEC_PATH : ch.place.path;
     let problem: string | undefined;
-    if (ch.before === null) problem = `The entry for ${name} gives no Before.`;
+    if (ch.place.kind === "policy" && !POLICY_PATH.test(ch.place.path)) problem = `${name} isn't a spec section or a policy file of the factory.`;
+    else if (ch.before === null) problem = `The entry for ${name} gives no Before.`;
     else if (ch.after === null) problem = `The entry for ${name} gives no After.`;
     else if (!read) problem = `The factory couldn't read main to check the Before quoted for ${name}.`;
     else {

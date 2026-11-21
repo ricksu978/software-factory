@@ -20,7 +20,7 @@ import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
 import type { CiFailure } from "../core/ci-findings.ts";
 import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
-import { parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
+import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
 import { approvedRulesHash } from "../store/rule-changes.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
@@ -418,7 +418,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   };
   // The factory's own spec and policy files on main, each read once per poll, that an item's rule changes are held to (PBI 395).
   const factoryFiles = new Map<string, Promise<string | null>>();
+  // Only the spec and policy files are ever read: an item names the path, so nothing else of the repo is reachable.
   const factoryRules = deps.factoryRepo && ((path: string) => {
+    if (!isRulesFile(path)) return Promise.resolve(null);
     if (!factoryFiles.has(path)) factoryFiles.set(path, deps.factoryRepo!.readFile(RULES_REF, path));
     return factoryFiles.get(path)!;
   });

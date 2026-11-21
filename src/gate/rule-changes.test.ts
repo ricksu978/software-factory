@@ -79,6 +79,15 @@ test("the check holds each Before to main word for word and names the entry that
   ]);
 });
 
+test("a heading that isn't a spec section or a policy file is never read", async () => {
+  const asked: string[] = [];
+  const read = async (path: string) => (asked.push(path), "secret");
+  const paths = ["aspire-apphost/keycloak/factory-realm.json", "policy/../.env", "policy/sub/dor.md", ".factory/dor.md", "policy/dor.md.bak"];
+  const got = await checkRuleChanges(paths.map((path) => ({ place: { kind: "policy" as const, path }, before: "secret", after: "X." })), read);
+  assert.deepEqual(asked, []);
+  assert.deepEqual(got.map((c) => c.problem), paths.map((p) => `${p} isn't a spec section or a policy file of the factory.`));
+});
+
 test("without the factory's repo, an entry's Before can't be checked and fails", async () => {
   const [c] = await checkRuleChanges([{ place: { kind: "spec", section: "§6" }, before: "A.", after: "B." }], undefined);
   assert.match(c.problem ?? "", /couldn't read main/);

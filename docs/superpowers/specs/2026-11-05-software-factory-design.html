@@ -3694,7 +3694,9 @@ Feature: Export invoices to CSV
 
     Each rule it changes gets a <code>### Spec §N</code> heading,
 
-    or a heading naming the policy file by its path,
+    or a heading naming the policy file by its path, such as <code>### policy/dor.md</code>.
+    Only a Markdown file directly under <code>policy/</code> counts as a policy file: any other heading gets an entry problem and is never read, so an item can't use the check to probe the factory's other files.
+    Under each heading come
 
     then <b>Before</b>, the rule's current text quoted word for word from <code>main</code>,
 
