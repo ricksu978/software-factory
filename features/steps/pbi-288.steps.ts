@@ -73,6 +73,8 @@ export type Ctx = {
   audited?: boolean;
   revoked?: boolean;
   aspireStarted?: boolean;
+  /** The port the BFF's settings resolve to with no PORT set, which "the BFF starts with no port set" reads. */
+  defaultPort?: number;
   local?: { browser: Browser; page?: Seen; back?: Seen };
   /** The source of src/bff/main.ts, as "I read src/bff/main.ts" read it. */
   mainSource?: string;
@@ -353,12 +355,19 @@ async function settled(b: Bff, port: number): Promise<void> {
   assert.ok(b.exit !== undefined || (await answers(port)), `the BFF neither answered on port ${port} nor exited within 30 seconds: ${b.out}`);
 }
 
+// The BFF's default port is fixed, so the scenario that uses it carries @serial and runs alone (PBI 390 AC-2). The step
+// spawns src/bff/main.ts with PORT and BFF_ORIGIN removed and records the port the process itself says it listens on,
+// from its startup log line, so the Then checks the BFF's own choice and that it answers there. No port is written here.
 When("the BFF starts with no port set", long, async function () {
   const c = ctx(this);
   const { PORT: _port, BFF_ORIGIN: _origin, ...env } = c.env!;
   const b = spawnBff(c, env);
-  await settle(b, 7403);
-  await settled(b, 7403);
+  const listening = /the BFF is listening on port (\d+)/;
+  const end = Date.now() + 30_000;
+  while (b.exit === undefined && !listening.test(b.out) && Date.now() < end) await sleep(100);
+  const m = listening.exec(b.out);
+  assert.ok(m, `the BFF never logged the port it listens on (exit ${JSON.stringify(b.exit)}): ${b.out}`);
+  c.defaultPort = Number(m[1]);
 });
 
 When("the BFF starts with no session key set", long, async function () {
@@ -388,9 +397,13 @@ Given("the BFF has been stopped and started again", long, async function () {
 });
 
 Then("the BFF answers on port {int}", long, async function (port: number) {
-  const b = ctx(this).bff;
+  const c = ctx(this);
+  const b = c.bff;
   assert.ok(b, "the BFF was never started");
   assert.equal(b.exit, undefined, `the BFF exited: ${b.out}`);
+  if (c.defaultPort !== undefined) {
+    assert.equal(c.defaultPort, port, `with no PORT set, the BFF listens on ${c.defaultPort}, not ${port}`);
+  }
   assert.ok(await answers(port), `nothing answers on port ${port}`);
 });
 

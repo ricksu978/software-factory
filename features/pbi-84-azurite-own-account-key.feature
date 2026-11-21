@@ -42,7 +42,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
 
   Rule: A SAS a cell signs with the published key is refused
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: A cell's own write SAS, signed with the published key, gets 403
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a "factory-cell:local" container has signed its own write SAS for a blob under "runs", with the published development key
@@ -50,7 +50,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
       Then the response status is 403
       And no such blob exists in Azurite
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: A cell's own read SAS, signed with the published key, can't read another run's log
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a run's log has been uploaded to Azurite
@@ -59,7 +59,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
       Then the response status is 403
       And the response does not contain the log's text
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: A cell's own write SAS, signed with the published key, can't overwrite an existing blob
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a run's log has been uploaded to Azurite
@@ -68,7 +68,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
       Then the response status is 403
       And the log in Azurite still holds its original text
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: A cell's own account-wide SAS, signed with the published key, can't list the containers
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a "factory-cell:local" container has signed its own account SAS that allows listing, with the published development key
@@ -77,7 +77,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
 
   Rule: The cell API's write-only upload URLs still work from inside a cell
 
-    @ac-3 @local @regression
+    @ac-3 @local @regression @serial
     Scenario: A cell container uploads to a write-only URL from the cell API
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a "factory-cell:local" container has asked the cell API for an upload URL for its run's log
@@ -85,7 +85,7 @@ Feature: Azurite runs on its own account key, so a cell can't forge a SAS
       Then the response status is 201
       And the control plane reads back the same log from Azurite
 
-    @ac-3 @local @regression
+    @ac-3 @local @regression @serial
     Scenario: The upload URL from the cell API still can't read the blob back
       Given "aspire run" is up and the image "factory-cell:local" is built
       And a "factory-cell:local" container has uploaded its run's log to an upload URL from the cell API

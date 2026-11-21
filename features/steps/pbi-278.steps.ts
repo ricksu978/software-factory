@@ -9,7 +9,9 @@
 //                             location.assign and the page it shows.
 //   web/dist/                 where `npm run build` writes the built page, index.html, and the script and stylesheet
 //                             it names. The BFF serves these files.
-// "The SPA has been built" runs `npm run build` in the repo, once per test run. "The BFF is running on 7403" runs
+// "The SPA has been built" runs `npm run build` in the repo, once per test run. The suite's parallel workers are threads
+// of one process (PBI 390), so the first worker to get there builds, under a mark in the temp directory named for the
+// process, and the others wait for its result, so no two builds write web/dist at once. "The BFF is running on 7403" runs
 // `node src/bff/main.ts` as PBI 288's steps do (features/steps/pbi-288.steps.ts), on a free port rather than 7403 so a
 // running factory doesn't get in the way, after checking 7403 is the BFF's own port. No scenario signs in, so the BFF
 // gets a database address nothing answers on. "A browser opens {string}" is PBI 288's step, which opens a path on that
@@ -17,11 +19,11 @@
 // PBI 19's, given the text of the no-access page the shell shows.
 // The source checks read every file under web/ but web/dist and web/node_modules. A check that something is absent
 // first checks that what it looks through is the SPA's, so it can't pass on a source that isn't there yet.
-import { After, Given, Then, When } from "@cucumber/cucumber";
+import { After, AfterAll, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { ctx as shared, freePort, openOnBff, startBff, stopBff, type Seen } from "./pbi-288.steps.ts";
@@ -147,13 +149,40 @@ function builtStylesheet(): string {
 
 // ---- The SPA has been built ----
 
-let built: { status: number | null; out: string } | undefined;
+type Built = { status: number | null; out: string };
+let built: Built | undefined;
+const BUILD_MARK = join(tmpdir(), `software-factory-spa-build-${process.pid}`);
+const BUILD_RESULT = join(BUILD_MARK, "result.json");
+let builder = false;
 
-Given("the SPA has been built", { timeout: 600_000 }, function () {
-  if (!built) {
-    const r = spawnSync("npm run build", { cwd: repo, shell: true, encoding: "utf8" });
-    built = { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+/** Builds the SPA once in this process: the worker that takes the mark builds, and every other one reads its result. */
+async function buildOnce(): Promise<Built> {
+  // A mark older than this process is a dead process's whose id this one got again.
+  if (existsSync(BUILD_MARK) && statSync(BUILD_MARK).mtimeMs < Date.now() - process.uptime() * 1000) rmSync(BUILD_MARK, { recursive: true, force: true });
+  try {
+    mkdirSync(BUILD_MARK);
+    builder = true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
   }
+  if (builder) {
+    const r = spawnSync("npm run build", { cwd: repo, shell: true, encoding: "utf8" });
+    const result = { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+    // Written aside and renamed, so a waiting worker never reads half of it.
+    writeFileSync(`${BUILD_RESULT}.part`, JSON.stringify(result));
+    renameSync(`${BUILD_RESULT}.part`, BUILD_RESULT);
+    return result;
+  }
+  while (!existsSync(BUILD_RESULT)) await new Promise((resolve) => setTimeout(resolve, 200));
+  return JSON.parse(readFileSync(BUILD_RESULT, "utf8")) as Built;
+}
+
+AfterAll(function () {
+  if (builder) rmSync(BUILD_MARK, { recursive: true, force: true });
+});
+
+Given("the SPA has been built", { timeout: 600_000 }, async function () {
+  built ??= await buildOnce();
   assert.equal(built.status, 0, `npm run build failed:\n${tail(built.out)}`);
 });
 

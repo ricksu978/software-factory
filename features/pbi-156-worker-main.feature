@@ -152,7 +152,7 @@ Feature: The worker runs the scheduler tick, the board poller and the egress pro
       Then exactly one cell starts for item "A"
       And the worker launched it
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: aspire run starts the worker beside today's control plane, and a queued item still starts
       # The worker starts the egress proxy from the cell image, so the image comes first.
       Given the image "factory-cell:local" is built
