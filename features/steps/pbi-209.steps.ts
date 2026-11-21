@@ -221,8 +221,10 @@ function makeCell(world: object, generation: number): Cell {
   const c = ctx(world);
   const runId = c.runId!;
   const api = httpCellApi({ controlUrl: c.cellOrigin!, runId, runToken: runToken(SECRET, runId, generation), generation });
-  // The cell API can't be reached: a port nothing listens on.
-  const down = httpCellApi({ controlUrl: "http://127.0.0.1:1", runId, runToken: runToken(SECRET, runId, generation), generation });
+  // The cell API can't be reached: a port nothing listens on. Its retries (PBI 259) don't wait, so the 150 seconds of
+  // real backoff they'd sleep through don't eat into the suite's time.
+  const down = httpCellApi({ controlUrl: "http://127.0.0.1:1", runId, runToken: runToken(SECRET, runId, generation), generation },
+    { sleep: async () => {} });
   const cell: Cell = {
     generation, api, down, abort: new AbortController(), dead: false,
     meter: undefined as never,
