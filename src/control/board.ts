@@ -3,6 +3,7 @@
 // only once the transition has committed.
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
+import type { FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { effectsDone, recordEffect } from "../store/outbox.ts";
 import { repoName, runBranch } from "../store/runs.ts";
@@ -89,4 +90,13 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
     });
   }
   if (failed.length) throw new Error(`board mirroring failed for item ${itemId}: ${failed.join(", ")}`);
+}
+
+/**
+ * PBI 364: posts a feature change request on the item's PBI as one comment, the way sign-off posts the scenarios: for
+ * each file, its path, the lines that change from the lock commit to the proposed version, before and after, and the
+ * stage's reason. The comment's key comes from the event, so the move handled twice posts it once. Not built yet.
+ */
+export async function mirrorFeatureChange(_board: BacklogAdapter, _externalId: string, _e: { eventId: string; featureChange: FeatureChangeFile[] }): Promise<void> {
+  // Not built yet (PBI 364).
 }

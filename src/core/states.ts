@@ -2,14 +2,17 @@
 
 export type ItemState =
   | "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput"
-  | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split";
+  | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split"
+  // PBI 364: a stage after sign-off asked to change a locked feature file, and the item waits on the owner.
+  | "FeatureChangeRequest";
 
 export type ItemEvent =
   | "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked"
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
-  | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited";
+  | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"
+  | "feature_change_requested";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
