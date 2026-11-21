@@ -183,54 +183,67 @@ function baseFailure(v: unknown): { sha: string; tests: string[]; base?: string 
   });
 }
 
-/** What's set over a running cell when it renews its lease: a pause of the factory or of its backlog, the kill switch, a restart being prepared, an operator's stop on its run. */
-export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean };
+/** What's set over a running cell when it renews its lease: a pause of the factory or of its backlog, the kill switch, a restart being prepared, a drain, an operator's stop on its run. */
+export type LeaseOverrides = { kill: boolean; pause: boolean; restart: boolean; stopRun: boolean;
+  /** The factory drains (PBI 379). It ends the cell's claim at the next stage boundary, as a restart being prepared does. */
+  drain?: boolean };
 
 /**
  * What a lease renewal tells a running cell. `stop` cuts the cell's stage short now: a pause, the kill switch or an
  * operator's stop on its run. A restart being prepared doesn't (PBI 301): `restarting` tells the cell to finish the
- * stage it's in, start no further stage and end its claim at that stage boundary. A stop outranks it.
+ * stage it's in, start no further stage and end its claim at that stage boundary. Nor does a drain, which gives the
+ * cell the same word (PBI 379). A stop outranks both.
  */
 export function leaseAnswer(set: LeaseOverrides): { stop: boolean; restarting: boolean } {
   const stop = set.kill || set.pause || set.stopRun;
-  return { stop, restarting: set.restart && !stop };
+  return { stop, restarting: (set.restart || set.drain === true) && !stop };
 }
 
-/** The lease route's reply. It names `restarting` only while a restart is being prepared, so it's `{ ok, stop }` otherwise. */
+/** The lease route's reply. It names `restarting` only while a restart is being prepared or the factory drains, so it's `{ ok, stop }` otherwise. */
 const leaseReply = (a: { stop: boolean; restarting: boolean }) => ({ ok: true, stop: a.stop, ...(a.restarting ? { restarting: true } : {}) });
 
 /**
- * Under a restart being prepared, ends the claim of a cell that stopped (PBI 140) or that ended at a stage boundary
- * (PBI 301): the item goes back to Queued at its run's next stage.
+ * Ends the claim of a cell that stopped under a restart being prepared (PBI 140), or that ended at a stage boundary
+ * under a restart being prepared (PBI 301) or a drain (PBI 379): the item goes back to Queued at its run's next stage.
+ * `boundary` is the latter: a stopped cell's claim ends only for a restart, since the stop came from a pause, the kill
+ * switch or an operator, whose handling keeps the claim. The one lease_expired records why: `reason: "restart"` while
+ * a restart is being prepared, which a later claim reads to resume a stopped attempt, and `drain: true` under a drain.
  */
-async function releaseForRestart(c: pg.PoolClient, run: Run, now: Date): Promise<void> {
-  const restart = await c.query(
-    "select 1 from override where cleared_at is null and scope = 'factory' and kind = 'restart' and (expires_at is null or expires_at > $1)",
+async function endClaimForWrapUp(c: pg.PoolClient, run: Run, now: Date, boundary: boolean): Promise<void> {
+  const set = await c.query<{ restart: boolean; drain: boolean }>(
+    `with o as (select kind from override where cleared_at is null and scope = 'factory' and (expires_at is null or expires_at > $1))
+     select exists (select from o where kind = 'restart') as restart, exists (select from o where kind = 'drain') as drain`,
     [now],
   );
-  if (!restart.rowCount) return;
+  const { restart, drain } = set.rows[0];
+  if (!restart && !(boundary && drain)) return;
   // Any attempt still started belongs to a cell that died before this one (PBI 239). The cell's own attempt is reported by now.
   await closeStartedAttempts(c, run.item_id, now);
-  await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id }, { reason: "restart" });
+  await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id },
+    { reason: restart ? "restart" : "drain", ...(drain ? { drain: true } : {}) });
+}
+
+/** What's set over a running cell now: the overrides a lease renewal answers with, and that a release reads too. */
+async function overridesOver(deps: CellApiDeps, c: pg.PoolClient, run: Run, now: Date): Promise<LeaseOverrides> {
+  // The kill switch is FACTORY_KILL=1 or a kill override (Task 13).
+  if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) return { kill: true, pause: false, restart: false, stopRun: false };
+  const r = await c.query<{ pause: boolean; kill: boolean; restart: boolean; drain: boolean; stop_run: boolean }>(
+    `with o as (select scope, kind, target_id from override where cleared_at is null and (expires_at is null or expires_at > $3))
+     select exists (select from o where (scope = 'factory' and kind = 'pause') or (scope = 'backlog' and target_id = $2 and kind = 'pause')) as pause,
+            exists (select from o where scope = 'factory' and kind = 'kill') as kill,
+            exists (select from o where scope = 'factory' and kind = 'restart') as restart,
+            exists (select from o where scope = 'factory' and kind = 'drain') as drain,
+            exists (select from o where scope = 'item' and target_id = $1 and kind = 'stop_run') as stop_run`,
+    [run.item_id, run.source_id, now],
+  );
+  const set = r.rows[0];
+  return { kill: set.kill, pause: set.pause, restart: set.restart, drain: set.drain, stopRun: set.stop_run };
 }
 
 const routes: Record<string, Route> = {
   "POST lease": async (deps, { c, run, now }) => {
     await renewLease(c, run.item_id, run.generation, now);
-    // The kill switch is FACTORY_KILL=1 or a kill override (Task 13).
-    if ((deps.killSwitch ?? (() => process.env.FACTORY_KILL === "1"))()) {
-      return leaseReply(leaseAnswer({ kill: true, pause: false, restart: false, stopRun: false }));
-    }
-    const r = await c.query<{ pause: boolean; kill: boolean; restart: boolean; stop_run: boolean }>(
-      `with o as (select scope, kind, target_id from override where cleared_at is null and (expires_at is null or expires_at > $3))
-       select exists (select from o where (scope = 'factory' and kind = 'pause') or (scope = 'backlog' and target_id = $2 and kind = 'pause')) as pause,
-              exists (select from o where scope = 'factory' and kind = 'kill') as kill,
-              exists (select from o where scope = 'factory' and kind = 'restart') as restart,
-              exists (select from o where scope = 'item' and target_id = $1 and kind = 'stop_run') as stop_run`,
-      [run.item_id, run.source_id, now],
-    );
-    const set = r.rows[0];
-    return leaseReply(leaseAnswer({ kill: set.kill, pause: set.pause, restart: set.restart, stopRun: set.stop_run }));
+    return leaseReply(leaseAnswer(await overridesOver(deps, c, run, now)));
   },
 
   "POST github-token": async (deps, { run }) => deps.repoHost.cellToken(repoOf(run)),
@@ -268,7 +281,7 @@ const routes: Record<string, Route> = {
     // closes as stopped, with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may
     // have pushed nothing, or a broken half-commit, so the next cell starts that stage fresh, as it did when such an
     // attempt stayed started. A lease-message attempt resumes only when the lease_expired that ended its own claim, the
-    // first one at or after the attempt started, was a restart's: releaseForRestart's, or that of an older factory's
+    // first one at or after the attempt started, was a restart's: endClaimForWrapUp's, or that of an older factory's
     // wrap-up, which stopped the cells still running once it ran out (PBI 300 took that stop away).
     // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
     // event.at and stage_run.started_at both come from the database's clock, so they compare.
@@ -459,7 +472,7 @@ const routes: Record<string, Route> = {
     // A cell that stops while a restart is being prepared has pushed its work and is about to exit, so its claim ends
     // here. The item goes back to Queued at the stage it was in, and the restarted factory starts it again at once
     // instead of waiting out the lease. Under a pause or a stop_run the claim stays, so the scheduler's handling holds.
-    if (status === "stopped") await releaseForRestart(c, run, now);
+    if (status === "stopped") await endClaimForWrapUp(c, run, now, false);
     const usage = body.usage as { utilization?: unknown; resetsAt?: unknown } | undefined;
     if (typeof usage?.utilization === "number") {
       const resetsAt = typeof usage.resetsAt === "string" ? new Date(usage.resetsAt) : new Date(now.getTime() + USAGE_PAUSE_MS);
@@ -470,9 +483,13 @@ const routes: Record<string, Route> = {
   },
 
   // A cell a restart stopped between stages, with no attempt open, ends its claim here, as a stopped report would. So
-  // does one that finished its stage while a restart was being prepared and starts no further stage (PBI 301). Without it the item would stay InProgress, and Floor would count it as wrapping up, until its lease ran out.
-  "POST release": async (_deps, { c, run, now }) => {
-    await releaseForRestart(c, run, now);
+  // does one that finished its stage while a restart was being prepared or the factory drains, and starts no further
+  // stage (PBI 301, PBI 379). Without it the item would stay InProgress, and Floor would count it as running, until its
+  // lease ran out.
+  // A cell also releases when a pause, the kill switch or an operator's stop caught it between stages. The route can't
+  // tell that from a boundary, so a drain ends the claim only while none of those is set: their handling keeps it.
+  "POST release": async (deps, { c, run, now }) => {
+    await endClaimForWrapUp(c, run, now, !leaseAnswer(await overridesOver(deps, c, run, now)).stop);
     return { ok: true };
   },
 

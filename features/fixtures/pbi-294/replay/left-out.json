@@ -1,0 +1,32 @@
+[
+ {
+  "name": "0b8a06c-spec",
+  "merge": "0b8a06cc4438a713dd363371dab9c20e2084b2dc",
+  "file": "docs/superpowers/specs/2026-11-05-software-factory-design.html",
+  "old": {
+   "base": "174b182a990664ab",
+   "ours": "48cb3917e19dcb0e",
+   "theirs": "8aa12751cc92d0c8"
+  },
+  "new": {
+   "base": "a23a4f1313b0600e",
+   "ours": "49a76f5df296fb48",
+   "theirs": "a25336394e47d8b4"
+  }
+ },
+ {
+  "name": "0b8a06c-plan",
+  "merge": "0b8a06cc4438a713dd363371dab9c20e2084b2dc",
+  "file": "docs/superpowers/plans/2026-11-05-phase-0-walking-skeleton.md",
+  "old": {
+   "base": "1031822ad293bd99",
+   "ours": "ae66bd0cec4654aa",
+   "theirs": "370f3a20aee4b87f"
+  },
+  "new": {
+   "base": "44292b75f827b182",
+   "ours": "46170f1170c74ecb",
+   "theirs": "641a3e3baf48f2da"
+  }
+ }
+]
