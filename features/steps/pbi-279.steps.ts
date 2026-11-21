@@ -989,14 +989,24 @@ Given("its signed-off feature file {string} holds {string}", function (path: str
   d.features.push({ path, text: body });
 });
 
+const pendingText = (path: string) => `@pbi-41\nFeature: Search the catalogue (${path})\n\n  Scenario: Search by title\n    Given a title in the catalogue\n`;
+
 function waitsForSignOff(c: Ctx, label: string): ItemData {
   const d = itemOf(c, label, "SignOff");
   apply(d, "SignOff");
   openRun(d).scenarios_sha = "5ce7a10";
   d.question = { kind: "sign_off", body: "The scenarios are ready for sign-off." };
   d.criteria ??= [];
+  // The Sign off form shows only with files to read, so an item waiting for sign-off has one up until a scenario names its own.
+  if (d.pending.length === 0) {
+    const path = `features/pbi-${d.item.external_id}-default.feature`;
+    d.pending.push({ path, text: pendingText(path) });
+    defaultPending.add(d);
+  }
   return d;
 }
+
+const defaultPending = new WeakSet<ItemData>();
 
 Given("item {string} waits for sign-off", function (label: string) {
   waitsForSignOff(ctx(this), label);
@@ -1015,10 +1025,10 @@ Given("its criterion {string} has no scenario", function (a: string) {
   (current(ctx(this)).criteria ??= []).push({ criterion: a, scenarios: [] });
 });
 
-const pendingText = (path: string) => `@pbi-41\nFeature: Search the catalogue (${path})\n\n  Scenario: Search by title\n    Given a title in the catalogue\n`;
-
 Given("its feature file {string} is up for sign-off", function (path: string) {
-  current(ctx(this)).pending.push({ path, text: pendingText(path) });
+  const d = current(ctx(this));
+  if (defaultPending.delete(d)) d.pending = [];
+  d.pending.push({ path, text: pendingText(path) });
 });
 
 Given("item {string} waits on the question {string}", function (label: string, q: string) {

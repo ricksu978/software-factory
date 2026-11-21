@@ -33,14 +33,19 @@ function kindOf<T extends string>(kinds: Record<string, T>, button: string): T {
   return kind;
 }
 
-/** Posts `body` as JSON, then reads the page again once the factory accepts it, or says what the factory said. */
+/** Posts `body` as JSON, then reads the page again once the factory accepts it, or says what the factory said, or that the re-read failed. */
 async function send<T>(call: Call, path: string, body: unknown, again: () => Promise<T>): Promise<Submitted<T>> {
   const r = await call(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) {
     const error = ((await r.json().catch(() => null)) as { error?: unknown } | null)?.error;
     return { outcome: "failed", message: sentence(typeof error === "string" ? error : `the factory answered ${r.status}`) };
   }
-  return { outcome: "accepted", data: await again() };
+  // The factory has taken it by now, so a failed re-read mustn't say it wasn't sent: sending it again would apply it twice.
+  try {
+    return { outcome: "accepted", data: await again() };
+  } catch (e) {
+    return { outcome: "failed", message: `The factory accepted it, but the page couldn't be read again (${e instanceof Error ? e.message : String(e)}). Reload the page before sending it again.` };
+  }
 }
 
 /** Sends a factory-wide override from Floor's Controls form, and reads the floor again once it's accepted. */

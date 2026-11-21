@@ -20,8 +20,6 @@ export function IssueRef({ external_id, repo }: { external_id: string | null; re
   return url ? <A href={url}>#{external_id}</A> : <>#{external_id}</>;
 }
 
-/** The address of an item's Run detail in the SPA. */
-
 /** An item as a page names it: "#N", then its title opening its Run detail. */
 export function ItemName({ r }: { r: Issue & { id: string; title: string } }) {
   return (

@@ -85,3 +85,15 @@ test("an item's buttons fit its controls", () => {
   assert.deepEqual(buttonsFor({ ...c, held: true, requeueable: true }), ["Release the hold", "Re-queue"]);
   assert.deepEqual(buttonsFor({ ...c, startable: true, movable: true }), ["Hold", "Start now", "Move up", "Move down"]);
 });
+
+test("an override the factory accepts whose re-read fails says it was accepted, not that it wasn't sent", async () => {
+  const sent: string[] = [];
+  const call: Call = async (path, init) => {
+    sent.push(`${init?.method ?? "GET"} ${path}`);
+    return init?.method === "POST" ? new Response('{"ok":true}', { status: 201 }) : new Response('{"error":"bad gateway"}', { status: 502 });
+  };
+  const r = await submitItemControls(call, item, "Move up", "urgent");
+  assert.equal(r.outcome, "failed");
+  assert.match((r as { message: string }).message, /^The factory accepted it, but the page couldn't be read again .*502.*Reload the page before sending it again\.$/);
+  assert.deepEqual(sent, ["POST /bff/v1/overrides", "GET /bff/v1/items/i-1"]);
+});

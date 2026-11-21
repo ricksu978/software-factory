@@ -138,7 +138,8 @@ export type DecisionSent = { kind: "approve" | "changes" | "answer"; text: strin
 /**
  * What a form's submit handler did:
  *   refused   it sent nothing, since the named field was empty or held only spaces
- *   failed    the factory refused it, and the page shows `message`, such as "That item isn't waiting for this decision."
+ *   failed    the factory refused it, or accepted it but the page's data couldn't be read again after, and the page
+ *             shows `message`, such as "That item isn't waiting for this decision."
  *   accepted  the factory accepted it, and `data` is the page's data read again from the factory after
  */
 export type Submitted<T> =

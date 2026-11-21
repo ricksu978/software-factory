@@ -200,7 +200,15 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
         </>
       )}
       {d.pending.length > 0 && <><H2>Scenarios up for sign-off</H2><Files files={d.pending} /></>}
-      {q?.kind === "sign_off" && (
+      {/* The owner approves only scenarios they can read here. Until the cell API stores the files at the scenarios sha,
+          the SPA may have none to show, so it sends the owner to today's dashboard to sign off instead. */}
+      {q?.kind === "sign_off" && d.pending.length === 0 && (
+        <>
+          <H2>Sign off</H2>
+          <p>The scenarios up for sign-off can't be shown here yet, so this page doesn't take the decision. Open the item's Run detail on today's dashboard, which shows the scope, the criteria and the scenarios, and sign off there.</p>
+        </>
+      )}
+      {q?.kind === "sign_off" && d.pending.length > 0 && (
         <>
           <H2>Sign off</H2>
           <form aria-label="Sign off" className="max-w-xl space-y-2" onSubmit={onSubmitWith("note", onSubmit && ((b, v) => onSubmit("Sign off", b, v)))}>
