@@ -272,12 +272,17 @@ export async function changedFiles(dir: string, range: string): Promise<string[]
 
 const lf = (text: string | undefined) => text?.replace(/\r\n/g, "\n");
 
-/** Every tracked or new .feature file in the checkout, by repo-relative path. */
-/** The text of `path` at `rev`, or "" when the commit doesn't hold it, as when the stage deleted a locked file. */
+/**
+ * The text of `path` at `rev`, or "" when the commit doesn't hold it, as when the stage deleted a locked file. Any
+ * other git failure throws: read as "", it would show the owner a request to delete the whole file.
+ */
 async function showAt(dir: string, rev: string, path: string): Promise<string> {
-  return run("git", ["show", `${rev}:${path}`], { cwd: dir, maxBuffer: MAX_OUTPUT }).then((r) => r.stdout, () => "");
+  const { stdout } = await run("git", ["ls-tree", "-z", "--name-only", rev, "--", path], { cwd: dir, maxBuffer: MAX_OUTPUT });
+  if (!stdout.split("\0").includes(path)) return "";
+  return (await run("git", ["show", `${rev}:${path}`], { cwd: dir, maxBuffer: MAX_OUTPUT })).stdout;
 }
 
+/** Every tracked or new .feature file in the checkout, by repo-relative path. */
 async function features(dir: string): Promise<Map<string, string>> {
   const { stdout } = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.feature"], { cwd: dir, maxBuffer: 64 * 1024 * 1024 });
   const out = new Map<string, string>();
