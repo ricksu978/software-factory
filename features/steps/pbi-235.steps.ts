@@ -26,7 +26,7 @@
 // its own and its URL, and a test when they hold its name.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { CiCheck } from "../../src/adapters/types.ts";
 import { ctx as pbi12, polled, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
@@ -34,7 +34,8 @@ import { ctx as pbi292, namesWord } from "./pbi-292.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 const REPO = "acme/widgets";
-const WEBHOOK_SECRET = "pbi-235-webhook-secret";
+// Made up for each run, so no fixed signing value sits in the source.
+const WEBHOOK_SECRET = randomBytes(20).toString("hex");
 const PASSED_URL = "https://github.com/acme/widgets/actions/runs/7000";
 
 type Mine = {
