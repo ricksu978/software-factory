@@ -23,6 +23,7 @@ import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
+import type { Clock } from "./clock.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
@@ -58,6 +59,11 @@ export type WorkerDeps = {
    * worker's heartbeat records it (PBI 158). `new Date()` by default.
    */
   now?: () => Date;
+  /**
+   * The clock every timer of the worker runs on, and that each tick reads its time from (PBI 396). realClock by default.
+   * Not read yet.
+   */
+  clock?: Clock;
   pollMs?: number;
   /** How often a standby tries for the worker lock again. LOCK_RETRY_MS by default. */
   lockRetryMs?: number;

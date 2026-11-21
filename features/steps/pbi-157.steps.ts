@@ -41,9 +41,11 @@ const POLL_MS = 1_000;
 /** How long a step waits for a worker that loses its lock connection to exit. */
 const EXIT_WITHIN_MS = 15_000;
 
-type Proxy = { port: number; cut(): void; refuse(): void; close(): Promise<void> };
-type Log = { lines: string[]; sink: Pick<Console, "log" | "warn" | "error"> };
-type Exit = { error?: unknown };
+export type Proxy = { port: number; cut(): void; refuse(): void; close(): Promise<void> };
+/** What a proxy is handed for each connection it accepts: the bytes each way, and the connection's close. */
+export type Tap = () => { client(b: Buffer): void; server(b: Buffer): void; close(): void };
+export type Log = { lines: string[]; sink: Pick<Console, "log" | "warn" | "error"> };
+export type Exit = { error?: unknown };
 
 export type Worker = {
   name: string;
@@ -113,7 +115,7 @@ async function within(ms: number, ok: () => boolean | Promise<boolean>): Promise
 
 // ---- The database: each worker's own pool, through a proxy ----
 
-async function dbUrl(): Promise<string> {
+export async function dbUrl(): Promise<string> {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   return (d as unknown as { url: string }).url;
@@ -140,8 +142,11 @@ function upstream(url: string): net.NetConnectOpts {
   return { host: u.host, port: Number(u.port || 5432) };
 }
 
-/** A TCP proxy to the test database whose connections a step can cut, as a lost network would. */
-async function startProxy(url: string): Promise<Proxy> {
+/**
+ * A TCP proxy to the test database whose connections a step can cut, as a lost network would. A `tap` sees each
+ * connection's bytes, as PBI 396's steps count a worker's queries.
+ */
+export async function startProxy(url: string, tap?: Tap): Promise<Proxy> {
   const pairs = new Set<[net.Socket, net.Socket]>();
   let refusing = false;
   const server = net.createServer((client) => {
@@ -149,7 +154,15 @@ async function startProxy(url: string): Promise<Proxy> {
     const up = net.connect(upstream(url));
     const pair: [net.Socket, net.Socket] = [client, up];
     pairs.add(pair);
+    const seen = tap?.();
+    if (seen) {
+      client.on("data", (b: Buffer) => seen.client(b));
+      up.on("data", (b: Buffer) => seen.server(b));
+    }
+    let ended = false;
     const close = () => {
+      if (!ended) seen?.close();
+      ended = true;
       pairs.delete(pair);
       client.destroy();
       up.destroy();
@@ -184,7 +197,7 @@ async function startProxy(url: string): Promise<Proxy> {
 }
 
 /** The test database's URL through `port`, with `app` as each connection's application_name. */
-function proxied(url: string, port: number, app: string): string {
+export function proxied(url: string, port: number, app: string): string {
   const u = parts(url);
   const auth = u.user ? `${u.user}${u.password ? `:${u.password}` : ""}@` : "";
   return `postgresql://${auth}127.0.0.1:${port}/${u.database}?application_name=${encodeURIComponent(app)}`;
@@ -195,7 +208,7 @@ function named(url: string, app: string): string {
   return `${url}${url.includes("?") ? "&" : "?"}application_name=${encodeURIComponent(app)}`;
 }
 
-function logger(name: string): Log {
+export function logger(name: string): Log {
   const lines: string[] = [];
   const line = (k: "log" | "warn" | "error") => (...args: unknown[]) => {
     const l = format(...args);
@@ -217,13 +230,13 @@ async function ownPool(name: string): Promise<{ app: string; pool: pg.Pool; prox
 const pool = () => need().pool;
 
 /** The pids of `app`'s sessions that hold a granted advisory lock: its lock session, once it holds the worker lock. */
-async function lockSessions(app: string): Promise<number[]> {
+export async function lockSessions(app: string): Promise<number[]> {
   return (await pool().query<{ pid: number }>(
     `select distinct l.pid from pg_locks l join pg_stat_activity a on a.pid = l.pid
      where l.locktype = 'advisory' and l.granted and a.application_name = $1`, [app])).rows.map((r) => r.pid);
 }
 
-async function terminate(pids: number[]): Promise<void> {
+export async function terminate(pids: number[]): Promise<void> {
   if (pids.length) await pool().query("select pg_terminate_backend(pid) from unnest($1::int[]) as pid", [pids]);
 }
 
@@ -231,7 +244,7 @@ async function terminate(pids: number[]): Promise<void> {
 
 /** Records how the worker settles: an error once it lost the lock. Attached as early as a step can. */
 const watched = new WeakSet<Running>();
-function watch(running: Running | undefined, into: { exit?: Exit }): void {
+export function watch(running: Running | undefined, into: { exit?: Exit }): void {
   if (!running?.done || watched.has(running)) return;
   watched.add(running);
   running.done.then(() => void (into.exit = {}), (error: unknown) => void (into.exit = { error }));
