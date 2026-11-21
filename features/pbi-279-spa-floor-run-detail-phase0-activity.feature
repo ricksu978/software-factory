@@ -10,14 +10,14 @@ Feature: Floor, Run detail, Phase 0 and Activity in the SPA, with their forms
   button on these forms has a label.
   Each page draws from one read of the factory. Live updates come in a later step. Today's dashboard keeps serving
   these pages on 7400 until step 9 cuts over. The Configuration page isn't part of this step.
-  As in step 8a, these scenarios run with no BFF and no sign-in: "opening" a page renders it with react-dom/server
-  from the fixture data the factory is said to hold, and the SPA's API client calls a stubbed fetch that answers
-  with that data and records what the SPA sends. Numbers and times read as today's pages format them in
-  src/http/format.ts.
+  As in step 8a, these scenarios run with no BFF and no real sign-in; the stub says who the viewer is and their
+  roles. "Opening" a page renders it with react-dom/server from the fixture data the factory is said to hold, and
+  the SPA's API client calls a stubbed fetch that answers with that data and records what the SPA sends. Numbers
+  and times read as today's pages format them in src/http/format.ts.
 
   Background:
     Given the SPA's pages are rendered with react-dom/server
-    And the SPA's API client calls a stubbed fetch that answers from fixture data, with no BFF and no one signed in
+    And the SPA's API client calls a stubbed fetch that answers from fixture data, with no BFF and no real sign-in; the stub says who the viewer is and their roles
 
   # ---------------------------------------------------------------------------------------------------------------
   # AC-1: Floor
@@ -386,7 +386,8 @@ Feature: Floor, Run detail, Phase 0 and Activity in the SPA, with their forms
       Given item "#46 Add search" had a readiness judge call on "haiku" that used 1,500 tokens in and 200 out and cost $0.0012
       When I open its Run detail in the SPA
       Then the "Readiness checks" table has the columns "Ran", "Call", "Model", "Tokens", "Cost" and "Verdict"
-      And its row shows "Judge", "haiku", "1.5k in, 200 out" and "$0.0012"
+      And its row shows "Judge", "haiku", "1.5k in, 200 out" and "<$0.01"
+      And the row's cost has the title "$0.0012"
 
     @ac-1
     Scenario Outline: Each readiness check shows what its call decided, or why it has no verdict
