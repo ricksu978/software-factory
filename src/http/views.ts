@@ -4,6 +4,7 @@ import { formatDuration, type ItemDurations } from "../core/durations.ts";
 import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
+import { placeKey, placeName, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
@@ -29,6 +30,9 @@ th, td { border-bottom: 1px solid var(--line); padding: .35rem .5rem; text-align
 .muted { color: var(--muted); }
 .badge { border: 1px solid var(--line); border-radius: 1rem; font-size: .8rem; padding: 0 .5rem; }
 .banner { background: var(--warn-bg); color: var(--warn-fg); padding: .5rem 1rem; }
+.sides { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+.sides blockquote { border-left: 3px solid var(--line); margin: 0; padding: 0 .75rem; }
+mark { background: var(--warn-bg); color: var(--warn-fg); }
 label { display: block; margin: .5rem 0 .25rem; }
 pre { overflow-x: auto; }
 pre.scope { font: inherit; white-space: pre-wrap; }
@@ -424,7 +428,37 @@ export type RunDetail = {
   splitInto?: SplitChildView[];
   /** PBI 369: for an item that failed its Definition of Done on main, when it was last re-checked, or null. */
   recheck?: { last: Date | null } | null;
+  /**
+   * PBI 395: the rule changes the item's last readiness check read, whether it waits for the owner's approval of them,
+   * whether this viewer may give it, and the owner's approval of them as they read now. Null when it read none.
+   */
+  ruleChanges?: { changes: RuleChangeRead[]; waiting: boolean; canApprove: boolean; approval: { by: string; at: Date } | null } | null;
 };
+
+const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${escapeHtml(w.text)}</mark>` : escapeHtml(w.text))).join(" ");
+
+/** The item page's Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked. */
+function ruleChangesSection(id: string, r: NonNullable<RunDetail["ruleChanges"]>, zone: string): string {
+  const entries = r.changes.map((c) => {
+    const diff = c.before !== null && c.after !== null ? wordDiff(c.before, c.after) : null;
+    const side = (which: "before" | "after", label: string, text: string | null, words: DiffWord[] | undefined) => text === null
+      ? `<div><h4>${label}</h4><p class="muted">No ${label} given.</p></div>`
+      : `<div><h4>${label}</h4><blockquote data-side="${which}">${words ? marked(words) : escapeHtml(text)}</blockquote></div>`;
+    return `<div class="rule" data-rule="${escapeHtml(placeKey(c.place))}"><h3>${c.place.kind === "spec" ? `Spec ${escapeHtml(c.place.section)}` : escapeHtml(c.place.path)}</h3>
+${c.problem ? `<p class="banner">${escapeHtml(c.problem)}</p>` : ""}<div class="sides">${side("before", "Before", c.before, diff?.before)}${side("after", "After", c.after, diff?.after)}</div></div>`;
+  }).join("\n");
+  const all = r.changes.map((c) => placeName(c.place));
+  const list = all.length <= 1 ? all.join("") : `${all.slice(0, -1).join(", ")} and ${all.at(-1)}`;
+  const status = r.approval
+    ? `<p>${escapeHtml(r.approval.by)} approved the rule change at ${local(r.approval.at, zone)}.</p>`
+    : r.waiting
+      ? `<p>This item waits for the owner to approve its rule changes: ${escapeHtml(list)}.</p>`
+      : "";
+  const form = r.canApprove
+    ? `<form method="post" action="/items/${escapeHtml(id)}/rule-approval"><p><button>Approve rule change</button></p></form>`
+    : "";
+  return `<h2>Rule changes</h2>${status}\n${entries}\n${form}`;
+}
 
 /**
  * Sets the `tz` cookie to the browser's time zone, so the server shows times in it, and reloads once when the page
@@ -531,7 +565,7 @@ ${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n`
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
+${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
 }

@@ -1717,11 +1717,13 @@ Azure comes in Task 19.
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked"`.
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"`.
     `approvals_met` is reserved for Phase 1.
     In Phase 0 a merge is `merged`,
     whether a person made it or the factory did once a person approved (PBI 181).
     `rechecked` moves a Failed item back to Accepted when its re-check no longer charges its merge with breaking main (PBI 369).
+    `rule_change_approved` moves a NotReady item to Eligible once the owner approves its rule changes,
+    and `rules_edited` moves a Queued item to Eligible when its rules section no longer reads as approved (PBI 395).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -1753,6 +1755,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
   ["NotReady", "split_filed", "Split"], ["Split", "children_done", "Done"], ["Abandoned", "split_filed", "Split"],
   ["Failed", "rechecked", "Accepted"],
+  ["NotReady", "rule_change_approved", "Eligible"], ["Queued", "rules_edited", "Eligible"],
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
@@ -2153,6 +2156,14 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     added by `db/migrations/018_ci_rerun.sql` (PBI 233).
     Each row is a commit whose failed checks a cell asked `POST /rerun-checks` to re-run,
     so a commit's checks are re-run once at most across restarts.
+  - `item.rule_changes jsonb`,
+    added by `db/migrations/019_item_rule_changes.sql` (PBI 395),
+    holds what the item's last readiness check read from its `## Changes the factory's rules` section:
+    each entry's `place`,
+    `before`,
+    `after` and `problem`,
+    an empty list for an item with no such section,
+    and null until a check has read it.
   - `stage_run.report_ref text`,
     the BDD report a red or green stage uploaded.
   - `db/migrations/012_close_orphaned_attempts.sql` (PBI 239) changes no schema.
@@ -3391,6 +3402,30 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     which on GitHub reads `GET /repos/{owner}/{repo}/installation` and names each of `CELL_PERMISSIONS` the installation holds below the level asked.
     A repo missing any adds them to its readiness sha,
     so the owner granting one re-gates the items it failed.
+  - **Rule changes (PBI 395).**
+    `src/gate/rule-changes.ts` parses the item's `## Changes the factory's rules` section into `RuleChange`s,
+    one per `### Spec §N` or `### <policy path>` heading,
+    each with its `**Before**` and `**After**` quotes.
+    `checkRuleChanges` holds each Before to `main` through `ctx.factoryRules`,
+    which the poller builds from `PollDeps.factoryRepo`,
+    the worker's `factoryRepoAt` over its checkout's remote-tracking refs.
+    A spec section's HTML is read as prose,
+    a block tag parting words and an inline one not,
+    and the Before must appear in it as whole words.
+    The judge's last line carries `"rules":[...]`,
+    each rule it finds the item changes.
+    After the judge,
+    an entry with no Before,
+    no After or a Before off `main` adds a failed `rule change` verdict naming its section.
+    A found rule the section misses fails the `dor.md` line whose text names the factory's rules,
+    its reason naming the sections to cover,
+    or adds a `rule change` verdict when no line does.
+    When everything else passed and the section's `ruleChangesHash` isn't `ctx.ruleApproval`,
+    the latest approval's hash,
+    a failed `rule change approval` verdict leaves the item waiting.
+    The poller stores what the gate read as `item.rule_changes` in the move's transaction,
+    and the readiness comment key gains `:rules-approved` once the approval matches.
+    Step 3 moves a Queued item through `rules_edited` when its parsed section is non-empty and its hash isn't the approved one.
   - **Oversized items (PBI 143).**
     The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
@@ -6367,6 +6402,17 @@ from spec §6 rows 1 to 7:
     - `GET /events` is SSE fed by `LISTEN factory_events`.
     - `POST /items/:id/signoff` takes `{ decision: "approve" | "changes", note }` and needs `product_owner`.
     - `POST /items/:id/answer` takes `{ answer }` and needs operator or product owner.
+    - `POST /items/:id/rule-approval` takes no fields and needs owner (PBI 395).
+      `approveRuleChange` in `src/store/rule-changes.ts` approves only an item that `waitsForApproval`,
+      logging `rule_change_approved` with `rulesHash` and `changes` at the dashboard's `now`,
+      and moving the item through `rule_change_approved` in the same transaction.
+      It answers 303 to the item page,
+      403 to anyone but an owner,
+      and 409 for an item that doesn't wait.
+      Run detail's `<h2>Rule changes</h2>` shows each entry as a `data-rule` element,
+      its Before and After in `<blockquote data-side="before">` and `data-side="after"`,
+      each changed word of `wordDiff` in a `<mark>`,
+      with the form for the owner while the item waits.
     - `POST /overrides` needs operator.
     - `POST /users` needs owner.
     - `GET /activity` is the activity log (PBI 105),

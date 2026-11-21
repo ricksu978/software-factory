@@ -119,7 +119,8 @@ export type ReadinessLogic = { judgePrompt: string; version: number; splitPrompt
 /** Raise this by one whenever the engine rules change, so every NotReady item is re-checked under the new rules. */
 // 2 (PBI 237): an open dependency no longer fails the gate. The scheduler holds a blocked item back instead.
 // 3 (PBI 264): each permission the App is missing on the item's repo fails the gate.
-export const READINESS_VERSION = 3;
+// 4 (PBI 395): an item's "Changes the factory's rules" section is held to main, and one that changes them waits for the owner.
+export const READINESS_VERSION = 4;
 
 /**
  * SHA-256 over every file the readiness check reads, in a fixed order (Run contract 11). Each text goes in as its

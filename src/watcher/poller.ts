@@ -20,6 +20,8 @@ import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
 import type { CiFailure } from "../core/ci-findings.ts";
 import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
+import { parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
+import { approvedRulesHash } from "../store/rule-changes.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -378,6 +380,16 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
+    // PBI 395: a Queued item whose "Changes the factory's rules" section no longer reads as the owner approved it, or
+    // that gained one since it was gated, meets the readiness check again in step 4, which leaves it waiting for the
+    // owner's approval. An edit anywhere else in the item doesn't move it.
+    if (row.state === "Queued") {
+      const changes = parseRuleChanges(fi.body);
+      if (changes.length > 0 && ruleChangesHash(changes) !== (await approvedRulesHash(pool, row.id))) {
+        await move(pool, row.id, "rules_edited");
+        return;
+      }
+    }
     // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
     // lends its group and priority to the items it depends on (PBI 320).
     await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
@@ -404,6 +416,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
+  // The factory's own spec and policy files on main, each read once per poll, that an item's rule changes are held to (PBI 395).
+  const factoryFiles = new Map<string, Promise<string | null>>();
+  const factoryRules = deps.factoryRepo && ((path: string) => {
+    if (!factoryFiles.has(path)) factoryFiles.set(path, deps.factoryRepo!.readFile(RULES_REF, path));
+    return factoryFiles.get(path)!;
+  });
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
   const depsOf = async (fi: FactoryItem) => ((await readinessOf(fi)).repoKnown ? adapter.openDependencies(fi.externalId) : []);
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
@@ -421,6 +439,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
       missingPermissions: r.missingPermissions,
+      ...(factoryRules ? { factoryRules } : {}), ruleApproval: await approvedRulesHash(pool, row.id),
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
@@ -432,7 +451,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // A queued item goes in blocked by its open dependencies, so no claim takes it before step 3 reads them next poll.
     const blockedBy = out.ready ? await depsOf(fi) : [];
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4, rule_changes = $5 where id = $1",
+        [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy, JSON.stringify(out.ruleChanges ?? [])]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)

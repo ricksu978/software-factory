@@ -24,7 +24,7 @@ import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
-import { mainDefaults } from "./main-defaults.ts";
+import { factoryRepoAt, mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
@@ -291,11 +291,14 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
   // The default policies come from the commit of `main` the cell image loop last fetched into the checkout, so a merged
   // change to one re-checks NotReady items on the next poll with no restart (PBI 261).
   const defaults = d.cellImage && mainDefaults(d.cellImage);
+  // Each rule an item says it changes is held to the factory's spec and policy files on that same fetched main (PBI 395).
+  const factoryRepo = d.cellImage && factoryRepoAt(d.cellImage);
   // Each board files its splits as child issues on itself (PBI 144).
   for (const s of d.sources) {
     const split = d.split && { ...d.split, file: s.file };
     loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
-      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, ...(defaults ? { defaults } : {}) }), runs, log));
+      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, ...(defaults ? { defaults } : {}),
+        ...(factoryRepo ? { factoryRepo } : {}) }), runs, log));
   }
   if (d.cellImage) {
     const cellImage = { ...d.cellImage, pool: d.pool, log };

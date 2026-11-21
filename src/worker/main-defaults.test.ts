@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
-import { mainDefaults } from "./main-defaults.ts";
+import { factoryRepoAt, mainDefaults } from "./main-defaults.ts";
 
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
@@ -83,5 +83,37 @@ describe("reading the default policies from main's fetched commit", () => {
 
   test("a default main doesn't hold throws, naming the file and the ref", async () => {
     await assert.rejects(mainDefaults({ checkout })("risk"), /policy\/risk\.md.*refs\/remotes\/origin\/main/);
+  });
+});
+
+// PBI 395.
+describe("reading the factory's own files on a branch from the fetched commit", () => {
+  let root: string;
+  let checkout: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "factory-repo-test-"));
+    const seed = join(root, "seed");
+    checkout = join(root, "checkout");
+    git(root, "init", "-q", "--bare", "-b", "main", "origin.git");
+    git(root, "init", "-q", "-b", "main", seed);
+    git(seed, "remote", "add", "origin", join(root, "origin.git"));
+    write(seed, "policy/dor.md", "- [ ] The item fits one Sprint.\n");
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "seed");
+    git(seed, "push", "-q", "origin", "main");
+    git(root, "clone", "-q", join(root, "origin.git"), checkout);
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  test("reads a file at the remote-tracking ref, ignoring the working tree", async () => {
+    write(checkout, "policy/dor.md", "edited\n");
+    assert.equal(await factoryRepoAt({ checkout }).readFile("main", "policy/dor.md"), "- [ ] The item fits one Sprint.\n");
+  });
+
+  test("a file or ref that isn't there reads as null", async () => {
+    const repo = factoryRepoAt({ checkout });
+    assert.equal(await repo.readFile("main", "policy/nope.md"), null);
+    assert.equal(await repo.readFile("next", "policy/dor.md"), null);
+    assert.equal(await repo.readFile("main", "../escape"), null);
   });
 });

@@ -669,3 +669,34 @@ describe("PBI 369: when a Failed item was last re-checked", () => {
     assert.doesNotMatch(detail(null), /re-checked/);
   });
 });
+
+describe("runDetailPage's Rule changes (PBI 395)", () => {
+  const detail = (ruleChanges: RunDetail["ruleChanges"]): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000395", external_id: "395", repo: "octo/repo", title: "t", state: "NotReady" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ruleChanges,
+  });
+  const change = { place: { kind: "spec" as const, section: "§6" }, before: "A lease lasts ten <b>minutes</b>.", after: "A lease lasts five <b>minutes</b>." };
+
+  test("shows each Before beside its After, escaped, with the changed words marked, and the owner's control", () => {
+    const html = runDetailPage(detail({ changes: [change], waiting: true, canApprove: true, approval: null }), null);
+    assert.match(html, /<h2>Rule changes<\/h2><p>This item waits for the owner to approve its rule changes: spec section §6\.<\/p>/);
+    assert.match(html, /data-rule="§6"/);
+    assert.match(html, /<blockquote data-side="before">A lease lasts <mark>ten<\/mark> &lt;b&gt;minutes&lt;\/b&gt;\.<\/blockquote>/);
+    assert.match(html, /<blockquote data-side="after">A lease lasts <mark>five<\/mark> /);
+    assert.match(html, /<form method="post" action="\/items\/00000000-0000-0000-0000-000000000395\/rule-approval"><p><button>Approve rule change<\/button>/);
+  });
+
+  test("no control without the right to approve, an entry's problem and a missing part shown, and the approval once given", () => {
+    const off = runDetailPage(detail({ changes: [{ ...change, after: null, problem: "The entry for spec section §6 gives no After." }], waiting: false, canApprove: false, approval: null }), null);
+    assert.doesNotMatch(off, /Approve rule change/);
+    assert.match(off, /gives no After\./);
+    assert.match(off, /No After given\./);
+    const done = runDetailPage({ ...detail({ changes: [change], waiting: false, canApprove: false, approval: { by: "olive", at: new Date("2026-11-21T10:00:00Z") } }), zone: "UTC" }, null);
+    assert.match(done, /olive approved the rule change at <time datetime="2026-11-21T10:00:00.000Z">2026-11-21 10:00<\/time>/);
+  });
+
+  test("an item that read no rule change has no such section", () => {
+    assert.doesNotMatch(runDetailPage(detail(null), null), /Rule changes/);
+  });
+});

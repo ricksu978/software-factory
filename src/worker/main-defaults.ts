@@ -48,3 +48,21 @@ export function mainDefaults(d: MainDefaultsDeps): DefaultPolicies {
   };
   return Object.assign(at(ref, ref), { pin });
 }
+
+/**
+ * The factory's own repo as the checkout's remote-tracking refs hold it (PBI 395), so the readiness check reads each
+ * rule an item says it changes as the branch it names last fetched. A file, a ref or a path that isn't there, or that
+ * climbs out of the repo, reads as null.
+ */
+export function factoryRepoAt(d: Pick<MainDefaultsDeps, "checkout" | "remote">): { readFile(ref: string, path: string): Promise<string | null> } {
+  return {
+    async readFile(ref, path) {
+      if (!/^[\w.-]+$/.test(ref) || path.split("/").some((p) => p === ".." || p === "") || path.startsWith("-")) return null;
+      try {
+        return (await run("git", ["cat-file", "blob", `refs/remotes/${d.remote ?? "origin"}/${ref}:${path}`], { cwd: d.checkout, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })).stdout;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
