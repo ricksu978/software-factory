@@ -797,6 +797,7 @@ stateDiagram-v2
   InProgress --> SignOff: scenarios written
   SignOff --> InProgress: approved, or changes asked
   InProgress --> NeedsInput: agent blocked
+  InProgress --> FeatureChangeRequest: a stage after sign-off asks to change a locked feature file
   NeedsInput --> InProgress: answered, by a person, or by the factory once CI passes on the base or the PR conflicts or gets a new review, or its question from before PBI 292 names only CI failures
   InProgress --> InReview: PR open, CI green
   InReview --> Queued: changes requested, or a conflict
@@ -2349,6 +2350,44 @@ Feature: Export invoices to CSV
     The owner is never asked about it,
 
     since no answer would change the files.
+
+    A stage that thinks a locked scenario is wrong may ask to change it instead (PBI 364).
+
+    Its agent edits the file as it would have it,
+
+    and its report names each such file and the reason,
+
+    one line each, <code>FEATURE CHANGE: &lt;path&gt;: &lt;reason&gt;</code>.
+
+    The factory still restores the locked files to the lock commit,
+
+    pushes the rest of the stage's work,
+
+    and moves the item from InProgress to FeatureChangeRequest,
+
+    where its run goes no further.
+
+    The request holds each file's text at the lock commit and the version the stage proposed.
+
+    The item page shows it under "Feature change request":
+
+    each file's path,
+
+    the stage's reason,
+
+    and its lines before and after.
+
+    The PBI gets it as one comment,
+
+    the way sign-off posts the scenarios,
+
+    with each file's change from the lock commit as a diff.
+
+    A request that names a file the stage didn't change,
+
+    or one that isn't locked,
+
+    asks for nothing.
 
     The self-reviewer holds no finding open for a scenario change.
 

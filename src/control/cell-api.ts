@@ -8,10 +8,12 @@ import { githubFailed } from "../adapters/github/errors.ts";
 import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
 import type { CiFailure } from "../cell/api-client.ts";
 import { SOP_MOVED } from "../cell/sop-move.ts";
+import type { FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
+import { requestFeatureChange } from "../store/feature-change.ts";
 import { closeStartedAttempts, LEASE_RAN_OUT, renewLease, transitionItem } from "../store/items.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
@@ -43,7 +45,7 @@ export type CellApiDeps = {
 
 // The only events a cell may send. Everything else is the control plane's, such as merged, which a steered cell
 // could otherwise use to mark its own PR accepted.
-const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited"]);
+const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited", "feature_change_requested"]);
 const NONE_AFTER_MS = 600_000;
 // The stages a run stays at while its item goes back to green, from their findings or CI failing on their head.
 const BACK_TO_GREEN_FROM = new Set(["open-pr", "pr-review", "address"]);
@@ -139,6 +141,17 @@ const oneOf = <T extends string>(v: unknown, name: string, allowed: readonly T[]
 const strings = (v: unknown, name: string): string[] => {
   if (!Array.isArray(v) || v.some((s) => typeof s !== "string")) throw new BadRequest(`${name} must be a list of strings`);
   return v;
+};
+/** PBI 364: a feature change request's files, each a file the run locked, with a reason and both versions. */
+const featureChange = (v: unknown, locked: string[]): FeatureChangeFile[] => {
+  if (!Array.isArray(v) || v.length === 0) throw new BadRequest("featureChange must be a non-empty list");
+  return v.map((f: Record<string, unknown> | null, i) => {
+    if (typeof f !== "object" || f === null) throw new BadRequest(`featureChange[${i}] must be an object`);
+    const path = str(f.path, `featureChange[${i}].path`);
+    if (!locked.includes(path)) throw new BadRequest(`featureChange[${i}].path ${path} isn't a locked feature file`);
+    if (typeof f.before !== "string" || typeof f.after !== "string") throw new BadRequest(`featureChange[${i}] needs before and after as strings`);
+    return { path, reason: str(f.reason, `featureChange[${i}].reason`), before: f.before, after: f.after };
+  });
 };
 const optional = <T>(v: unknown, read: (v: unknown) => T): T | null => (v === undefined || v === null ? null : read(v));
 
@@ -575,6 +588,10 @@ const routes: Record<string, Route> = {
     } else if (event === "retries_exhausted") {
       const attempts = await c.query("select stage_id, attempt, status from stage_run where run_id = $1 order by started_at, attempt", [run.run_id]);
       detail = { attempts: attempts.rows };
+    } else if (event === "feature_change_requested") {
+      // PBI 364: the request goes on the run, and the move's payload carries it for the PBI comment.
+      await requestFeatureChange(c, run.run_id, featureChange(body.featureChange, run.locked_files ?? []));
+      return { state: "FeatureChangeRequest" };
     } else if (event === "usage_limited") {
       const resumeAt = optional(body.resumeAt, (v) => str(v, "resumeAt"));
       if (resumeAt !== null && Number.isNaN(Date.parse(resumeAt))) throw new BadRequest("resumeAt must be a time");

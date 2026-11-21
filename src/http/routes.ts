@@ -18,6 +18,7 @@ import { readCellImage } from "../store/cell-image.ts";
 import { splitChildren } from "../store/splits.ts";
 import { approveRuleChange, latestApproval, ruleChangesChecked, waitsForApproval } from "../store/rule-changes.ts";
 import { ruleChangesHash } from "../gate/rule-changes.ts";
+import { featureChangeRequest } from "../store/feature-change.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
 import { zoneFrom } from "./format.ts";
 import { failedOnMain } from "../store/rechecks.ts";
@@ -349,6 +350,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, i
     fixingCi: fixingCi(item.state, run, stages),
     durations: await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))()),
     ruleChanges: await ruleChangesOf(pool, id, isOwner),
+    featureChange: await featureChangeRequest(pool, id),
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
 }

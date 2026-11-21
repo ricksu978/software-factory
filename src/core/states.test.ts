@@ -33,6 +33,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "rule_change_approved", "Eligible"], ["Queued", "rules_edited", "Eligible"],
   ["InProgress", "rules_edited", "Eligible"], ["SignOff", "rules_edited", "Eligible"],
   ["NeedsInput", "rules_edited", "Eligible"], ["InReview", "rules_edited", "Eligible"],
+  // PBI 364: a stage after sign-off asks to change a locked feature file.
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -55,4 +57,7 @@ test("rechecked moves only a Failed item", () => {
 test("only a NotReady item takes a rule change approval, and only a Queued or later one a rules edit", () => {
   for (const s of ["Eligible", "Queued", "InProgress", "Abandoned"] as ItemState[]) assert.equal(next(s, "rule_change_approved"), null);
   for (const s of ["NotReady", "Eligible", "Accepted", "Done", "Abandoned"] as ItemState[]) assert.equal(next(s, "rules_edited"), null);
+});
+test("feature_change_requested moves only an InProgress item", () => {
+  for (const s of ["Queued", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as ItemState[]) assert.equal(next(s, "feature_change_requested"), null);
 });

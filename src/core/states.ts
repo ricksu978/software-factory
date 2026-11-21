@@ -25,6 +25,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "scenarios_written", "SignOff"],
   ["InProgress", "blocked", "NeedsInput"],
   ["InProgress", "pr_opened", "InReview"],
+  // A stage after sign-off asks to change a locked feature file, and the item waits on the owner (PBI 364).
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
   ["InReview", "changes_requested", "Queued"],
   ["InReview", "merged", "Accepted"],
   ["InProgress", "merged", "Accepted"],
