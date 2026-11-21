@@ -460,6 +460,15 @@ A task that touches one of them follows this section and does not restate it.
      as PBI 140 has it.
      A later claim's `lease_expired` says nothing about the attempt,
      since that claim's cell may have opened no attempt at the stage.
+   - `retry`,
+     which is `{ stageId, tried, findings }` when the last attempt at `nextStage` is `failed` with a `retry_carry`,
+     and null otherwise (PBI 393).
+     Its cell ended the claim at that attempt boundary,
+     under a drain or a restart being prepared,
+     with `tried` of the stage's tries spent.
+     The cell then spends only the tries left at that stage,
+     and its first attempt's brief carries `findings` under "Your last attempt failed",
+     as a retry within one claim does.
 6. **CI status.**
    Only the control plane reads checks,
    with the App's own `RepoHost`.
@@ -2148,6 +2157,15 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     as a `prUrl` that differs does.
     So a cell can't put a `javascript:` link on the dashboard.
     The views also link only an https URL and show any other check as plain text.
+  - `stage_run.retry_carry jsonb`,
+    added by `db/migrations/019_stage_run_retry_carry.sql` (PBI 393),
+    `{ tried, findings }` on a failed attempt whose cell ended its claim at that attempt boundary,
+    under a drain or a restart being prepared,
+    and null on every other.
+    `POST /stage` takes it as `retryCarry` on a `failed` report only,
+    keeping at most 50 findings of 4,000 characters each,
+    and gives 400 for one of another shape.
+    `/context` reads it off the next stage's last attempt for `retry`.
   - `ci_rerun(run_id, sha, checks text[], requested_at)`,
     primary key `(run_id, sha)`,
     added by `db/migrations/018_ci_rerun.sql` (PBI 233).
@@ -4954,12 +4972,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   - **Drain and pause.**
     Neither starts anything.
     Under drain the running cell's `/lease` reply has `stop: false` and `restarting: true`,
-    so the cell finishes the stage it's in,
-    with that stage's own retries,
-    and ends its claim at that stage boundary as under Prepare restart:
+    so the cell finishes the attempt it's in.
+    An attempt that passes ends its claim at that stage boundary as under Prepare restart:
     the item waits in Queued at its run's next stage,
     with no attempt stopped and no work-in-progress commit,
     and once the drain is cleared it's claimed again from that stage (PBI 379).
+    An attempt that fails with retries left ends the claim at that attempt boundary,
+    so the item waits in Queued at the same stage,
+    and once the drain is cleared it's claimed again there,
+    with the stage's retries left (PBI 393).
+    A pass back to green after open-pr, pr-review or address ends at its attempt boundary too.
+    `next_stage` is still that later stage, so `/context` hands green's carry
+    when green's failed attempt is the run's last one, the base merge aside,
+    and the next claim goes back to green through `failedCiHeads` and spends it there.
     Under pause the reply has `stop: true`,
     under a drain as well.
     While the factory drains,
@@ -5374,7 +5399,8 @@ type CellContext = { externalId: string; title: string; acceptanceCriteria: stri
   trustedComments: ReviewComment[]; stageAttempts: Record<string, number>;
   trustedBot?: string | null;   // the repo's trusted bot, whose threads and reviews are the factory's own (PBI 318)
   failedCiHeads?: CiFailure[];   // each head CI failed on in the run's earlier claims, oldest first (PBI 315)
-  resume?: { stageId: string; attempt: number } | null };   // the body of GET /context (Run contract 5)
+  resume?: { stageId: string; attempt: number } | null;
+  retry?: { stageId: string; tried: number; findings: string[] } | null };   // the body of GET /context (Run contract 5); retry is PBI 393's
 type Git = { fetchBase(base: string): Promise<string>;   // fetches the base once per claim, returns origin/<base>'s commit
   mergeAt(base: string, commit: string): Promise<string[]>;   // merges that commit, no fetch; the paths still in conflict
   commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> };
@@ -5857,6 +5883,29 @@ from spec §6 rows 1 to 7:
     The findings this cell was carrying to green aren't kept;
     green works from what the rerun stage finds.
     A reply with `restarting` gone by the stage's end lets the cell go on.
+  - **Attempt boundary (PBI 393).**
+    Specify,
+    red,
+    green and address run their attempts through `attempts`.
+    After an attempt that fails with retries left,
+    the engine reads the lease again.
+    With `restarting` set it starts no further attempt:
+    it reports the attempt `failed` with `retryCarry: { tried, findings }`,
+    sends `POST /release` and returns `restarting`,
+    with no work-in-progress commit and no attempt reported `stopped`.
+    The release sends the item back to Queued at the same stage,
+    since a failed attempt doesn't move `next_stage`.
+    A `stop` in that reply aborts the agent as the renewal loop's does.
+    A stage's last attempt that fails still exhausts or blocks as before,
+    under a drain or not.
+    The next claim's `ctx.retry`,
+    when it names the claim's first stage,
+    starts that stage's tries at `tried`,
+    and green's count across the run at `tried` too,
+    and gives its first attempt `findings` as the last attempt's.
+    It's used once,
+    so a later pass back to green in the same claim spends nothing of it again.
+    Open-pr's and self-review's own loops don't stop at an attempt boundary.
   - **Lost lease.**
     A 409 from any API call makes the engine stop at once,
     with no push and no further calls.

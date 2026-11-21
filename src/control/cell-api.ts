@@ -45,9 +45,21 @@ export type CellApiDeps = {
 // could otherwise use to mark its own PR accepted.
 const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited"]);
 const NONE_AFTER_MS = 600_000;
+// The stages a run stays at while its item goes back to green, from their findings or CI failing on their head.
+const BACK_TO_GREEN_FROM = new Set(["open-pr", "pr-review", "address"]);
 const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
+/** Reads a failed `/stage` report's `retryCarry` (PBI 393): the tries its stage spent, and the attempt's
+ * findings, at most 50 of 4,000 characters each, for the next claim's brief. */
+export function retryCarryOf(v: unknown): { tried: number; findings: string[] } {
+  const r = v as { tried?: unknown; findings?: unknown } | null;
+  if (!r || !Number.isInteger(r.tried) || (r.tried as number) < 1 || !Array.isArray(r.findings) || !r.findings.every((f) => typeof f === "string")) {
+    throw new BadRequest("retryCarry must be { tried, findings }");
+  }
+  return { tried: r.tried as number, findings: (r.findings as string[]).slice(0, 50).map((f) => Array.from(f).slice(0, 4000).join("")) };
+}
+
 /**
  * Reads a `/stage` report's `ciFailure` (PBI 292): the commit CI failed on and each failed check, with its URL and
  * failing tests. Each string is cut to 500 characters, and at most 20 checks and 20 tests a check are kept.
@@ -286,8 +298,8 @@ const routes: Record<string, Route> = {
     // wrap-up, which stopped the cells still running once it ran out (PBI 300 took that stop away).
     // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
     // event.at and stage_run.started_at both come from the database's clock, so they compare.
-    const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean }>(
-      `select s.attempt, s.status, s.message,
+    const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean; retry_carry: { tried: number; findings: string[] } | null }>(
+      `select s.attempt, s.status, s.message, s.retry_carry,
          coalesce((select e.payload->>'reason' = 'restart' from event e
                    where e.item_id = $3 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired'
                      and e.at >= s.started_at
@@ -298,6 +310,23 @@ const routes: Record<string, Route> = {
     const l = last.rows[0];
     const stopped = l?.status === "stopped" && (l.message !== LEASE_RAN_OUT || l.restarted);
     const resume = stopped ? { stageId: run.next_stage, attempt: l.attempt } : null;
+    // PBI 393: when the next stage's last attempt failed and its cell ended the claim at that attempt boundary, under a
+    // drain or a restart being prepared, the next claim spends only the stage's retries left and briefs its first
+    // attempt with that attempt's findings, as a retry within one claim would.
+    let retry: { stageId: string | null; tried: number; findings: string[] } | null =
+      l?.status === "failed" && l.retry_carry ? { stageId: run.next_stage, ...l.retry_carry } : null;
+    // A pass back to green from open-pr, pr-review or address runs while the run is still at that stage, so its carry
+    // is green's: the run's last attempt, at any stage but a claim's base merge, when that was green's and it failed
+    // with a carry. The next claim goes back to green through failedCiHeads and spends the carry there.
+    if (!retry && run.next_stage !== null && BACK_TO_GREEN_FROM.has(run.next_stage)) {
+      const latest = await c.query<{ stage_id: string; status: string; retry_carry: { tried: number; findings: string[] } | null }>(
+        `select stage_id, status, retry_carry from stage_run where run_id = $1 and stage_id <> 'merge'
+         order by started_at desc, attempt desc limit 1`,
+        [run.run_id],
+      );
+      const g = latest.rows[0];
+      if (g?.stage_id === "green" && g.status === "failed" && g.retry_carry) retry = { stageId: "green", ...g.retry_carry };
+    }
     let trustedComments: ReviewComment[] = [];
     // Each open thread's comment count at the claim, every author's. Before it resolves a thread it answered, address
     // reads the threads again and leaves open one that gained a comment it never read (PBI 258).
@@ -329,6 +358,7 @@ const routes: Record<string, Route> = {
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       failedCiHeads,
       resume,
+      retry,
     };
   },
 
@@ -445,19 +475,22 @@ const routes: Record<string, Route> = {
       ? JSON.stringify(body.restates.map((r: { round: number; reason: string }) => ({ round: r.round, reason: cut(r.reason) })))
       : (() => { throw new BadRequest("restates must be a list of { round, reason }"); })();
     const ciFailure = body.ciFailure === undefined ? null : JSON.stringify(ciFailureOf(body.ciFailure, run.repo_url));
+    // PBI 393: a failed attempt that ends its claim at the attempt boundary hands the next claim its tries and findings.
+    const retryCarry = body.retryCarry === undefined || status !== "failed" ? null : JSON.stringify(retryCarryOf(body.retryCarry));
     const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure];
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure, retryCarry];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
-         message = coalesce($12, message), restates = coalesce($13::jsonb, restates), ci_failure = coalesce($14::jsonb, ci_failure)
+         message = coalesce($12, message), restates = coalesce($13::jsonb, restates), ci_failure = coalesce($14::jsonb, ci_failure),
+         retry_carry = coalesce($15::jsonb, retry_carry)
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb)`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure, retry_carry)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb, $15::jsonb)`,
         values,
       );
     }
