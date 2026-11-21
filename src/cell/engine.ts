@@ -2,7 +2,7 @@
 // pointer names, and reports every stage, verdict and state move to the control plane through the cell API.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -534,6 +534,27 @@ function uncoveredFirst(command: string, gateCommands: string[]): boolean {
   return first >= 0 && parts.some((p, i) => i > first && gate.has(p));
 }
 
+/**
+ * Each file and folder under `dir`, outside `.git`, with its size, inode and change times, so a rewrite of a file
+ * that was already there shows as a change, as a rebuild under an existing ignored `dist/` does. `git status` shows
+ * such a folder as one line and never a file's contents, so it can't tell. Null when the tree can't be read.
+ */
+async function fileStamps(dir: string): Promise<string | null> {
+  const out: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    const entries = await readdir(join(dir, rel), { withFileTypes: true });
+    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (path === ".git") continue;
+      const st = await lstat(join(dir, path), { bigint: true });
+      out.push(`${path}\0${st.mode}\0${st.ino}\0${st.size}\0${st.mtimeNs}\0${st.ctimeNs}`);
+      if (e.isDirectory()) await walk(path);
+    }
+  };
+  try { await walk(""); } catch { return null; }
+  return out.join("\n");
+}
+
 /** What a line's reason says of the gate's run that stood in for its covered parts. */
 const gateReason = (g: GateRun, covered: string[]) =>
   `Green's gate passed ${covered.map((c) => `\`${c}\``).join(" and ")} at ${g.sha.slice(0, 7)} with ${g.passed} scenarios passed and ${g.failed} failed.`;
@@ -600,13 +621,14 @@ export async function checkDefinitionOfDone(d: {
     }
     let command = cover ? cover.rest.join(" && ") : c.run!;
     // A part before a covered one can write files the gate command after it reads, as a build does before the tests.
-    // When the parts run changed the checkout's files, or that can't be told, the gate's run didn't see what the line
-    // asks for, so the line runs whole as before.
-    const before = cover && uncoveredFirst(c.run!, gate!.commands) ? await sh("git status --porcelain --ignored", dir) : null;
+    // When the parts run created, removed or rewrote any file in the checkout, ignored ones included, or that can't be
+    // told, the gate's run didn't see what the line asks for, so the line runs whole as before.
+    const first = cover && uncoveredFirst(c.run!, gate!.commands);
+    const before = first ? await fileStamps(dir) : null;
     let r = await sh(command, dir);
-    if (before && r.code === 0) {
-      const after = await sh("git status --porcelain --ignored", dir);
-      if (before.code !== 0 || after.code !== 0 || before.all !== after.all) {
+    if (first && r.code === 0) {
+      const after = await fileStamps(dir);
+      if (before === null || after === null || before !== after) {
         command = c.run!;
         cover = null;
         r = await sh(command, dir);
