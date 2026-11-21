@@ -84,6 +84,38 @@ Feature: An item may change the factory's own rules when it says so and the owne
       When the readiness check checks item "395"
       Then the readiness check read no rule change on item "395"
 
+    @ac-1
+    Scenario: A rule entry with a Before but no After fails the item and names the section
+      Given item "395"'s body has this section:
+        """
+        ## Changes the factory's rules
+
+        ### Spec §6
+        **Before**
+        > A lease lasts ten minutes and the worker renews it every minute.
+        """
+      And the readiness judge passes every line and finds the item changes spec section "§6"
+      When the readiness check checks item "395"
+      Then the factory holds item "395" in state "NotReady"
+      And the board item has a new readiness comment saying the entry for spec section "§6" gives no After
+      And item "395" isn't waiting for the owner's approval
+
+    @ac-1
+    Scenario: A rule entry with an After but no Before fails the item and names the section
+      Given item "395"'s body has this section:
+        """
+        ## Changes the factory's rules
+
+        ### Spec §6
+        **After**
+        > A lease lasts five minutes and the worker renews it every thirty seconds.
+        """
+      And the readiness judge passes every line and finds the item changes spec section "§6"
+      When the readiness check checks item "395"
+      Then the factory holds item "395" in state "NotReady"
+      And the board item has a new readiness comment saying the entry for spec section "§6" gives no Before
+      And item "395" isn't waiting for the owner's approval
+
   Rule: A Before that doesn't match main word for word fails the item and names the section whose quote is off
 
     @ac-2
@@ -122,6 +154,45 @@ Feature: An item may change the factory's own rules when it says so and the owne
       When the owner opens item "395"'s item page
       Then the item page says the Before quoted for spec section "§6" doesn't match main
       And the item page doesn't show the "Approve rule change" control
+
+    @ac-2
+    Scenario: A Before quoted as one line of prose matches a rule that main's spec holds as HTML over several lines with markup
+      Given on main, spec section "§7" is HTML with one clause per line and reads:
+        """
+        <li><b>Claiming.</b>
+
+        The scheduler takes a lease on the item and the cell renews it every 60 seconds.
+
+        After 5 missed renewals the lease expires and the item goes back to <code>Queued</code>,
+
+        branch intact.</li>
+        """
+      And item "395"'s rules section changes spec section "§7" with the Before "Claiming. The scheduler takes a lease on the item and the cell renews it every 60 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact."
+      And the readiness judge passes every line and finds the item changes spec section "§7"
+      When the readiness check checks item "395"
+      Then the readiness check passed item "395" on the line "An item that changes the factory's own rules names the spec section it changes"
+      And the factory holds item "395" in state "NotReady"
+      And item "395" is waiting for the owner's approval
+      And the board item's new readiness comment doesn't say the Before quoted for spec section "§7" is off
+
+    @ac-2
+    Scenario: The same one-line quote of an HTML rule with one word changed still fails and names the section
+      Given on main, spec section "§7" is HTML with one clause per line and reads:
+        """
+        <li><b>Claiming.</b>
+
+        The scheduler takes a lease on the item and the cell renews it every 60 seconds.
+
+        After 5 missed renewals the lease expires and the item goes back to <code>Queued</code>,
+
+        branch intact.</li>
+        """
+      And item "395"'s rules section changes spec section "§7" with the Before "Claiming. The scheduler takes a lease on the item and the cell renews it every 90 seconds. After 5 missed renewals the lease expires and the item goes back to Queued, branch intact."
+      And the readiness judge passes every line and finds the item changes spec section "§7"
+      When the readiness check checks item "395"
+      Then the factory holds item "395" in state "NotReady"
+      And the board item has a new readiness comment saying the Before quoted for spec section "§7" doesn't match main
+      And item "395" isn't waiting for the owner's approval
 
   Rule: An item whose section covers every rule the judge finds passes the rules line and waits for the owner's approval
 
