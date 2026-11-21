@@ -18,7 +18,7 @@ import { createAuth } from "../../src/http/auth.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p16ctx, mods as p16mods, routeCall, snapshot, stageBody } from "./pbi-16.steps.ts";
 
-const SECRET = "cell-secret";
+export const SECRET = "cell-secret";
 const REPO = "ricksu978/software-factory";
 const DEV_LOGIN = "owner";
 const CONFIG = "bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n";
@@ -69,7 +69,8 @@ export function ctx(world: object): Ctx {
 const pool = () => need().pool;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-After({ tags: "@pbi-222", ...long }, async function () {
+// PBI 223's scenarios run the cell API service through this context too.
+After({ tags: "@pbi-222 or @pbi-223", ...long }, async function () {
   const c = ctx(this);
   await c.cellApi?.stop();
   await c.cellApiMain?.stop();
@@ -84,7 +85,7 @@ After({ tags: "@pbi-222", ...long }, async function () {
 
 /** True when something accepts a TCP connection on `port`, over IPv4 or IPv6. */
 /** Whether anything answers on the free port the scenario's `named` port stands for. */
-async function answers(world: object, named: number): Promise<boolean> {
+export async function answers(world: object, named: number): Promise<boolean> {
   const port = await scenarioPorts(world).real(named);
   const on = (host: string) => new Promise<boolean>((resolve) => {
     const s = connect({ host, port, timeout: 2_000 });
@@ -143,7 +144,7 @@ async function fakeUpstream(c: Ctx, owner?: string): Promise<void> {
   c.upstreamUrl = `http://127.0.0.1:${(c.upstream.address() as AddressInfo).port}`;
 }
 
-async function startCellApi(world: object, port: number): Promise<void> {
+export async function startCellApi(world: object, port: number): Promise<void> {
   const c = ctx(world);
   const mod = await load<CellApiModule>("src/cell-api/main.ts");
   if (!mod?.serveCellApi) {
@@ -167,7 +168,7 @@ async function startControl(world: object, port: number): Promise<void> {
 }
 
 /** A cell's call to `port` under /internal/cells/<run>, with its token, unless the service on it never started. */
-async function cellCall(world: object, port: number, method: string, path: string, body?: unknown, token?: string): Promise<number | null> {
+export async function cellCall(world: object, port: number, method: string, path: string, body?: unknown, token?: string): Promise<number | null> {
   const first = p16ctx(world).first;
   assert.ok(first, "no run was claimed");
   if (!(await answers(world, port))) return null;
@@ -193,7 +194,7 @@ async function modelRequest(world: object, port: number, token?: string): Promis
 }
 
 /** Records an answer from the scenario's `port`: the cell API's, on 7401, go to PBI 16's context, today's control plane's to this one's. */
-function record(world: object, port: number, status: number | null): void {
+export function record(world: object, port: number, status: number | null): void {
   if (status === null) return;
   if (port === 7401) p16ctx(world).statuses.push(status);
   else ctx(world).statuses.push(status);

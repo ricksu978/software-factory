@@ -10,12 +10,12 @@ import { join } from "node:path";
 // data volumes, so run these scenarios once per worktree at a time. Every aspire command names this AppHost with
 // --apphost, and control's URLs come from `aspire describe` once it's up.
 const repo = process.cwd();
-const APPHOST = "--apphost . --non-interactive --nologo";
+export const APPHOST = "--apphost . --non-interactive --nologo";
 let control = "";
 let cellControl = "";
 const long = { timeout: 600_000 };
 
-type Ctx = {
+export type Ctx = {
   started: boolean;
   up?: boolean;
   runsBefore?: number | null;
@@ -26,13 +26,13 @@ type Ctx = {
   sdkOut?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi6?: Ctx };
   w.pbi6 ??= { started: false };
   return w.pbi6;
 }
 
-function sh(command: string, input?: string): { status: number | null; out: string; stdout: string; stderr: string } {
+export function sh(command: string, input?: string): { status: number | null; out: string; stdout: string; stderr: string } {
   const r = spawnSync(command, { cwd: repo, shell: true, encoding: "utf8", input, env: { ...process.env, FACTORY_FLOAT_PORTS: "1" } });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
@@ -55,7 +55,7 @@ async function get(path: string): Promise<{ status: number; body: string } | nul
  * `aspire describe` for one resource, or every resource when none is named, parsed from the JSON on stdout. It hands
  * back the exit status and stderr, never stdout, because stdout shows environment values such as FACTORY_DB_URI.
  */
-function describe(resource = ""): { status: number | null; stderr: string; doc: { resources: Record<string, any>[] } | null } {
+export function describe(resource = ""): { status: number | null; stderr: string; doc: { resources: Record<string, any>[] } | null } {
   const r = sh(`aspire describe ${resource} --format Json ${APPHOST}`);
   try {
     return { status: r.status, stderr: r.stderr, doc: JSON.parse(r.stdout.slice(r.stdout.indexOf("{"))) };
@@ -64,7 +64,7 @@ function describe(resource = ""): { status: number | null; stderr: string; doc: 
   }
 }
 
-async function startAspire(c: Ctx): Promise<void> {
+export async function startAspire(c: Ctx): Promise<void> {
   c.started = true;
   control = "";
   cellControl = "";
@@ -78,7 +78,7 @@ async function startAspire(c: Ctx): Promise<void> {
   c.up = (await get("/")) !== null;
 }
 
-function stopAspire(): void {
+export function stopAspire(): void {
   sh(`aspire stop ${APPHOST}`);
 }
 
