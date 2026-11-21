@@ -318,20 +318,33 @@ Then("the script says the run count must be a whole number above zero", function
   assert.match(r.out, /run count must be a whole number above zero/i);
 });
 
-Then("each run failed because the second worker launched no cell for item {string} within {int} seconds", function (name: string, _s: number) {
+Then("each run failed because the second worker launched no cell for item {string} within {int} seconds", function (name: string, s: number) {
   const r = result(this);
-  // PBI 157's takeover Then times out with this, once its 30 seconds from the lock loss are up.
+  // PBI 157's takeover Then times out with this, once its seconds from the lock loss are up.
   const because = `timed out waiting until the second worker launches item ${name}'s cell`;
   const n = failedRuns(r.out).length;
   assert.ok(n > 0, `the script names no run as failed:\n${r.out}`);
   const seen = r.out.split(because).length - 1;
   assert.ok(seen >= n, `${seen} of the ${n} failed runs failed because the second worker launched no cell for item ${name} in time:\n${r.out}`);
+  // And each run waited for this scenario's deadline: the inner run's hook below says what its Then waited for.
+  const waits = [...r.out.matchAll(DEADLINE_LINE)].filter((m) => m[1] === name).map((m) => ({ deadline: Number(m[2]), gaveUpMs: Number(m[3]) }));
+  assert.ok(waits.length >= n, `${waits.length} of the ${n} failed runs said what deadline they waited for:\n${r.out}`);
+  for (const w of waits) {
+    assert.equal(w.deadline, s, `a run waited ${w.deadline} seconds for item ${name}'s cell, not ${s}`);
+    assert.ok(w.gaveUpMs >= s * 1_000 && w.gaveUpMs < s * 1_000 + DEADLINE_SLACK_MS, `a run gave up ${w.gaveUpMs} ms after the lock loss, not just after ${s} seconds`);
+  }
 });
 
 // ---- PBI 157's faults, read in the inner run ----
 
 const fault = () => process.env[FAULT_ENV] as Fault | undefined;
 const LOSS_STEP = "the first worker's lock connection is ended by Postgres";
+/** PBI 157's takeover Then, whose deadline the "never" and "late" faults make it wait out. */
+const TAKEOVER_STEP = /^within (\d+) seconds the second worker launches a cell for item "(.*)"$/;
+/** The line the inner run prints when that Then fails: item, the seconds it was given, and when it gave up. */
+const DEADLINE_LINE = /PBI376: the takeover Then for item "(.*?)" waited (\d+) seconds and gave up (\d+) ms after the lock loss/g;
+/** How long past its deadline the Then may give up: one poll and its queries. Well under the "late" fault's 15 seconds more. */
+const DEADLINE_SLACK_MS = 5_000;
 
 type Holder = { client: pg.PoolClient; granted: Promise<unknown>; timer?: NodeJS.Timeout; released?: boolean };
 const holders = new WeakMap<object, Holder>();
@@ -365,6 +378,15 @@ AfterStep({ tags: "@pbi-157", ...long }, async function ({ pickleStep }) {
     h.released = true;
     void h.client.query("select pg_advisory_unlock($1)", [WORKER_LOCK_KEY]).catch(() => {});
   }, Math.max(lostAt + LATE_MS - Date.now(), 0));
+});
+
+// Under a fault, says what deadline PBI 157's takeover Then waited for when it failed, so the outer Then can check it.
+AfterStep({ tags: "@pbi-157" }, function ({ pickleStep, result }) {
+  if (!fault() || result.status !== "FAILED") return;
+  const m = TAKEOVER_STEP.exec(pickleStep.text);
+  const lostAt = p157(this).stoppedAt;
+  if (!m || lostAt === undefined) return;
+  process.stderr.write(`PBI376: the takeover Then for item "${m[2]}" waited ${m[1]} seconds and gave up ${Date.now() - lostAt} ms after the lock loss\n`);
 });
 
 After({ tags: "@pbi-157" }, async function () {
