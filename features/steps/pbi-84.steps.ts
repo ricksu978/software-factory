@@ -95,7 +95,7 @@ function resolve(v) {
   if (v[REF]) return v.strings.reduce((out, s, i) => out + s + (i < v.values.length ? resolve(v.values[i]) : ''), '');
   const meta = info.get(v);
   if (!meta) return '<value>';
-  if (meta.kind === 'blobs') return 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=' + PUBLISHED_KEY + ';BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;';
+  if (meta.kind === 'blobs') return 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=' + PUBLISHED_KEY + ';BlobEndpoint=http://azurite.test:10000/devstoreaccount1;';
   if (meta.kind === 'parameter') return paramValue(meta);
   return '<' + meta.name + '>';
 }

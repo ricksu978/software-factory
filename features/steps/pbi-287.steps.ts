@@ -1,5 +1,5 @@
 // Step definitions for features/pbi-287-api-github-webhook-intake.feature. The API runs in this process from
-// src/api/main.ts's startApi on port 7402, on PBI 4's shared test database, through PBI 284's "the API starts" step,
+// src/api/main.ts's startApi on the scenario's free port (PBI 284's apiPort), on PBI 4's shared test database, through PBI 284's "the API starts" step,
 // with PBI 284's fake issuer standing in for the sign-in provider. GitHub's deliveries carry no bearer token, so the
 // issuer only lets the API start. PBI 222's "a fresh factory database" empties the database, and its truncate of item
 // cascades to event and outbox. PBI 284's "the API answers {int}" and "no webhook event is recorded" read the last
@@ -20,9 +20,8 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { CONSUMER } from "../../src/store/outbox.ts";
 import { long, need } from "./pbi-8.steps.ts";
-import { ctx as api, startIssuer, stopAll, type Reply } from "./pbi-284.steps.ts";
+import { apiPort, ctx as api, startIssuer, stopAll, type Reply } from "./pbi-284.steps.ts";
 
-const PORT = 7402;
 const REPO = "octo/repo";
 
 type Delivery = { event: string; deliveryId: string | null; body: Buffer; reply: Reply };
@@ -156,7 +155,7 @@ async function post(world: object, s: Send): Promise<Delivery> {
   if (s.deliveryId !== null) headers["x-github-delivery"] = s.deliveryId;
   let reply: Reply;
   try {
-    const r = await fetch(`http://127.0.0.1:${PORT}/webhooks/github`, { method: "POST", headers, body: new Uint8Array(s.sent ?? s.body) });
+    const r = await fetch(`http://127.0.0.1:${await apiPort(world)}/webhooks/github`, { method: "POST", headers, body: new Uint8Array(s.sent ?? s.body) });
     reply = { status: r.status, text: await r.text() };
   } catch (e) {
     // Nothing answered. The Then that reads the reply fails on it.

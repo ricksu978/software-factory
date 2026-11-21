@@ -1,5 +1,5 @@
 // Step definitions for features/pbi-285-api-raw-path-guard.feature. They build on PBI 284's: the same fake issuer,
-// the same API started from src/api/main.ts's startApi on port 7402, the same fresh database and the same people.
+// the same API started from src/api/main.ts's startApi on the scenario's free port, the same fresh database and the same people.
 // PBI 284's hooks run for @pbi-285 too, so the API and the issuer stop after each scenario.
 //
 // "Sent exactly as written" goes out through node:http with the path untouched. fetch would parse the URL first,
@@ -11,7 +11,7 @@ import { Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { request } from "node:http";
-import { ctx, itemId, PORT, validToken, WEBHOOK_SECRET, type Ctx, type Reply } from "./pbi-284.steps.ts";
+import { apiPort, ctx, itemId, validToken, WEBHOOK_SECRET, type Ctx, type Reply } from "./pbi-284.steps.ts";
 import { long } from "./pbi-8.steps.ts";
 
 /** `path` with each segment that names one of the scenario's items swapped for the item's id. */
@@ -22,8 +22,9 @@ function withIds(c: Ctx, path: string): string {
 /** Sends `method path` to the API with the path byte for byte as given, and keeps the reply as PBI 284's steps do. */
 async function sendRaw(world: object, method: string, path: string, headers: Record<string, string>, body?: Buffer): Promise<void> {
   const c = ctx(world);
+  const port = await apiPort(world);
   c.reply = await new Promise<Reply>((resolve) => {
-    const req = request({ host: "127.0.0.1", port: PORT, method, path, headers: { ...headers, ...(body ? { "content-length": String(body.length) } : {}) } }, (res) => {
+    const req = request({ host: "127.0.0.1", port, method, path, headers: { ...headers, ...(body ? { "content-length": String(body.length) } : {}) } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {

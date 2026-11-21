@@ -1,5 +1,6 @@
 // Step definitions for features/pbi-284-api-bearer-auth-roles.feature. The API runs in this process from
-// src/api/main.ts's startApi on port 7402, on PBI 4's shared test database, as PBI 222's steps run the cell API from
+// src/api/main.ts's startApi on a free port of the scenario's own (apiPort), rather than its own 7402, so scenarios in
+// parallel workers never collide (PBI 390), on PBI 4's shared test database, as PBI 222's steps run the cell API from
 // serveCellApi. A fake issuer on a free port publishes a discovery document and an RS256 key set, and signs the
 // scenario's tokens with jose. A person's token carries their name as its subject. Stored blobs live in a map the
 // API reads through ApiDeps.readBlob, so no blob account is needed.
@@ -28,10 +29,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
 import pg from "pg";
+import { freePort } from "../../src/bdd/ports.ts";
 import { ctx as pbi175 } from "./pbi-175.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
-export const PORT = 7402;
+/** The free port the scenario's API listens on, picked the first time a step asks, so a request before it starts reaches nothing. */
+export async function apiPort(world: object): Promise<number> {
+  const c = ctx(world);
+  return (c.port ??= await freePort());
+}
 export const WEBHOOK_SECRET = "pbi-284-webhook-secret";
 const OTHER_ISSUER = "http://other-issuer.test/realms/elsewhere";
 const KID = "pbi-284-key";
@@ -58,6 +64,8 @@ export type Ctx = {
   started: boolean;
   /** True for a scenario tagged @db, whose "fresh factory database" step may be PBI 222's, so the API gets the database. */
   db: boolean;
+  /** The free port the API listens on, from apiPort. */
+  port?: number;
   /** Each person's last token, so "again with the same token" sends it. */
   tokens: Map<string, string>;
   reply?: Reply;
@@ -308,7 +316,7 @@ When("the API starts from src\\/api\\/main.ts", long, async function () {
       readBlob: async (path: string) => c.blobs.get(path) ?? null,
       env: { ...c.env },
       ...(c.now ? { now: () => c.now! } : {}),
-    }, PORT);
+    }, await apiPort(this));
   } catch (e) {
     c.startError = e;
   } finally {
@@ -331,7 +339,7 @@ export async function call(world: object, method: string, path: string, opts: { 
   if (opts.auth !== undefined) headers.authorization = opts.auth;
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   try {
-    const r = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+    const r = await fetch(`http://127.0.0.1:${await apiPort(world)}${path}`, {
       method, headers, redirect: "manual",
       body: opts.raw ? new Uint8Array(opts.raw) : (opts.body === undefined ? undefined : JSON.stringify(opts.body)),
     });

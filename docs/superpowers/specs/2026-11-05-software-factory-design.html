@@ -2499,6 +2499,42 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Running the suite in parallel.</b>
+
+    <code>npm run bdd</code> runs the scenarios in cucumber-js's own parallel workers (PBI 390),
+
+    so a cell's Red and Green and every CI build finish the suite in a fraction of the time.
+
+    How many comes from one setting, <code>BDD_WORKERS</code>,
+
+    so a cell, CI and a person's machine can each set their own.
+
+    Unset, it is 4.
+
+    A count that isn't a whole number above zero is refused before anything runs.
+
+    A scenario that can't share the machine with another carries <code>@serial</code>, on itself or its feature.
+
+    The suite's parallel rule starts it only when no other scenario runs,
+
+    and starts no other while it runs.
+
+    The @local scenarios that drive the AppHost, Docker or the owner's accounts carry it.
+
+    No step starts a server on, or connects to, a port fixed in its code:
+
+    a step that starts a server takes a free port,
+
+    and each port a scenario names stands for a free port of that scenario's own.
+
+    A check over the step definitions names any step that breaks this rule, by file and line.
+
+    Every worker writes into the one Cucumber Messages report,
+
+    so Red and Green read each scenario and its result as they did from a serial run.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Reading runner results.</b>
 
     Every runner writes a Cucumber Messages report,
