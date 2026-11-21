@@ -35,6 +35,9 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NeedsInput", "rules_edited", "Eligible"], ["InReview", "rules_edited", "Eligible"],
   // PBI 364: a stage after sign-off asks to change a locked feature file.
   ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
+  // PBI 364: backlog changes and a merge reach an item waiting in FeatureChangeRequest.
+  ["FeatureChangeRequest", "withdrawn", "Abandoned"], ["FeatureChangeRequest", "criteria_changed", "Queued"],
+  ["FeatureChangeRequest", "rules_edited", "Eligible"], ["FeatureChangeRequest", "merged", "Accepted"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));

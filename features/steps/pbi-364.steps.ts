@@ -133,8 +133,15 @@ function asks(world: object, role: Role, path: string, reason: string) {
 // ---- the run and its agents ----
 
 Given("item {int} is InProgress", function (_item: number) {
-  // A cell runs only for a claimed item, so the run PBI 152's step set up is InProgress.
-  harness(this);
+  // A cell runs only for a claimed item, so the run PBI 152's step set up is InProgress: claimed after sign-off, its
+  // feature files locked, at a stage after sign-off, and not yet run.
+  const { c } = harness(this);
+  assert.equal(next("Queued", "claimed"), "InProgress");
+  assert.ok(c.lockSha, "the run has no lock commit, so it was never signed off");
+  assert.ok(c.lockedFiles.length > 0, "the run locked no feature file");
+  assert.ok(["red", "green", "self-review", "open-pr", "address"].includes(c.nextStage), `the run resumes at ${c.nextStage}, not a stage after sign-off`);
+  assert.equal(c.result, null, "the cell already ran for this claim");
+  assert.equal(transitions(c).length, 0, "the run already moved the item out of InProgress");
 });
 
 Given("the {word} agent changes {string} to {string} in {string}", function (stage: string, from: string, to: string, path: string) {
@@ -167,8 +174,10 @@ Given("the fix pass's report asks to change {string} because {string}", function
 });
 
 Given("the open-pr report asks to change no feature file", function () {
-  // The summary pass's answer is the default one, which names no feature change.
-  harness(this);
+  // The summary pass's answer is the default one, which names no feature change, and no earlier step queued one.
+  const { x } = harness(this);
+  const queued = x.reports.filter((p) => p.role === "summary" && /^FEATURE CHANGE:/.test(p.line));
+  assert.deepEqual(queued, [], `the summary pass's report already asks for a feature change: ${queued.map((p) => p.line).join("; ")}`);
 });
 
 // ---- the cell's request ----
