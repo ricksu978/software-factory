@@ -3087,6 +3087,8 @@ Feature: Export invoices to CSV
 
     so this repo's line 1 runs only <code>npm run typecheck</code> at Green.
 
+    A line with a part that changes the shell's state for the parts after it, such as <code>cd web</code> or <code>export X=1</code>, runs whole.
+
     A line joined any other way,
 
     with a pipe, <code>||</code>, <code>;</code> or a subshell,

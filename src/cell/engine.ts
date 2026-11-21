@@ -505,17 +505,24 @@ function andParts(command: string): string[] | null {
 }
 
 /**
+ * A part that changes the shell's state for the parts after it: its directory (`cd web`), its variables (`export X=1`,
+ * `FOO=1`), its options or the files it sources. A gate command after one of these doesn't run as the gate ran it.
+ */
+const STATEFUL = /^(?:(?:cd|pushd|popd|export|unset|source|\.|set|shopt|alias|umask|declare|typeset|readonly|local|eval|exec)(?:\s|$)|[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=)/;
+
+/**
  * Which parts of a `run:` command Green's gate commands cover (PBI 389). A command identical to a gate command is
  * covered whole. Otherwise one made only of parts joined with `&&` is split, and `rest` holds the parts still to run.
- * Null when no part is covered, or the parts are joined any other way, so the command runs whole as before.
+ * Null when no part is covered, the parts are joined any other way, or a part changes the shell's state (such as
+ * `cd web && npm test`), so the command runs whole as before.
  */
 export function gateCover(command: string, gateCommands: string[]): { covered: string[]; rest: string[] } | null {
   const gate = new Set(gateCommands.map(squash));
   const whole = squash(command);
   if (gate.has(whole)) return { covered: [whole], rest: [] };
   const parts = andParts(command);
-  if (!parts) return null;
-  const covered = parts.filter((p) => gate.has(p));
+  if (!parts || parts.some((p) => STATEFUL.test(p))) return null;
+  const covered = [...new Set(parts.filter((p) => gate.has(p)))];
   return covered.length ? { covered, rest: parts.filter((p) => !gate.has(p)) } : null;
 }
 

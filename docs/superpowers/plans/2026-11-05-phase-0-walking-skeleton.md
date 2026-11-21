@@ -813,6 +813,10 @@ A task that touches one of them follows this section and does not restate it.
       even one holding a `$(...)`.
       Otherwise a command made only of parts joined with `&&` outside quotes is split there,
       and one with a pipe, `||`, `;`, a lone `&`, parentheses or a substitution isn't.
+      Nor is one with a part that changes the shell's state for the parts after it,
+      such as `cd web`, `export X=1`, `FOO=1`, `source` or `set`,
+      since a gate command after it doesn't run as the gate ran it.
+      So `cd web && npm test` runs whole.
       A line covered whole passes on the gate's run, with a reason naming Green's gate, the commit and the scenario counts,
       and runs nothing.
       A line covered in part runs the rest joined with `&&`.

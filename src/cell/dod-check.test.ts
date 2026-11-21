@@ -133,6 +133,14 @@ describe("gateCover", () => {
       assert.equal(gateCover(c, cmds), null, c);
     }
   });
+  test("a line with a part that changes the shell's state runs whole", () => {
+    for (const c of ["cd web && npm test", "npm run typecheck && cd web && npm test", "export X=1 && npm test", "FOO=1 && npm test", "pushd web && npm test", "source env.sh && npm test", ". ./env.sh && npm test", "set -e && npm test"]) {
+      assert.equal(gateCover(c, cmds), null, c);
+    }
+  });
+  test("a gate command repeated in a line is named once", () => {
+    assert.deepEqual(gateCover("npm test && npm run typecheck && npm test", cmds), { covered: ["npm test"], rest: ["npm run typecheck"] });
+  });
   test("an && inside quotes doesn't split", () => {
     assert.equal(gateCover(`echo "a && npm test"`, cmds), null);
   });
