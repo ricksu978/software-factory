@@ -3754,6 +3754,20 @@ Feature: Export invoices to CSV
 
     so it waits again.
 
+    Deleting an approved section is an edit to it too:
+
+    a Queued item goes back to Eligible,
+
+    and the judge checks it again.
+
+    The owner approves only the rule changes the page showed.
+
+    When the section changed after the page was shown,
+
+    the approval is refused and nothing is logged,
+
+    so the owner reloads the page and reviews the changes again.
+
     An item already claimed keeps the section it was approved with.
 
     An edit anywhere else in the item doesn't ask for approval again,

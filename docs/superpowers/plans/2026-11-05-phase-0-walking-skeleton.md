@@ -3425,7 +3425,11 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     a failed `rule change approval` verdict leaves the item waiting.
     The poller stores what the gate read as `item.rule_changes` in the move's transaction,
     and the readiness comment key gains `:rules-approved` once the approval matches.
-    Step 3 moves a Queued item through `rules_edited` when its parsed section is non-empty and its hash isn't the approved one.
+    Step 3 moves a Queued item through `rules_edited` when its parsed section is non-empty and its hash isn't the approved one,
+    or when it has no section but the last readiness check stored rule changes,
+    so deleting an approved section has the judge check the item again.
+    That check stores no rule changes,
+    so the next poll leaves the item Queued.
   - **Oversized items (PBI 143).**
     The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
@@ -6402,13 +6406,18 @@ from spec §6 rows 1 to 7:
     - `GET /events` is SSE fed by `LISTEN factory_events`.
     - `POST /items/:id/signoff` takes `{ decision: "approve" | "changes", note }` and needs `product_owner`.
     - `POST /items/:id/answer` takes `{ answer }` and needs operator or product owner.
-    - `POST /items/:id/rule-approval` takes no fields and needs owner (PBI 395).
+    - `POST /items/:id/rule-approval` takes `{ ruleChangesHash }` and needs owner (PBI 395).
+      The page's form carries the `ruleChangesHash` of the rule changes it showed in a hidden field.
       `approveRuleChange` in `src/store/rule-changes.ts` approves only an item that `waitsForApproval`,
+      and only when that hash is the hash of the item's stored rule changes,
       logging `rule_change_approved` with `rulesHash` and `changes` at the dashboard's `now`,
       and moving the item through `rule_change_approved` in the same transaction.
       It answers 303 to the item page,
       403 to anyone but an owner,
-      and 409 for an item that doesn't wait.
+      409 for an item that doesn't wait,
+      and 409 when the rule changes changed since the page was shown,
+      logging nothing,
+      so the owner reloads the page and reviews them again.
       Run detail's `<h2>Rule changes</h2>` shows each entry as a `data-rule` element,
       its Before and After in `<blockquote data-side="before">` and `data-side="after"`,
       each changed word of `wordDiff` in a `<mark>`,
