@@ -355,11 +355,11 @@ Then("Green's brief says CI named no failing test for the check {string}", funct
   assert.ok(b.split("\n").some((l) => namesWord(l, check) && /no failing test/i.test(l)), `Green's brief doesn't say CI named no failing test for "${check}":\n${b}`);
 });
 
-/** The messages of the attempts the cell ended, with each attempt's stage. */
+/** The messages of the attempts the run ended, with each attempt's stage: an earlier claim's (PBI 315), then this cell's. */
 export function ended(world: object): { stageId: string; attempt: number; message: string }[] {
   const run = cell(world);
   settled(run);
-  return run.calls.filter((x) => x.route === "/stage" && x.body.status !== "started")
+  return [...(run.earlierCalls ?? []), ...run.calls].filter((x) => x.route === "/stage" && x.body.status !== "started")
     .map((x) => ({ stageId: String(x.body.stageId), attempt: Number(x.body.attempt), message: String(x.body.message ?? "") }));
 }
 

@@ -43,6 +43,12 @@ export type CellContext = {
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
   /**
+   * PBI 315: each head CI failed on in an earlier claim of this run, with its failed checks, oldest first, as the
+   * run's attempts reported them with `ciFailure`: Green's on the failure it fixes, and those of open-pr, address
+   * or pr-review on the failure they found. Absent or empty when no earlier claim saw CI fail.
+   */
+  failedCiHeads?: CiFailure[];
+  /**
    * The attempt at the run's next stage that a stop cut short, when the run resumes from the work in progress that
    * attempt pushed (PBI 140). Absent or null when the stage starts fresh.
    */
@@ -572,6 +578,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     /** Notes the factory adds, such as a missing CI check (PBI 229). They go before the message, since the cell API
      *  keeps only its first 500 characters, and a later `say` doesn't replace them. */
     notes?: string[];
+    /** PBI 315: the CI failure this attempt found, on its failed report, so a later claim of the run knows the head
+     *  failed even when this claim ends before Green starts. */
+    ciFailure?: CiFailure;
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   let dodSha = ctx.dodCheckedSha;
@@ -655,6 +664,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       costUsd: m.costUsd, ...(c.message === undefined && !c.notes?.length ? {} : { message: [...(c.notes ?? []), c.message].filter(Boolean).join("\n\n") }),
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       ...(c.restates?.length ? { restates: c.restates } : {}),
+      ...(c.ciFailure ? { ciFailure: c.ciFailure } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
@@ -849,8 +859,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // PBI 292: every CI failure on the run's own commits in this cell, oldest first, by the commit it failed on. A head
   // CI failed on is never read again, so no attempt is charged for the same failure twice.
+  // PBI 315: a head CI failed on in an earlier claim of the run counts as failed here too, until a new commit moves on.
   const ciFailures: CiFailure[] = [];
-  const failedHeads = new Map<string, CiFailure>();
+  const failedHeads = new Map<string, CiFailure>((ctx.failedCiHeads ?? []).map((f) => [f.sha, f]));
   // PBI 232: each failed check's log, as `/checks` named it, by the commit CI failed on, for Green's findings.
   const failedLogs = new Map<string, FailedCheck[]>();
   // The CI failure the next Green pass is sent back to fix, and the one the pass in flight fixes, for its reports.
@@ -940,6 +951,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const shared = baseSha ? sharedCiLines(f, await orNull(api.ciChecks(baseSha, "base"))) : null;
       if (shared) throw new BaseFails(ctx.base, baseSha, shared);
     }
+    // PBI 315: the failure is the item's own, so the attempt's failed report records it for a later claim. A failure
+    // the base shares isn't reported as the item's (PBI 215, 292).
+    if (current) current.ciFailure = f;
     return f;
   };
 
@@ -1185,6 +1199,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Returns findings that send the item back to green, or null once the PR is open and CI passed. The item stays
   // InProgress: the PR review moves it to InReview once it passes (PBI 128), or open-pr does when there's no review.
   const openPr = async (): Promise<string[] | null> => {
+    // PBI 315: a head CI already failed on, in an earlier claim of the run, goes back to Green before open-pr starts,
+    // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
+    const known = failedHeads.get(await git.head());
+    if (known) return backToGreen(known);
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
@@ -1674,8 +1692,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // release sends the item back to Queued until the restart is done, at the stage the run records. That is the next
     // stage after understand, red, green or self-review passes. After open-pr passes it stays open-pr, and after address
     // passes it stays address, so the restarted cell runs that stage again before pr-review. Back to green the last
-    // attempt failed, so it stays at open-pr or address: the restarted cell runs that stage again and reads CI
-    // again, and the findings carried to green here aren't kept.
+    // attempt failed, so it stays at open-pr or address. That attempt's failed report recorded the head CI failed on
+    // (PBI 315), so the restarted cell finds it in failedCiHeads and goes back to Green without reading CI on it again.
     if (e instanceof Restarting) {
       await api.release();
       return "restarting";

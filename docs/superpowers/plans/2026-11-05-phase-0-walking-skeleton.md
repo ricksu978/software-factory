@@ -433,6 +433,11 @@ A task that touches one of them follows this section and does not restate it.
    - `stageAttempts`,
      the highest attempt in `stage_run` per stage,
      so a later claim on the same run numbers its attempts on from there and writes over no earlier row or blob;
+   - `failedCiHeads`,
+     each distinct `ci_failure` the run's attempts reported in `stage_run`,
+     of any stage,
+     oldest first,
+     so a later claim on the same run knows each head CI already failed on (PBI 315);
    - `resume`,
      which is `{ stageId, attempt }` when the last attempt at `nextStage` is `stopped`,
      and null otherwise (PBI 140).
@@ -892,6 +897,23 @@ A task that touches one of them follows this section and does not restate it.
       Green running out of retries still fails the item,
       as PBI 128 has it.
       An address retry whose head is one CI already failed on goes back to Green without reading CI again.
+      When open-pr, address or pr-review finds a CI failure that is the item's own,
+      not one the base shares,
+      its failed attempt is reported to `/stage` with that `ciFailure` too,
+      so the head is on the run even when the claim ends at the stage boundary before Green starts,
+      as on a restart, a drain or a lost lease (PBI 315).
+      The cell starts with the heads in `ctx.failedCiHeads` already kept,
+      so a head CI failed on in an earlier claim of the run counts as failed in this one too (PBI 315).
+      Before open-pr opens its attempt,
+      a head that is one of them goes back to Green with its failed checks,
+      so the claim reads no CI on it and charges no attempt for it.
+      Green's pass is then reported with that `ciFailure`,
+      and one that leaves the head unchanged asks `ciQuestion` again.
+      Any new commit,
+      Green's fix,
+      a person's push while the item waited or the claim's merge of a newer base,
+      is a head CI hasn't failed on,
+      so CI is read on it and a failure there is charged as usual.
     - **A red CI's failed checks are re-run once before it is charged (PBI 233).**
       `src/cell/ci-rerun.ts` holds the sentences.
       When `readCi` reads `failure` on a head,
@@ -2113,7 +2135,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `stage_run.ci_failure jsonb`,
     added by `db/migrations/014_stage_run_ci_failure.sql` (PBI 292),
     `{ sha, checks: { name, url, failingTests }[] }` on a Green attempt the cell reported as fixing a CI failure,
+    and on a failed open-pr, address or pr-review attempt that found the item's own CI failure (PBI 315),
     and null on every other.
+    Floor and Run detail show it as fixing CI only on a Green row,
+    and `/context` reads it off every row for `failedCiHeads`.
     `POST /stage` takes it as `ciFailure`,
     cutting each string to 500 characters and keeping at most 20 checks and 20 tests a check,
     and gives 400 for one of another shape.
@@ -5348,6 +5373,7 @@ type CellContext = { externalId: string; title: string; acceptanceCriteria: stri
   scenarioNotes?: string[];   // the run's kept self-review scenario notes (PBI 152)
   trustedComments: ReviewComment[]; stageAttempts: Record<string, number>;
   trustedBot?: string | null;   // the repo's trusted bot, whose threads and reviews are the factory's own (PBI 318)
+  failedCiHeads?: CiFailure[];   // each head CI failed on in the run's earlier claims, oldest first (PBI 315)
   resume?: { stageId: string; attempt: number } | null };   // the body of GET /context (Run contract 5)
 type Git = { fetchBase(base: string): Promise<string>;   // fetches the base once per claim, returns origin/<base>'s commit
   mergeAt(base: string, commit: string): Promise<string[]>;   // merges that commit, no fetch; the paths still in conflict
