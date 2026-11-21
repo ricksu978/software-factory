@@ -26,16 +26,18 @@ type Ctx = {
   outcomes: Map<string, Outcome[]>;
   /** Retries set for a stage, over the SOP's own. */
   retries: Map<string, number>;
+  /** The attempt whose start sets the drain on the fake control plane, as an operator draining mid-retry does (PBI 393). */
+  drainAt?: { stage: string; attempt: number };
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi379?: Ctx };
   w.pbi379 ??= { outcomes: new Map(), retries: new Map() };
   return w.pbi379;
 }
 
 const ORDINALS = ["first", "second", "third", "fourth"];
-const ordinal = (word: string) => {
+export const ordinal = (word: string) => {
   const n = ORDINALS.indexOf(word) + 1;
   assert.ok(n > 0, `no attempt "${word}"`);
   return n;
@@ -117,8 +119,12 @@ When("an operator drains the factory", function () {
   events(this, p301(this).stage!).push({ draining: true });
 });
 
-When("an operator drains the factory while red's first attempt runs", function () {
-  events(this, "red").push({ draining: true });
+// PBI 393: the drain is set as the attempt starts, so it holds when the attempt ends, whether or not a renewal came.
+When(/^an operator drains the factory while (\S+)'s (second|third) attempt runs$/, function (stage: string, n: string) {
+  const c = p301(this);
+  assert.equal(c.stage, stage, `the run is at ${c.stage}, not ${stage}`);
+  assert.equal(c.ran, false, "the cell already ran");
+  ctx(this).drainAt = { stage, attempt: ordinal(n) };
 });
 
 Given("red allows {int} retries", function (n: number) {
@@ -129,7 +135,7 @@ Given("red allows {int} retries", function (n: number) {
 });
 
 /** The attempt the cell last started at its stage, as it reported it. */
-function attemptNow(p: Pbi18): number {
+export function attemptNow(p: Pbi18): number {
   const started = p.calls.filter((x) => x.route === "/stage" && x.body.stageId === p.stage && x.body.status === "started").at(-1);
   return Number(started?.body.attempt ?? 1);
 }
@@ -137,9 +143,10 @@ function attemptNow(p: Pbi18): number {
 /**
  * Scripts the cell's stages: each SOP retry the scenario set, and each attempt it scripted to fail. A green attempt
  * that fails leaves the item's scenarios failing, so its checks fail. A red attempt that fails leaves them passing,
- * so they don't fail on a Then. PBI 140's "green allows {int} retry" counts too.
+ * so they don't fail on a Then. PBI 140's "green allows {int} retry" counts too. An attempt an operator drains the
+ * factory during sets the drain as it starts.
  */
-function script(world: object, p: Pbi18): void {
+export function script(world: object, p: Pbi18): void {
   const c = ctx(world);
   const greenRetries = p140(world).greenRetries;
   const retries = new Map(c.retries);
@@ -148,6 +155,7 @@ function script(world: object, p: Pbi18): void {
     for (const s of sop.stages) if (retries.has(s.id)) s.retries = retries.get(s.id);
   };
   p.wrapAgent = (base) => async (a: any) => {
+    if (c.drainAt && c.drainAt.stage === p.stage && c.drainAt.attempt === attemptNow(p)) p301(world).draining = true;
     const out = await base(a);
     const stage = p.stage;
     const outcome = c.outcomes.get(stage)?.[attemptNow(p) - 1];
@@ -162,14 +170,14 @@ function script(world: object, p: Pbi18): void {
   };
 }
 
-function scriptAttempt(world: object, stage: string, n: number, outcome: Outcome): void {
+export function scriptAttempt(world: object, stage: string, n: number, outcome: Outcome): void {
   const list = ctx(world).outcomes.get(stage) ?? [];
   assert.equal(list.length, n - 1, `${stage}'s attempt ${n} is scripted out of order`);
   list.push(outcome);
   ctx(world).outcomes.set(stage, list);
 }
 
-async function runScripted(world: object, stage: string): Promise<void> {
+export async function runScripted(world: object, stage: string): Promise<void> {
   assert.equal(p301(world).stage, stage, `the run is at ${p301(world).stage}, not ${stage}`);
   script(world, pbi18(world));
   await runCell(world);
@@ -264,7 +272,7 @@ When("the operator opens Floor straight away, before cell {string}'s lease would
   await open(p89(this), "/");
 });
 
-async function runOf(world: object, name: string): Promise<string> {
+export async function runOf(world: object, name: string): Promise<string> {
   const id = p17(world).items[name];
   assert.ok(id, `no item ${name}`);
   const r = await need().pool.query<{ id: string }>("select id from run where item_id = $1 order by started_at desc limit 1", [id]);

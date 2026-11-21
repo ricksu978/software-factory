@@ -58,7 +58,7 @@ const flush = async () => {
 
 const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
-Before({ tags: "(@pbi-301 or @pbi-379) and not @db" }, function () {
+Before({ tags: "(@pbi-301 or @pbi-379 or @pbi-393) and not @db" }, function () {
   // PBI 140's "a run for item 482 that is at green's first attempt" and "the factory is preparing to restart", and PBI
   // 173's "green passes", reach this file's cell through these.
   Object.assign(this, {
@@ -72,7 +72,7 @@ Before({ tags: "(@pbi-301 or @pbi-379) and not @db" }, function () {
   });
 });
 
-After({ tags: "@pbi-301 or @pbi-379" }, function () {
+After({ tags: "@pbi-301 or @pbi-379 or @pbi-393" }, function () {
   mock.timers.reset();
   const c = ctx(this);
   const last = (this as { pbi18?: Pbi18 }).pbi18?.root;
@@ -319,14 +319,23 @@ When("an operator's stop on item {string}'s run is set", long, async function (n
  * own client has it. Anything else it calls is the fake's. `prepare` scripts the cell further before it runs, as PBI
  * 379's retries do.
  */
-export async function runAsCell(world: object, cell: string, prepare?: (p: Pbi18) => void): Promise<void> {
-  const run = await cellRun(cell);
+export async function runAsCell(world: object, cell: string, prepare?: (p: Pbi18) => void, forward: ("transition" | "pr")[] = []): Promise<void> {
+  await runAsRun(world, await cellRun(cell), prepare, forward);
+}
+
+/**
+ * `runAsCell` for a run and generation, such as those of a cell the scheduler just started (PBI 393). `forward` names
+ * further calls that go to the real cell API instead of the fake's, as a transition must when the Thens read the item's
+ * state from the control plane.
+ */
+export async function runAsRun(world: object, run: { runId: string; generation: number }, prepare?: (p: Pbi18) => void,
+  forward: ("transition" | "pr")[] = []): Promise<void> {
   const stage = (await need().pool.query<{ next_stage: string }>("select next_stage from run where id = $1", [run.runId])).rows[0].next_stage;
   const c = ctx(world);
   atStage(world, stage);
   const p = pbi18(world);
   const fake = fakeApi(world, p);
-  const forward = async (route: string, body: Record<string, unknown>) => {
+  const send = async (route: string, body: Record<string, unknown>) => {
     const a = await call(world, run, "POST", route, body);
     if (a.status === 409) throw new LeaseLost(`${route}: the lease generation moved on`);
     if (a.status !== 200) throw new Error(`the cell API answered ${route} with ${a.status}: ${JSON.stringify(a.body)}`);
@@ -336,17 +345,19 @@ export async function runAsCell(world: object, cell: string, prepare?: (p: Pbi18
     ...fake,
     async lease() {
       record(p, "/lease");
-      return forward("lease", { generation: run.generation });
+      return send("lease", { generation: run.generation });
     },
     async stage(b: Record<string, any>) {
       record(p, "/stage", b);
       if (b.status === "started") p.stage = b.stageId;
-      await forward("stage", b);
+      await send("stage", b);
     },
     async release() {
       record(p, "/release");
-      await forward("release", {});
+      await send("release", {});
     },
+    ...(forward.includes("transition") ? { async transition(b: Record<string, any>) { record(p, "/transition", b); await send("transition", b); } } : {}),
+    ...(forward.includes("pr") ? { async pr(b: Record<string, any>) { record(p, "/pr", b); await send("pr", b); } } : {}),
   };
   p.agent = playingAgent(world) as never;
   prepare?.(p);
@@ -396,8 +407,11 @@ Then("item {string} holds no lease", long, async function (name: string) {
   assert.equal(row.lease_expires, null, `item ${name}'s lease runs to ${row.lease_expires?.toISOString()}`);
   // PBI 379: under a drain, the cell's claim ends at the stage boundary once, and the one lease_expired that ends it
   // records the drain (`drain: true`), alongside a restart's reason when one is being prepared too.
+  // PBI 393: an item that a transition took out of InProgress, as retries used up do, ended its claim with that
+  // transition, not with a release at a boundary, so only an item back in Queued is checked for it.
   const drain = await need().pool.query("select 1 from override where cleared_at is null and scope = 'factory' and kind = 'drain'");
-  if (drain.rowCount) {
+  const queued = (await need().pool.query<{ state: string }>("select state from item where id = $1", [p17(this).items[name]])).rows[0]?.state === "Queued";
+  if (drain.rowCount && queued) {
     const r = await need().pool.query<{ payload: Record<string, unknown> }>(
       `select e.payload from event e join run r on r.item_id = e.item_id
        where r.id = $1 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired' and e.at >= r.started_at order by e.at`,
