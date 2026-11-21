@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { classify, greenGate, notDryRun, redGate, traceability, unfinishedRun, type Results } from "./messages.ts";
+import { classify, finishedFindings, greenGate, notDryRun, redGate, traceability, unfinishedRun, type Results } from "./messages.ts";
 
 // A real cucumber-js 13.3.0 run, trimmed to the four message kinds classify reads.
 const fixture = readFileSync(new URL("./fixtures/verdicts.ndjson", import.meta.url), "utf8");
@@ -148,12 +148,33 @@ test("unfinishedRun names the scenarios still running in a report with no end of
     { testCaseStarted: { id: "r3", testCaseId: "c2" } },
   ];
   const text = (ms: object[]) => ms.map((m) => JSON.stringify(m)).join("\n") + "\n";
-  assert.deepEqual(unfinishedRun(text(cut)), { running: ["running", "retried"] });
+  // The retried scenario's earlier attempt finished, but its latest is running, so only "done" counts as finished.
+  assert.deepEqual(unfinishedRun(text(cut)), { running: ["running", "retried"], finished: ["p0"] });
   // A last line cut part way is skipped, as classify skips it.
-  assert.deepEqual(unfinishedRun(`${text(cut)}{"testCaseFinished":{"testCa`), { running: ["running", "retried"] });
+  assert.deepEqual(unfinishedRun(`${text(cut)}{"testCaseFinished":{"testCa`), { running: ["running", "retried"], finished: ["p0"] });
   assert.equal(unfinishedRun(text([...cut, { testRunFinished: { success: false } }])), null);
-  assert.deepEqual(unfinishedRun(text([{ testRunStarted: {} }, ...pickles])), { running: [] });
+  assert.deepEqual(unfinishedRun(text([{ testRunStarted: {} }, ...pickles])), { running: [], finished: [] });
   // A report that never started a run, such as an empty one, isn't one cut short: the gates read it as before.
   assert.equal(unfinishedRun(""), null);
   assert.equal(unfinishedRun(text([...pickles, ...cases])), null);
+});
+
+test("a run cut short keeps the verdicts of the scenarios it finished, and gives none to the one still running (PBI 399)", () => {
+  const pickle = (id: string, name: string) => ({ pickle: { id, name, tags: [], steps: [{ id: `${id}s`, type: "Outcome", text: "the total is 3" }] } });
+  const tc = (id: string, p: string) => ({ testCase: { id, pickleId: p, testSteps: [{ id: `${id}t`, pickleStepId: `${p}s` }] } });
+  const report = [
+    { testRunStarted: {} }, pickle("p0", "Refunds show negative"), pickle("p1", "Slow export"), pickle("p2", "Totals add up"),
+    tc("c0", "p0"), tc("c1", "p1"), tc("c2", "p2"),
+    { testCaseStarted: { id: "r2", testCaseId: "c2" } },
+    { testStepFinished: { testCaseStartedId: "r2", testStepId: "c2t", testStepResult: { status: "PASSED" } } },
+    { testCaseFinished: { testCaseStartedId: "r2" } },
+    { testCaseStarted: { id: "r0", testCaseId: "c0" } },
+    { testStepFinished: { testCaseStartedId: "r0", testStepId: "c0t", testStepResult: { status: "FAILED", message: "expected 3, got -3" } } },
+    { testCaseFinished: { testCaseStartedId: "r0" } },
+    { testCaseStarted: { id: "r1", testCaseId: "c1" } },
+  ].map((m) => JSON.stringify(m)).join("\n");
+  const cut = unfinishedRun(report)!;
+  assert.deepEqual(cut.running, ["Slow export"]);
+  assert.deepEqual(finishedFindings(classify(report), cut.finished), ['scenario is red: Refunds show negative: "the total is 3" failed: expected 3, got -3']);
+  assert.deepEqual(finishedFindings(classify(report), []), []);
 });

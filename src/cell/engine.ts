@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { factoryThread, FAILED_LOG_CHARS, LOGGED_CHECKS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type Review, type ReviewComment, type RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
-import { classify, greenGate, notDryRun, redGate, traceability, unfinishedFinding, unfinishedRun } from "../bdd/messages.ts";
+import { classify, finishedFindings, greenGate, notDryRun, redGate, traceability, unfinishedFinding, unfinishedRun } from "../bdd/messages.ts";
 import { DEFAULT_COMMAND_TIMEOUT_MINUTES, parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { CI_BACK_TO_GREEN } from "../core/questions.ts";
@@ -1353,9 +1353,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (current) current.report = run.report;
       keep(greenResults, run.report);
       const classified = classify(run.report);
-      // A run that didn't finish is one finding, in place of the gate's verdicts on its unfinished scenarios (PBI 399).
+      // A run that didn't finish is one finding, in place of the gate's verdicts on its unfinished scenarios, and the
+      // scenarios it did finish keep theirs, so a finished red one still shows (PBI 399).
       const cut = bddRunUnfinished(run, config.bdd.run, limitMinutes);
-      const out = cut ? [cut] : greenGate(classified).findings;
+      const out = cut ? [cut, ...finishedFindings(classified, unfinishedRun(run.report)?.finished ?? classified.keys())] : greenGate(classified).findings;
       for (const k of ["test", "lint"] as const) {
         const r = await exec(config.commands[k]);
         if (r.code !== 0) out.push(failedRun(`commands.${k}`, config.commands[k], r));
