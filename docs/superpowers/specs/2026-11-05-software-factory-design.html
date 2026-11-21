@@ -2543,6 +2543,10 @@ Feature: Export invoices to CSV
 
     so a worker whose fake clock never moves still exits when it loses the lock.
 
+    A worker that stops gives the lock back before it closes its lock connection,
+
+    so a standby's next try on its fake clock finds the lock free.
+
     So PBI 157's and PBI 158's scenarios move their workers' clocks on where they used to sit through real lock retries and ticks,
 
     and a takeover scenario no longer waits 15 real seconds.

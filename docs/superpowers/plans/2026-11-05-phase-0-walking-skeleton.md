@@ -4651,6 +4651,9 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   `runProcess` then exits the process with code 1,
   and the platform restarts it.
   A standby whose lock connection closes exits the same way.
+  A worker that stops gives the lock back with `pg_advisory_unlock_all()` before it closes its lock connection.
+  Postgres frees a closed session's locks only once its backend exits,
+  so without the unlock a standby could try a moment too early and wait out another retry.
   `src/worker/main.test.ts` covers the standby,
   the takeover,
   the lost lock and a failed egress set-up,

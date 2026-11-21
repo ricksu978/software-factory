@@ -163,10 +163,14 @@ async function lockConnection(pool: pg.Pool, onClose: (why: string) => void) {
     async check(): Promise<void> {
       await client.query("select 1");
     },
-    /** Closes the connection, which gives the lock back if it holds it. */
+    /**
+     * Gives the lock back, then closes the connection. Postgres frees a closed session's locks only once its backend
+     * exits, a moment after end() resolves, so the explicit unlock is what lets a standby take the lock at its next try.
+     */
     async close(): Promise<void> {
       if (closing) return;
       closing = true;
+      if (!closed) await client.query("select pg_advisory_unlock_all()").catch(() => {});
       await client.end().catch(() => {});
     },
   };
@@ -295,7 +299,8 @@ function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<
     try {
       await tick({
         pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo, recheckHours, slow,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo, recheckHours,
+        slow,
       });
     } finally {
       // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,

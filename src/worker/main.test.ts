@@ -146,6 +146,19 @@ describe("the worker lock", dbTest, () => {
     await assert.rejects(w.done, /lost the worker lock/);
   });
 
+  // PBI 396: a standby on a fake clock tries once at its retry time, so the lock must already be free by then.
+  test("a stopped worker has given the lock back by the time its stop returns", async () => {
+    const one = deps("unlock");
+    for (let i = 0; i < 5; i++) {
+      const w = await startWorker(one.d);
+      await until("the worker ticks", () => ticks(w) > 0);
+      await w.stop();
+      const r = await db.pool.query<{ n: number }>(
+        "select count(*)::int as n from pg_locks where locktype = 'advisory' and granted");
+      assert.equal(r.rows[0].n, 0, `stop ${i + 1} returned while the lock was still held`);
+    }
+  });
+
   test("a worker whose egress proxy fails throws and gives the lock back", async () => {
     const one = deps("noegress");
     await assert.rejects(startWorker({ ...one.d, egress: async () => { throw new Error("no docker"); } }), /egress proxy/);
