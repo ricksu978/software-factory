@@ -434,7 +434,8 @@ A task that touches one of them follows this section and does not restate it.
      the highest attempt in `stage_run` per stage,
      so a later claim on the same run numbers its attempts on from there and writes over no earlier row or blob;
    - `failedCiHeads`,
-     each distinct `ci_failure` the run's Green attempts reported in `stage_run`,
+     each distinct `ci_failure` the run's attempts reported in `stage_run`,
+     of any stage,
      oldest first,
      so a later claim on the same run knows each head CI already failed on (PBI 315);
    - `resume`,
@@ -860,6 +861,11 @@ A task that touches one of them follows this section and does not restate it.
       Green running out of retries still fails the item,
       as PBI 128 has it.
       An address retry whose head is one CI already failed on goes back to Green without reading CI again.
+      When open-pr, address or pr-review finds a CI failure that is the item's own,
+      not one the base shares,
+      its failed attempt is reported to `/stage` with that `ciFailure` too,
+      so the head is on the run even when the claim ends at the stage boundary before Green starts,
+      as on a restart, a drain or a lost lease (PBI 315).
       The cell starts with the heads in `ctx.failedCiHeads` already kept,
       so a head CI failed on in an earlier claim of the run counts as failed in this one too (PBI 315).
       Before open-pr opens its attempt,
@@ -2071,7 +2077,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `stage_run.ci_failure jsonb`,
     added by `db/migrations/014_stage_run_ci_failure.sql` (PBI 292),
     `{ sha, checks: { name, url, failingTests }[] }` on a Green attempt the cell reported as fixing a CI failure,
+    and on a failed open-pr, address or pr-review attempt that found the item's own CI failure (PBI 315),
     and null on every other.
+    Floor and Run detail show it as fixing CI only on a Green row,
+    and `/context` reads it off every row for `failedCiHeads`.
     `POST /stage` takes it as `ciFailure`,
     cutting each string to 500 characters and keeping at most 20 checks and 20 tests a check,
     and gives 400 for one of another shape.

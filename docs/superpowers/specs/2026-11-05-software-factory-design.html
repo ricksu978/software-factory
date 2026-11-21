@@ -1728,7 +1728,12 @@ stateDiagram-v2
 
       such as one that ended on the question below and was answered,
 
+      or one that ended at a stage boundary on a restart, a drain or a lost lease after the PR stages found the failure and before Green started,
+
       counts as failed in the next one,
+
+      since whichever stage finds the item's own CI failure records it on its failed attempt,
+
 
       which goes back to Green with that head's failed checks without reading CI on it or charging an attempt.
 
