@@ -9,16 +9,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { sh } from "./engine.ts";
 import { failingTests } from "../core/failing-tests.ts";
+import { sharedWithBase } from "../core/ci-findings.ts";
 
-export { failingTests };
+export { failingTests, sharedWithBase };
 
 const run = promisify(execFile);
 
-/** Whether the base is at fault: every test that failed on the item's branch fails on the base too, and some did. */
-export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
-  const base = new Set(onBase);
-  return onBranch.length > 0 && onBranch.every((t) => base.has(t));
-}
 
 /**
  * A Definition of Done line, or a CI check that failed on the item's commit (PBI 292), with the tests it fails that the

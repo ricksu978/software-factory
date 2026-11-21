@@ -916,6 +916,33 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(await causeOf(c.id), { kind: "not_mergeable" });
   });
 
+  test("CI failing on an InReview PR's head sends the item to address with the failure as its findings, and a failure on an older commit doesn't (PBI 235)", async () => {
+    const red = (sha: string) => {
+      host.checks.set(`${REPO}@${sha}`, "failure");
+      host.ciChecks.set(`${REPO}@${sha}`, [{ name: "ci", conclusion: "failure", url: `https://github.com/${REPO}/actions/runs/1`, failingTests: ["adds up"] }]);
+    };
+    const a = await held("InReview", { pr: true });
+    host.prs.find((x) => x.number === a.pr)!.headSha = "h1";
+    red("h1");
+    const b = await held("InReview", { pr: true });
+    host.prs.find((x) => x.number === b.pr)!.headSha = "h2";
+    red("h0");
+    host.checks.set(`${REPO}@h2`, "pending");
+    const c = await held("InProgress", { pr: true });
+    host.prs.find((x) => x.number === c.pr)!.headSha = "h1";
+    await poll();
+    assert.equal((await db.pool.query("select state from item where id = $1", [a.id])).rows[0].state, "Queued");
+    assert.equal((await db.pool.query("select next_stage from run where id = $1", [a.run])).rows[0].next_stage, "address");
+    const ev = (await db.pool.query<{ payload: { cause: unknown; findings: string[] } }>(
+      "select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'changes_requested'", [a.id],
+    )).rows.map((r) => r.payload);
+    assert.equal(ev.length, 1);
+    assert.deepEqual(ev[0].cause, { kind: "ci_failed", sha: "h1", checks: [{ name: "ci", url: `https://github.com/${REPO}/actions/runs/1`, failingTests: ["adds up"] }] });
+    assert.match(ev[0].findings[0], /^CI failed on h1: the check "ci" failed, .*runs\/1\. Failing tests: "adds up"\.$/);
+    assert.equal((await db.pool.query("select state from item where id = $1", [b.id])).rows[0].state, "InReview");
+    assert.equal((await db.pool.query("select state from item where id = $1", [c.id])).rows[0].state, "InProgress");
+  });
+
   test("a review older than the address run's claim leaves the item in InReview", async () => {
     await db.pool.query(`insert into "user" (provider, subject, role, github_login) values ('dev', 'octo', 'owner', 'octo')`);
     const { ext, pr } = await held("InReview", { pr: true, reviewsSeenAt: "2026-11-06T10:00:00Z" });

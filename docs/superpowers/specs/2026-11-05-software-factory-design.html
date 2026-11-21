@@ -1882,6 +1882,76 @@ stateDiagram-v2
 
       or that GitHub reported the PR not mergeable (PBI 258).
 
+      CI failing on the head of an In review item's PR sends it back to address too.
+
+      The poller reads CI on the head of each In review item's PR,
+
+      and when it has failed there it moves the item to Queued,
+
+      and the run resumes at address.
+
+      The findings address gets are the failure detail:
+
+      the commit CI failed on,
+
+      and each failed check with its URL and its failing tests,
+
+      in the words Green's findings use.
+
+      The <code>changes_requested</code> event names that CI failure as its cause.
+
+      A check that passed isn't named,
+
+      and CI still running on the head,
+
+      or passed there,
+
+      leaves the item In review.
+
+      So does a failure that names no failed check,
+
+      since address would have no detail to work from:
+
+      the failing required check then only holds the merge,
+
+      as stage 10 describes (PBI 181).
+
+      So does a failure whose every failed check names failing tests that the default branch's head fails too:
+
+      the base is at fault, not the item, as the cell finds it (PBI 215, PBI 292),
+
+      and the failing check only holds the merge.
+
+      A base whose CI can't be read leaves the failure the item's.
+
+      Before the item goes back, its failed checks on the head are re-run once, as the cell re-runs them (PBI 233),
+
+      and only a check still red after its re-run counts:
+
+      a flaky check doesn't cost the item a claim, a base merge and a PR review round.
+
+      The re-run is recorded by run and sha with the cell's,
+
+      so a commit's checks are re-run once whichever asks,
+
+      and a later poll or delivery waits until each re-run check has finished after the re-run was asked for.
+
+      A check that can't be told apart from its old run, or one the host refused to re-run, is taken as it reads.
+
+      With webhooks on,
+
+      GitHub's delivery that a check suite completed does the same without waiting for the next poll.
+
+      Only the PR's head counts:
+
+      a failure on an older commit of the PR,
+
+      or on any commit that isn't the head when the factory reads it,
+
+      is ignored,
+
+      so a late delivery about a commit the PR has since moved past never sends the item back (PBI 235).
+
       Once address has dealt with a person's thread,
 
       by a fix CI has passed on or a reply it posted,
@@ -2365,6 +2435,44 @@ Feature: Export invoices to CSV
     A repo with no runner gets one in its first factory PBI,
 
     and its commands go in the repo config.
+
+    <span class="tag call">My call</span></li>
+
+    <li><b>Proving a scenario steady.</b>
+
+    A scenario that fails now and then turns <code>main</code> red and fails items that had nothing to do with it.
+
+    <code>npm run bdd:repeat -- --times &lt;n&gt; --name "&lt;scenario name&gt;"</code> runs the one scenario with exactly that name n times,
+
+    one run after another,
+
+    each in a cucumber-js process of its own,
+
+    as <code>npm run bdd</code> runs it.
+
+    A failed run doesn't stop the runs after it.
+
+    The script names each failed run with its output,
+
+    says how many of the n passed,
+
+    and exits 0 only when every run passed.
+
+    Each run ends as soon as cucumber-js has reported,
+
+    so a handle left open doesn't add to its time.
+
+    A name that matches no scenario fails,
+
+    and so does a run count that isn't a whole number above zero,
+
+    which runs nothing.
+
+    A fix for a flaky scenario shows 20 passing runs in a row,
+
+    and a scenario that waits for something keeps the same deadline,
+
+    so it still fails when the behaviour doesn't happen (PBI 376).
 
     <span class="tag call">My call</span></li>
 

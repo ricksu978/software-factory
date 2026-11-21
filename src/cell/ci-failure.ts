@@ -3,43 +3,20 @@
 // fixing CI while Green works on it. When Green leaves the commit unchanged, CI has nothing new to judge, so the
 // factory gives up and asks a person the question built here. A failure whose tests the base fails too stays the base's (PBI 215).
 import type { CiCheck } from "../adapters/types.ts";
-import type { CiFailure } from "./api-client.ts";
-import { sharedWithBase, type BaseLine } from "./base-run.ts";
+import { ciSharedWithBase, testsOf, type CiFailure } from "../core/ci-findings.ts";
+import type { BaseLine } from "./base-run.ts";
 
+export { ciFailureOf, ciFindings } from "../core/ci-findings.ts";
 export type { CiFailure };
 
 const short = (sha: string) => sha.slice(0, 7);
-const quoted = (tests: string[]) => tests.map((t) => `"${t}"`).join(", ");
-
-/** The failed checks CI named on `sha`, each with its URL and failing tests. A check that passed or still runs isn't one. */
-export function ciFailureOf(sha: string, checks: CiCheck[] | null): CiFailure {
-  const failed = (checks ?? []).filter((c) => c.conclusion === "failure");
-  return { sha, checks: failed.map((c) => ({ name: c.name, url: c.url, failingTests: [...(c.failingTests ?? [])] })) };
-}
-
-/** What a failed check says about its tests. */
-const testsOf = (c: CiFailure["checks"][number]) => c.failingTests.length
-  ? `Failing tests: ${quoted(c.failingTests)}.`
-  : `CI named no failing test for the check "${c.name}".`;
-
-/**
- * Green's findings for a CI failure: one per failed check, each saying CI failed on the commit, with the check, its URL
- * and its failing tests. `what` says what the commit was, such as the PR addresser's fix.
- */
-export function ciFindings(f: CiFailure, what?: string): string[] {
-  const on = `CI failed on ${f.sha}${what ? `, ${what}` : ""}`;
-  if (!f.checks.length) return [`${on}, and named no failed check the factory could read.`];
-  return f.checks.map((c) => `${on}: the check "${c.name}" failed, ${c.url}. ${testsOf(c)}`);
-}
 
 /**
  * The failed checks, as lines for the base question, when the base is at fault: every failed check names failing tests,
  * and the base's failed checks fail each of them too. Null when any of it fails only on the item, so the item fixes it.
  */
 export function sharedCiLines(f: CiFailure, onBase: CiCheck[] | null): BaseLine[] | null {
-  if (!f.checks.length || f.checks.some((c) => !c.failingTests.length)) return null;
-  const baseTests = (onBase ?? []).filter((c) => c.conclusion === "failure").flatMap((c) => c.failingTests ?? []);
-  if (!sharedWithBase(f.checks.flatMap((c) => c.failingTests), baseTests)) return null;
+  if (!ciSharedWithBase(f, onBase)) return null;
   return f.checks.map((c) => ({ criterion: c.name, tests: c.failingTests, check: { name: c.name, url: c.url } }));
 }
 
