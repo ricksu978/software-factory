@@ -15,6 +15,8 @@ const CHUNK_MS = 250;
 const PAUSE_MS = 5;
 
 const clocks = new WeakMap<object, FakeClock[]>();
+/** How far the scenario's fake clocks have moved on in all, in milliseconds. */
+const movedBy = new WeakMap<object, number>();
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A new fake clock for one of the scenario's workers. It reads the real time it was made at, as a new worker would. */
@@ -27,8 +29,12 @@ export function workerClock(world: object): FakeClock {
 /** Whether the scenario has started any worker on a fake clock. */
 export const onFakeClocks = (world: object) => (clocks.get(world)?.length ?? 0) > 0;
 
+/** How far the scenario's fake clocks have moved on since they were made, in milliseconds. */
+export const moved = (world: object) => movedBy.get(world) ?? 0;
+
 async function chunk(world: object, ms: number): Promise<void> {
   await Promise.all((clocks.get(world) ?? []).map((c) => c.advance(ms)));
+  movedBy.set(world, moved(world) + ms);
   await sleep(PAUSE_MS);
 }
 
@@ -39,19 +45,25 @@ export async function pass(world: object, ms: number): Promise<void> {
 
 /**
  * Whether `ok` holds within `realMs` real milliseconds, moving the scenario's fake clocks on while it doesn't. With no
- * fake clock, it checks on the real clock every 25 ms, as the steps did before.
+ * fake clock, it checks on the real clock every 25 ms, as the steps did before. Given `fakeMs`, the clocks move no more
+ * than that on, so a check bounded in a worker's own time fails once that time is used up, however fast it went by.
  */
-export async function passWithin(world: object, realMs: number, ok: () => boolean | Promise<boolean>): Promise<boolean> {
+export async function passWithin(world: object, realMs: number, ok: () => boolean | Promise<boolean>, fakeMs = Infinity): Promise<boolean> {
   const end = Date.now() + realMs;
+  let left = fakeMs;
   while (!(await ok())) {
     if (Date.now() >= end) return false;
-    if (onFakeClocks(world)) await chunk(world, CHUNK_MS);
-    else await sleep(25);
+    if (onFakeClocks(world)) {
+      if (left <= 0) return false;
+      const ms = Math.min(left, CHUNK_MS);
+      await chunk(world, ms);
+      left -= ms;
+    } else await sleep(25);
   }
   return true;
 }
 
 /** passWithin, failing with `timed out waiting until <what>`. */
-export async function passUntil(world: object, what: string, ok: () => boolean | Promise<boolean>, realMs = 30_000): Promise<void> {
-  assert.ok(await passWithin(world, realMs, ok), `timed out waiting until ${what}`);
+export async function passUntil(world: object, what: string, ok: () => boolean | Promise<boolean>, realMs = 30_000, fakeMs = Infinity): Promise<void> {
+  assert.ok(await passWithin(world, realMs, ok, fakeMs), `timed out waiting until ${what}`);
 }

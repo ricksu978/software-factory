@@ -36,6 +36,7 @@ import { cucumberArgs, DEFAULT_WORKERS } from "../../src/bdd/run.ts";
 import { createPool } from "../../src/store/db.ts";
 import type { FakeClock } from "../../src/worker/clock.ts";
 import { realTimers, trackTimers } from "../support/real-timers.ts";
+import { moved } from "../support/worker-clocks.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { board, ctx as w156, fakes, learnItems, rehome, type Running } from "./pbi-156.steps.ts";
@@ -300,17 +301,27 @@ function started(world: object, w: W): void {
 
 /**
  * Waits, with no timed wait, until the worker's work has finished: no client of its pool is out or awaited, no
- * connection of its waits on a reply, and nothing it counts has moved for many turns of the event loop.
+ * connection of its waits on a reply, and nothing it counts has moved for many turns of the event loop. Fails with what
+ * was still busy when the worker hasn't settled within 10 real seconds.
  */
 async function settle(w: W): Promise<void> {
   const end = Date.now() + 10_000;
   let calm = 0;
   let last = "";
-  while (calm < 50 && Date.now() < end) {
+  let still: string[] = [];
+  while (calm < 50) {
+    if (Date.now() >= end) {
+      assert.fail(`${w.name} never settled; still busy: ${still.join("; ") || "nothing it counts stood still"}`);
+    }
     await turn();
     const snap = JSON.stringify([[...(w.running?.runs ?? [])], w.polls, w.launched.length, w.log.lines.length, queries(w), w.exit !== undefined]);
-    const busy = w.pool.totalCount !== w.pool.idleCount || w.pool.waitingCount > 0 || waiting(w) > 0;
-    calm = !busy && snap === last ? calm + 1 : 0;
+    still = [];
+    const out = w.pool.totalCount - w.pool.idleCount;
+    if (out) still.push(`${out} client(s) of its pool out`);
+    if (w.pool.waitingCount) still.push(`${w.pool.waitingCount} client(s) of its pool awaited`);
+    if (waiting(w)) still.push(`${waiting(w)} connection(s) waiting on a reply`);
+    if (snap !== last) still.push(`its counts still moving: ${snap}`);
+    calm = !still.length ? calm + 1 : 0;
     last = snap;
   }
 }
@@ -480,6 +491,7 @@ When("the second worker's lock connection is ended by Postgres", long, async fun
     return;
   }
   w157(this).stoppedAt = Date.now();
+  w157(this).stoppedMoved = moved(this);
   await terminate(pids);
 });
 

@@ -22,7 +22,7 @@ import pg from "pg";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as w156, rehome, type Running } from "./pbi-156.steps.ts";
-import { ctx as w157, type Worker as Worker157 } from "./pbi-157.steps.ts";
+import { ctx as w157, sinceStop, type Worker as Worker157 } from "./pbi-157.steps.ts";
 import type { Clock } from "../../src/worker/clock.ts";
 import { pass, passUntil, passWithin } from "../support/worker-clocks.ts";
 
@@ -287,7 +287,7 @@ Then("within {int} seconds of the first worker stopping, the heartbeat shows the
     const n = ended(second);
     seen = await heartbeats();
     return seen.length === 1 && isLatest(this, second, seen[0], n);
-  });
+  }, sinceStop(this, s));
   assert.ok(ok, `the heartbeat shows ${seen.map(iso).join(", ") || "nothing"}, not the second worker's latest tick, ${iso(times(this, "second").at(-1))}`);
 });
 

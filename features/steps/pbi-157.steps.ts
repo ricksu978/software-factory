@@ -36,7 +36,7 @@ import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import type { FakeClock } from "../../src/worker/clock.ts";
-import { pass, passUntil, workerClock } from "../support/worker-clocks.ts";
+import { moved, pass, passUntil, workerClock } from "../support/worker-clocks.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { board, ctx as w156, fakes, learnItems, rehome, type Running, startWorker as startWorker156 } from "./pbi-156.steps.ts";
 
@@ -84,6 +84,8 @@ type Ctx = {
   single?: { app: string; pool: pg.Pool; proxy: Proxy; log: Log; exit?: Exit };
   /** When the first worker stopped or died, or when its lock connection ended. */
   stoppedAt?: number;
+  /** How far the scenario's fake clocks had moved on then, so a check bounded in time since the stop bounds fake time too. */
+  stoppedMoved?: number;
   /** The single worker's board polls when its lock connection ended. */
   pollsAtLoss?: number;
   /** A lock-ending step found no session holding the worker lock. */
@@ -444,6 +446,7 @@ Given("the first worker has stopped and the second worker has taken over", long,
   await first.running.stop();
   first.stopped = true;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
   // A standby counts no tick until it takes the lock, so a tick after the stop means it has taken over.
   const n = ticks(second);
   await passUntil(this, "the second worker ticks after the first one stopped", () => ticks(second) > n);
@@ -532,6 +535,7 @@ When("the first worker stops", long, async function () {
   await first.running?.stop();
   first.stopped = true;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
 });
 
 When("the first worker dies without stopping cleanly, so Postgres ends its sessions", long, async function () {
@@ -543,6 +547,7 @@ When("the first worker dies without stopping cleanly, so Postgres ends its sessi
   const pids = (await pool().query<{ pid: number }>("select pid from pg_stat_activity where application_name = $1", [first.app])).rows.map((r) => r.pid);
   await terminate(pids);
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
 });
 
 /** Ends the worker's lock session as an administrator would. A worker that holds no lock is noted for the Then. */
@@ -561,6 +566,7 @@ async function singleLost(world: object): Promise<void> {
   watch(w156(world).worker, c.single!);
   c.pollsAtLoss = (await board(world)).calls.filter((call) => call.method === "listEligible").length;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(world);
 }
 
 When("the worker's lock connection is ended by Postgres on an administrator's order", long, async function () {
@@ -584,6 +590,7 @@ When("the worker's lock connection is closed by a lost network connection", long
 When("the first worker's lock connection is ended by Postgres", long, async function () {
   const c = ctx(this);
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
   await endLock(this, worker(this, "first").app, "first worker");
 });
 
@@ -683,6 +690,12 @@ Then("exactly one of the three workers launched a cell or polled the board", fun
   assert.equal(working.length, 1, `workers that worked: ${JSON.stringify(working)}`);
 });
 
+/** The fake time left of `s` seconds since the first worker stopped: what the scenario's fake clocks may still move on. */
+export function sinceStop(world: object, s: number): number {
+  const c = ctx(world);
+  return Math.max(s * 1_000 - (moved(world) - (c.stoppedMoved ?? moved(world))), 0);
+}
+
 /** That the second worker launched item `name`'s cell within `s` seconds of the first stopping, holding the worker lock. */
 async function takesOver(world: object, s: number, name: string): Promise<void> {
   const c = ctx(world);
@@ -693,7 +706,7 @@ async function takesOver(world: object, s: number, name: string): Promise<void> 
   await passUntil(world, `the second worker launches item ${name}'s cell`, async () => {
     await rehome(world);
     return w.launched.includes(p17(world).items[name]);
-  }, Math.max(deadline - Date.now(), 0));
+  }, Math.max(deadline - Date.now(), 0), sinceStop(world, s));
   await learnItems(world);
   assert.ok((await lockSessions(w.app)).length, "the second worker launched a cell without holding the worker lock");
 }
@@ -711,7 +724,7 @@ Then("within {int} seconds of the first worker stopping, the second worker has p
   started(c);
   const w = worker(this, "second");
   assert.equal(w.polledBefore ?? 0, 0, "the second worker polled the board before the first one stopped");
-  await passUntil(this, "the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0));
+  await passUntil(this, "the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0), sinceStop(this, s));
 });
 
 Then("the worker exits with an error saying it lost the worker lock", long, async function () {
