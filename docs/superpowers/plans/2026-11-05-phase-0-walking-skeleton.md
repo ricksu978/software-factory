@@ -6166,7 +6166,11 @@ from spec §6 rows 1 to 7:
   an override goes to `/bff/v1/overrides` and a sign-off or answer to `/bff/v1/items/{id}/decisions`,
   a reason or an answer left empty or holding only spaces is refused and nothing is sent,
   an accepted form reads the page again,
+  and if that read fails the page says the factory accepted it and asks for a reload before sending it again,
   and a refused one shows the API's error as a sentence.
+  Run detail offers the Sign off form only when it has feature files up for sign-off.
+  Until the cell API stores the run's criteria and files at the scenarios sha,
+  it says the scenarios can't be shown here yet and sends the owner to today's dashboard to sign off.
   `GET /v1/items/{id}` answers the SPA's `ItemData`,
   filled by the dashboard's own `itemStanding`,
   `fixingCi`,
