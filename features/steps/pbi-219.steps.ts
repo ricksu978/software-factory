@@ -355,6 +355,8 @@ async function cellTransition(world: object, issue: string, body: Record<string,
 }
 
 When("the cell reports through the cell API that its scenarios are ready for sign-off", long, async function () {
+  // The cell API stores the locked file's text at the sha with the report (PBI 224), so the repo holds it.
+  host(this).files.set(`${REPO}@5c3a1f0:features/pbi-11.feature`, "Feature: Board adapter\n");
   await cellTransition(this, "#11", {
     event: "scenarios_written", question: { kind: "sign_off", body: "Please sign off the scenarios." },
     scenariosSha: "5c3a1f0", lockedFiles: ["features/pbi-11.feature"],

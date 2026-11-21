@@ -23,7 +23,7 @@ export type Mods = {
   };
   server: { startServer: (handlers: Handler[], opts: { port: number; host?: string }) => Promise<Server> };
   outbox: { workOutbox: (deps: object) => Promise<void> };
-  fake: { fakeBacklog: () => Target; fakeRepoHost: () => object };
+  fake: { fakeBacklog: () => Target; fakeRepoHost: () => { files: Map<string, string> } };
   items: {
     claimNext: (c: pg.PoolClient, owner: string, now: Date) => Promise<{ itemId: string; runId: string; generation: number } | null>;
     expireLeases: (c: pg.PoolClient, now: Date) => Promise<string[]>;
@@ -161,6 +161,8 @@ Given("a backlog source whose field map sets these board statuses:", long, async
   const upstreamPort = await listen(c.upstream);
   const board = m.fake.fakeBacklog();
   const repoHost = m.fake.fakeRepoHost();
+  // The file a scenarios_written report locks, so the cell API's snapshot of it (PBI 224) finds it at the sha.
+  repoHost.files.set(`${repoName}@5c3a1f0:features/pbi-16-cell-api.feature`, "Feature: Cell API\n");
   c.board = board;
   const backlogFor = () => board.adapter;
   c.mirror = () => m.outbox.workOutbox({ pool: d.pool, backlogFor, repoHost });
