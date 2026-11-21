@@ -394,6 +394,32 @@ const routes: Record<string, Route> = {
     return { checks: await deps.repoHost.ciChecksOnSha(repoOf(run), sha) };
   },
 
+  // PBI 233: re-runs the named checks that failed on one of the run's own commits, once, before the cell charges a red
+  // CI to an attempt. A host that can't re-run, or refuses to, answers an error, and the cell charges the failure as it stands.
+  // The re-run is recorded by run and sha, so a second one on the same commit is refused even from a cell that resumed
+  // the run after a restart. A call the host refuses outright rolls the record back with the transaction: nothing was
+  // re-run. Once any check was re-run the record stays, keeping only the checks that were, and the answer names the
+  // checks the host refused, with why, so the cell charges those as they stand and waits only on the rest.
+  "POST rerun-checks": async (deps, { c, run, body, now }) => {
+    const { repo, sha } = await ownCommit(deps, run, new URLSearchParams({ sha: str(body.sha, "sha") }));
+    const checks = strings(body.checks, "checks");
+    if (!checks.length || checks.some((x) => x === "")) throw new BadRequest("checks must name at least one check");
+    if (!deps.repoHost.rerunChecksOnSha) throw new BadRequest("the repo host can't re-run checks");
+    const recorded = await c.query(
+      "insert into ci_rerun (run_id, sha, checks, requested_at) values ($1, $2, $3, $4) on conflict (run_id, sha) do nothing",
+      [run.run_id, sha, checks, now],
+    );
+    if (recorded.rowCount === 0) throw new BadRequest(`the checks on ${sha} were already re-run once`);
+    const { rerun, refused } = await deps.repoHost.rerunChecksOnSha(repo, sha, checks).catch((e: unknown) => {
+      // The host re-ran nothing. A 400 rolls the record back and hands the cell the host's reason for its note.
+      // A GitHub 5xx keeps its 503.
+      if (githubFailed(e)) throw e;
+      throw new BadRequest(`the repo host re-ran none of the checks: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    if (refused.length) await c.query("update ci_rerun set checks = $3 where run_id = $1 and sha = $2", [run.run_id, sha, rerun]);
+    return { ok: true, rerun, refused };
+  },
+
   "POST stage": async (deps, { c, run, body, now }) => {
     const stageId = str(body.stageId, "stageId");
     const attempt = int(body.attempt, "attempt");

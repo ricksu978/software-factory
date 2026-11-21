@@ -409,7 +409,7 @@ describe("claim keys (PBI 320)", dbTest, () => {
     await item("X", "Queued", 4, 1);
     assert.deepEqual(await order(), ["D", "X"]);
     assert.deepEqual(await claimKeys(db.pool, [d]), new Map([[d, {
-      own: 5, priority: 2, finalStage: true, priorityFrom: { id: a, externalId: "A" }, finalStageFrom: { id: a, externalId: "A" },
+      own: 5, priority: 2, finalStage: true, priorityFrom: { id: a, externalId: "A" }, finalStageFrom: { id: a, externalId: "A" }, bug: false,
     }]]));
   });
 
@@ -421,8 +421,8 @@ describe("claim keys (PBI 320)", dbTest, () => {
     const k = await item("K", "Queued", 5, 3);
     assert.deepEqual(await order(), ["D", "X", "K"]);
     const keys = await claimKeys(db.pool, [d, k]);
-    assert.deepEqual(keys.get(d), { own: 4, priority: 1, finalStage: false, priorityFrom: { id: h, externalId: "H" }, finalStageFrom: null });
-    assert.deepEqual(keys.get(k), { own: 3, priority: 3, finalStage: false, priorityFrom: null, finalStageFrom: null });
+    assert.deepEqual(keys.get(d), { own: 4, priority: 1, finalStage: false, priorityFrom: { id: h, externalId: "H" }, finalStageFrom: null, bug: false });
+    assert.deepEqual(keys.get(k), { own: 3, priority: 3, finalStage: false, priorityFrom: null, finalStageFrom: null, bug: false });
   });
 
   test("a Done dependent lends nothing, and a cycle of dependencies ends", async () => {
@@ -432,7 +432,7 @@ describe("claim keys (PBI 320)", dbTest, () => {
     const c = await item("C", "Queued", 3, 4, ["B"]);
     const d = await item("D", "Queued", 4, 5);
     const keys = await claimKeys(db.pool);
-    assert.deepEqual(keys.get(d), { own: 5, priority: 5, finalStage: false, priorityFrom: null, finalStageFrom: null });
+    assert.deepEqual(keys.get(d), { own: 5, priority: 5, finalStage: false, priorityFrom: null, finalStageFrom: null, bug: false });
     assert.equal(keys.get(c)?.priority, 2);
   });
 
@@ -442,5 +442,56 @@ describe("claim keys (PBI 320)", dbTest, () => {
     await item("H", "Queued", 3, 1, ["D"]);
     await item("D", "Queued", 4, 4);
     assert.deepEqual(await order(true), ["P", "D"]);
+  });
+
+  // PBI 378: the board's "bug" label, as the poller writes it to bug_label.
+  const bug = (id: string) => db.pool.query("update item set bug_label = true where id = $1", [id]);
+  /** An answered NeedsInput item. */
+  async function answered(id: string): Promise<void> {
+    await db.pool.query("insert into question (item_id, kind, body, answer) values ($1, 'needs_input', 'q', 'a')", [id]);
+  }
+
+  test("in the final-stage group, bug items come first within each priority, after the higher priorities", async () => {
+    await inLoop(await item("A", "Queued", 1, 1), "address", ["pr-review"]);
+    await inLoop(await item("C", "Queued", 2, 2), "address", ["pr-review"]);
+    const b = await item("B", "Queued", 3, 2);
+    await inLoop(b, "address", ["pr-review"]);
+    await bug(b);
+    await item("X", "Queued", 4, 1);
+    assert.deepEqual(await order(), ["A", "B", "C", "X"]);
+    assert.equal((await claimKeys(db.pool, [b])).get(b)?.bug, true);
+  });
+
+  test("outside the group, bug items come first at claim priority 1 only, and before answered items", async () => {
+    const n = await item("N", "NeedsInput", 1, 1);
+    await answered(n);
+    await item("A", "Queued", 2, 1);
+    await bug(await item("B", "Queued", 3, 1));
+    await item("P", "Queued", 4, 2);
+    await bug(await item("Q", "Queued", 5, 2));
+    assert.deepEqual(await order(), ["B", "N", "A", "P", "Q"]);
+  });
+
+  test("an item doesn't take the bug label of an item that depends on it, but its own counts at an inherited priority", async () => {
+    await bug(await item("H", "Queued", 1, 1, ["D"]));
+    const d = await item("D", "Queued", 2, 4);
+    await item("X", "Queued", 3, 1);
+    await bug(await item("Y", "Queued", 4, 1));
+    const e = await item("E", "Queued", 5, 4);
+    await item("K", "Queued", 6, 1, ["E"]);
+    assert.deepEqual(await order(), ["Y", "D", "X", "E"]);
+    assert.equal((await claimKeys(db.pool, [d])).get(d)?.bug, false);
+    await bug(e);
+    assert.deepEqual(await order(), ["Y", "E", "D", "X"]);
+  });
+
+  test("Move up doesn't take an item past a bug item at claim priority 1", async () => {
+    await bug(await item("B", "Queued", 1, 1));
+    const c = await item("C", "Queued", 2, 1);
+    const op = (await db.pool.query<{ id: string }>(
+      `insert into "user" (provider, subject, github_login, role) values ('microsoft', 'op', 'op', 'operator') returning id`,
+    )).rows[0].id;
+    await withTx(db.pool, (tx) => moveInQueue(tx, c, "up", { reason: "unit", createdBy: op }));
+    assert.deepEqual(await order(), ["B", "C"]);
   });
 });

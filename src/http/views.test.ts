@@ -614,8 +614,8 @@ describe("runDetailPage fixing CI", () => {
 });
 
 describe("an item's priority and group (PBI 320)", () => {
-  const own = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null };
-  const lent = { own: 5, priority: 1, priorityFrom: { id: "a", externalId: "12" }, finalStage: true, finalStageFrom: { id: "a", externalId: "12" } };
+  const own = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null, bug: false };
+  const lent = { own: 5, priority: 1, priorityFrom: { id: "a", externalId: "12" }, finalStage: true, finalStageFrom: { id: "a", externalId: "12" }, bug: false };
 
   test("Floor names the priority, and the item it comes from", () => {
     assert.equal(standing(own), ` <span class="muted">priority 3</span>`);
@@ -628,6 +628,19 @@ describe("an item's priority and group (PBI 320)", () => {
     assert.match(claimLines(lent), /Priority 1, from #12, which depends on it\. Its own priority on the board is 5\. Final-stage because #12 depends on it/);
     assert.match(claimLines({ ...own, finalStage: true }), /^<p>Priority 3\. Final-stage: its PR is open/);
     assert.equal(claimLines(own), "<p>Priority 3.</p>");
+  });
+
+  // PBI 378: an item carrying the "bug" label itself is marked; one that takes its priority or group from one isn't.
+  test("Floor marks a bug item, and not one without the label", () => {
+    assert.equal(standing({ ...own, bug: true }), ` <span class="badge">bug</span> <span class="muted">priority 3</span>`);
+    assert.doesNotMatch(standing(lent), /\bbug\b/);
+  });
+
+  test("the item page says it carries the bug label, and where that puts it first", () => {
+    assert.match(claimLines({ ...lent, bug: true }), /Carries the bug label, so it's claimed before the items at priority 1 in the final-stage group that don't\./);
+    assert.match(claimLines({ ...own, priority: 1, bug: true }), /Carries the bug label, so it's claimed before the priority-1 items outside the final-stage group that don't\./);
+    assert.match(claimLines({ ...own, bug: true }), /Carries the bug label, which puts it first only in the final-stage group or at priority 1\./);
+    assert.doesNotMatch(claimLines(lent), /\bbug\b/);
   });
 });
 
