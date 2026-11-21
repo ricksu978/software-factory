@@ -91,6 +91,17 @@ export function boardPriority(fields: Record<string, string>): number {
   return /^[1-5]$/.test(raw) ? Number(raw) : 3;
 }
 
+/** The board label that marks an item a bug (PBI 378). */
+export const BUG_LABEL = "bug";
+
+/**
+ * Whether an item carries the board's "bug" label (PBI 378), read on every poll beside its priority. GitHub matches
+ * label names without regard to case, so this does too.
+ */
+export function carriesBug(labels: string[]): boolean {
+  return labels.some((l) => l.toLowerCase() === BUG_LABEL);
+}
+
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
 
 async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: pg.PoolClient) => Promise<unknown>, detail?: Record<string, unknown>): Promise<void> {
@@ -247,8 +258,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       fetched.set(ext, fi);
       if (fi) {
         await pool.query(
-          "update item set repo = $3, board_priority = $4 where source_id = $1 and external_id = $2 and (repo is distinct from $3 or board_priority is distinct from $4)",
-          [sourceId, ext, fi.repo, boardPriority(fi.fields)],
+          `update item set repo = $3, board_priority = $4, bug_label = $5 where source_id = $1 and external_id = $2
+             and (repo is distinct from $3 or board_priority is distinct from $4 or bug_label is distinct from $5)`,
+          [sourceId, ext, fi.repo, boardPriority(fi.fields), carriesBug(fi.labels)],
         );
       }
     }
@@ -278,7 +290,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
-    await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
+    await pool.query(
+      "update item set board_priority = $2, bug_label = $3 where id = $1 and (board_priority is distinct from $2 or bug_label is distinct from $3)",
+      [id, boardPriority(fi.fields), carriesBug(fi.labels)],
+    );
     if (!unread.has(id)) await returnWithdrawn(pool, id);
   });
 

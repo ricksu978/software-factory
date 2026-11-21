@@ -166,8 +166,17 @@ for (const app of [control, cellApi, worker]) {
 const bffSessionKey = await secret('bff-session-key');
 const bffIssuer = runMode ? 'http://localhost:7430/realms/factory' : await builder.addParameter('oidc-issuer');
 const bffClientSecret = runMode ? '' : await secret('oidc-client-secret');
+// The SPA (redesign step 8a): the BFF serves web/dist, which `npm run build` (scripts/build-spa.ts) type-checks and
+// builds with Vite. Under `aspire run` a resource of its own builds it from this checkout, after the start checks' pull,
+// and the BFF waits for it to exit with 0, so 7403 never serves a missing or stale build. A type error exits non-zero,
+// so the dashboard shows it as failed with tsc's output in its console, and the BFF never starts. `aspire publish` runs
+// the same script through withBuildScript. The build needs the devDependencies (Vite, React, Tailwind).
+const spaBuild = runMode
+  ? await builder.addNodeApp('spa-build', repo, 'scripts/build-spa.ts').withNpm({ install: false })
+  : null;
 const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
   .withNpm({ install: false })
+  .withBuildScript('build')
   .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7403, env: 'PORT' })
   .withEnvironment('FACTORY_DB_URI', dbUri)
   .withEnvironment('OIDC_ISSUER', bffIssuer)
@@ -176,6 +185,7 @@ const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
   .withEnvironment('OIDC_SCOPES', 'openid')
   .withEnvironment('BFF_SESSION_KEY', bffSessionKey)
   .waitForCompletion(migrate, { exitCode: 0 });
+if (spaBuild) await bff.waitForCompletion(spaBuild, { exitCode: 0 });
 // The address the browser reaches the BFF on, built from its own endpoint so it follows the port.
 const bffPort = await bff.getEndpoint('http').property(EndpointProperty.Port);
 await bff.withEnvironment('BFF_ORIGIN', refExpr`http://localhost:${bffPort}`);

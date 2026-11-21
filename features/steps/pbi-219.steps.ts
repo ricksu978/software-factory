@@ -47,11 +47,32 @@ type Ctx = {
   response?: { status: number; location: string | null };
   /** The source search's findings: each file that names onTransition. */
   hookFiles?: string[];
+  /** Further refusals a scenario sets up (PBI 221). Each returns why it refuses a call, or null to let it through. */
+  rules: Rule[];
+  /** Every call the factory asked of a board through these steps, refused or not, with the worker's pass it came in. */
+  asked: Asked[];
+  /** Each time the worker worked through the outbox, in order. */
+  passes: Pass[];
+  /** The number of the pass under way, or null between passes. */
+  pass: number | null;
+  /** How far the factory's clock has been moved on, in milliseconds (PBI 221). The outbox's times are kept in the
+   * database's clock, so a time in the factory's clock is a database time plus this. */
+  offsetMs: number;
 };
+
+/** A call the factory asked of a board. */
+export type Asked = { board: string; method: string; id: string; args: unknown[]; pass: number | null };
+export type Rule = (call: Asked) => string | null;
+type Snapshot = Map<string, { attempts: number; failed: boolean }>;
+/** One pass of the worker: when it started and ended on the factory's clock, and the outbox before and after it. */
+export type Pass = { n: number; start: number; end: number; before: Snapshot; after: Snapshot };
 
 export function ctx(world: object): Ctx {
   const w = world as { pbi219?: Ctx };
-  w.pbi219 ??= { refuseUpdates: new Set(), refuseComments: new Set(), users: new Map(), closers: [], cells: new Map() };
+  w.pbi219 ??= {
+    refuseUpdates: new Set(), refuseComments: new Set(), users: new Map(), closers: [], cells: new Map(),
+    rules: [], asked: [], passes: [], pass: null, offsetMs: 0,
+  };
   return w.pbi219;
 }
 
@@ -75,7 +96,7 @@ export function boardNamed(world: object, name: string): Board {
   return b;
 }
 
-const UPDATES = new Set(["claim", "release", "comment", "setStatus", "linkPr", "close"]);
+export const UPDATES = new Set(["claim", "release", "comment", "setStatus", "linkPr", "close"]);
 
 /** The board as the factory reaches it: PBI 156's recording adapter, refusing what the scenario says it refuses. */
 function refusing(world: object, b: Board): BacklogAdapter {
@@ -86,6 +107,12 @@ function refusing(world: object, b: Board): BacklogAdapter {
       if (typeof v !== "function") return v;
       return async (...args: unknown[]) => {
         const id = String(args[0]);
+        const call: Asked = { board: b.name, method: String(prop), id, args, pass: c.pass };
+        c.asked.push(call);
+        for (const rule of c.rules) {
+          const why = rule(call);
+          if (why) throw new Error(why);
+        }
         if (UPDATES.has(String(prop)) && c.refuseUpdates.has(id)) throw new Error(`board ${b.name} refuses every update to item ${id}`);
         if (prop === "comment" && c.refuseComments.has(id)) throw new Error(`board ${b.name} refuses every comment on item ${id}`);
         return v.apply(target, args);
@@ -342,7 +369,7 @@ When("the cell asks {string} and item {string} moves to {string}", long, async f
 
 // ---- GitHub's webhook ----
 
-async function deliver(world: object, issue: string, login: string, body: string, repo: string): Promise<void> {
+export async function deliver(world: object, issue: string, login: string, body: string, repo: string): Promise<void> {
   const id = randomUUID();
   const raw = Buffer.from(JSON.stringify({ issue: { number: Number(num(issue)) }, comment: { id, body }, repository: { full_name: repo } }));
   const headers = {
@@ -430,13 +457,49 @@ Then("the dashboard takes {string} back to item {string}", long, async function 
 
 // ---- the worker ----
 
+async function snapshot(): Promise<Snapshot> {
+  const r = await pool().query<{ seq: string; attempts: number; failed: boolean }>("select seq, attempts, failed_at is not null as failed from outbox");
+  return new Map(r.rows.map((x) => [x.seq, { attempts: x.attempts, failed: x.failed }]));
+}
+
+/** The time on the factory's clock, in milliseconds: the database's clock moved on by however far a scenario moved it. */
+export async function factoryNow(world: object): Promise<number> {
+  const r = await pool().query<{ t: Date }>("select clock_timestamp() as t");
+  return r.rows[0].t.getTime() + ctx(world).offsetMs;
+}
+
+/** The worker works through the outbox once, as src/worker/outbox.ts's workOutbox, and the pass is logged. */
+export async function workPass(world: object): Promise<Pass> {
+  const c = ctx(world);
+  const n = c.passes.length + 1;
+  const start = await factoryNow(world);
+  const before = await snapshot();
+  c.pass = n;
+  try {
+    await workOutbox(workerDeps(world));
+  } finally {
+    c.pass = null;
+  }
+  const pass: Pass = { n, start, end: await factoryNow(world), before, after: await snapshot() };
+  c.passes.push(pass);
+  return pass;
+}
+
+/** Whether the worker tried the outbox row `seq` in the pass: its attempts went up, it was marked failed, or it went. */
+export function triedIn(pass: Pass, seq: string): boolean {
+  const was = pass.before.get(seq);
+  if (!was) return false;
+  const now = pass.after.get(seq);
+  return !now || now.attempts > was.attempts || (now.failed && !was.failed);
+}
+
 When("the worker works through the outbox", long, async function () {
-  await workOutbox(workerDeps(this));
+  await workPass(this);
 });
 
 When("the row for item {string} is due again and the worker works through the outbox", long, async function (issue: string) {
   await pool().query("update outbox set next_attempt_at = now() where item_id = $1", [await item(this, issue, MAIN)]);
-  await workOutbox(workerDeps(this));
+  await workPass(this);
 });
 
 When("the worker handles that decision's announcement row twice, as it would after a crash before removing it", long, async function () {

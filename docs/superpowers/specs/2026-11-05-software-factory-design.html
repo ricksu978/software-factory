@@ -834,7 +834,13 @@ stateDiagram-v2
 
     so a dead cell's attempt never stays open.
 
-    A restart that sends a cell's item back to Queued closes them the same way.
+    A restart or a drain that ends a cell's claim at a stage boundary,
+
+    and so sends its item back to Queued,
+
+    closes them the same way (PBI 301,
+
+    PBI 379).
 
     Like any stopped attempt,
 
@@ -983,6 +989,24 @@ stateDiagram-v2
     then the factory queue's order,
 
     which Move up and Move down change.
+
+    An item that carries the board's <code>bug</code> label,
+
+    read on each poll beside the priority,
+
+    comes before the rest within its priority in the final-stage group,
+
+    and before the rest at priority 1 outside it,
+
+    ahead of answered items;
+
+    at priorities 2 to 5 outside the group the label doesn't change the order.
+
+    Only the item's own label counts:
+
+    an item that takes its priority or group from a bug item doesn't take its label,
+
+    and Floor and Run detail mark only the item that carries it (PBI 378).
 
     An item that a final-stage item depends on,
 
@@ -1604,7 +1628,55 @@ stateDiagram-v2
 
       CI green.</td>
       
-      <td>CI failures go back to stage 5.
+      <td>Before a red CI is charged to the attempt,
+
+      the factory re-runs the failed checks once,
+
+      and only those,
+
+      so a flaky check doesn't cost an attempt.
+
+      A pass on the re-run counts as green,
+
+      and the stage's message says which check was re-run on which commit and that it passed.
+
+      A check that fails again is charged as before,
+
+      and only the checks that failed on the re-run go back,
+
+      each with its re-run's URL.
+
+      When the repo host won't start the re-run,
+
+      the failure is charged as it stands,
+
+      and the message says the check couldn't be re-run (PBI 233).
+
+      When it re-runs some of the checks and refuses others,
+
+      the refused ones are charged as they stand with that note,
+
+      and the factory waits only on the ones it re-ran.
+
+      The factory reads which checks failed only once no check on the commit is still running,
+
+      so a check that fails later is re-run too.
+
+      It waits until each re-run check shows a new run,
+
+      either at a new URL or finished later than its old run,
+
+      and that run has finished,
+
+      before it reads CI again.
+
+      A note for a check whose re-run still reads as running says its re-run hadn't finished.
+
+      The control plane records each re-run by run and commit and refuses a second one,
+
+      so a run resumed after a restart can't re-run the same commit's checks twice.
+
+      CI failures go back to stage 5.
 
       Green's findings name each failed check,
 
@@ -1888,7 +1960,13 @@ stateDiagram-v2
 
       Stage 9 counts human approvals once it has set the tier.</td>
       
-      <td>CI failing on the addresser's fix goes back to stage 5,
+      <td>A red CI on what this stage or address pushed has its failed checks re-run once first,
+
+      as at stage 7,
+
+      and only a check still red after the re-run is charged (PBI 233).
+
+      CI failing on the addresser's fix goes back to stage 5,
 
       counted against its retries.
 
@@ -4555,7 +4633,31 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       resume or drain.
 
-      Drain finishes the items in flight and starts nothing new.
+      Drain starts nothing new and ends each running cell as Prepare restart does (PBI 379).
+
+      Every cell's lease renewal tells it to carry on,
+
+      so it finishes the stage it's in,
+
+      that stage's own retries included.
+
+      It then starts no further stage and ends its claim at that stage boundary,
+
+      and the item waits in Queued at its next stage,
+
+      with no attempt stopped and no work-in-progress commit.
+
+      A pause,
+
+      the kill switch or an operator's stop still tells a cell to stop,
+
+      and while one of them is set a cell's release keeps its claim,
+
+      so the handling of that stop still holds.
+
+      Once the drain is cleared,
+
+      each such item is claimed again from the stage its run recorded.
 
       While the factory drains,
 
@@ -4567,7 +4669,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       counted as Prepare restart counts them:
 
-      an item counts when it's InProgress and its cell holds a live lease.
+      an item counts when it's InProgress and its cell holds a live lease,
+
+      so a cell counts until it ends its claim.
 
       Once no cell runs,
 
@@ -4679,7 +4783,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       and move it one place among the items it's ordered with,
 
-      which share its group and priority (PBI 320).
+      which share its group and priority (PBI 320),
+
+      and whether the item comes first as a bug item (PBI 378).
 
       A move is kept relative to the item's own board position,
 

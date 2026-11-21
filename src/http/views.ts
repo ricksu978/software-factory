@@ -133,16 +133,21 @@ const named = (r: Issue & { id: string; title: string }) => `${issueRef(r.extern
 
 /**
  * Floor's note on an item's claim key (PBI 320): its priority, and whether it's final-stage, each naming the item that
- * depends on it where the priority or the group comes from that item.
+ * depends on it where the priority or the group comes from that item, after a "bug" badge for a bug item (PBI 378).
  */
 export function standing(k: ClaimKey | undefined): string {
   if (!k) return "";
   const from = k.priorityFrom ? `, from #${escapeHtml(k.priorityFrom.externalId)}` : "";
   const group = k.finalStage ? `, final-stage${k.finalStageFrom ? ` because of #${escapeHtml(k.finalStageFrom.externalId)}` : ""}` : "";
-  return ` <span class="muted">priority ${k.priority}${from}${group}</span>`;
+  // PBI 378: only the item's own "bug" label is marked, never one of an item it takes its priority or group from.
+  const bug = k.bug ? ` <span class="badge">bug</span>` : "";
+  return `${bug} <span class="muted">priority ${k.priority}${from}${group}</span>`;
 }
 
-/** The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page. */
+/**
+ * The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page, and
+ * one without the "bug" label never has that word (PBI 378).
+ */
 export function claimLines(k: ClaimKey): string {
   const priority = k.priorityFrom
     ? `Priority ${k.priority}, from #${escapeHtml(k.priorityFrom.externalId)}, which depends on it. Its own priority on the board is ${k.own}.`
@@ -150,7 +155,12 @@ export function claimLines(k: ClaimKey): string {
   const group = !k.finalStage ? ""
     : k.finalStageFrom ? ` Final-stage because #${escapeHtml(k.finalStageFrom.externalId)} depends on it, so it's claimed ahead of other work while that dependency stands.`
     : " Final-stage: its PR is open and it's in the review loop, so it's claimed ahead of other work.";
-  return `<p>${priority}${group}</p>`;
+  // PBI 378: the item's own "bug" label puts it first within its priority in the final-stage group, and at priority 1.
+  const bug = !k.bug ? ""
+    : k.finalStage ? ` Carries the bug label, so it's claimed before the items at priority ${k.priority} in the final-stage group that don't.`
+    : k.priority === 1 ? " Carries the bug label, so it's claimed before the priority-1 items outside the final-stage group that don't."
+    : " Carries the bug label, which puts it first only in the final-stage group or at priority 1.";
+  return `<p>${priority}${group}${bug}</p>`;
 }
 
 /** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */

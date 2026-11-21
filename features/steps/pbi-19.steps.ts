@@ -45,7 +45,7 @@ type Ctx = {
   applied?: boolean;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi19?: Ctx };
   w.pbi19 ??= {};
   return w.pbi19;

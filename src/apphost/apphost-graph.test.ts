@@ -125,3 +125,16 @@ test("aspire publish adds no cell-image, and keeps the other listed waits", () =
   );
   assert.deepEqual(waitsAmong(graph, names), expected);
 });
+
+test("under aspire run, the BFF waits for spa-build to complete with exit code 0, so it never serves a missing build", () => {
+  const graph = runAppHost(true);
+  assert.ok(graph.apps.includes("spa-build"), "apphost.mts adds no spa-build resource");
+  const wait = graph.waits.find((w) => w.from === "bff" && w.to === "spa-build");
+  assert.ok(wait, "the BFF doesn't wait for spa-build");
+  assert.equal(wait.kind, "waitForCompletion");
+  assert.equal(wait.options?.exitCode, 0);
+});
+
+test("aspire publish adds no spa-build resource", () => {
+  assert.ok(!runAppHost(false).apps.includes("spa-build"));
+});

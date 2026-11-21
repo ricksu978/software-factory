@@ -445,7 +445,7 @@ A task that touches one of them follows this section and does not restate it.
      so the next cell starts that stage fresh,
      as it did when such an attempt stayed `started`.
      The exception is a claim a restart ended,
-     through `releaseForRestart` or,
+     through `endClaimForWrapUp` or,
      before PBI 300,
      the scheduler's stop at the end of the wrap-up:
      when the `lease_expired` event that ended the attempt's own claim,
@@ -856,6 +856,65 @@ A task that touches one of them follows this section and does not restate it.
       Green running out of retries still fails the item,
       as PBI 128 has it.
       An address retry whose head is one CI already failed on goes back to Green without reading CI again.
+    - **A red CI's failed checks are re-run once before it is charged (PBI 233).**
+      `src/cell/ci-rerun.ts` holds the sentences.
+      When `readCi` reads `failure` on a head,
+      it reads `GET /ci-checks` on it.
+      `/checks` answers `failure` as soon as one check fails,
+      while others may still run,
+      and GitHub won't re-run a job until its workflow run has finished,
+      so while any check on the commit reads `pending` the cell keeps reading `/ci-checks` under the same 60-minute cap,
+      and reads the failed set only once none does.
+      A commit that turns out not to have failed after that wait goes on as it reads.
+      It then takes the checks that failed with `failedNames`,
+      and asks `POST /rerun-checks` to re-run only those,
+      then waits on `GET /checks` again,
+      with a fresh 60-minute cap,
+      as for any push.
+      GitHub may still report the old failed run right after the re-run is asked for,
+      above all for a check another app re-runs through `/rerequest`,
+      so the factory notes each failed check's URL and `completedAt` first and reads CI as pending,
+      under that same cap,
+      until `/ci-checks` shows every re-run check's new run and that run has finished:
+      while any re-run check reads `pending`,
+      CI still reads as pending,
+      since `/checks` answers `failure` as soon as one check fails again.
+      A re-run check shows its new run when it reads at a new URL,
+      or when it has finished and its `completedAt` is later than its old run's.
+      A check another app re-requests may finish again under the same run and URL,
+      so only the later finish tells it apart.
+      The GitHub repo host fills `CiCheck.completedAt` from a finished check run's `completed_at`.
+      A check with neither a URL nor a `completedAt`,
+      or a `/ci-checks` that can't be read,
+      is taken as it reads.
+      A pass on the re-run counts as green,
+      so the stage goes on as if CI had passed the first time.
+      A re-run that fails again is charged as before,
+      and `ciFailed` reads `/ci-checks` after the re-run,
+      so only the checks that failed again go back to Green,
+      each with the URL of its re-run.
+      Either way the cell reads `/ci-checks` once more and adds one `rerunNotes` sentence per re-run check to the open attempt's message,
+      saying it failed on the short commit,
+      the factory re-ran it once,
+      and it passed or failed again on the re-run,
+      or,
+      when `/ci-checks` still reads the check as `pending`,
+      that its re-run hadn't finished when CI was read.
+      When `/rerun-checks` is refused,
+      the red CI is charged as it stands,
+      and `refusedNotes` adds a sentence per check saying the factory couldn't re-run it,
+      and why.
+      When it answers that some checks were re-run and others refused,
+      `refusedNotes` adds a sentence for each refused check with its own reason,
+      and the cell waits for and notes only the checks that were re-run.
+      The cell keeps each head it re-ran on and re-runs a commit's checks once at most.
+      The control plane also records each re-run in `ci_rerun` and refuses a second one for the same run and sha,
+      so a cell that resumes the run after a restart or a lost lease can't re-run a commit's checks twice.
+      The client sends `/rerun-checks` once,
+      without retries,
+      so a retry can't start a second re-run.
+      A cell API without `rerunFailedChecks` or `ciChecks` charges a red CI at once,
+      as before.
     - **Fresh DoD.**
       Self-review and address can push code after green,
       and CI may not run a `run:` line such as `run: npm run e2e`.
@@ -1428,6 +1487,11 @@ Azure comes in Task 19.
     which the control plane logs,
     a red main's bug item names no failing tests,
     and a CI failure goes back to Green with its checks' names and URLs but no failing tests or log lines.
+    To re-run a failed GitHub Actions job once before a red CI is charged (PBI 233),
+    the App needs write on actions.
+    Without it GitHub refuses the re-run with 403,
+    and the failure is charged as before,
+    with a message saying the check couldn't be re-run.
     Leave its webhook inactive for now,
     because GitHub can't reach a local machine.
     Phase 0a runs on the 5-minute poll,
@@ -1805,7 +1869,7 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     in `seq` order,
     and returns.
     It takes each row with `for no key update skip locked`.
-    A row waits while an earlier row for the same item and consumer is still in the outbox,
+    A row waits while an earlier row for the same item and consumer is still in the outbox and not set aside,
     so one item's rows run in the order they were written and a failed one holds back only that item.
     A row written during the pass,
     such as the announcement of a decision a comment command made,
@@ -1815,6 +1879,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     its `attempts` goes up and `next_attempt_at` moves out by `backoffMs`:
     30 seconds,
     doubling up to 30 minutes.
+    On its tenth failure (`MAX_ATTEMPTS`) the row gets `failed_at` instead and is set aside:
+    it stays in the outbox,
+    is never tried again,
+    and no longer holds back its item's later rows (PBI 221).
     `runRowEffects(deps, row)` runs one row's effects without deleting it.
     A `board_mirror` row runs `mirror` for its event's `to` and event (`override` for an override).
     A `decision_announcement` row comments `announcement(kind, text)` from the decision event's payload,
@@ -1997,6 +2065,11 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     as a `prUrl` that differs does.
     So a cell can't put a `javascript:` link on the dashboard.
     The views also link only an https URL and show any other check as plain text.
+  - `ci_rerun(run_id, sha, checks text[], requested_at)`,
+    primary key `(run_id, sha)`,
+    added by `db/migrations/018_ci_rerun.sql` (PBI 233).
+    Each row is a commit whose failed checks a cell asked `POST /rerun-checks` to re-run,
+    so a commit's checks are re-run once at most across restarts.
   - `stage_run.report_ref text`,
     the BDD report a red or green stage uploaded.
   - `db/migrations/012_close_orphaned_attempts.sql` (PBI 239) changes no schema.
@@ -2094,7 +2167,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     then the rest,
     and within each group by claim priority,
     1 first (PBI 320).
-    Within one claim priority it picks a SignOff or NeedsInput item whose `question` has an answer before any Queued item.
+    Within one claim priority,
+    in the final-stage group or at claim priority 1,
+    it picks an item whose own `bug_label` is set first (PBI 378).
+    Then it picks a SignOff or NeedsInput item whose `question` has an answer before any Queued item.
     Then it picks highest `priority`,
     then lowest queue rank:
     the `rank` in `value` of the item's latest active `move_up` or `move_down` override,
@@ -4018,6 +4094,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     A restart being prepared doesn't set it:
     it adds `restarting: true` instead,
     so the cell finishes its stage and ends its claim at the stage boundary (PBI 301).
+    A factory `drain` adds `restarting: true` the same way (PBI 379).
     With `stop` true,
     `restarting` is left out.
     The kill switch is either half of Task 13's definition:
@@ -4077,6 +4154,32 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     and so does one it places on main,
     since the branch starts from main and main's commits are its ancestors too.
     So a cell can't ask about main's green head.
+  - `POST /rerun-checks` takes `{ sha, checks: string[] }` and re-runs the named checks that failed on that commit through `RepoHost.rerunChecksOnSha`,
+    answering `{ ok: true, rerun, refused }`,
+    the checks re-run and each refused check with why (PBI 233).
+    It takes the same sha checks as `/checks` and gets 400 for the same shas,
+    and for an empty `checks` or a repo host that can't re-run.
+    In the same transaction as the call,
+    it inserts a `ci_rerun` row for the run and sha,
+    and gets 400 when one is already there,
+    saying the checks on that commit were already re-run once.
+    When the host re-runs none of the checks the call fails and rolls the row back with the transaction,
+    since nothing was re-run.
+    Once any check was re-run the row stays,
+    with `checks` cut to the ones that were,
+    so a partial re-run still counts as the commit's one re-run.
+    The GitHub repo host reads the commit's check runs and refuses,
+    before it re-runs anything,
+    when a named check didn't fail there.
+    Re-running one Actions job starts a new attempt of its whole workflow run,
+    and GitHub refuses to re-run another job of that run while it runs,
+    so it reads each failed Actions check run's workflow run with `GET /repos/{owner}/{repo}/actions/jobs/{id}` and calls `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs` once per workflow run,
+    which needs the App's `actions: write` and re-runs every failed job of that run.
+    It re-requests a check another App reports with `POST /repos/{owner}/{repo}/check-runs/{id}/rerequest`.
+    Each of those is asked for apart,
+    so one refused leaves the others started.
+    It rejects only when none was re-run,
+    and the cell then charges the red CI as it stands.
   - `GET /pending-checks?sha=<sha>` returns `{ checks: string[] }`,
     the names `RepoHost.pendingChecksOnSha` gives for the checks still pending on that commit,
     for the question a cell asks when CI stays pending for 60 minutes (PBI 234).
@@ -4139,9 +4242,23 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   - `POST /release` takes `{}`.
     A cell that a stop found between a stage's `passed` report and its transition has no open attempt to report `stopped`,
     so it sends this instead before it exits (PBI 140).
-    So does a cell that finished a stage while a restart was being prepared and starts no further stage (PBI 301).
-    While a restart is being prepared it ends the claim the same way a `stopped` report does,
-    and outside a restart it changes nothing.
+    So does a cell that finished a stage while a restart was being prepared or the factory drains,
+    and starts no further stage (PBI 301,
+    PBI 379).
+    While a restart is being prepared or the factory drains,
+    it ends the claim the same way a `stopped` report does,
+    with one `lease_expired` transition whose payload has `reason: "restart"` under a restart and otherwise `reason: "drain"`,
+    plus `drain: true` under a drain.
+    Under a drain without a restart,
+    a release reads the same overrides `/lease` does and ends the claim only while none of a pause,
+    the kill switch or a stop-run is set,
+    since the route can't tell a release at a stage boundary from one a stop sent,
+    and the handling of those keeps the claim.
+    Outside both it changes nothing.
+    A `stopped` report ends the claim only under a restart,
+    since under a drain alone the stop came from a pause,
+    the kill switch or an operator,
+    whose handling keeps the claim.
   - `POST /sop-move` takes `{ from, to }` (PBI 173).
     It sets `run.sop_version` to `to` and appends one `sop_moved` event on the item,
     with actor `system` and payload `{ from, to, runId }`,
@@ -4649,6 +4766,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     A move stays among the items with the same Start now,
     final-stage group,
     claim priority,
+    bug-first standing (PBI 378),
     Queued or answered,
     and `priority`.
     The claim order sorts by queue rank (nulls last),
@@ -4712,6 +4830,13 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     `fs_from` and `p_from` name the item the group and the priority come from,
     the one with the highest priority,
     then the lowest `backlog_rank`.
+    `bug` is the item's own `bug_label` and is never lent (PBI 378).
+    The poller writes `item.bug_label` (migration 018) on each poll beside `board_priority`,
+    through `carriesBug(labels)`:
+    true when the board item's labels include `bug`,
+    in any case.
+    Labels aren't in the readiness hash,
+    so adding or removing it doesn't re-gate the item.
   - `claimNext(c, owner, now, { resumeOnly })`.
     With `resumeOnly`,
     a Queued item counts only when its open run has a `stage_run` row,
@@ -4745,8 +4870,15 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     makes `tick` call `stop` for every execution with a live lease and start nothing.
   - **Drain and pause.**
     Neither starts anything.
-    Under drain the running cell's `/lease` reply has `stop: false`,
-    and under pause it has `stop: true`.
+    Under drain the running cell's `/lease` reply has `stop: false` and `restarting: true`,
+    so the cell finishes the stage it's in,
+    with that stage's own retries,
+    and ends its claim at that stage boundary as under Prepare restart:
+    the item waits in Queued at its run's next stage,
+    with no attempt stopped and no work-in-progress commit,
+    and once the drain is cleared it's claimed again from that stage (PBI 379).
+    Under pause the reply has `stop: true`,
+    under a drain as well.
     While the factory drains,
     Floor counts the cells still running as Prepare restart does,
     an InProgress item with a live lease,
@@ -5593,6 +5725,8 @@ from spec §6 rows 1 to 7:
     It resolves with `ok: false` and never rejects,
     so an engine that waits for a throw fails here.
   - **Restarting (PBI 301).**
+    A drain gives the cell the same `restarting` word,
+    so everything below holds under a drain too (PBI 379).
     The engine keeps the last `/lease` reply's `restarting`,
     from the renewal loop and from the check before each push.
     It never aborts the agent.
@@ -5929,6 +6063,65 @@ from spec §6 rows 1 to 7:
   because the API's `/v1` routes come in a later step.
   The `@db` scenarios in `features/pbi-289-bff-guards-and-forwards.feature` forward to the stand-in API in `features/fixtures/pbi-289-api.ts`,
   and `src/bff/session.db.test.ts` checks `pgSessions` against Postgres.
+- Since step 8a (2026-11-07 design,
+  §04,
+  §09 and §10,
+  PBI 278),
+  the SPA's shell lives in `web/`,
+  a Vite 8 project with React 19,
+  Tailwind 4 and shadcn/ui.
+  `npm run build` runs `scripts/build-spa.ts`,
+  which type-checks `web/` with `tsc -p web/tsconfig.json` and stops on a type error,
+  naming the file,
+  before Vite writes `web/dist`.
+  CI already runs the build before the tests.
+  `npm run typecheck` checks `web/` too,
+  and `npm test` runs `web/src/**/*.test.ts`.
+  `createBff` takes `spaDir`,
+  which `src/bff/main.ts` sets to `web/dist`,
+  and `serveSpa(dist)` in `src/bff/spa.ts` answers every GET no BFF route took.
+  A built file comes back with its type,
+  and the hashed files under `/assets/` are cached as immutable.
+  A missing path with a file extension gets 404.
+  Any other path gets `index.html`,
+  so deep links open the SPA.
+  Paths under `/auth` and `/bff` get 404,
+  and a path with a `..` segment,
+  a backslash or a NUL,
+  or one outside `web/dist`,
+  gets 404.
+  Before a build the page answers 503.
+  `web/src/shell.ts` holds `startShell(env)`,
+  which runs in Node against stand-ins.
+  It marks the root element `dark` while `(prefers-color-scheme: dark)` matches,
+  following a live change.
+  It reads `/bff/v1/floor` at start:
+  a 401 sends the browser to `/auth/login`,
+  and a 403 shows the no-access page with today's text.
+  Its `call(path, init)` is the only way the SPA calls the BFF,
+  refuses any address outside `/bff/v1/` and `/auth/`,
+  and handles a 401 the same way.
+  Only a 403 on a read shows the no-access page.
+  `web/src/main.tsx` starts the shell with the browser's globals and renders `pageFor(shown, call)` from `web/src/page.tsx`:
+  `NoAccess` for a no-access page,
+  `App` otherwise. shadcn/ui's table,
+  badge,
+  button,
+  input,
+  textarea and alert components are kept in `web/src/components/ui`,
+  configured by `web/components.json`,
+  and themed by the CSS variables in `web/src/index.css`.
+  `src/bff/spa.test.ts`,
+  `src/bff/app.test.ts`,
+  `web/src/shell.test.ts` and `web/src/page.test.ts` (which renders both pages to a string with `react-dom/server`,
+  loaded through Vite's SSR loader) cover it,
+  and `features/pbi-278-spa-shell.feature` checks the build,
+  the served files and the source.
+  Under `aspire run` the AppHost's run-mode `spa-build` resource runs `scripts/build-spa.ts` after the start checks' pull,
+  and the BFF waits for it to exit with 0,
+  so it serves a build of the checkout it runs beside.
+  `aspire publish` runs the same script through the BFF's `withBuildScript('build')`,
+  and the build needs the devDependencies.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,
@@ -6497,7 +6690,8 @@ from spec §6 rows 1 to 7:
       or `priority N, from #E` when it comes from item `#E` that depends on it,
       and `final-stage`,
       or `final-stage because of #E`,
-      when it's in the group;
+      when it's in the group,
+      after a `bug` badge when the item itself carries the `bug` label (PBI 378);
     - "Not ready",
       each NotReady item with the `dor.md` lines it failed;
     - "Blocked",
@@ -6558,6 +6752,8 @@ from spec §6 rows 1 to 7:
     A final-stage item's page says it's final-stage,
     and one in the group only through a dependent says `Final-stage because #E depends on it`.
     A page whose item isn't final-stage never has the word on it.
+    A page whose item carries the `bug` label itself says so and where that puts it first,
+    and a page whose item doesn't never has the word `bug` on it (PBI 378).
 - [ ] **Step 2:
   Run the tests.**
   Expected:
@@ -7315,6 +7511,19 @@ now on the platform Task 19 built.
      NeedsInput,
      InReview or Accepted and no PR is open.
      A held or stopped item is Failed and counts as settled.
+     A drain ends each cell at its next stage boundary and leaves the item Queued at its run's next stage (PBI 379),
+     and nothing starts while it's set,
+     so the drain can't finish such an item:
+     a Queued item whose open run has a `stage_run` row is still in flight.
+     Crossing over gives it up on purpose:
+     Step 4 deletes its branch with the stages it already passed,
+     and the Azure factory builds it again from run 1,
+     paying for those stages a second time.
+     To keep that work instead,
+     clear the drain so those items are claimed again,
+     and set it again once they reach one of the settled states above.
+     While it's cleared other Queued items can start too,
+     so remove the `factory` label from any you don't want started first.
   2. Record the local `/phase0` report in the runbook:
      merged factory PRs and cost per item.
      That's Phase 0a's share of the exit count,

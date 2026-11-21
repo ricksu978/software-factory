@@ -160,6 +160,8 @@ export function fakeRepoHost(): RepoHost & {
   pendingChecks: Map<string, string[]>;
   /** The named checks CI reported, by `repo@sha` (PBI 229). */
   ciChecks: Map<string, CiCheck[]>;
+  /** Each re-run asked for, as `<repo>@<sha>` with the checks named (PBI 233). */
+  reruns: { key: string; checks: string[] }[];
   files: Map<string, string>;
   heads: Map<string, string>;
   branches: Map<string, string[]>;
@@ -185,6 +187,7 @@ export function fakeRepoHost(): RepoHost & {
   const failedChecks = new Map<string, FailedCheck[]>();
   const pendingChecks = new Map<string, string[]>();
   const ciChecks = new Map<string, CiCheck[]>();
+  const reruns: { key: string; checks: string[] }[] = [];
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
@@ -205,6 +208,7 @@ export function fakeRepoHost(): RepoHost & {
     failedChecks,
     pendingChecks,
     ciChecks,
+    reruns,
     files,
     heads,
     branches,
@@ -251,6 +255,13 @@ export function fakeRepoHost(): RepoHost & {
     },
     async ciChecksOnSha(repo, sha) {
       return ciChecks.get(`${repo}@${sha}`) ?? null;
+    },
+    async rerunChecksOnSha(repo, sha, names) {
+      const failed = (ciChecks.get(`${repo}@${sha}`) ?? []).filter((c) => c.conclusion === "failure").map((c) => c.name);
+      const not = names.filter((n) => !failed.includes(n));
+      if (not.length) throw new Error(`${not.join(", ")} didn't fail on ${sha}`);
+      reruns.push({ key: `${repo}@${sha}`, checks: [...names] });
+      return { rerun: [...names], refused: [] };
     },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;
