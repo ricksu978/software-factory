@@ -1,5 +1,5 @@
 // Step definitions for features/pbi-286-api-read-endpoints.feature. They run on PBI 284's harness: the API runs in this
-// process from src/api/main.ts's startApi on port 7402, against PBI 284's fake issuer, on PBI 4's shared test database.
+// process from src/api/main.ts's startApi on the scenario's free port (PBI 284's apiPort), against PBI 284's fake issuer, on PBI 4's shared test database.
 // The activity log's Givens and most of its Thens are PBI 105's, which read the API's rows here in place of the page.
 //
 // Time: an event stream ends after STREAM_MS, a timer the API sets with setTimeout. While a scenario has a stream
@@ -27,7 +27,7 @@ import { withTx } from "../../src/store/db.ts";
 import { appendEvent } from "../../src/store/events.ts";
 import { transitionItem } from "../../src/store/items.ts";
 import { readActivityFromApi } from "./pbi-105.steps.ts";
-import { bearer, body, call, ctx as pbi284, itemId, reply, validToken } from "./pbi-284.steps.ts";
+import { apiPort, bearer, body, call, ctx as pbi284, itemId, reply, validToken } from "./pbi-284.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
 const DAY = 86_400_000;
@@ -128,9 +128,10 @@ When("{int} minutes and {int} seconds pass", async function (m: number, s: numbe
 // ---- the event stream ----
 
 /** Opens GET /v1/events with `token` and resolves once the response's head and first chunk arrive, or it fails. */
-function openStream(token: string): Promise<Stream> {
+async function openStream(world: object, token: string): Promise<Stream> {
+  const port = await apiPort(world);
   return new Promise((resolve) => {
-    const req = http.get({ host: "127.0.0.1", port: 7402, path: "/v1/events", headers: { authorization: bearer(token), accept: "text/event-stream" } });
+    const req = http.get({ host: "127.0.0.1", port, path: "/v1/events", headers: { authorization: bearer(token), accept: "text/event-stream" } });
     const s: Stream = { status: null, data: "", request: req };
     req.on("response", (res) => {
       s.status = res.statusCode ?? null;
@@ -158,7 +159,7 @@ function openStream(token: string): Promise<Stream> {
 When("{string} opens the event stream on port {int} with a valid token", long, async function (name: string, _port: number) {
   const c = ctx(this);
   installClock(c);
-  const s = await openStream(await validToken(pbi284(this), name));
+  const s = await openStream(this, await validToken(pbi284(this), name));
   c.streams.set(name, [...(c.streams.get(name) ?? []), s]);
 });
 

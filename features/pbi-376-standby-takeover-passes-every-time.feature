@@ -79,7 +79,7 @@ Feature: The PBI 157 standby takeover scenario passes every time, so a flake sto
       Then the script exits with code 0
       And the script reports that 3 of 3 runs passed
 
-    @ac-2 @db @local
+    @ac-2 @db @local @serial
     Scenario: The takeover scenario passes on each of 20 runs back to back
       When the owner runs `npm run bdd:repeat -- --times 20 --name "When the working worker loses its lock connection, the standby takes over within 30 seconds"`
       Then the script exits with code 0
@@ -93,7 +93,7 @@ Feature: The PBI 157 standby takeover scenario passes every time, so a flake sto
       Then the script exits with code 0
       And the script reports that 3 of 3 runs passed
 
-    @ac-3 @db @local
+    @ac-3 @db @local @serial
     Scenario: The second worker scenario passes on each of 20 runs back to back
       When the owner runs `npm run bdd:repeat -- --times 20 --name "A second worker claims no item while the first one runs"`
       Then the script exits with code 0

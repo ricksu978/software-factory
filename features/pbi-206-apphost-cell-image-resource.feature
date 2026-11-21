@@ -78,7 +78,7 @@ Feature: The AppHost rebuilds factory-cell:local as a resource the worker waits 
       When the AppHost starts
       Then "cell-image" built "factory-cell:local" with the checkout's "cell/Dockerfile"
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: On the owner's machine, aspire run rebuilds the cell image before the worker starts
       Given the owner's checkout is on branch "main" with no uncommitted edits
       When the owner starts "aspire run"
@@ -114,7 +114,7 @@ Feature: The AppHost rebuilds factory-cell:local as a resource the worker waits 
       Then "cell-image" shows as failed in the dashboard
       And the worker never starts
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: On the owner's machine, a broken cell Dockerfile shows "cell-image" failed, and the worker stays down
       Given the owner's checkout is on a branch whose "cell/Dockerfile" has a step that always fails
       When the owner starts "aspire run"

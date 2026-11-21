@@ -21,8 +21,9 @@ import { ctx as p17, freshDb, newItem } from "./pbi-17.steps.ts";
 
 const REPO = "ricksu978/software-factory";
 const IMAGE = "factory-cell:scenario";
-const CONTROL_URL = "http://host.docker.internal:7400";
-const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;";
+// Settings the worker hands on and never connects to, so their hosts are names that reach nothing (PBI 390).
+const CONTROL_URL = "http://control.test:7400";
+const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://blob.test:7410/devstoreaccount1;";
 // The worker ticks this often here. It polls once at start and not again within a scenario, so an item a step adds
 // later reaches the worker only through the tick.
 const TICK_MS = 100;
@@ -230,7 +231,7 @@ export async function fakes(world: object) {
     // The control plane's own settings.
     local: false,
     auth: createAuth({ mode: "azure" }),
-    origin: "http://127.0.0.1:7400",
+    origin: "http://control.test:7400",
     webhookSecret: "webhook-secret",
     claudeToken: "unused",
     uploadUrl: async (path: string) => `http://blob.test/${path}`,

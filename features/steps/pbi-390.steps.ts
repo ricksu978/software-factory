@@ -433,10 +433,14 @@ Given("the worker count setting is {string}", function (text: string) {
   ctx(this).workers = text;
 });
 
-/** Holds `port` with a TCP server that counts every connection. Waits a while if something else holds it already. */
+/**
+ * Holds `port` with a TCP server that counts every connection. Waits while something else holds it already, which in a
+ * parallel run is often another of these scenarios, holding it for an earlier item's whole run.
+ */
+const HOLD_WAIT_MS = 30 * 60_000;
 async function hold(world: object, port: number): Promise<void> {
   const c = ctx(world);
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + HOLD_WAIT_MS;
   for (;;) {
     const holder: Holder = { port, server: net.createServer(), reached: 0 };
     holder.server.on("connection", (socket) => {
@@ -456,11 +460,11 @@ async function hold(world: object, port: number): Promise<void> {
   }
 }
 
-Given("another program on this machine already listens on port {int}", { timeout: 90_000 }, async function (port: number) {
+Given("another program on this machine already listens on port {int}", { timeout: HOLD_WAIT_MS + 30_000 }, async function (port: number) {
   await hold(this, port);
 });
 
-Given("other programs on this machine already listen on ports {int}, {int} and {int}", { timeout: 200_000 }, async function (a: number, b: number, d: number) {
+Given("other programs on this machine already listen on ports {int}, {int} and {int}", { timeout: 3 * HOLD_WAIT_MS + 30_000 }, async function (a: number, b: number, d: number) {
   for (const port of [a, b, d]) await hold(this, port);
 });
 
