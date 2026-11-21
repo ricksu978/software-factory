@@ -7,7 +7,7 @@ import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
 import { CONSUMER, writeOutboxRows } from "../store/outbox.ts";
-import { headCiFailure, sendBackForCi } from "./ci-head.ts";
+import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
 import { logAttemptedMerge } from "./merge.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
@@ -152,7 +152,7 @@ async function applyChecksCompleted(pool: pg.Pool, host: RepoHost, e: Extract<Fa
   // One PR that can't be read doesn't stop the others; the poller's next pass reads it again.
   for (const row of rows) {
     try {
-      const failed = await headCiFailure(host, e.repo, row.pr_number, { sha: e.sha });
+      const failed = await headCiFailure(host, e.repo, row.pr_number, { sha: e.sha }, rerunLedger(pool, row.run_id));
       if (failed) await sendBackForCi(pool, { itemId: row.item_id, runId: row.run_id }, failed, github);
     } catch (err) {
       console.error(`reading CI on PR #${row.pr_number} in ${e.repo} failed, the poller retries it:`, err);

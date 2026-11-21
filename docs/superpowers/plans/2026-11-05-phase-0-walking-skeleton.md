@@ -578,6 +578,14 @@ A task that touches one of them follows this section and does not restate it.
     as Task 17's merge describes (PBI 181).
     So does a failure whose every failed check names failing tests that the default branch's head fails too:
     the base is at fault, as the cell finds it (PBI 215, PBI 292).
+    Before that, `headCiFailure` re-runs the head's failed checks once through `rerunChecksOnSha`,
+    recording the re-run in `ci_rerun` by run and sha, as `POST rerun-checks` does (PBI 233),
+    so a commit's checks are re-run once whichever asks.
+    It reads the checks again and waits while a re-run check is pending or finished no later than the ask,
+    whose time is kept past the old runs' finish so GitHub's old failure never reads as the re-run's.
+    A check with no finish time is taken as it reads,
+    a host that refuses the re-run lets the failure stand,
+    and a GitHub 5xx on the ask drops the record so the next poll asks again.
     The cause is `{ kind: "ci_failed", sha, checks: [{ name, url, failingTests }] }`,
     one entry per failed check,
     and the payload's `findings` hold the lines `ciFindings` writes for Green:

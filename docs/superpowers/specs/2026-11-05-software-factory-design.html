@@ -1924,6 +1924,20 @@ stateDiagram-v2
 
       A base whose CI can't be read leaves the failure the item's.
 
+      Before the item goes back, its failed checks on the head are re-run once, as the cell re-runs them (PBI 233),
+
+      and only a check still red after its re-run counts:
+
+      a flaky check doesn't cost the item a claim, a base merge and a PR review round.
+
+      The re-run is recorded by run and sha with the cell's,
+
+      so a commit's checks are re-run once whichever asks,
+
+      and a later poll or delivery waits until each re-run check has finished after the re-run was asked for.
+
+      A check that can't be told apart from its old run, or one the host refused to re-run, is taken as it reads.
+
       With webhooks on,
 
       GitHub's delivery that a check suite completed does the same without waiting for the next poll.

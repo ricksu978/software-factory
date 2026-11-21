@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { fakeRepoHost } from "../adapters/fake.ts";
 import type { CiCheck } from "../adapters/types.ts";
-import { ciChangeDetail, headCiFailure } from "./ci-head.ts";
+import { ciChangeDetail, headCiFailure, type RerunLedger } from "./ci-head.ts";
 
 const REPO = "acme/widgets";
 const url = (n: number) => `https://github.com/acme/widgets/actions/runs/${n}`;
@@ -93,6 +93,109 @@ describe("headCiFailure", () => {
     report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
     report(h, "ma1n001", [{ name: "ci", conclusion: "failure", url: url(9) }]);
     assert.equal((await headCiFailure(h, REPO, 57))?.sha, "c0ffee1");
+  });
+});
+
+function ledger() {
+  const rows = new Map<string, { checks: string[]; requestedAt: Date }>();
+  const l: RerunLedger = {
+    async get(sha) { return rows.get(sha) ?? null; },
+    async claim(sha, checks, requestedAt) { if (rows.has(sha)) return false; rows.set(sha, { checks, requestedAt }); return true; },
+    async settle(sha, checks) { if (checks.length) rows.get(sha)!.checks = checks; else rows.delete(sha); },
+  };
+  return { rows, l };
+}
+
+describe("headCiFailure re-runs the failed checks once first (PBI 233)", () => {
+  test("re-runs the failed checks once, waits while GitHub still shows the old run, and fails the head once the re-run fails", async () => {
+    const h = host("c0ffee1");
+    const { rows, l } = ledger();
+    const old = new Date(Date.now() - 60_000).toISOString();
+    report(h, "c0ffee1", [
+      { name: "lint", conclusion: "success", url: url(7300), completedAt: old },
+      { name: "ci", conclusion: "failure", url: url(7301), completedAt: old },
+    ]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null, "the read right after the ask still shows the old run");
+    assert.deepEqual(h.reruns, [{ key: `${REPO}@c0ffee1`, checks: ["ci"] }]);
+    assert.deepEqual(rows.get("c0ffee1")?.checks, ["ci"]);
+    report(h, "c0ffee1", [{ name: "lint", conclusion: "success", url: url(7300), completedAt: old }, { name: "ci", conclusion: "pending", url: url(7305) }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null, "the re-run is still running");
+    report(h, "c0ffee1", [
+      { name: "lint", conclusion: "success", url: url(7300), completedAt: old },
+      { name: "ci", conclusion: "failure", url: url(7305), completedAt: new Date(Date.now() + 1000).toISOString() },
+    ]);
+    assert.equal((await headCiFailure(h, REPO, 57, {}, l))?.checks[0].url, url(7305));
+    assert.equal(h.reruns.length, 1, "a commit's checks are re-run once");
+  });
+
+  test("leaves the item in review when the re-run passes", async () => {
+    const h = host("c0ffee1");
+    const { l } = ledger();
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), completedAt: new Date(Date.now() - 60_000).toISOString() }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null);
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "success", url: url(2), completedAt: new Date(Date.now() + 1000).toISOString() }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null);
+    assert.equal(h.reruns.length, 1);
+  });
+
+  test("takes a check with no finish time as it reads after the re-run, so a re-run that fails at once fails the head", async () => {
+    const h = host("c0ffee1");
+    const { l } = ledger();
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
+    assert.equal((await headCiFailure(h, REPO, 57, {}, l))?.sha, "c0ffee1");
+    assert.equal(h.reruns.length, 1);
+  });
+
+  test("keeps the old run stale even when the factory's clock is behind GitHub's", async () => {
+    const h = host("c0ffee1");
+    const { l } = ledger();
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), completedAt: new Date(Date.now() + 30_000).toISOString() }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null);
+  });
+
+  test("asks for no re-run when the commit's checks were re-run already, by the cell or an earlier read", async () => {
+    const h = host("c0ffee1");
+    const { rows, l } = ledger();
+    rows.set("c0ffee1", { checks: ["ci"], requestedAt: new Date(Date.now() - 120_000) });
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(2), completedAt: new Date(Date.now() - 60_000).toISOString() }]);
+    assert.equal((await headCiFailure(h, REPO, 57, {}, l))?.sha, "c0ffee1");
+    assert.equal(h.reruns.length, 0);
+  });
+
+  test("waits for checks still running before asking, so a check that fails later is re-run too", async () => {
+    const h = host("c0ffee1");
+    const { l } = ledger();
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }, { name: "e2e", conclusion: "pending", url: url(2) }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null);
+    assert.equal(h.reruns.length, 0);
+  });
+
+  test("lets the failure stand when the host refuses the re-run, and drops the record", async () => {
+    const h = host("c0ffee1");
+    const { rows, l } = ledger();
+    h.rerunChecksOnSha = async () => { throw new Error("This workflow run is not retryable"); };
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), completedAt: new Date(Date.now() - 60_000).toISOString() }]);
+    assert.equal((await headCiFailure(h, REPO, 57, {}, l))?.sha, "c0ffee1");
+    assert.equal(rows.size, 0);
+  });
+
+  test("leaves the item in review when GitHub fails to answer the ask, so the next read asks again", async () => {
+    const h = host("c0ffee1");
+    const { rows, l } = ledger();
+    h.rerunChecksOnSha = async () => { throw Object.assign(new Error("bad gateway"), { name: "HttpError", status: 502 }); };
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
+    await assert.rejects(headCiFailure(h, REPO, 57, {}, l), /bad gateway/);
+    assert.equal(rows.size, 0);
+  });
+
+  test("leaves the item in review when the re-run fails tests the base fails too", async () => {
+    const h = host("c0ffee1");
+    const { l } = ledger();
+    h.heads.set(REPO, "ma1n001");
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), failingTests: ["totals include VAT"] }]);
+    report(h, "ma1n001", [{ name: "ci", conclusion: "failure", url: url(9), failingTests: ["totals include VAT"] }]);
+    assert.equal(await headCiFailure(h, REPO, 57, {}, l), null);
+    assert.equal(h.reruns.length, 1);
   });
 });
 
