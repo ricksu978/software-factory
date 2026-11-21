@@ -80,6 +80,17 @@ function recheckHours(doc: Record<string, unknown>): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : DEFAULT_FAILED_RECHECK_HOURS;
 }
 
+/**
+ * 15 when the key is missing (PBI 399). Unlike `failed_recheck_hours`, a wrong value makes the config invalid: a limit
+ * the cell guessed at would stop a repo's long commands, or leave a hung one running, without saying why.
+ */
+function commandTimeout(doc: Record<string, unknown>): number {
+  if (!("command_timeout_minutes" in doc)) return DEFAULT_COMMAND_TIMEOUT_MINUTES;
+  const v = doc.command_timeout_minutes;
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) throw new ConfigError("command_timeout_minutes");
+  return v;
+}
+
 function parseYaml(yamlText: string | null): Record<string, unknown> {
   let doc: unknown = null;
   if (yamlText !== null) {
@@ -110,5 +121,6 @@ export function parseRepoConfig(yamlText: string | null): RepoConfig {
     bdd: section(d, "bdd", ["parse", "run", "report"] as const),
     commands: { ...section(d, "commands", ["test", "lint"] as const), ...setup(d) },
     failedRecheckHours: recheckHours(d),
+    commandTimeoutMinutes: commandTimeout(d),
   };
 }

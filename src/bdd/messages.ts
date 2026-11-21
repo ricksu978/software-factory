@@ -128,6 +128,45 @@ export function traceability(results: Results, criteriaCount: number, pbiTag: st
   return missing;
 }
 
+/**
+ * PBI 399: the scenarios still running when a BDD run stopped, or null when its report has its end of run. cucumber-js
+ * writes testRunStarted first and testRunFinished last, so a report with the first and not the second was cut short,
+ * as one is when the cell stops bdd.run at its time limit. Its unfinished scenarios have no verdict: they neither
+ * failed nor crashed. A report with no testRunStarted, an empty one or a stand-in's, is read by the gates as before.
+ * A scenario is running when its latest attempt started and didn't finish, on any of the run's workers.
+ */
+export function unfinishedRun(ndjson: string): { running: string[] } | null {
+  let started = false;
+  let finished = false;
+  const pickles = new Map<string, string>(); // pickle id -> name
+  const cases = new Map<string, string>(); // testCase id -> pickle id
+  const open = new Map<string, string>(); // testCaseStarted id -> testCase id, for each attempt not yet finished
+  for (const line of ndjson.split("\n")) {
+    if (!line.trim()) continue;
+    let m: Record<string, any>;
+    try {
+      m = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (m.testRunStarted) started = true;
+    else if (m.testRunFinished) finished = true;
+    else if (m.pickle) pickles.set(m.pickle.id, m.pickle.name);
+    else if (m.testCase) cases.set(m.testCase.id, m.testCase.pickleId);
+    else if (m.testCaseStarted) open.set(m.testCaseStarted.id, m.testCaseStarted.testCaseId);
+    else if (m.testCaseFinished) open.delete(m.testCaseFinished.testCaseStartedId);
+  }
+  if (!started || finished) return null;
+  return { running: [...open.values()].map((c) => pickles.get(cases.get(c) ?? "") ?? c) };
+}
+
+/** The gate's one finding for a BDD run that didn't finish (PBI 399). `why` says what stopped it, when that's known. */
+export function unfinishedFinding(running: string[], why?: string): string {
+  const what = running.length === 0 ? "no scenario was running"
+    : `${running.length === 1 ? "the scenario" : "the scenarios"} running then ${running.length === 1 ? "was" : "were"} ${running.map((n) => `"${n}"`).join(", ")}`;
+  return `the BDD run didn't finish${why ? `: ${why}` : ": its report has no end of run (testRunFinished), as cucumber-js leaves one when it's stopped"}. ${what[0]!.toUpperCase()}${what.slice(1)}. The scenarios it didn't finish have no verdict, so none is reported as failing.`;
+}
+
 // A dry run executes no step, so cucumber-js reports each one SKIPPED, or UNDEFINED or AMBIGUOUS when it has no single
 // step definition (PBI 185).
 const NOT_EXECUTED = new Set(["SKIPPED", "UNDEFINED", "AMBIGUOUS"]);

@@ -1,6 +1,6 @@
 // The cell engine (spec §6 rows 1 to 8, plan Task 14): runs one item through the SOP from the stage its run's resume
 // pointer names, and reports every stage, verdict and state move to the control plane through the cell API.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,8 +9,8 @@ import { promisify } from "node:util";
 import { factoryThread, FAILED_LOG_CHARS, LOGGED_CHECKS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type Review, type ReviewComment, type RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
-import { classify, greenGate, notDryRun, redGate, traceability } from "../bdd/messages.ts";
-import { parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
+import { classify, greenGate, notDryRun, redGate, traceability, unfinishedFinding, unfinishedRun } from "../bdd/messages.ts";
+import { DEFAULT_COMMAND_TIMEOUT_MINUTES, parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
 import { fenced } from "../core/fence.ts";
 import { CI_BACK_TO_GREEN } from "../core/questions.ts";
 import { summaryOf } from "./pr-body.ts";
@@ -85,7 +85,13 @@ export type Shell = (command: string, cwd: string, limitMs: number) => Promise<S
 const RENEW_MS = 60_000;
 const RENEW_GIVE_UP = 3; // a cell stops itself after 3 minutes of failed renewals
 const CHECKS_POLL_MS = 60_000;
-const COMMAND_TIMEOUT_MS = 900_000;
+/** The limit `sh` gives a command when its caller names none: the default `command_timeout_minutes` (PBI 399). */
+const COMMAND_TIMEOUT_MS = DEFAULT_COMMAND_TIMEOUT_MINUTES * 60_000;
+/** The longest delay a Node timer holds. A longer one fires at once, so a limit is capped here, about 24 days. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** How long a command the cell stops has to end after SIGTERM before its process group gets SIGKILL. */
+const STOP_GRACE_MS = 10_000;
+const MAX_OUTPUT = 64 * 1024 * 1024;
 const WALL_CLOCK_MS = 8 * 3_600_000;
 const SOP_DIR = join(import.meta.dirname, "..", "..");
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
@@ -146,15 +152,75 @@ export function commandEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
   return out;
 }
 
-/** Runs a command as Run contract 11 says. `out` is the output's last 2000 characters, `all` the whole of it. */
-export function sh(command: string, cwd: string): Promise<{ code: number; out: string; all: string }> {
+/**
+ * Runs a command as Run contract 11 says. `out` is the output's last 2000 characters, `all` the whole of it. A command
+ * still running after `limitMs` is stopped, `stopped` true (PBI 399). It runs in a process group of its own, so the
+ * stop reaches what it started, such as the node that `npm test` runs or cucumber-js's workers, and not only `sh`:
+ * SIGTERM first, then SIGKILL for whatever is left after STOP_GRACE_MS.
+ */
+export function sh(command: string, cwd: string, limitMs = COMMAND_TIMEOUT_MS): Promise<ShResult> {
   return new Promise((resolve) => {
-    execFile("sh", ["-c", command], { cwd, timeout: COMMAND_TIMEOUT_MS, env: commandEnv(), maxBuffer: 64 * 1024 * 1024 }, (e, stdout, stderr) => {
-      const code = e ? (typeof e.code === "number" ? e.code : 1) : 0;
-      const all = `${stdout}${stderr}`;
-      resolve({ code, out: all.slice(-2000), all });
-    });
+    const child = spawn("sh", ["-c", command], { cwd, env: commandEnv(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let size = 0;
+    let stopped = false;
+    let overflow = false;
+    const kill = (signal: NodeJS.Signals) => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, signal);
+      } catch {
+        // The group has already gone.
+      }
+    };
+    // As execFile's maxBuffer did: output past the cap kills the command, which then fails.
+    const take = (into: Buffer[]) => (b: Buffer) => {
+      size += b.length;
+      if (size <= MAX_OUTPUT) into.push(b);
+      else if (!overflow) {
+        overflow = true;
+        kill("SIGKILL");
+      }
+    };
+    child.stdout.on("data", take(stdout));
+    child.stderr.on("data", take(stderr));
+    let grace: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      stopped = true;
+      kill("SIGTERM");
+      grace = setTimeout(() => kill("SIGKILL"), STOP_GRACE_MS);
+    }, Math.min(limitMs, MAX_TIMER_MS));
+    const done = (code: number, extra = "") => {
+      clearTimeout(timer);
+      clearTimeout(grace);
+      const all = `${Buffer.concat(stdout).toString()}${Buffer.concat(stderr).toString()}${extra}`;
+      resolve({ code, out: all.slice(-2000), all, stopped });
+    };
+    child.on("error", (e) => done(1, e.message));
+    child.on("close", (code) => done(code === 0 && (stopped || overflow) ? 1 : code ?? 1));
   });
+}
+
+/**
+ * PBI 399: the finding for a command the cell stopped at its time limit, in place of the "exited N" a failed one gets,
+ * since the command didn't fail: the clock ran out. `what` names the command's setting, such as `commands.test`.
+ */
+export function stoppedFinding(what: string, command: string, minutes: number, out = ""): string {
+  const tail = out.trim();
+  return `${stoppedAt(what, command, minutes)}: it was still running, so it neither passed nor failed. Make it finish within ${minutes} minute${minutes === 1 ? "" : "s"}, or, if it needs longer, raise \`command_timeout_minutes\` in .factory/config.yml.${tail ? ` The last of its output:\n${tail}` : ""}`;
+}
+
+const stoppedAt = (what: string, command: string, minutes: number) =>
+  `the cell stopped ${what} \`${command}\` at its time limit of ${minutes} minute${minutes === 1 ? "" : "s"}`;
+
+/**
+ * Green's and Red's finding for bdd.run's report when the run didn't finish, or null when it did (PBI 399): one for
+ * the whole run, naming the scenarios that were running, in place of each unfinished scenario's crash or failure.
+ */
+export function bddRunUnfinished(r: { report: string; stopped?: boolean }, command: string, minutes: number): string | null {
+  const cut = unfinishedRun(r.report);
+  if (!r.stopped && !cut) return null;
+  return unfinishedFinding(cut?.running ?? [], r.stopped ? `${stoppedAt("bdd.run", command, minutes)}, which leaves its report with no end of run` : undefined);
 }
 
 /** The tags written before a feature file's `Feature:` line. */
@@ -601,8 +667,13 @@ export async function checkDefinitionOfDone(d: {
   store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
   /** PBI 215: called when a run: line's command fails. A string it returns goes before the line's reason. */
   onRunFailed?: (c: Criterion, r: { code: number; out: string; all: string }) => Promise<string | undefined>;
+  /** PBI 399: runs each `run:` command, `sh` by default, and the minutes it gives each, 15 by default. */
+  shell?: Shell;
+  limitMinutes?: number;
 }): Promise<{ verdicts: Verdict[]; findings: string[]; missing: string[]; checkedSha: string }> {
   const { dir, head, dod } = d;
+  const minutes = d.limitMinutes ?? DEFAULT_COMMAND_TIMEOUT_MINUTES;
+  const exec = (command: string) => (d.shell ?? sh)(command, dir, minutes * 60_000);
   const named = dod.criteria.filter((x) => x.ci);
   // Asked once, and only about `head`: a check that passed on an earlier commit never stands in for this one.
   const checks = named.length && d.ciChecks ? await d.ciChecks(head) : null;
@@ -632,17 +703,18 @@ export async function checkDefinitionOfDone(d: {
     // told, the gate's run didn't see what the line asks for, so the line runs whole as before.
     const first = cover && uncoveredFirst(c.run!, gate!.commands);
     const before = first ? await fileStamps(dir) : null;
-    let r = await sh(command, dir);
+    let r = await exec(command);
     if (first && r.code === 0) {
       const after = await fileStamps(dir);
       if (before === null || after === null || before !== after) {
         command = c.run!;
         cover = null;
-        r = await sh(command, dir);
+        r = await exec(command);
       }
     }
-    let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
-    if (r.code !== 0 && d.onRunFailed) {
+    // A command stopped at its limit didn't fail, so it isn't run again on the base either (PBI 399).
+    let reason = r.code === 0 ? "exit 0" : r.stopped ? stoppedFinding("the line's command", command, minutes, r.out) : `exit ${r.code}: ${r.out.trim()}`;
+    if (r.code !== 0 && !r.stopped && d.onRunFailed) {
       const prefix = await d.onRunFailed({ ...c, run: command }, r);
       if (prefix) reason = `${prefix}: ${reason}`;
     }
@@ -659,6 +731,13 @@ export async function checkDefinitionOfDone(d: {
 export async function runCell(d: CellDeps): Promise<Outcome> {
   const { api, ctx, git, dir, sop, config, policies } = d;
   const tag = `@pbi-${ctx.externalId}`;
+  // PBI 399: every command the cell runs, the gate's, the Definition of Done's and setup, gets the repo's limit.
+  const limitMinutes = config.commandTimeoutMinutes ?? DEFAULT_COMMAND_TIMEOUT_MINUTES;
+  const shell = d.shell ?? sh;
+  const exec = (command: string, cwd = dir) => shell(command, cwd, limitMinutes * 60_000);
+  // What a gate command that didn't pass says: that the cell stopped it, or its exit code and output as before.
+  const failedRun = (what: string, command: string, r: ShResult) =>
+    r.stopped ? stoppedFinding(what, command, limitMinutes, r.out) : `${what} exited ${r.code}: ${r.out.trim()}`;
   const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const started = d.now().getTime();
   const abort = new AbortController();
@@ -851,16 +930,16 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     return existsSync(path) ? readFile(path, "utf8") : "";
   };
   const bdd = async (which: "parse" | "run") => {
-    const r = await sh(config.bdd[which], dir);
-    return { code: r.code, out: r.out, report: await readReport() };
+    const r = await exec(config.bdd[which]);
+    return { ...r, report: await readReport() };
   };
   // bdd.run with `--dry-run` added (PBI 185). The report is removed first, so a dry run that writes none isn't read
   // as the report bdd.parse left behind.
   const dryRun = async () => {
     await rm(join(dir, config.bdd.report), { force: true });
-    const r = await sh(`${config.bdd.run} --dry-run`, dir);
+    const r = await exec(`${config.bdd.run} --dry-run`);
     const path = join(dir, config.bdd.report);
-    return { code: r.code, out: r.out, report: existsSync(path) ? await readFile(path, "utf8") : null };
+    return { ...r, report: existsSync(path) ? await readFile(path, "utf8") : null };
   };
 
   const item = () => {
@@ -894,7 +973,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!r) {
       // A base run that can't run at all (no origin/<base>, no temp folder, a locked worktree) proves nothing against the
       // base, so the failure stays the item's and is retried as before, instead of ending the cell.
-      r = runOnBase(dir, ctx.base, command, config.commands.setup)
+      r = runOnBase(dir, ctx.base, command, config.commands.setup, exec)
         .then((b) => ({ sha: b.sha, tests: b.code === 0 ? [] : failingTests(b.out) }))
         .catch((e) => {
           console.error(`running a Definition of Done command on origin/${ctx.base} failed, so its failure stays the item's:`, e);
@@ -917,7 +996,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let baseSha = "";
     const ciChecks = (ctx.prNumber !== null || opened !== null) && api.ciChecks ? api.ciChecks.bind(api) : null;
     const { verdicts, missing, checkedSha } = await checkDefinitionOfDone({
-      dir, head: await git.head(), dod, ciChecks, gate: gateRun,
+      dir, head: await git.head(), dod, ciChecks, gate: gateRun, shell, limitMinutes,
       judge: async (judged) => {
         const r = await ask(stageId, brief(
           "# Definition of Done",
@@ -1150,7 +1229,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         out.push("the owner asked for changes, and no feature file changed");
       for (const p of written) if (!featureTags(after.get(p)!).includes(tag)) out.push(`${p} doesn't carry ${tag} at Feature level`);
       const parse = await bdd("parse");
-      if (parse.code !== 0) out.push(`bdd.parse exited ${parse.code}: ${parse.out.trim()}`);
+      if (parse.code !== 0) out.push(failedRun("bdd.parse", config.bdd.parse, parse));
       else for (const t of traceability(classify(parse.report), ctx.acceptanceCriteria.length, tag)) out.push(`no scenario carries ${t}`);
       locked = [...after.entries()].filter(([, text]) => featureTags(text).includes(tag)).map(([p]) => p).sort();
       if (current) current.report = parse.report;
@@ -1172,13 +1251,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const undone = await keepLock("red", `red(${tag}): step definitions`);
       if (undone.length) return undone;
       const parse = await bdd("parse");
-      if (parse.code !== 0) return [`bdd.parse exited ${parse.code}: ${parse.out.trim()}`];
+      if (parse.code !== 0) return [failedRun("bdd.parse", config.bdd.parse, parse)];
       const listed = [...classify(parse.report).values()].filter((r) => r.tags.includes(tag)).length;
       // Red expects only the scenarios bdd.run selects, so a @local one it leaves out isn't missing (PBI 185). A dry
       // run of bdd.run itself lists them: cucumber-js emits a test case only for a scenario its filter selects, however
       // that filter is set, in the command, a profile or an environment variable, or in an npm script the command
       // runs with a trailing `--`, so the added flag reaches cucumber-js.
       const dry = await dryRun();
+      if (dry.stopped) return [stoppedFinding("bdd.run with --dry-run added", `${config.bdd.run} --dry-run`, limitMinutes, dry.out)];
       if (dry.report === null) return [`bdd.run with --dry-run added wrote no report to ${config.bdd.report} (exit ${dry.code}): ${dry.out.trim()}`];
       // The flag reaches cucumber-js only when it ends the command: `npm run <script>` keeps it for npm unless the
       // command already passes `--`, and a trailing `|| true` or pipe sends it elsewhere. Then the "dry run" was a real
@@ -1189,6 +1269,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(redResults, run.report);
+      // A run that didn't finish proves nothing red: its unfinished scenarios neither failed nor crashed (PBI 399).
+      const cut = bddRunUnfinished(run, config.bdd.run, limitMinutes);
+      if (cut) return [cut];
       return redGate(classify(run.report), tag, expected, listed).findings;
     });
     if (findings.length) throw new Blocked(`Red failed:\n${findings.map((f) => `- ${f}`).join("\n")}`);
@@ -1218,10 +1301,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (current) current.report = run.report;
       keep(greenResults, run.report);
       const classified = classify(run.report);
-      const out = greenGate(classified).findings;
+      // A run that didn't finish is one finding, in place of the gate's verdicts on its unfinished scenarios (PBI 399).
+      const cut = bddRunUnfinished(run, config.bdd.run, limitMinutes);
+      const out = cut ? [cut] : greenGate(classified).findings;
       for (const k of ["test", "lint"] as const) {
-        const r = await sh(config.commands[k], dir);
-        if (r.code !== 0) out.push(`commands.${k} exited ${r.code}: ${r.out.trim()}`);
+        const r = await exec(config.commands[k]);
+        if (r.code !== 0) out.push(failedRun(`commands.${k}`, config.commands[k], r));
       }
       if (out.length) return out;
       // PBI 389: the gate passed here, so the DoD check and self-review's brief take its run instead of the suite again.
@@ -1746,8 +1831,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // install them, so the first gate command would fail (PBI 105's open-pr exited 127). Setup runs after the merge,
     // which can change a lockfile, and before any stage.
     if (config.commands.setup) {
-      const r = await sh(config.commands.setup, dir);
-      if (r.code !== 0) throw new Blocked(`commands.setup exited ${r.code}: ${r.out.trim()}`);
+      const r = await exec(config.commands.setup);
+      if (r.code !== 0) throw new Blocked(failedRun("commands.setup", config.commands.setup, r));
     }
 
     const start = ctx.nextStage;

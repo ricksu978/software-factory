@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { classify, greenGate, notDryRun, redGate, traceability, type Results } from "./messages.ts";
+import { classify, greenGate, notDryRun, redGate, traceability, unfinishedRun, type Results } from "./messages.ts";
 
 // A real cucumber-js 13.3.0 run, trimmed to the four message kinds classify reads.
 const fixture = readFileSync(new URL("./fixtures/verdicts.ndjson", import.meta.url), "utf8");
@@ -132,4 +132,28 @@ test("notDryRun accepts a report whose steps all finished SKIPPED, UNDEFINED or 
   assert.equal(notDryRun(""), null);
   assert.equal(notDryRun(msgs("PASSED", "PASSED", "FAILED")), "steps ran: 2 PASSED, 1 FAILED");
   assert.equal(notDryRun(JSON.stringify({ testCase: { id: "c0", pickleId: "p0", testSteps: [] } })), "1 test case never started");
+});
+
+test("unfinishedRun names the scenarios still running in a report with no end of run, and is null for a whole one (PBI 399)", () => {
+  const pickles = ["done", "running", "retried", "never started"].map((name, i) => ({ pickle: { id: `p${i}`, name, tags: [], steps: [] } }));
+  const cases = pickles.map((_, i) => ({ testCase: { id: `c${i}`, pickleId: `p${i}`, testSteps: [] } }));
+  const cut = [
+    { testRunStarted: {} }, ...pickles, ...cases,
+    { testCaseStarted: { id: "r0", testCaseId: "c0", workerId: "w0" } },
+    { testCaseStarted: { id: "r1", testCaseId: "c1", workerId: "w1" } },
+    { testCaseFinished: { testCaseStartedId: "r0", willBeRetried: false } },
+    // A retried scenario's earlier attempt finished, and its retry is the one still running.
+    { testCaseStarted: { id: "r2", testCaseId: "c2" } },
+    { testCaseFinished: { testCaseStartedId: "r2", willBeRetried: true } },
+    { testCaseStarted: { id: "r3", testCaseId: "c2" } },
+  ];
+  const text = (ms: object[]) => ms.map((m) => JSON.stringify(m)).join("\n") + "\n";
+  assert.deepEqual(unfinishedRun(text(cut)), { running: ["running", "retried"] });
+  // A last line cut part way is skipped, as classify skips it.
+  assert.deepEqual(unfinishedRun(`${text(cut)}{"testCaseFinished":{"testCa`), { running: ["running", "retried"] });
+  assert.equal(unfinishedRun(text([...cut, { testRunFinished: { success: false } }])), null);
+  assert.deepEqual(unfinishedRun(text([{ testRunStarted: {} }, ...pickles])), { running: [] });
+  // A report that never started a run, such as an empty one, isn't one cut short: the gates read it as before.
+  assert.equal(unfinishedRun(""), null);
+  assert.equal(unfinishedRun(text([...pickles, ...cases])), null);
 });

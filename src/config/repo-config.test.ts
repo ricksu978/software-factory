@@ -52,6 +52,18 @@ describe("parseRepoConfig", () => {
     assert.equal(failedRecheckHours("failed_recheck_hours: 3\n"), 3);
   });
 
+  test("command_timeout_minutes is 15 when it's missing, and reads through when set (PBI 399)", () => {
+    assert.equal(parseRepoConfig(valid).commandTimeoutMinutes, 15);
+    assert.equal(parseRepoConfig(`${valid}command_timeout_minutes: 40\n`).commandTimeoutMinutes, 40);
+  });
+
+  test("a command_timeout_minutes that isn't a whole number above zero makes the config invalid (PBI 399)", () => {
+    for (const bad of ["0", "-5", "2.5", "'forty'", "'40'", "[40]", ".inf", "null"]) {
+      assert.throws(() => parseRepoConfig(`${valid}command_timeout_minutes: ${bad}\n`),
+        (e: unknown) => e instanceof ConfigError && e.key === "command_timeout_minutes" && e.message.includes("missing or invalid command_timeout_minutes"), bad);
+    }
+  });
+
   test("a failed_recheck_hours that isn't a number above zero counts as 8 and leaves the config valid (PBI 369)", () => {
     for (const bad of ["0", "-1", "'8'", "8h", "[8]", ".nan", ".inf"]) {
       assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: ${bad}\n`).failedRecheckHours, 8, bad);
