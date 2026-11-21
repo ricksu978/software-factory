@@ -754,8 +754,11 @@ A task that touches one of them follows this section and does not restate it.
       `loadPolicy` rejects it in any other file with `PolicyError`.
       The cell runs `dod.md` commands at the end of green,
       in the checkout,
-      as `execFile("sh", ["-c", command], { cwd, timeout: 900_000, env: { PATH, HOME, CI: "true", FACTORY_PG_BIN, ...proxy } })`,
-      where `proxy` is the four proxy variables and `NO_PROXY` in both cases when the cell has them (Run contract 5).
+      as `sh -c command` in `cwd` with `env: { PATH, HOME, CI: "true", FACTORY_PG_BIN, ...proxy }`,
+      where `proxy` is the four proxy variables and `NO_PROXY` in both cases when the cell has them (Run contract 5),
+      in a process group of its own,
+      stopped once it has run for the repo's `command_timeout_minutes`, 15 by default (PBI 399),
+      and then its line fails with a reason that says the cell stopped it at that limit, in place of `exit <code>`, and isn't run on the base.
       `FACTORY_PG_BIN` is the image's path to the Postgres binaries,
       so `startTestDb` can start a server in the command (PBI 22,
       Global Constraints).
@@ -1262,7 +1265,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   and exits 0 only when every run passed.
   Each run passes `--force-exit`,
   so it ends once cucumber-js has reported rather than sit out the 10 seconds an idle pg pool client keeps a process alive.
-  A cell kills `npm run bdd` after 15 minutes (`COMMAND_TIMEOUT_MS` in `src/cell/engine.ts`),
+  A cell then killed `npm run bdd` after 15 minutes, before PBI 399 let a repo set `command_timeout_minutes`,
   and PBI 376's @ac-4 scenarios each wait out the takeover's 30 seconds on every run,
   so the first of them starts the script for all three faults at once and each scenario reads its own fault's run.
   The flake it found in PBI 157's takeover scenario was in the harness.
@@ -3292,7 +3295,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
 **Interfaces:**
 - Produces:
   - `parseRepoConfig(yamlText: string | null): RepoConfig`,
-    where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; webTools: WebTool[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string; setup?: string }; failedRecheckHours: number }` and `type WebTool = "WebSearch" | "WebFetch"`.
+    where `RepoConfig = { sensitivePaths: string[]; reviewers: string[]; webTools: WebTool[]; bdd: { parse: string; run: string; report: string }; commands: { test: string; lint: string; setup?: string }; failedRecheckHours: number; commandTimeoutMinutes?: number }` and `type WebTool = "WebSearch" | "WebFetch"`.
     Defaults:
     `sensitivePaths: []`,
     `reviewers: []` and `webTools: []`,
@@ -3307,6 +3310,9 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     `failedRecheckHours(yamlText)` reads that key alone,
     8 for a null text,
     so the scheduler isn't stopped by a config that's wrong elsewhere.
+    `commandTimeoutMinutes` is the YAML key `command_timeout_minutes`,
+    15 (`DEFAULT_COMMAND_TIMEOUT_MINUTES`) when it's missing.
+    A value that isn't a whole number above zero throws `ConfigError` naming it (PBI 399).
   - `loadSop(yamlText: string): Sop`,
     which validates stage ids,
     `models.coding` and `models.triage`.
@@ -3936,6 +3942,14 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     An item with no scenarios in either list fails with "no scenario carries <tag>".
   - **`greenGate`.**
     A report with no scenarios fails with "the report holds no scenarios".
+  - **`unfinishedRun`.**
+    A report with `testRunStarted` and no `testRunFinished` was cut short.
+    It gives the names of the scenarios whose latest attempt started and didn't finish,
+    and null for a whole report or one with no `testRunStarted`.
+    The engine's `bddRunUnfinished` turns it into Red's and Green's one finding for such a run,
+    "the BDD run didn't finish", naming those scenarios,
+    in place of `redGate`'s and `greenGate`'s findings,
+    so an unfinished scenario is never reported as failing or crashed (PBI 399).
   - **`matchesLock`.**
     Run `git diff --quiet <lockSha> HEAD -- <files...>` through `execFile`.
     Exit 1 means a locked file changed or was deleted.

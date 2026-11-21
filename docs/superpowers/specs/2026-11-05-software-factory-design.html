@@ -2569,6 +2569,18 @@ Feature: Export invoices to CSV
 
     and Green fails too (<a href="https://github.com/cucumber/messages/blob/main/jsonschema/messages.md" target="_blank" rel="noopener">schema</a>).
 
+    cucumber-js writes <code>testRunStarted</code> first and <code>testRunFinished</code> last,
+
+    so a report with the first and not the second is one whose run didn't finish,
+
+    as when the cell stops <code>bdd.run</code> at its time limit.
+
+    Red and Green then fail on one finding that says the BDD run didn't finish and names each scenario that was running,
+
+    on any of the run's workers,
+
+    and report none of its unfinished scenarios as failing or crashed (PBI 399).
+
     <span class="tag call">My call</span></li>
 
   </ul>
@@ -3816,7 +3828,8 @@ commands:                       # what the SOP's cmd checks call
   setup: npm ci                 # optional: installs dependencies in each fresh checkout
   test: npm test
   lint: npm run lint
-failed_recheck_hours: 8         # optional: how often an item that failed on main is re-checked</pre>
+failed_recheck_hours: 8         # optional: how often an item that failed on main is re-checked
+command_timeout_minutes: 15     # optional: the minutes a cell gives each command it runs</pre>
 
   <ul>
 
@@ -3915,6 +3928,40 @@ failed_recheck_hours: 8         # optional: how often an item that failed on mai
     or a value that isn't a number above zero,
 
     counts as 8 (PBI 369).
+
+    <span class="tag call">My call</span></li>
+
+    <li><b>Command time limit.</b>
+
+    <code>command_timeout_minutes</code> sets how many minutes a cell gives each command it runs,
+
+    the gate's <code>bdd.parse</code>, <code>bdd.run</code>, <code>commands.test</code> and <code>commands.lint</code>,
+
+    <code>commands.setup</code>,
+
+    and each Definition of Done line's <code>run:</code> command.
+
+    It's 15 when the key is missing.
+
+    Unlike <code>failed_recheck_hours</code>,
+
+    a value that isn't a whole number above zero makes the config invalid,
+
+    so readiness reports it and a run is blocked,
+
+    since a guessed limit would stop a long command, or leave a hung one running, without saying why.
+
+    A command still running at its limit is stopped,
+
+    with SIGTERM to its whole process group and SIGKILL 10 seconds later,
+
+    and it fails with a finding that names the command and the limit and says the cell stopped it,
+
+    in place of the "exited N" a failed command gets.
+
+    The next attempt's brief carries that finding (PBI 399).
+
+    This repo sets 40.
 
     <span class="tag call">My call</span></li>
 
