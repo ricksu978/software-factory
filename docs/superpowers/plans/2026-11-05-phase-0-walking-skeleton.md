@@ -290,8 +290,13 @@ as revised on this plan's branch with the 14 flow-review fixes.
   It applies this rule to those two files only.
   `scripts/one-sentence-per-line.ts` made the reflow,
   and `scripts/merge-replay.ts` replays 47 past file merges from committed inputs under `features/fixtures/pbi-294/replay/`.
-  In this layout 18 of them conflict,
+  In the reflow's layout 18 of them conflict,
   against 47 in the old one.
+  That layout also starts a new line after each comma, semicolon and colon in a sentence,
+  and in the spec puts a blank line after each line.
+  The lint keeps neither, so later edits may drop them.
+  With only one sentence and one table cell per line the replay gives 21 conflicts,
+  and with the spec's blank lines added it gives 19.
 
 ## Review Focus
 

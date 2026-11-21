@@ -7802,9 +7802,21 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       It applies this rule to those two files only.
 
-      Replaying 47 past file merges in this layout through <code>scripts/merge-replay.ts</code> gives 18 conflicts,
+      Replaying 47 past file merges through <code>scripts/merge-replay.ts</code> gives 18 conflicts,
 
       against 47 in the old layout.
+
+      That 18 is for the layout <code>scripts/one-sentence-per-line.ts</code> made,
+
+      which also starts a new line after each comma, semicolon and colon in a sentence,
+
+      and in the spec puts a blank line after each line.
+
+      The lint keeps neither, so later edits may drop them.
+
+      With only one sentence and one table cell per line the replay gives 21 conflicts,
+
+      and with the spec's blank lines added it gives 19.
 
       Decided 2026-11-20 with PBI 294</td>
 
