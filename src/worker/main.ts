@@ -23,7 +23,8 @@ import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
-import type { Clock } from "./clock.ts";
+import { realClock, type Clock } from "./clock.ts";
+import type { Clock as SlowClock } from "../control/slow-work.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
@@ -55,13 +56,14 @@ export type WorkerDeps = {
   /** How often it works through the outbox. OUTBOX_MS by default. */
   outboxMs?: number;
   /**
-   * The clock each scheduler tick reads its time from, once, as the tick starts. That time is the tick's `now`, and the
-   * worker's heartbeat records it (PBI 158). `new Date()` by default.
+   * What each scheduler tick reads its time from, once, as the tick starts, in place of the clock's now(). That time is
+   * the tick's `now`, and the worker's heartbeat records it (PBI 158). `clock.now` by default.
    */
   now?: () => Date;
   /**
-   * The clock every timer of the worker runs on, and that each tick reads its time from (PBI 396). realClock by default.
-   * Not read yet.
+   * The clock every timer of the worker runs on: each scheduler tick, the outbox loop, each board poll, the standby's
+   * lock retry, the holder's lock check and the slow-work warnings of a tick or a poll. Each tick reads its time from
+   * it too (PBI 396). realClock by default.
    */
   clock?: Clock;
   pollMs?: number;
@@ -97,26 +99,33 @@ export async function attempt(what: string, fn: () => Promise<unknown>, log: Pic
 }
 
 /**
- * Runs `fn` now and then `ms` after each run ends, so two runs never overlap. A failure is logged and the next run goes
- * ahead. Each run is counted in `runs`. Returns the call that stops it, which waits for a run under way.
+ * Runs `fn` now and then `ms` after each run ends, on `clock`, so two runs never overlap. A failure is logged and the
+ * next run goes ahead. Each run is counted in `runs`. Returns the call that stops it, which waits for a run under way.
  */
-function every(ms: number, what: string, fn: () => Promise<unknown>, runs: Map<string, number>, log: Pick<Console, "error">): () => Promise<void> {
+function every(clock: Clock, ms: number, what: string, fn: () => Promise<unknown>, runs: Map<string, number>, log: Pick<Console, "error">): () => Promise<void> {
   let stopped = false;
-  let timer: NodeJS.Timeout | undefined;
+  let timer: unknown;
   let current = Promise.resolve();
+  // Returns the run, so a fake clock waits for it before it fires the next timer.
   const run = () => {
     current = (async () => {
       await attempt(what, fn, log);
       runs.set(what, (runs.get(what) ?? 0) + 1);
-      if (!stopped) timer = setTimeout(run, ms);
+      if (!stopped) timer = clock.setTimeout(run, ms);
     })();
+    return current;
   };
-  run();
+  void run();
   return async () => {
     stopped = true;
-    clearTimeout(timer);
+    clock.clearTimeout(timer);
     await current;
   };
+}
+
+/** The worker's clock as the slow-work warnings of a tick or a poll read it (PBI 134). */
+function slowClock(clock: Clock): SlowClock {
+  return { now: () => clock.now().getTime(), setTimeout: (fn, ms) => clock.setTimeout(fn, ms), clearTimeout: (h) => clock.clearTimeout(h) };
 }
 
 /**
@@ -171,6 +180,7 @@ async function lockConnection(pool: pg.Pool, onClose: (why: string) => void) {
  */
 export async function startWorker(d: WorkerDeps): Promise<Worker> {
   const log = d.log ?? console;
+  const clock = d.clock ?? realClock;
   const runs = new Map<string, number>();
   let settle!: { resolve: () => void; reject: (e: unknown) => void };
   const done = new Promise<void>((resolve, reject) => void (settle = { resolve, reject }));
@@ -178,8 +188,8 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
   done.catch(() => {});
   let state: "standby" | "holding" | "stopped" = "standby";
   let stopJobs: (() => Promise<void>) | undefined;
-  let retry: NodeJS.Timeout | undefined;
-  let check: NodeJS.Timeout | undefined;
+  let retry: unknown;
+  let check: unknown;
   let pending = Promise.resolve();
   let lock: Awaited<ReturnType<typeof lockConnection>> | undefined;
 
@@ -188,10 +198,10 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
   await clearRestartOnStart(d.pool);
   // A takeover under way finishes first, so the timers it sets are cleared after it.
   const halt = async () => {
-    clearTimeout(retry);
+    clock.clearTimeout(retry);
     await pending;
-    clearTimeout(retry);
-    clearInterval(check);
+    clock.clearTimeout(retry);
+    clock.clearTimeout(check);
     await stopJobs?.();
     stopJobs = undefined;
     await lock?.close();
@@ -219,12 +229,18 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
       throw new Error(`the egress proxy couldn't be set up, so the worker starts no cell: ${e instanceof Error ? e.message : e}`, { cause: e });
     }
     if (state !== "holding") return;
-    stopJobs = jobs(d, runs, log);
-    check = setInterval(() => void held.check().catch((e: Error) => lost(e.message)), LOCK_CHECK_MS);
+    stopJobs = jobs(d, clock, runs, log);
+    checkLater();
+  };
+  // Each check is set once the one before it has answered, so a fake clock waits for its query.
+  const checkLater = () => {
+    check = clock.setTimeout(() => held.check().then(() => {
+      if (state === "holding") checkLater();
+    }, (e: Error) => lost(e.message)), LOCK_CHECK_MS);
   };
   const tryAgain = () => {
-    retry = setTimeout(() => {
-      pending = (async () => {
+    retry = clock.setTimeout(() => {
+      return pending = (async () => {
         if (state !== "standby") return;
         let got: boolean;
         try {
@@ -268,17 +284,18 @@ export async function startWorker(d: WorkerDeps): Promise<Worker> {
 }
 
 /** Starts the outbox loop, the tick and one poll loop per board. Returns the call that stops them all. */
-function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log" | "error">): () => Promise<void> {
+function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<Console, "log" | "error">): () => Promise<void> {
   const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
   let ticked = false;
   const ciMemo: CiMemo = new Map();
   const recheckHours: RecheckHoursMemo = new Map();
-  const loops = [every(d.tickMs ?? TICK_MS, "scheduler tick", async () => {
-    const now = (d.now ?? (() => new Date()))();
+  const slow = { clock: slowClock(clock) };
+  const loops = [every(clock, d.tickMs ?? TICK_MS, "scheduler tick", async () => {
+    const now = d.now ? d.now() : clock.now();
     try {
       await tick({
         pool: d.pool, launcher: d.launcher, now, killFlag: d.killFlag, repoHost: d.repoHost, backlogFor,
-        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo, recheckHours,
+        secret: d.secret, controlUrl: d.controlUrl, sopVersion: d.sopVersion, ciMemo, recheckHours, slow,
       });
     } finally {
       // Every tick records the heartbeat, one with nothing to do, one under the kill switch and one that failed too,
@@ -293,19 +310,19 @@ function jobs(d: WorkerDeps, runs: Map<string, number>, log: Pick<Console, "log"
     if (!ticked) log.log("The worker ran its first scheduler tick.");
     ticked = true;
   }, runs, log)];
-  loops.push(every(d.outboxMs ?? OUTBOX_MS, "working through the outbox", () => workOutbox({ pool: d.pool, backlogFor, repoHost: d.repoHost }), runs, log));
+  loops.push(every(clock, d.outboxMs ?? OUTBOX_MS, "working through the outbox", () => workOutbox({ pool: d.pool, backlogFor, repoHost: d.repoHost }), runs, log));
   // The default policies come from the commit of `main` the cell image loop last fetched into the checkout, so a merged
   // change to one re-checks NotReady items on the next poll with no restart (PBI 261).
   const defaults = d.cellImage && mainDefaults(d.cellImage);
   // Each board files its splits as child issues on itself (PBI 144).
   for (const s of d.sources) {
     const split = d.split && { ...d.split, file: s.file };
-    loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
-      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, ...(defaults ? { defaults } : {}) }), runs, log));
+    loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
+      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, slow, ...(defaults ? { defaults } : {}) }), runs, log));
   }
   if (d.cellImage) {
     const cellImage = { ...d.cellImage, pool: d.pool, log };
-    loops.push(every(d.pollMs ?? POLL_INTERVAL_MS, "polling main for the cell image", () => pollCellImage(cellImage), runs, log));
+    loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, "polling main for the cell image", () => pollCellImage(cellImage), runs, log));
   }
   return async () => {
     await Promise.all(loops.map((stop) => stop()));

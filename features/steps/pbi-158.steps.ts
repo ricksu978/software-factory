@@ -3,7 +3,9 @@
 // (two workers, each on a pool of its own). Both files' hooks run for @pbi-158, so their contexts, fakes and log
 // capture hold here too, and PBI 17's steps own the items and the launcher's record.
 //
-// Each worker gets a clock in its deps, which records every time it hands out. The worker reads it once as each
+// Each worker runs on a fake clock that PBI 157's steps give it (PBI 396), and the steps here that wait for its ticks
+// move those clocks on as they wait. Each worker also gets a `now` in its deps, which reads its fake clock and records
+// every time it hands out. The worker reads it once as each
 // scheduler tick starts, so a worker's n-th time is its n-th tick's time, and that time is what the heartbeat records.
 // A worker's runs map counts the ticks that have ended. So the heartbeat shows the time of a worker's latest tick when
 // it is the time of the last tick to end before it was read, or of a tick that started after that.
@@ -21,6 +23,8 @@ import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as w156, rehome, type Running } from "./pbi-156.steps.ts";
 import { ctx as w157, type Worker as Worker157 } from "./pbi-157.steps.ts";
+import type { Clock } from "../../src/worker/clock.ts";
+import { pass, passUntil, passWithin } from "../support/worker-clocks.ts";
 
 /** The single worker's name, beside PBI 157's "first" and "second". */
 const SINGLE = "the worker";
@@ -57,18 +61,14 @@ async function within(ms: number, ok: () => boolean | Promise<boolean>): Promise
   return true;
 }
 
-async function until(what: string, ok: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {
-  assert.ok(await within(ms, ok), `timed out waiting until ${what}`);
-}
-
 const iso = (ms: number | undefined) => (ms === undefined ? "none" : new Date(ms).toISOString());
 
-/** A clock for the named worker that records each time it hands out. */
-function clock(world: object, name: string): () => Date {
+/** The time of the named worker's clock, `of()`, or the real time without one, recording each time it hands out. */
+function clock(world: object, name: string, of: () => Clock | undefined): () => Date {
   const times: number[] = [];
   ctx(world).clocks.set(name, times);
   return () => {
-    const d = new Date();
+    const d = of()?.now() ?? new Date();
     times.push(d.getTime());
     return d;
   };
@@ -138,8 +138,9 @@ function latestTick(world: object): number | undefined {
 
 Before({ tags: "@pbi-158 and @db", ...long }, async function () {
   // PBI 157's hook adds its pool and log to these deps, whichever runs first.
-  w156(this).deps = { ...w156(this).deps, now: clock(this, SINGLE) };
-  w157(this).deps = (name: string) => ({ now: clock(this, name) });
+  // Each reads its worker's fake clock as the tick starts, whichever hook put it there first.
+  w156(this).deps = { ...w156(this).deps, now: clock(this, SINGLE, () => w156(this).deps?.clock as Clock | undefined) };
+  w157(this).deps = (name: string) => ({ now: clock(this, name, () => w157(this).workers.find((w) => w.name === name)?.clock) });
   const d = await testDb();
   if (!d) return;
   await refuse(false);
@@ -206,7 +207,7 @@ When("the worker ticks twice more", long, async function () {
   if (!who.running) return;
   await rehome(this);
   const n = ended(who);
-  await until("the worker ticks twice more", () => ended(who) >= n + 2);
+  await passUntil(this, "the worker ticks twice more", () => ended(who) >= n + 2);
 });
 
 When("the heartbeat can be written again", long, async function () {
@@ -272,7 +273,7 @@ Then("the heartbeat still shows the time of the first worker's last tick until t
     if (times(this, "second").length) break;
     assert.equal(iso(h), iso(last), "the heartbeat moved off the first worker's last tick before the second worker took the lock");
     checks++;
-    await sleep(250);
+    await pass(this, 250);
   }
   assert.ok(checks > 0, "the second worker took the lock before the heartbeat could be read");
 });
@@ -282,7 +283,7 @@ Then("within {int} seconds of the first worker stopping, the heartbeat shows the
   started(this, second);
   const deadline = (w157(this).stoppedAt ?? Date.now()) + s * 1_000;
   let seen: number[] = [];
-  const ok = await within(Math.max(deadline - Date.now(), 0), async () => {
+  const ok = await passWithin(this, Math.max(deadline - Date.now(), 0), async () => {
     const n = ended(second);
     seen = await heartbeats();
     return seen.length === 1 && isLatest(this, second, seen[0], n);

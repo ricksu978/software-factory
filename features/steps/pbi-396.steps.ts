@@ -687,7 +687,9 @@ async function runSuite(world: object, files: string[], extra: string[], recordT
         if (k) suite.cases.push({ name: k.name, uri: k.uri, statuses: k.statuses, stepMs: k.stepMs });
       }
     }
-    suite.pickles = pickles.size;
+    // cucumber-js reports a pickle for every scenario in the files it reads, and a test case only for each one its
+    // --tags and --name select, so the test cases are the scenarios selected.
+    suite.pickles = cases.size;
   }
   if (recordTimers) suite.timers = existsSync(timers) ? readFileSync(timers, "utf8").split("\n").filter(Boolean) : [];
   rmSync(dir, { recursive: true, force: true });

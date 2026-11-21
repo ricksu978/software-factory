@@ -22,17 +22,50 @@ export type FakeClock = Clock & {
 /** The process's own clock and timers. */
 export const realClock: Clock = {
   now: () => new Date(),
-  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  setTimeout: (fn, ms) => setTimeout(() => void fn(), ms),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
 
-/** A fake clock that reads `start`. Not built yet (PBI 396): it neither fires timers nor moves. */
+type Timer = { at: number; seq: number; fn: () => unknown };
+
+/**
+ * A fake clock that reads `start` and sets no timer on the real clock. A timer falls due `ms` after the clock's time
+ * when it was set. Timers due at the same time fire in the order they were set. Moves overlapping one another run one
+ * after the other.
+ */
 export function fakeClock(start: Date = new Date(0)): FakeClock {
-  const at = start.getTime();
+  let at = start.getTime();
+  let seq = 0;
+  const timers = new Set<Timer>();
+  let moving = Promise.resolve();
+  const next = (until: number) => {
+    let first: Timer | undefined;
+    for (const t of timers) if (t.at <= until && (!first || t.at < first.at || (t.at === first.at && t.seq < first.seq))) first = t;
+    return first;
+  };
+  const move = async (ms: number) => {
+    const until = at + Math.max(ms, 0);
+    for (let t = next(until); t; t = next(until)) {
+      timers.delete(t);
+      at = Math.max(at, t.at);
+      await t.fn();
+    }
+    at = until;
+  };
   return {
     now: () => new Date(at),
-    setTimeout: () => undefined,
-    clearTimeout: () => {},
-    advance: async () => {},
+    setTimeout(fn, ms) {
+      const t: Timer = { at: at + Math.max(Number(ms) || 0, 0), seq: seq++, fn };
+      timers.add(t);
+      return t;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle as Timer);
+    },
+    advance(ms) {
+      const done = moving.then(() => move(ms));
+      moving = done.catch(() => {});
+      return done;
+    },
   };
 }

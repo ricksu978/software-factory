@@ -17,6 +17,11 @@
 //
 // PBI 158's steps run these hooks and workers too, so the hooks run for @pbi-158, and its steps reach this file's context.
 //
+// Every worker these steps start in this process, PBI 156's single worker too, runs on a fake clock of its own
+// (PBI 396), made by features/support/worker-clocks.ts. A step that waited on the real clock for a tick, a poll or a
+// lock retry moves all of them on together instead. A Then that gives the workers some seconds counts real seconds
+// still, and moves the clocks on while it waits, so a standby that doesn't take over still fails it once they're up.
+//
 // Tick intervals differ by worker, and a step that starts a worker returns just after the worker already running has
 // ticked. So until the lock keeps a second worker idle, the newest worker is the one that claims the next queued item,
 // and a scenario that says it claims nothing fails on its Then.
@@ -30,6 +35,8 @@ import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
+import type { FakeClock } from "../../src/worker/clock.ts";
+import { pass, passUntil, workerClock } from "../support/worker-clocks.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { board, ctx as w156, fakes, learnItems, rehome, type Running, startWorker as startWorker156 } from "./pbi-156.steps.ts";
 
@@ -59,6 +66,8 @@ export type Worker = {
   polls: number;
   judged: string[];
   tickMs: number;
+  /** The fake clock it runs on, when one of this file's workers. */
+  clock?: FakeClock;
   running?: Running;
   startError?: unknown;
   exit?: Exit;
@@ -288,7 +297,9 @@ async function startOne(world: object): Promise<Worker> {
   const i = c.reserved = (c.reserved ?? 0) + 1;
   const name = ordinal[i - 1];
   const own = await ownPool(name);
-  const w: Worker = { name, ...own, log: logger(`${name} worker`), launched: [], polls: 0, judged: [], tickMs: TICK_MS[i - 1] };
+  const w: Worker = {
+    name, ...own, log: logger(`${name} worker`), launched: [], polls: 0, judged: [], tickMs: TICK_MS[i - 1], clock: workerClock(world),
+  };
   c.workers.push(w);
   c.workers.sort((a, b) => ordinal.indexOf(a.name) - ordinal.indexOf(b.name));
   const mod = await load<{ startWorker(d: object): Promise<Running> }>("src/worker/main.ts");
@@ -319,6 +330,7 @@ async function startOne(world: object): Promise<Worker> {
       tickMs: w.tickMs,
       pollMs: POLL_MS,
       log: w.log.sink,
+      clock: w.clock,
       ...c.deps?.(name),
     });
     watch(w.running, w);
@@ -329,9 +341,9 @@ async function startOne(world: object): Promise<Worker> {
 }
 
 /** Waits for the worker to tick and poll the board. */
-async function busy(w: Worker): Promise<void> {
+async function busy(world: object, w: Worker): Promise<void> {
   if (!w.running) return;
-  await until(`the ${w.name} worker ticks and polls the board`, () => ticks(w) >= 1 && w.polls >= 1);
+  await passUntil(world, `the ${w.name} worker ticks and polls the board`, () => ticks(w) >= 1 && w.polls >= 1);
 }
 
 /**
@@ -342,12 +354,13 @@ async function afterWorkingTick(world: object): Promise<void> {
   const w = ctx(world).workers.find((x) => x.running && !x.exit && ticks(x) > 0 && !x.stopped);
   if (!w) return;
   const n = ticks(w);
-  await until(`the ${w.name} worker ticks again`, () => ticks(w) > n, w.tickMs * 3 + 5_000);
+  await passUntil(world, `the ${w.name} worker ticks again`, () => ticks(w) > n, w.tickMs * 3 + 5_000);
 }
 
+/** Moves every worker's fake clock `ms` on. */
 async function runFor(world: object, ms: number): Promise<void> {
   await rehome(world);
-  await sleep(ms);
+  await pass(world, ms);
   await rehome(world);
   await learnItems(world);
 }
@@ -370,7 +383,8 @@ Before({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
   c.single = { ...own, log: logger("the worker") };
   // PBI 156's steps start the @ac-2 scenarios' worker with these in its deps.
   // PBI 158's steps put a clock of their own in these deps too, so they're added to, not replaced.
-  w156(this).deps = { ...w156(this).deps, pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink };
+  // It runs on a fake clock too (PBI 396).
+  w156(this).deps = { ...w156(this).deps, pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink, clock: workerClock(this) };
 });
 
 const bounded = (p: Promise<unknown> | undefined) => Promise.race([Promise.resolve(p).catch(() => undefined), sleep(10_000)]);
@@ -395,15 +409,15 @@ After({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
 // ---- Given ----
 
 Given("the first worker is running and has ticked once", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("the first worker is running and has polled the board once", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("the first worker is running", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("a second worker has started beside it", long, async function () {
@@ -432,7 +446,7 @@ Given("the first worker has stopped and the second worker has taken over", long,
   c.stoppedAt = Date.now();
   // A standby counts no tick until it takes the lock, so a tick after the stop means it has taken over.
   const n = ticks(second);
-  await until("the second worker ticks after the first one stopped", () => ticks(second) > n);
+  await passUntil(this, "the second worker ticks after the first one stopped", () => ticks(second) > n);
 });
 
 Given("the worker is running and has polled the board once", long, async function () {
@@ -592,7 +606,7 @@ When("longer than one scheduler tick passes", long, async function () {
 });
 
 When("longer than one board poll passes", long, async function () {
-  await sleep(POLL_MS + 1_000);
+  await pass(this, POLL_MS + 1_000);
 });
 
 When("the board gains a new item {string} with acceptance criteria", long, async function (ext: string) {
@@ -650,7 +664,7 @@ Then("the first worker is still running", long, async function () {
   const w = worker(this, "first");
   assert.equal(w.exit, undefined, `the first worker exited: ${String(w.exit?.error)}`);
   const n = ticks(w);
-  await until("the first worker ticks again", () => ticks(w) > n, w.tickMs * 2 + 5_000);
+  await passUntil(this, "the first worker ticks again", () => ticks(w) > n, w.tickMs * 2 + 5_000);
 });
 
 Then("the worker is still running", long, async function () {
@@ -659,7 +673,7 @@ Then("the worker is still running", long, async function () {
   assert.ok(w, "the worker never started");
   assert.equal(c.single!.exit, undefined, `the worker exited: ${String(c.single!.exit?.error)}`);
   const n = w.runs.get("scheduler tick") ?? 0;
-  await until("the worker ticks again", () => (w.runs.get("scheduler tick") ?? 0) > n, 5_000);
+  await passUntil(this, "the worker ticks again", () => (w.runs.get("scheduler tick") ?? 0) > n, 5_000);
 });
 
 Then("exactly one of the three workers launched a cell or polled the board", function () {
@@ -676,7 +690,7 @@ async function takesOver(world: object, s: number, name: string): Promise<void> 
   const w = worker(world, "second");
   assert.deepEqual(w.launchedBefore ?? [], [], "the second worker launched a cell before the first one stopped");
   const deadline = c.stoppedAt! + s * 1_000;
-  await until(`the second worker launches item ${name}'s cell`, async () => {
+  await passUntil(world, `the second worker launches item ${name}'s cell`, async () => {
     await rehome(world);
     return w.launched.includes(p17(world).items[name]);
   }, Math.max(deadline - Date.now(), 0));
@@ -697,7 +711,7 @@ Then("within {int} seconds of the first worker stopping, the second worker has p
   started(c);
   const w = worker(this, "second");
   assert.equal(w.polledBefore ?? 0, 0, "the second worker polled the board before the first one stopped");
-  await until("the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0));
+  await passUntil(this, "the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0));
 });
 
 Then("the worker exits with an error saying it lost the worker lock", long, async function () {

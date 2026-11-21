@@ -8,7 +8,8 @@ import { format } from "node:util";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { createPool } from "../store/db.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { startWorker, type Worker, type WorkerDeps } from "./main.ts";
+import { fakeClock } from "./clock.ts";
+import { LOCK_RETRY_MS, startWorker, type Worker, type WorkerDeps } from "./main.ts";
 
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" }).trim();
@@ -103,6 +104,46 @@ describe("the worker lock", dbTest, () => {
     await sleep(200);
     assert.equal(ticks(w), n);
     await w.stop();
+  });
+
+  // PBI 396.
+  test("a standby on a fake clock tries for the lock again only once its clock moves the retry interval on", async () => {
+    const one = deps("fake-one");
+    const two = deps("fake-two");
+    const first = await start(one.d);
+    await until("the first worker ticks", () => ticks(first) > 0);
+    const clock = fakeClock(new Date("2026-01-01T09:00:00Z"));
+    const { lockRetryMs: _, ...rest } = two.d;
+    const second = await start({ ...rest, clock });
+    assert.ok(two.lines.some((l) => /tries again every 15 seconds/.test(l)), two.lines.join("\n"));
+    await first.stop();
+    await clock.advance(LOCK_RETRY_MS - 1);
+    assert.equal(ticks(second), 0);
+    assert.ok(!two.lines.some((l) => /took the worker lock/.test(l)));
+    await clock.advance(1);
+    assert.ok(two.lines.some((l) => /took the worker lock/.test(l)), two.lines.join("\n"));
+    await until("the second worker ticks", () => ticks(second) > 0);
+    assert.equal((await lockPids("fake-two")).length, 1);
+  });
+
+  test("a worker on a fake clock ticks at the clock's times, waiting for each tick before the next", async () => {
+    await db.pool.query("delete from worker_heartbeat");
+    const one = deps("fake-ticks");
+    const clock = fakeClock(new Date("2026-01-01T09:00:00Z"));
+    const w = await start({ ...one.d, clock, tickMs: 3_000 });
+    await until("the worker ticks", () => ticks(w) > 0);
+    await clock.advance(45_000);
+    assert.equal(ticks(w), 16);
+    const h = (await db.pool.query<{ ticked_at: Date }>("select ticked_at from worker_heartbeat")).rows;
+    assert.equal(h[0].ticked_at.toISOString(), "2026-01-01T09:00:45.000Z");
+  });
+
+  test("a worker on a fake clock that never moves still exits once its lock connection closes", async () => {
+    const one = deps("fake-lost");
+    const w = await start({ ...one.d, clock: fakeClock() });
+    await until("the worker ticks", () => ticks(w) > 0);
+    await db.pool.query("select pg_terminate_backend(pid) from unnest($1::int[]) as pid", [await lockPids("fake-lost")]);
+    await assert.rejects(w.done, /lost the worker lock/);
   });
 
   test("a worker whose egress proxy fails throws and gives the lock back", async () => {
