@@ -26,7 +26,7 @@ Feature: Dashboard wiring, overrides and the rest of Task 15
     When the control plane starts
     Then it logs a sign-in link to http://localhost:7999 with a 64-character token
 
-  @ac-2 @local
+  @ac-2 @local @serial
   Scenario: aspire run starts the control plane from src/main.ts
     # The control plane starts the egress proxy from the cell image, so the image comes first.
     Given the image "factory-cell:local" is built

@@ -195,7 +195,7 @@ export async function floor(pool: pg.Pool) {
  * The item's own scenarios with their verdict in the latest red and the latest green report, read from the stored
  * reports with classify. A report that's gone leaves its column empty.
  */
-async function verdicts(deps: DashboardDeps, externalId: string, stages: { stage_id: string; report_ref: string | null }[]): Promise<RunDetail["verdicts"]> {
+export async function verdicts(deps: { readBlob?: (path: string) => Promise<string | null> }, externalId: string, stages: { stage_id: string; report_ref: string | null }[]): Promise<RunDetail["verdicts"]> {
   if (!deps.readBlob) return [];
   const tag = `@pbi-${externalId}`;
   const byName = new Map<string, { red: string; green: string }>();
@@ -254,6 +254,11 @@ export async function activity(pool: pg.Pool): Promise<ActivityRow[]> {
  */
 function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, files: RunDetail["features"]): RunDetail["criteria"] {
   if (!fi || !deps.repoHost || !fi.repo) return null;
+  return criteriaWithScenarios(fi.acceptanceCriteria, files);
+}
+
+/** Each acceptance criterion, in order, with the scenarios the feature files tag @ac-N for it, the Nth criterion. */
+export function criteriaWithScenarios(acceptanceCriteria: string[], files: RunDetail["features"]): NonNullable<RunDetail["criteria"]> {
   const byAc = new Map<number, Scenario[]>();
   for (const { text } of files) {
     let tags: string[] = [];
@@ -274,7 +279,7 @@ function criteriaView(deps: DashboardDeps, fi: FactoryItem | null, files: RunDet
       } else if (t && !t.startsWith("#")) tags = [];
     }
   }
-  return fi.acceptanceCriteria.map((criterion, i) => ({ criterion, scenarios: byAc.get(i + 1) ?? [] }));
+  return acceptanceCriteria.map((criterion, i) => ({ criterion, scenarios: byAc.get(i + 1) ?? [] }));
 }
 
 /** The item's feature files as they stand at `sha`: the lock sha once signed off, the scenarios sha while waiting. */
@@ -321,6 +326,21 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const criteria = signing ? criteriaView(deps, fi, pending) : null;
   const scope = signing && fi?.body.trim() ? fi.body : null;
   const features = run?.features_lock_sha ? await featuresAt(deps, fi, run.features_lock_sha, run.locked_files ?? []) : [];
+  return {
+    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
+    verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
+    fixingCi: fixingCi(item.state, run, stages),
+    durations: await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))()),
+    ...(await itemStanding(pool, id, item.state, canOperate)),
+  };
+}
+
+/**
+ * Where an item stands, for Run detail on today's dashboard and in the API (redesign step 8b): an operator's override
+ * buttons, or null for anyone else, its Start now and a Move the board's order ended, which anyone sees, its claim key,
+ * a Split parent's children and a Failed item's last re-check.
+ */
+export async function itemStanding(pool: pg.Pool, id: string, state: string, canOperate: boolean) {
   const held = (await pool.query<{ held: boolean }>("select held from item where id = $1", [id])).rows[0].held;
   // An active Start now shows to anyone who opens the page (PBI 265).
   const startNow = (await pool.query<{ reason: string; by: string | null }>(
@@ -336,21 +356,16 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean): 
   const moveEnded = latestMove?.cleared_at && latestMove.cleared_cause === ENDED_BY_BOARD_ORDER
     ? { control: latestMove.kind === "move_up" ? "Move up" as const : "Move down" as const, at: latestMove.cleared_at }
     : null;
-  const durations = await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))());
   const claim = (await claimKeys(pool, [id])).get(id) ?? null;
   return {
-    item: { ...item, repo: (await issueRepos(pool, [id])).get(id) ?? null }, run, policies, stages, readiness: await readinessChecks(pool, id), question, criteria, scope, pending, features,
-    verdicts: await verdicts(deps, item.external_id, stages), linkBlobs: Boolean(deps.readBlob),
-    fixingCi: fixingCi(item.state, run, stages),
     controls: canOperate
-      ? { held, stoppable: item.state === "InProgress", requeueable: item.state === "Failed" || item.state === "Abandoned", ...(await selectable(pool, id, item.state)) }
+      ? { held, stoppable: state === "InProgress", requeueable: state === "Failed" || state === "Abandoned", ...(await selectable(pool, id, state)) }
       : null,
     startNow,
     moveEnded,
     claim,
-    durations,
     splitInto: (await splitChildren(pool, [id])).get(id) ?? [],
-    recheck: await recheckOf(pool, id, item.state),
+    recheck: await recheckOf(pool, id, state),
   };
 }
 

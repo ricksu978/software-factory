@@ -20,7 +20,7 @@ Feature: The BFF signs people in and keeps sessions in Postgres
 
   Rule: The BFF answers on port 7403
 
-    @ac-1 @db
+    @ac-1 @db @serial
     Scenario: The BFF listens on 7403 when no port is given
       Given the BFF is stopped
       When the BFF starts with no port set
@@ -86,7 +86,7 @@ Feature: The BFF signs people in and keeps sessions in Postgres
       And no session exists
       And the browser holds no session cookie
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: The test owner signs in through Keycloak on 7430 and the BFF on 7403
       Given "aspire run" is up
       When a browser opens "http://localhost:7403/auth/login"

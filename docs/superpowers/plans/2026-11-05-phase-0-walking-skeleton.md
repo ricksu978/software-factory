@@ -800,6 +800,48 @@ A task that touches one of them follows this section and does not restate it.
       so the engine adds that note to the attempt's `/stage` message,
       and the stage fails only on failed lines.
       This repo's `dod.md` line 1 names its `ci` job.
+    - **Green's gate run (PBI 389).**
+      When Green's gate passes,
+      the engine keeps a `GateRun`:
+      the commit,
+      `bdd.run`, `commands.test` and `commands.lint`,
+      and the report's scenarios passed and failed.
+      `checkDefinitionOfDone` takes it as `gate`,
+      and uses it only when its commit is `head`.
+      `gateCover` reads which parts of a `run:` command the gate covered.
+      A command identical to a gate command, after whitespace is collapsed, is covered whole,
+      even one holding a `$(...)`.
+      Otherwise a command made only of parts joined with `&&` outside quotes is split there,
+      and one with a pipe, `||`, `;`, a lone `&`, parentheses or a substitution isn't.
+      Nor is one with a part that changes the shell's state for the parts after it,
+      such as `cd web`, `export X=1`, `FOO=1`, `source` or `set`,
+      since a gate command after it doesn't run as the gate ran it.
+      So `cd web && npm test` runs whole.
+      A line covered whole passes on the gate's run, with a reason naming Green's gate, the commit and the scenario counts,
+      and runs nothing.
+      A line covered in part runs the rest joined with `&&`.
+      When that passes,
+      the reason adds that the rest exited 0,
+      and when it fails the reason starts `exit <code>` as before,
+      and the base re-run of PBI 215 runs only the rest.
+      When a part the gate didn't run comes before one it did,
+      the check records each file and folder in the checkout outside `.git`, ignored ones included,
+      with its size, inode and change times, before and after the rest runs (`fileStamps`),
+      so a rebuild inside an existing ignored `dist/` shows as a change, which `git status` can't show.
+      When the rest created, removed or rewrote a file, or either record can't be read,
+      it runs the line whole as before,
+      since a build in `npm run build && npm test` changes what the gate's `npm test` read.
+      `tsc --noEmit` writes nothing, so this repo's line 1 still runs only the typecheck.
+      A line with no covered part runs whole.
+      The gate run lasts only for the claim,
+      so a later claim's checks run every line.
+      `gateNote` adds a `## Green's gate` section to every self-review round's brief.
+      It says the full suite passed in Green's gate at the commit, with `bdd.run` and the counts,
+      and says not to run the full suite.
+      It names `bdd.run` with `--tags "<item tag> and @ac-1"` added for a single scenario,
+      and allows single test files.
+      A fix commit gets line 1 once in open-pr's check,
+      and CI runs the suite again on the PR's head.
     - **Base failures (PBI 215).**
       A `run:` line that fails is run again,
       before the failure counts against the item,
@@ -1180,6 +1222,25 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   `npm run typecheck` runs `tsc --noEmit`.
   `npm run bdd` runs every feature file with cucumber-js and writes Cucumber Messages to `reports/bdd.ndjson`,
   the report Task 10 reads.
+  PBI 390 runs it through `scripts/bdd.ts` (`src/bdd/run.ts`),
+  which starts cucumber-js with `--parallel` and the count `BDD_WORKERS` sets,
+  4 when it's unset,
+  and refuses a count that isn't a whole number above zero with "the worker count must be a whole number above zero" before anything runs.
+  It imports `features/support/**/*.ts` before the steps.
+  `features/support/parallel.ts` hands cucumber-js the parallel rule in `src/bdd/parallel.ts`:
+  a scenario tagged `@serial`,
+  or in a feature tagged `@serial`,
+  starts only when no other runs,
+  and none starts while it runs.
+  cucumber-js 13.3.0 runs its workers as worker threads of one process,
+  so each worker has its own module state,
+  and so its own test database,
+  while ports and files stay shared.
+  No step starts a server on, or connects to, a port fixed in its code.
+  `src/bdd/ports.ts` gives a step a free port,
+  and stands each port a scenario names for a free port of that scenario's own.
+  `findFixedPorts` in `src/bdd/fixed-ports.ts` names each step file and line that listens on or connects to a fixed port,
+  and PBI 390's scenarios run it over `features/steps`.
   Imports use explicit `.ts` extensions.
   PBI 376 adds `npm run bdd:repeat -- --times <n> --name "<scenario name>"` (`scripts/bdd-repeat.ts`,
   with its logic in `src/bdd/repeat.ts`).
@@ -1210,7 +1271,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   the exact versions from the Tech Stack line,
   and scripts `test`,
   `typecheck`,
-  `bdd` (`cucumber-js --import "features/steps/**/*.ts" --format message:reports/bdd.ndjson`),
+  `bdd` (`cucumber-js --import "features/steps/**/*.ts" --format message:reports/bdd.ndjson`, which PBI 390 moves into `scripts/bdd.ts`),
   `start:control` (`node src/main.ts`) and `start:cell` (`node src/cell/main.ts`).
 - [ ] **Step 2:
   Write `tsconfig.json`** with `strict`,
@@ -6206,6 +6267,45 @@ from spec §6 rows 1 to 7:
   so it serves a build of the checkout it runs beside.
   `aspire publish` runs the same script through the BFF's `withBuildScript('build')`,
   and the build needs the devDependencies.
+- Since step 8b (2026-11-07 design,
+  §04 and §05,
+  PBI 279),
+  the SPA has Floor at `/`,
+  Run detail at `/runs/{id}`,
+  Activity at `/activity` and the Phase 0 report at `/phase0`,
+  in `web/src/pages/`,
+  routed by `web/src/routes.ts`,
+  which also names the addresses the pages link to,
+  and drawn by `web/src/App.tsx`.
+  An issue's GitHub address comes from `issueUrl` in `src/core/links.ts`,
+  which today's dashboard uses too.
+  They show what today's pages in `src/http/views.ts` show,
+  in the same words,
+  from one read each through `readFloor`,
+  `readItem`,
+  `readPhase0` and `readActivity` in `web/src/api.ts`.
+  Their sentences are in `web/src/lines.ts`,
+  and their submit handlers in `web/src/forms.ts`:
+  an override goes to `/bff/v1/overrides` and a sign-off or answer to `/bff/v1/items/{id}/decisions`,
+  a reason or an answer left empty or holding only spaces is refused and nothing is sent,
+  an accepted form reads the page again,
+  and if that read fails the page says the factory accepted it and asks for a reload before sending it again,
+  and a refused one shows the API's error as a sentence.
+  Run detail offers the Sign off form only when it has feature files up for sign-off.
+  Until the cell API stores the run's criteria and files at the scenarios sha,
+  it says the scenarios can't be shown here yet and sends the owner to today's dashboard to sign off.
+  `GET /v1/items/{id}` answers the SPA's `ItemData`,
+  filled by the dashboard's own `itemStanding`,
+  `fixingCi`,
+  `verdicts` and `criteriaWithScenarios` in `src/http/routes.ts` and the run's `run_file` snapshots,
+  and `GET /v1/floor` sends its claim keys as an object.
+  `web/src/lines.test.ts`,
+  `web/src/forms.test.ts`,
+  `web/src/routes.test.ts`,
+  `web/src/page.test.ts`,
+  `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
+  and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
+  Today's dashboard keeps serving these pages on 7400 until step 9.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,

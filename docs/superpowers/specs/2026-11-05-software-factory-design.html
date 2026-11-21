@@ -2499,6 +2499,42 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Running the suite in parallel.</b>
+
+    <code>npm run bdd</code> runs the scenarios in cucumber-js's own parallel workers (PBI 390),
+
+    so a cell's Red and Green and every CI build finish the suite in a fraction of the time.
+
+    How many comes from one setting, <code>BDD_WORKERS</code>,
+
+    so a cell, CI and a person's machine can each set their own.
+
+    Unset, it is 4.
+
+    A count that isn't a whole number above zero is refused before anything runs.
+
+    A scenario that can't share the machine with another carries <code>@serial</code>, on itself or its feature.
+
+    The suite's parallel rule starts it only when no other scenario runs,
+
+    and starts no other while it runs.
+
+    The @local scenarios that drive the AppHost, Docker or the owner's accounts carry it.
+
+    No step starts a server on, or connects to, a port fixed in its code:
+
+    a step that starts a server takes a free port,
+
+    and each port a scenario names stands for a free port of that scenario's own.
+
+    A check over the step definitions names any step that breaks this rule, by file and line.
+
+    Every worker writes into the one Cucumber Messages report,
+
+    so Red and Green read each scenario and its result as they did from a serial run.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Reading runner results.</b>
 
     Every runner writes a Cucumber Messages report,
@@ -3066,6 +3102,54 @@ Feature: Export invoices to CSV
     A <code>ci:</code> line outside <code>dod.md</code> makes that file invalid,
 
     as a <code>run:</code> line does.
+
+    <span class="tag call">My call</span></li>
+
+    <li><b>Green's gate run (PBI 389).</b>
+
+    Green's gate runs <code>bdd.run</code>, <code>commands.test</code> and <code>commands.lint</code> before the Definition of Done check runs at the same commit.
+
+    When the gate passed at the commit being checked,
+
+    a <code>run:</code> line identical to one of those commands passes on the gate's run,
+
+    and the cell doesn't run it again.
+
+    Its reason names Green's gate, the commit and the scenario counts.
+
+    A line made only of commands joined with <code>&amp;&amp;</code> runs just the parts the gate didn't run,
+
+    and passes when those parts pass,
+
+    so this repo's line 1 runs only <code>npm run typecheck</code> at Green.
+
+    A line with a part that changes the shell's state for the parts after it, such as <code>cd web</code> or <code>export X=1</code>, runs whole.
+
+    So does a line whose parts before a gate command change the checkout's files, as <code>npm run build &amp;&amp; npm test</code> does,
+
+    since the gate's tests ran before that build: the check records each file and folder in the checkout outside <code>.git</code>, ignored ones included, with its size, inode and change times, before and after the parts it runs.
+
+    A rewrite of a file that was already there counts as a change, as a rebuild inside an existing ignored <code>dist/</code> does, which <code>git status</code> can't show, and so does a tree it can't read.
+
+    A line joined any other way,
+
+    with a pipe, <code>||</code>, <code>;</code> or a subshell,
+
+    runs whole as before,
+
+    and so does every line at a commit the gate didn't pass at.
+
+    The self-reviewer's brief says where the full suite passed, with the command and the counts,
+
+    and tells the reviewer to run no full suite,
+
+    only single scenarios with the repo's <code>bdd.run</code> and a <code>--tags</code> filter, or single test files.
+
+    A fix commit from self-review gets the full suite once, in open-pr's Definition of Done check,
+
+    and CI runs it again on the PR's head,
+
+    which nothing merges without.
 
     <span class="tag call">My call</span></li>
 

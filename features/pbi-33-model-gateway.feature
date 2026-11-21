@@ -19,13 +19,13 @@ Feature: Keep the owner's Claude token out of cells
     Then the gateway answers 401
     And the upstream receives no request
 
-  @ac-2 @local
+  @ac-2 @local @serial
   Scenario: A cell runs the Agent SDK on the owner's subscription through the gateway
     Given the image "factory-cell:local" is built
     When a cell container holding only a stand-in token runs "spike/sdk-oauth.ts" through the gateway
     Then the cell's result has the subtype "success"
 
-  @ac-3 @local
+  @ac-3 @local @serial
   Scenario: The owner's token is absent from a running cell's environment
     Given the image "factory-cell:local" is built
     When a cell container holding only a stand-in token lists its environment

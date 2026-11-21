@@ -54,7 +54,7 @@ Feature: A merged cell-side change reaches new cells without restarting the fact
       Then the cell image has not been built
       And the cell image "factory-cell:local" was built from commit "aaa111"
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: On the owner's machine, a merged cell-side change reaches the next cell under a running factory
       Given the factory is running under `aspire run`
       And a commit that changes only "sop/sop.yml" is merged to `main`

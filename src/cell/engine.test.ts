@@ -971,7 +971,8 @@ describe("runCell", () => {
     const asked: string[] = [];
     const h = harness({ nextStage: "green", ctx: { prNumber: null } });
     h.deps.api.ciChecks = async (sha) => (asked.push(sha), [{ name: "ci", conclusion: "failure", url: "https://ci/3" }]);
-    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: true` `ci: ci`\n");
+    // A command Green's gate didn't run, so the line isn't passed on the gate's run (PBI 389).
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo ok` `ci: ci`\n");
     assert.equal(await h.run(), "done");
     const green = h.calls.find((c) => c.route === "/policy-results" && c.body.stageId === "green")!.body;
     assert.deepEqual(green.verdicts.map((v: any) => v.reason), ["exit 0"]);

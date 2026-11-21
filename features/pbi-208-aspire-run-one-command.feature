@@ -95,7 +95,7 @@ Feature: aspire run is the one command that starts the factory
       And the start shows "Docker is not running, and Docker Desktop is not installed where this looks. Start Docker first."
       And no resource has started
 
-    @ac-1 @regression @local
+    @ac-1 @regression @local @serial
     Scenario: On the owner's machine, aspire run from the repo root pulls main and brings Docker up
       Given the owner's checkout is on branch "main", one merged commit behind the remote's "main"
       And the owner has quit Docker Desktop
@@ -134,7 +134,7 @@ Feature: aspire run is the one command that starts the factory
       And the start ran no pull
       And the checkout still has its uncommitted edit to "sop/sop.yml"
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: On the owner's machine, the PBI 6 suite's start leaves a main checkout where it was
       Given the owner's worktree is on branch "main", one merged commit behind the remote's "main"
       When the PBI 6 suite starts the AppHost as a test run, with no one at the console
@@ -165,7 +165,7 @@ Feature: aspire run is the one command that starts the factory
 
   Rule: The BDD suites that start the AppHost still pass
 
-    @ac-4 @regression @local
+    @ac-4 @regression @local @serial
     Scenario Outline: The <suite> scenarios that start the AppHost still pass
       Given the owner's machine has Docker Desktop, the Aspire CLI and the factory's secrets
       When the owner runs the <suite> scenarios that start the AppHost
