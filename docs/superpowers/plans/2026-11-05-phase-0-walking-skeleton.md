@@ -4981,9 +4981,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     so the item waits in Queued at the same stage,
     and once the drain is cleared it's claimed again there,
     with the stage's retries left (PBI 393).
-    That holds only at the stage the run records as next, whose last attempt `/context` reads the carry from.
-    A pass back to green after open-pr, pr-review or address runs while `next_stage` is still that later stage,
-    so it runs its retries within the claim, as before.
+    A pass back to green after open-pr, pr-review or address ends at its attempt boundary too.
+    `next_stage` is still that later stage, so `/context` hands green's carry
+    when green's failed attempt is the run's last one, the base merge aside,
+    and the next claim goes back to green through `failedCiHeads` and spends it there.
     Under pause the reply has `stop: true`,
     under a drain as well.
     While the factory drains,

@@ -4784,9 +4784,11 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       and the failed attempt counts against the stage's retries (PBI 393).
 
-      A pass back to green after open-pr, pr-review or address runs while the run is still at that later stage,
+      A pass back to green after open-pr, pr-review or address ends at its attempt boundary too.
 
-      so it runs its retries within the claim, as before, and its tries and findings aren't lost.
+      The run is still at that later stage, so the next claim goes back to green through the heads CI failed on,
+
+      and its first green attempt has green's tries spent and the failed attempt's findings.
 
       A pause,
 

@@ -45,6 +45,8 @@ export type CellApiDeps = {
 // could otherwise use to mark its own PR accepted.
 const cellEvents = new Set<ItemEvent>(["scenarios_written", "blocked", "pr_opened", "retries_exhausted", "usage_limited"]);
 const NONE_AFTER_MS = 600_000;
+// The stages a run stays at while its item goes back to green, from their findings or CI failing on their head.
+const BACK_TO_GREEN_FROM = new Set(["open-pr", "pr-review", "address"]);
 const USAGE_PAUSE_MS = 5 * 3_600_000;
 /** Floor shows a stage's last agent message cut to 500 characters, counted by code point so no emoji is split. */
 const cut = (s: string | null) => (s === null ? null : Array.from(s).slice(0, 500).join(""));
@@ -311,7 +313,20 @@ const routes: Record<string, Route> = {
     // PBI 393: when the next stage's last attempt failed and its cell ended the claim at that attempt boundary, under a
     // drain or a restart being prepared, the next claim spends only the stage's retries left and briefs its first
     // attempt with that attempt's findings, as a retry within one claim would.
-    const retry = l?.status === "failed" && l.retry_carry ? { stageId: run.next_stage, ...l.retry_carry } : null;
+    let retry: { stageId: string | null; tried: number; findings: string[] } | null =
+      l?.status === "failed" && l.retry_carry ? { stageId: run.next_stage, ...l.retry_carry } : null;
+    // A pass back to green from open-pr, pr-review or address runs while the run is still at that stage, so its carry
+    // is green's: the run's last attempt, at any stage but a claim's base merge, when that was green's and it failed
+    // with a carry. The next claim goes back to green through failedCiHeads and spends the carry there.
+    if (!retry && run.next_stage !== null && BACK_TO_GREEN_FROM.has(run.next_stage)) {
+      const latest = await c.query<{ stage_id: string; status: string; retry_carry: { tried: number; findings: string[] } | null }>(
+        `select stage_id, status, retry_carry from stage_run where run_id = $1 and stage_id <> 'merge'
+         order by started_at desc, attempt desc limit 1`,
+        [run.run_id],
+      );
+      const g = latest.rows[0];
+      if (g?.stage_id === "green" && g.status === "failed" && g.retry_carry) retry = { stageId: "green", ...g.retry_carry };
+    }
     let trustedComments: ReviewComment[] = [];
     // Each open thread's comment count at the claim, every author's. Before it resolves a thread it answered, address
     // reads the threads again and leaves open one that gained a comment it never read (PBI 258).

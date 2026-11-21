@@ -56,7 +56,9 @@ export type CellContext = {
   /**
    * PBI 393: the run's next stage's last attempt failed while the factory drained or a restart was being prepared, with
    * retries left, so its cell ended the claim at that attempt boundary. `tried` is how many of the stage's tries it had
-   * spent, and `findings` are that attempt's, for the next attempt's brief. Absent or null otherwise.
+   * spent, and `findings` are that attempt's, for the next attempt's brief. A pass back to green from open-pr, pr-review
+   * or address runs while the run is still at that stage, so its carry names green while `nextStage` names that stage.
+   * Absent or null otherwise.
    */
   retry?: RetryCarry | null;
 };
@@ -753,11 +755,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     : "";
 
   // PBI 393: the tries and findings an earlier claim's attempt boundary left the claim's first stage. They're taken
-  // once, so a later pass at the same stage in this claim, such as back to green, doesn't spend them again.
-  let carry = ctx.retry?.stageId === ctx.nextStage ? ctx.retry : null;
+  // once, so a later pass at the same stage in this claim, such as back to green, doesn't spend them again. A claim at
+  // open-pr, pr-review or address may carry green's, from a pass back to green that ended at its attempt boundary: the
+  // claim goes back to green through failedCiHeads, and that pass spends them.
+  const backStage = ["open-pr", "pr-review", "address"].includes(ctx.nextStage);
+  let carry = ctx.retry && (ctx.retry.stageId === ctx.nextStage || (ctx.retry.stageId === "green" && backStage)) ? ctx.retry : null;
   const carriedOver = (stageId: StageId): { spent: number; findings: string[] } => {
     const c = carry?.stageId === stageId ? carry : null;
-    carry = null;
+    // Address runs before the pass back to green it may lead to, so it leaves green's carry for that pass.
+    if (c || !(stageId === "address" && carry?.stageId === "green")) carry = null;
     return c ? { spent: c.tried, findings: c.findings } : { spent: 0, findings: [] };
   };
   // PBI 393: after a failed attempt with retries left, the lease is checked afresh. Under a drain or a restart being
@@ -773,16 +779,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // `from` is the tries already spent and the last findings, as a claim after an attempt boundary carries them over.
   // Under a drain or a restart being prepared, a failed attempt with retries left ends the claim there (PBI 393): it's
   // reported failed, with the tries spent and its findings, and the next claim runs the stage's next attempt. That holds
-  // only at the stage the run records as next, whose last attempt the next claim reads the carry from. A pass back to
-  // green after open-pr, pr-review or address runs while the run is still at that later stage, so a claim ended there
-  // would lose green's tries and findings: it runs its retries in this claim, as before.
+  // for a pass back to green from open-pr, pr-review or address too: the run stays at that stage, and `/context` hands
+  // the next claim green's carry when green's failed attempt is the run's last.
   const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>,
-    from = carriedOver(stageId), atNext = true) => {
+    from = carriedOver(stageId)) => {
     let findings = from.findings;
     for (let i = from.spent; i < tries; i++) {
       findings = await body(await begin(stageId), findings);
       if (findings.length === 0) return [];
-      if (atNext && i + 1 < tries && (await endsAtAttempt())) {
+      if (i + 1 < tries && (await endsAtAttempt())) {
         if (current) current.retryCarry = { tried: i + 1, findings };
         await end("failed");
         throw new Restarting("the factory drains or a restart is being prepared, so the stage's next attempt waits for the next claim");
@@ -1105,8 +1110,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Green's attempts are counted across the run, so open-pr sending the item back to green spends the same budget.
   let greenTries = 0;
-  // `backPass` is a pass back to green from open-pr, pr-review or address, while the run's next stage is still that one.
-  const green = async (carried: string[], backPass = false) => {
+  const green = async (carried: string[]) => {
     const max = retriesOf("green") + 1;
     const dodText = `## The team's Definition of Done\n\n${fenced(policies.dod.text, "markdown")}`;
     // PBI 292: a pass sent back to fix a CI failure is reported as fixing CI. One that leaves the commit CI failed on
@@ -1134,7 +1138,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (out.length) return out;
       const dod = dodFindings(await checkDod("green", attempt));
       return dod.length ? dod : dodHeadHeld();
-    }, { spent: greenTries, findings: [] }, !backPass);
+    }, { spent: greenTries, findings: [] });
     fixing = null;
     if (findings.length) throw new Exhausted(`Green failed after ${max} attempts:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
@@ -1250,6 +1254,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
     const known = failedHeads.get(await git.head());
     if (known) return backToGreen(known);
+    // Open-pr runs, so no pass back to green from an earlier claim is still waiting: a green carry is dropped.
+    carriedOver("open-pr");
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
@@ -1670,10 +1676,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!resumed && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
     if (start === "red") { await red(); await atBoundary(); }
     let from = resumed ? 1 : Math.max(order.indexOf(start), 1);
-    // Green after address, or after open-pr or pr-review sent the item back, runs while the run is still at that stage.
-    let backPass = resumed;
     for (;;) {
-      if (from <= 1) { await green(carried, backPass); await atBoundary(); }
+      if (from <= 1) { await green(carried); await atBoundary(); }
       if (from <= 2) { await selfReview(); await atBoundary(); }
       let back = await openPr();
       // Open-pr passed and pr-review is next, in this cell. A claim ended here resumes at open-pr, as a stop's does.
@@ -1681,7 +1685,6 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (!back) return "done";
       carried = back;
       from = 1;
-      backPass = true;
       // Back to green, from open-pr's or pr-review's findings: green is a further stage.
       await atBoundary();
     }

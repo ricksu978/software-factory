@@ -1874,24 +1874,50 @@ describe("runCell", () => {
     assert.doesNotMatch(first.prompt, /Your last attempt failed/, "a carry for a stage the claim didn't start at isn't used");
   });
 
-  test("a pass back to green under a restart being prepared runs its retries in the claim, since the run is still at open-pr (PBI 393)", async () => {
-    // The run's next stage stays open-pr while green's back-pass runs, and the next claim reads a carry only from the
-    // next stage's last attempt. Ending the claim at green's failed attempt would lose its tries and findings.
+  test("a pass back to green under a restart being prepared ends the claim at its failed attempt, and the next claim at open-pr spends green's carry (PBI 393)", async () => {
+    // The run's next stage stays open-pr while green's back-pass runs. Its failed report carries green's tries and
+    // findings, and the next claim goes back to green through failedCiHeads and picks them up.
     let on = false;
-    let greens = 0;
     const h = harness({
       nextStage: "open-pr",
       lease: async () => ({ stop: false, restarting: on }),
-      script: (a, stage) => { if (stage === "green") { on = true; writeFileSync(join(a.cwd, "app.txt"), `fix ${++greens}\n`); } },
+      script: (a, stage) => { if (stage === "green") { on = true; writeFileSync(join(a.cwd, "app.txt"), `fix ${Math.random()}\n`); } },
     });
     h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
-    const flag = join(h.root, "green-once");
-    h.deps.config.commands.test = `test -f '${flag}' || { touch '${flag}'; echo 'not ok 1 - totals include VAT'; exit 1; }`;
+    h.deps.config.commands.test = "echo 'not ok 1 - totals include VAT'; exit 1";
     assert.equal(await h.run(), "restarting");
-    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"], [2, "started"], [2, "passed"]]);
-    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.retryCarry), "a back-pass attempt hands no carry");
-    const retry = h.agentCalls.filter((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))[1]!;
-    assert.match(retry.prompt, /totals include VAT/);
+    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.ok(failed.body.retryCarry.findings.some((f: string) => f.includes("totals include VAT")));
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+
+    const ciFailure = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!.body.ciFailure;
+    on = false;
+    // A new claim clones the branch as pushed: the failed green attempt's commit was never pushed.
+    git(h.dir, "fetch", "-q", "origin");
+    git(h.dir, "reset", "-q", "--hard", `origin/${BRANCH}`);
+    assert.equal(git(h.dir, "rev-parse", "HEAD"), ciFailure.sha);
+    const mark = h.calls.length;
+    const agents = h.agentCalls.length;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", failedCiHeads: [ciFailure], stageAttempts: { "open-pr": 1, green: 1 },
+      retry: { stageId: "green", ...failed.body.retryCarry } };
+    h.deps.config.commands.test = "true";
+    await h.run();
+    const started = h.calls.slice(mark).filter((c) => c.route === "/stage" && c.body.status === "started");
+    assert.deepEqual([started[0]!.body.stageId, started[0]!.body.attempt], ["green", 2]);
+    const brief = h.agentCalls.slice(agents).find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(brief.prompt, /## Your last attempt failed[\s\S]*totals include VAT/);
+    assert.doesNotMatch(brief.prompt, /Carry on from the earlier work/);
+  });
+
+  test("a claim at open-pr whose head isn't one CI failed on runs open-pr and drops green's carry (PBI 393)", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "green", tried: 2, findings: ["old"] } } });
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    await h.run();
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "green"));
+    assert.equal(h.started()[0], "open-pr");
   });
 
   test("a restart prepared during green's push still ends the cell at the boundary", async () => {
