@@ -475,6 +475,61 @@ describe("githubRepoHost", () => {
     assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
   });
 
+  test("rerunChecksOnSha re-runs the failed jobs of each workflow run once, re-requests another app's check, and leaves the rest (PBI 233)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") => ({ id, name, status: "completed", conclusion, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}": () => ({ run_id: 77 }),
+      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs": () => ({}),
+      "POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest": () => ({}),
+    });
+    assert.deepEqual(await host.rerunChecksOnSha!("o/r", "abc", ["ci", "e2e", "other"]), { rerun: ["other", "ci", "e2e"], refused: [] });
+    // "ci" and "e2e" share workflow run 77: one re-run of its failed jobs, not a job re-run each that GitHub would refuse.
+    assert.deepEqual(calls.filter((c) => c.route.startsWith("POST")).map((c) => [c.route, c.params.run_id ?? c.params.check_run_id]), [
+      ["POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", 4],
+      ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", 77],
+    ]);
+    assert.ok(!calls.some((c) => c.route.endsWith("/jobs/{job_id}/rerun")));
+  });
+
+  test("rerunChecksOnSha answers a partial re-run with the checks refused, and rejects only when none was re-run (PBI 233)", async () => {
+    const run = (id: number, name: string, slug = "github-actions") => ({ id, name, status: "completed", conclusion: "failure", app: { slug } });
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [run(2, "ci"), run(3, "e2e"), run(4, "other", "circleci")] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}": (p) => ({ run_id: p.job_id === 2 ? 77 : 78 }),
+      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs": (p) => {
+        if (p.run_id === 78) throw Object.assign(new Error("This workflow run is not retryable"), { status: 403 });
+        return {};
+      },
+      "POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest": () => { throw new Error("Not Found"); },
+    });
+    assert.deepEqual(await host.rerunChecksOnSha!("o/r", "abc", ["ci", "e2e", "other"]), {
+      rerun: ["ci"],
+      refused: [{ check: "other", reason: "Not Found" }, { check: "e2e", reason: "This workflow run is not retryable" }],
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["e2e", "other"]), /e2e: This workflow run is not retryable/);
+  });
+
+  test("rerunChecksOnSha refuses a check that didn't fail on the sha, and re-runs nothing (PBI 233)", async () => {
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { id: 1, name: "lint", status: "completed", conclusion: "success" }, { id: 2, name: "ci", status: "completed", conclusion: "failure" },
+      ] }),
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["ci", "lint"]), /no failed check named lint/);
+    assert.ok(!calls.some((c) => c.route.startsWith("POST")));
+  });
+
+  test("fakeRepoHost re-runs only checks that failed on the sha, and records each re-run", async () => {
+    const fake = fakeRepoHost();
+    fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "failure", url: "u" }, { name: "lint", conclusion: "success", url: "v" }]);
+    assert.deepEqual(await fake.rerunChecksOnSha!("o/r", "abc", ["ci"]), { rerun: ["ci"], refused: [] });
+    await assert.rejects(fake.rerunChecksOnSha!("o/r", "abc", ["lint"]));
+    assert.deepEqual(fake.reruns, [{ key: "o/r@abc", checks: ["ci"] }]);
+  });
+
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {
     const fake = fakeRepoHost();
     fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "success", url: "u" }]);

@@ -11,10 +11,13 @@
 //   *    /bff/v1/*       needs a live session, or gets 401. The BFF refreshes an access token that expires within 60
 //                        seconds, then forwards the call one for one to the API's /v1/*, with the session's access token
 //                        as a bearer token and none of the browser's cookies or credentials.
+// And step 8a (§04 and §10):
+//   GET  everything else the SPA's built files from spaDir, or its page for a deep link (src/bff/spa.ts).
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ResponseBodyError } from "openid-client";
 import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
+import { serveSpa } from "./spa.ts";
 import {
   hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type Session, type SessionStore,
 } from "./session.ts";
@@ -51,6 +54,8 @@ export type BffConfig = {
   /** The API's base address, with no path. Without it /bff/v1/* answers 502. */
   apiUrl?: string;
   fetch?: typeof fetch;
+  /** Where `npm run build` writes the SPA, web/dist. Without it the BFF serves no SPA. */
+  spaDir?: string;
 };
 
 type SignIn = SignInChecks;
@@ -236,6 +241,9 @@ export function createBff(cfg: BffConfig): Hono {
     if (!who) return c.json({ error: "not signed in" }, 401);
     return c.json({ issuer: who.issuer, subject: who.subject });
   });
+
+  // Last, so the routes above keep their addresses.
+  if (cfg.spaDir) app.get("*", serveSpa(cfg.spaDir));
 
   return app;
 }

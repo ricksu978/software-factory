@@ -5,8 +5,10 @@
 // BFF_ORIGIN, the address the browser reaches it on, and API_URL, the API's base address. It refuses to start without a
 // usable BFF_SESSION_KEY.
 // Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, GET /auth/session, and, since step 7b, /bff/v1/*,
-// which it forwards to the API's /v1/* (src/bff/app.ts). The webhook pass-through comes in a later step.
+// which it forwards to the API's /v1/* (src/bff/app.ts). Since step 8a it serves the SPA that `npm run build` writes to
+// web/dist on every other GET (src/bff/spa.ts). The webhook pass-through comes in a later step.
 import { serve } from "@hono/node-server";
+import { join } from "node:path";
 import { createBff } from "./app.ts";
 import { pgSessions, rolePool } from "./session.ts";
 import { readSettings, type BffSettings } from "./settings.ts";
@@ -35,6 +37,7 @@ const app = createBff({
   key: settings.key,
   sessions: pgSessions(pool),
   apiUrl: settings.apiUrl,
+  spaDir: join(import.meta.dirname, "..", "..", "web", "dist"),
 });
 
 const server = serve({ fetch: app.fetch, port: settings.port }, (info) => {

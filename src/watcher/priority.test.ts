@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { FactoryItem } from "../adapters/types.ts";
-import { boardPriority, readinessItemHash } from "./poller.ts";
+import { boardPriority, carriesBug, readinessItemHash } from "./poller.ts";
 
 describe("boardPriority", () => {
   test("a whole number from 1 to 5 is the priority", () => {
@@ -14,6 +14,18 @@ describe("boardPriority", () => {
     for (const raw of ["", "0", "6", "-1", "2.5", "high", "P1", "10"]) assert.equal(boardPriority({ Priority: raw }), 3, raw);
     assert.equal(boardPriority({}), 3);
     assert.equal(boardPriority({ Size: "1" }), 3);
+  });
+});
+
+describe("carriesBug", () => {
+  // PBI 378: only the board's "bug" label counts, in any case, and no other label does.
+  test("an item with the bug label carries it", () => {
+    assert.equal(carriesBug(["factory", "bug"]), true);
+    assert.equal(carriesBug(["Bug"]), true);
+  });
+
+  test("an item without it doesn't", () => {
+    for (const labels of [[], ["factory"], ["enhancement"], ["bugfix"], ["not a bug"]]) assert.equal(carriesBug(labels), false, labels.join(","));
   });
 });
 
