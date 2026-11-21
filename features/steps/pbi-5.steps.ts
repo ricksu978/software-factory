@@ -1,7 +1,7 @@
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
@@ -88,6 +88,9 @@ Given("a scratch project with the repo's package.json, its installed packages an
   c.cleanup.push(dir);
   copyFileSync(join(repo, "package.json"), join(dir, "package.json"));
   symlinkSync(join(repo, "node_modules"), join(dir, "node_modules"), "junction");
+  // The package's scripts run from scripts/ with their logic in src/, as `npm run bdd` does since PBI 390.
+  cpSync(join(repo, "scripts"), join(dir, "scripts"), { recursive: true });
+  symlinkSync(join(repo, "src"), join(dir, "src"), "junction");
   mkdirSync(join(dir, "features", "steps"), { recursive: true });
   writeFileSync(join(dir, "features", "scratch.feature"), "Feature: Scratch\n  Scenario: Passes\n    Given nothing\n");
   writeFileSync(join(dir, "features", "steps", "scratch.steps.ts"), 'import { Given } from "@cucumber/cucumber";\nGiven("nothing", () => {});\n');

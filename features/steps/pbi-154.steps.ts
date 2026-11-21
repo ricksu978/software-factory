@@ -30,6 +30,8 @@ type Ctx = {
   received: { ext: string; path: string; at: number }[];
   sent: Sent[];
   forwardedAt?: number;
+  /** When, on the fake clock, the upstream drops each item's request. */
+  drops: { ext: string; at: number }[];
 };
 
 const HEADER = "x-pbi-154-item";
@@ -56,6 +58,7 @@ function serve(world: object, req: IncomingMessage, res: ServerResponse): void {
     const b = behaviourFor(c, ext);
     if (b.kind === "never") return;
     if (b.kind === "drop") {
+      c.drops.push({ ext, at: clock.now() + b.afterMs });
       clock.setTimeout(() => req.socket.destroy(), b.afterMs);
       return;
     }
@@ -86,7 +89,7 @@ Before({ tags: "@pbi-154", ...long }, async function () {
   const upstream = createServer((req, res) => serve(this, req, res));
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", () => resolve()));
   const url = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
-  (this as { pbi154?: Ctx }).pbi154 = { upstream, url, behaviours: new Map(), fallback: { kind: "never" }, received: [], sent: [] };
+  (this as { pbi154?: Ctx }).pbi154 = { upstream, url, behaviours: new Map(), fallback: { kind: "never" }, received: [], sent: [], drops: [] };
   // The cell API, which PBI 134's steps start with the first run, sends model requests here.
   ctx134(this).upstream = url;
 });
@@ -201,6 +204,15 @@ When(/^(\d+) (seconds?|minutes?) pass after the gateway forwards (?:it|them)$/, 
   assert.ok(c.forwardedAt !== undefined, "the gateway forwarded nothing");
   const target = c.forwardedAt + ms(Number(n), unit);
   assert.ok(target >= clock.now(), `the clock is already past ${n} ${unit} after the forward`);
+  // A drop reaches the gateway through the network in real time, so the clock stops at each one until the cell's
+  // request has ended, and no later timer, such as the gateway's slow check, fires before the gateway saw it. On a
+  // busy machine, with the suite's parallel workers (PBI 390), the drop could otherwise land after that check.
+  for (const drop of c.drops.filter((d) => d.at > clock.now() && d.at <= target).sort((a, b) => a.at - b.at)) {
+    await clock.advance(drop.at - clock.now());
+    const sent = c.sent.filter((x) => x.ext === drop.ext);
+    const until = Date.now() + 10_000;
+    while (sent.some((x) => !x.done) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   await clock.advance(target - clock.now());
   assert.equal(clock.now(), target, `the clock is at ${clock.now()} ms, not ${target}`);
   assert.equal(clock.overdue(), 0, "a timer due by now is still pending");

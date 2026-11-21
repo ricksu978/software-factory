@@ -2,7 +2,7 @@
 // pointer names, and reports every stage, verdict and state move to the control plane through the cell API.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -53,13 +53,27 @@ export type CellContext = {
    * attempt pushed (PBI 140). Absent or null when the stage starts fresh.
    */
   resume?: { stageId: string; attempt: number } | null;
+  /**
+   * PBI 393: the run's next stage's last attempt failed while the factory drained or a restart was being prepared, with
+   * retries left, so its cell ended the claim at that attempt boundary. `tried` is how many of the stage's tries it had
+   * spent, and `findings` are that attempt's, for the next attempt's brief. A pass back to green from open-pr, pr-review
+   * or address runs while the run is still at that stage, so its carry names green while `nextStage` names that stage.
+   * Absent or null otherwise.
+   */
+  retry?: RetryCarry | null;
 };
+
+/** What a stage's tries carry from one claim to the next when a cell ends its claim at an attempt boundary (PBI 393). */
+export type RetryCarry = { stageId: string; tried: number; findings: string[] };
 
 /** What a stage attempt is recorded under: an SOP stage, or the merge pass that opens a claim. */
 type Recorded = StageId | "merge";
 
 export type Policies = { scenarios: Policy; prReview: Policy; risk: Policy; dod: Policy };
-/** `restarting`: the cell finished its stage while a restart was being prepared and ended its claim there (PBI 301). */
+/**
+ * `restarting`: the cell finished its stage while a restart was being prepared or the factory drained and ended its claim
+ * there (PBI 301, PBI 379), or ended it after a failed attempt with retries left, at that attempt boundary (PBI 393).
+ */
 export type Outcome = "done" | "waiting" | "failed" | "stopped" | "limited" | "restarting";
 
 export type CellDeps = {
@@ -473,16 +487,123 @@ function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | null 
 }
 
 /**
+ * A Green gate run that passed (PBI 389): `bdd.run`, `commands.test` and `commands.lint` all passed at `sha`, and the
+ * report held `passed` scenarios that passed and `failed` that didn't.
+ */
+export type GateRun = { sha: string; commands: string[]; passed: number; failed: number };
+
+const squash = (cmd: string) => cmd.trim().replace(/\s+/g, " ");
+
+/**
+ * Splits `command` at each `&&` outside quotes. Null when anything else joins or wraps its parts: a pipe, `||`, `;`, a
+ * lone `&`, a newline, parentheses or a command substitution, since the parts then don't simply run one after another.
+ */
+function andParts(command: string): string[] | null {
+  const parts: string[] = [];
+  let cur = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") { cur += ch; if (ch === "'") quote = null; continue; }
+    if (ch === "\\") { cur += ch + (command[i + 1] ?? ""); i++; continue; }
+    if (ch === "`" || (ch === "$" && command[i + 1] === "(")) return null;
+    if (quote === '"') { cur += ch; if (ch === '"') quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === "&" && command[i + 1] === "&") { parts.push(cur); cur = ""; i++; continue; }
+    if ("|;&()\n".includes(ch)) return null;
+    cur += ch;
+  }
+  if (quote) return null;
+  parts.push(cur);
+  return parts.map(squash).some((p) => p === "") ? null : parts.map(squash);
+}
+
+/**
+ * A part that changes the shell's state for the parts after it: its directory (`cd web`), its variables (`export X=1`,
+ * `FOO=1`), its options or the files it sources. A gate command after one of these doesn't run as the gate ran it.
+ */
+const STATEFUL = /^(?:(?:cd|pushd|popd|export|unset|source|\.|set|shopt|alias|umask|declare|typeset|readonly|local|eval|exec)(?:\s|$)|[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=)/;
+
+/**
+ * Which parts of a `run:` command Green's gate commands cover (PBI 389). A command identical to a gate command is
+ * covered whole. Otherwise one made only of parts joined with `&&` is split, and `rest` holds the parts still to run.
+ * Null when no part is covered, the parts are joined any other way, or a part changes the shell's state (such as
+ * `cd web && npm test`), so the command runs whole as before.
+ */
+export function gateCover(command: string, gateCommands: string[]): { covered: string[]; rest: string[] } | null {
+  const gate = new Set(gateCommands.map(squash));
+  const whole = squash(command);
+  if (gate.has(whole)) return { covered: [whole], rest: [] };
+  const parts = andParts(command);
+  if (!parts || parts.some((p) => STATEFUL.test(p))) return null;
+  const covered = [...new Set(parts.filter((p) => gate.has(p)))];
+  return covered.length ? { covered, rest: parts.filter((p) => !gate.has(p)) } : null;
+}
+
+/** Whether an `&&` part the gate didn't run comes before one it did, so it could change what the gate command reads. */
+function uncoveredFirst(command: string, gateCommands: string[]): boolean {
+  const gate = new Set(gateCommands.map(squash));
+  const parts = andParts(command) ?? [];
+  const first = parts.findIndex((p) => !gate.has(p));
+  return first >= 0 && parts.some((p, i) => i > first && gate.has(p));
+}
+
+/**
+ * Each file and folder under `dir`, outside `.git`, with its size, inode and change times, so a rewrite of a file
+ * that was already there shows as a change, as a rebuild under an existing ignored `dist/` does. `git status` shows
+ * such a folder as one line and never a file's contents, so it can't tell. Null when the tree can't be read.
+ */
+async function fileStamps(dir: string): Promise<string | null> {
+  const out: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    const entries = await readdir(join(dir, rel), { withFileTypes: true });
+    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (path === ".git") continue;
+      const st = await lstat(join(dir, path), { bigint: true });
+      out.push(`${path}\0${st.mode}\0${st.ino}\0${st.size}\0${st.mtimeNs}\0${st.ctimeNs}`);
+      if (e.isDirectory()) await walk(path);
+    }
+  };
+  try { await walk(""); } catch { return null; }
+  return out.join("\n");
+}
+
+/** What a line's reason says of the gate's run that stood in for its covered parts. */
+const gateReason = (g: GateRun, covered: string[]) =>
+  `Green's gate passed ${covered.map((c) => `\`${c}\``).join(" and ")} at ${g.sha.slice(0, 7)} with ${g.passed} scenarios passed and ${g.failed} failed.`;
+
+/**
+ * The self-reviewer's note on Green's gate run (PBI 389): where the full suite passed, so the reviewer runs none, and how
+ * to run a single scenario with the repo's `bdd.run` and a further tag filter. Empty with no gate run in this claim.
+ */
+export function gateNote(g: GateRun | null, tag: string): string {
+  if (!g) return "";
+  const [bddRun, test, lint] = g.commands;
+  const short = g.sha.slice(0, 7);
+  return [
+    "## Green's gate",
+    `The full suite passed in Green's gate at ${short}: \`${bddRun}\` reported ${g.passed} scenarios passed and ${g.failed} failed, and \`${test}\` and \`${lint}\` passed there too.`,
+    "Don't run the full suite. A fix commit gets the Definition of Done check before the PR opens, and CI runs the full suite again on the PR's head.",
+    `To check a finding, run a single scenario with the repo's tag filter added to its bdd.run, such as \`${bddRun} --tags "${tag} and @ac-1"\`.`,
+    "You may also run single test files to check a finding.",
+  ].join("\n\n");
+}
+
+/**
  * Checks the Definition of Done at `head` (Run contract 11): a line whose `ci:` check passed or failed on `head` takes
  * that check's verdict, each other `run:` line's command runs in the checkout, the rest go to `judge`, and the
  * verdicts are stored with the commit they checked (PBI 229). `ciChecks` reads the checks CI reported on a commit, or
  * is null when there's no PR, and gives null when CI hasn't reported on that commit. The findings are one per failed
  * line, then one per named check CI reported no run of on `head`, whose line fell back to its command. Those are
  * `missing` as well, since a missing check alone fails nothing: the caller fails the stage on the failed lines.
+ * PBI 389: when `gate` passed at `head`, a `run:` line its commands cover isn't run again. Only the parts it didn't
+ * cover run, and the line's reason names the gate's run. A gate run at any other commit stands in for nothing.
  */
 export async function checkDefinitionOfDone(d: {
   dir: string; head: string; dod: Policy;
   ciChecks: ((sha: string) => Promise<CiCheck[] | null>) | null;
+  gate?: GateRun | null;
   judge: (judged: Criterion[]) => Promise<Verdict[]>;
   store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
   /** PBI 215: called when a run: line's command fails. A string it returns goes before the line's reason. */
@@ -505,13 +626,34 @@ export async function checkDefinitionOfDone(d: {
       rest.push(c);
     }
   }
+  const gate = d.gate && d.gate.sha === head ? d.gate : null;
   for (const c of rest.filter((x) => x.run)) {
-    const r = await sh(c.run!, dir);
+    let cover = gate ? gateCover(c.run!, gate.commands) : null;
+    if (cover && !cover.rest.length) {
+      verdicts.push({ index: c.index, criterion: c.text, status: "passed", reason: gateReason(gate!, cover.covered) });
+      continue;
+    }
+    let command = cover ? cover.rest.join(" && ") : c.run!;
+    // A part before a covered one can write files the gate command after it reads, as a build does before the tests.
+    // When the parts run created, removed or rewrote any file in the checkout, ignored ones included, or that can't be
+    // told, the gate's run didn't see what the line asks for, so the line runs whole as before.
+    const first = cover && uncoveredFirst(c.run!, gate!.commands);
+    const before = first ? await fileStamps(dir) : null;
+    let r = await sh(command, dir);
+    if (first && r.code === 0) {
+      const after = await fileStamps(dir);
+      if (before === null || after === null || before !== after) {
+        command = c.run!;
+        cover = null;
+        r = await sh(command, dir);
+      }
+    }
     let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
     if (r.code !== 0 && d.onRunFailed) {
-      const prefix = await d.onRunFailed(c, r);
+      const prefix = await d.onRunFailed({ ...c, run: command }, r);
       if (prefix) reason = `${prefix}: ${reason}`;
     }
+    if (cover) reason = r.code === 0 ? `${gateReason(gate!, cover.covered)} \`${command}\` exited 0.` : `${reason}\n${gateReason(gate!, cover.covered)}`;
     verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
   }
   const judged = rest.filter((x) => !x.run);
@@ -581,8 +723,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     /** PBI 315: the CI failure this attempt found, on its failed report, so a later claim of the run knows the head
      *  failed even when this claim ends before Green starts. */
     ciFailure?: CiFailure;
+    /** PBI 393: the tries and findings this failed attempt hands the next claim, when it ends the claim. */
+    retryCarry?: { tried: number; findings: string[] };
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
+  // The last Green gate run that passed in this claim (PBI 389). A later claim has none, so its checks run as before.
+  let gateRun: GateRun | null = null;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
   // attempt rows and blobs, never over an earlier one's.
@@ -665,6 +811,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       ...(c.restates?.length ? { restates: c.restates } : {}),
       ...(c.ciFailure ? { ciFailure: c.ciFailure } : {}),
+      ...(status === "failed" && c.retryCarry ? { retryCarry: c.retryCarry } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
@@ -737,12 +884,45 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     ? `## Carry on from the earlier work\n\nAn earlier attempt at this stage was stopped before it finished, so the factory could restart. Its work in progress is already on the branch, in the commits since \`origin/${ctx.base}\`, the last one of which may be \`work in progress, stopped\`. Read it and carry on from it instead of starting over. Don't reset or discard it.`
     : "";
 
+  // PBI 393: the tries and findings an earlier claim's attempt boundary left the claim's first stage. They're taken
+  // once, so a later pass at the same stage in this claim, such as back to green, doesn't spend them again. A claim at
+  // open-pr, pr-review or address may carry green's, from a pass back to green that ended at its attempt boundary: the
+  // claim goes back to green, through failedCiHeads or, when the pass came from stale Definition of Done verdicts or a
+  // moved head, on the carry itself, and that pass spends them.
+  const backStage = ["open-pr", "pr-review", "address"].includes(ctx.nextStage);
+  let carry = ctx.retry && (ctx.retry.stageId === ctx.nextStage || (ctx.retry.stageId === "green" && backStage)) ? ctx.retry : null;
+  const carriedOver = (stageId: StageId): { spent: number; findings: string[] } => {
+    const c = carry?.stageId === stageId ? carry : null;
+    // Address runs before the pass back to green it may lead to, so it leaves green's carry for that pass.
+    if (c || !(stageId === "address" && carry?.stageId === "green")) carry = null;
+    return c ? { spent: c.tried, findings: c.findings } : { spent: 0, findings: [] };
+  };
+  // PBI 393: after a failed attempt with retries left, the lease is checked afresh. Under a drain or a restart being
+  // prepared the cell starts no further attempt. A stop is left to the renewal's handling, as mid-attempt.
+  const endsAtAttempt = async () => {
+    const r = await api.lease();
+    restarting = r.restarting === true;
+    if (r.stop) abort.abort(new Stop("stopped by the control plane"));
+    return restarting && !r.stop;
+  };
+
   // Runs a stage until an attempt has no findings or its retries run out. Returns the last findings, empty on a pass.
-  const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>) => {
-    let findings: string[] = [];
-    for (let i = 0; i < tries; i++) {
+  // `from` is the tries already spent and the last findings, as a claim after an attempt boundary carries them over.
+  // Under a drain or a restart being prepared, a failed attempt with retries left ends the claim there (PBI 393): it's
+  // reported failed, with the tries spent and its findings, and the next claim runs the stage's next attempt. That holds
+  // for a pass back to green from open-pr, pr-review or address too: the run stays at that stage, and `/context` hands
+  // the next claim green's carry when green's failed attempt is the run's last.
+  const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>,
+    from = carriedOver(stageId)) => {
+    let findings = from.findings;
+    for (let i = from.spent; i < tries; i++) {
       findings = await body(await begin(stageId), findings);
       if (findings.length === 0) return [];
+      if (i + 1 < tries && (await endsAtAttempt())) {
+        if (current) current.retryCarry = { tried: i + 1, findings };
+        await end("failed");
+        throw new Restarting("the factory drains or a restart is being prepared, so the stage's next attempt waits for the next claim");
+      }
       await end("failed");
     }
     return findings;
@@ -780,7 +960,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let baseSha = "";
     const ciChecks = (ctx.prNumber !== null || opened !== null) && api.ciChecks ? api.ciChecks.bind(api) : null;
     const { verdicts, missing, checkedSha } = await checkDefinitionOfDone({
-      dir, head: await git.head(), dod, ciChecks,
+      dir, head: await git.head(), dod, ciChecks, gate: gateRun,
       judge: async (judged) => {
         const r = await ask(stageId, brief(
           "# Definition of Done",
@@ -1068,26 +1248,37 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // unchanged gives CI nothing new to judge, so it gives up and asks a person instead of failing the item.
     const fix = toFix;
     toFix = null;
+    const from = carriedOver("green");
+    if (from.spent) { greenTries = Math.max(greenTries, from.spent); carried = from.findings; }
     if (greenTries >= max) throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
     fixing = fix;
-    const findings = await attempts("green", max - greenTries, async (attempt, last) => {
+    const findings = await attempts("green", max, async (attempt, last) => {
       greenTries++;
       await say("green", brief(await promptOf("green"), item(), lockedNote(), dodText, resumed("green"), retryNote(last.length ? last : carried)));
       const undone = await keepLock("green", `green(${tag}): implementation`);
       if (undone.length) return undone;
       if (fix && (await git.head()) === fix.sha) throw new Blocked(ciQuestion(ciFailures));
+      gateRun = null;
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(greenResults, run.report);
-      const out = greenGate(classify(run.report)).findings;
+      const classified = classify(run.report);
+      const out = greenGate(classified).findings;
       for (const k of ["test", "lint"] as const) {
         const r = await sh(config.commands[k], dir);
         if (r.code !== 0) out.push(`commands.${k} exited ${r.code}: ${r.out.trim()}`);
       }
       if (out.length) return out;
+      // PBI 389: the gate passed here, so the DoD check and self-review's brief take its run instead of the suite again.
+      // The gate reads bdd.run's report, not its exit, so a bdd.run that exited non-zero stands in for nothing.
+      const results = [...classified.values()];
+      if (run.code === 0) gateRun = {
+        sha: await git.head(), commands: [config.bdd.run, config.commands.test, config.commands.lint],
+        passed: results.filter((x) => x.verdict === "green").length, failed: results.filter((x) => x.verdict !== "green").length,
+      };
       const dod = dodFindings(await checkDod("green", attempt));
       return dod.length ? dod : dodHeadHeld();
-    });
+    }, { spent: greenTries, findings: [] });
     fixing = null;
     if (findings.length) throw new Exhausted(`Green failed after ${max} attempts:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
@@ -1121,7 +1312,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const undoneNote = () => undone.length ? `## Edits the factory undid\n\n${undone.map((u) => `- ${u}`).join("\n")}` : "";
     for (let round = 1; round <= rounds; round++) {
       reviewRounds++;
-      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, locked, rubric, resumed("self-review"), undoneNote(), history), "factory-self-reviewer");
+      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, gateNote(gateRun, tag), locked, rubric, resumed("self-review"), undoneNote(), history), "factory-self-reviewer");
       const verdicts = parseJudgement(r.text, pr);
       await api.policyResults({ file: "pr-review", source: pr.source, stageId: "self-review", attempt: reviewRounds, checkedSha: await git.head(), verdicts });
       const last = lastLine(r.text);
@@ -1203,6 +1394,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
     const known = failedHeads.get(await git.head());
     if (known) return backToGreen(known);
+    // PBI 393: green's carry means the run's last attempt was a pass back to green that ended at its attempt boundary.
+    // That pass may have come from stale Definition of Done verdicts or a moved head, which leave no head CI failed on,
+    // so the claim goes back to green on the carry itself, and green spends its tries and findings.
+    if (carry?.stageId === "green") return carry.findings;
+    // Open-pr's own carry, from an earlier claim that ended at its attempt boundary (PBI 393), seeds its tries and findings.
+    const from = carriedOver("open-pr");
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
@@ -1216,7 +1413,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // `## Problem` heading fails the attempt, and the next one is told to reply with the body alone.
     const tries = retriesOf("open-pr") + 1;
     let text = "";
-    for (let tried = 1, last: string[] = []; ; tried++) {
+    for (let tried = from.spent + 1, last: string[] = from.findings; ; tried++) {
       const reply = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`, lockedNote(), retryNote(last)));
       await keepLock("open-pr", `open-pr(${tag}): summary`);
       const clean = summaryOf(reply);
@@ -1224,6 +1421,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (current) current.message = clean.finding;
       if (tried >= tries) throw new Blocked(`Open-pr failed after ${tries} attempt${tries === 1 ? "" : "s"}:\n- ${clean.finding}`);
       last = [clean.finding];
+      // PBI 393: under a drain or a restart being prepared, open-pr's next try waits for the next claim too.
+      if (await endsAtAttempt()) {
+        if (current) current.retryCarry = { tried, findings: last };
+        await end("failed");
+        throw new Restarting("the factory drains or a restart is being prepared, so the stage's next attempt waits for the next claim");
+      }
       await end("failed");
       attempt = await begin("open-pr");
     }
