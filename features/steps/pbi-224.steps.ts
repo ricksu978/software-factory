@@ -182,7 +182,11 @@ Given("a repo {string} on a board whose opt-in label is {string}", long, async f
 
 async function issue(world: object, title: string, repo: string, criteria: string[]): Promise<void> {
   const c = ctx(world);
+  assert.equal(repo, c.repo, `the issue's repo "${repo}" isn't the repo that was set up`);
   const id = await c.board.seed({ title, repo, acceptanceCriteria: criteria, labels: [OPT_IN_LABEL] });
+  const seeded = await c.board.adapter.getItem(id);
+  assert.ok(seeded, `the board doesn't read back the issue "${title}" it was seeded with`);
+  assert.deepEqual(seeded.acceptanceCriteria, criteria, `the board reads back "${title}" with other acceptance criteria`);
   c.issues.set(title, id);
 }
 
@@ -241,18 +245,41 @@ Given("{string} at commit {string} in {string} now reads differently", function 
   hold(c, path, sha, `${heldText(c, path, sha)}\n# Edited after the fact.\n`);
 });
 
-Given("the repo stops answering every read", function () {
-  ctx(this).down = true;
+/** Every file the repo holds, as `{ sha, path }`. */
+function heldFiles(c: Ctx): { sha: string; path: string }[] {
+  const prefix = `${c.repo}@`;
+  return [...c.files.files.keys()].filter((k) => k.startsWith(prefix)).map((k) => {
+    const rest = k.slice(prefix.length);
+    const at = rest.indexOf(":");
+    return { sha: rest.slice(0, at), path: rest.slice(at + 1) };
+  });
+}
+
+Given("the repo stops answering every read", async function () {
+  const c = ctx(this);
+  assert.ok(c.repo, "no repo was set up");
+  c.down = true;
+  const file = heldFiles(c)[0] ?? { sha: "HEAD", path: "features/none.feature" };
+  await assert.rejects(async () => c.host.readFile(c.repo!, file.sha, file.path), "the repo still answers reads of files");
+  await assert.rejects(async () => c.backlog.getItem(c.issues.get(primary(c))!), "the board still answers reads");
 });
 
-Given("the repo refuses every read of {string}", function (path: string) {
-  ctx(this).refused.add(path);
+Given("the repo refuses every read of {string}", async function (path: string) {
+  const c = ctx(this);
+  const held = heldFiles(c).filter((f) => f.path === path);
+  assert.ok(held.length > 0, `the repo holds no ${path}, so refusing it tests nothing`);
+  c.refused.add(path);
+  for (const f of held) await assert.rejects(async () => c.host.readFile(c.repo!, f.sha, path), `the repo still answers reads of ${path} at ${f.sha}`);
 });
 
-When("the repo answers reads again", function () {
+When("the repo answers reads again", async function () {
   const c = ctx(this);
   c.down = false;
   c.refused.clear();
+  for (const f of heldFiles(c)) {
+    assert.equal(await c.host.readFile(c.repo!, f.sha, f.path), heldText(c, f.path, f.sha), `the repo doesn't answer a read of ${f.path} at ${f.sha}`);
+  }
+  assert.ok(await c.backlog.getItem(c.issues.get(primary(c))!), "the board doesn't answer reads");
 });
 
 // ---- the factory's items, runs and cells ----
