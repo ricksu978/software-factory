@@ -4,6 +4,7 @@ Feature: Cells reach only the cell API, and the cell API takes only a run's toke
   Cells reach the cell API on 7401 through the egress proxy and nothing else of the factory's.
   Today's dashboard on 7400 and the API on 7402 stay out of a cell's reach.
   The worker won't set up an egress proxy that would let cells through to either port.
+  The egress proxy itself refuses both ports too, even if its allowlist were widened to name them.
   The cell API never accepts a user's sign-in token.
   It answers a request carrying one with 401, because that request isn't from a cell.
   It keeps 409 for a run token from an older generation, which tells a cell its lease has moved on.
@@ -16,12 +17,29 @@ Feature: Cells reach only the cell API, and the cell API takes only a run's toke
   Rule: A cell reaches the cell API through the egress proxy
 
     @ac-1 @local
-    Scenario: A cell container pings the cell API through the egress proxy, and the proxy refuses the dashboard
+    Scenario: A cell container pings the cell API through the egress proxy, and the proxy refuses the dashboard and the API
       Given "aspire run" is up and the image "factory-cell:local" is built
       When a "factory-cell:local" container on the cells' network posts to "/internal/cells/ping" on the cell API through the egress proxy
       Then the response status is 204
       When the same container asks today's control plane for the dashboard's home page through the egress proxy
       Then the egress proxy refuses the request with 403
+      When the same container asks the API on 7402 for the floor through the egress proxy
+      Then the egress proxy refuses the request with 403
+
+  Rule: The egress proxy refuses cells' requests to the dashboard's port and the API's port
+
+    @ac-1
+    Scenario: The egress proxy forwards a cell to the cell API and refuses the dashboard and the API, even when its allowlist names them
+      Given the dashboard answers on port 7400, the cell API on port 7401 and the API on port 7402
+      And the worker's environment points cells at "http://host.docker.internal:7401"
+      And the egress proxy runs with the allowlist the worker builds for cells, widened to name ports 7400 and 7402 as well
+      When a cell posts to "/internal/cells/ping" on port 7401 through the egress proxy
+      And the cell asks for the dashboard's home page on port 7400 through the egress proxy
+      And the cell asks for the floor on port 7402 through the egress proxy
+      Then the egress proxy forwards the cell's ping to the cell API
+      And the egress proxy refuses the request to port 7400 with 403
+      And the egress proxy refuses the request to port 7402 with 403
+      And neither the dashboard nor the API received a request
 
   Rule: The worker won't let cells through to the dashboard's port or the API's port
 
