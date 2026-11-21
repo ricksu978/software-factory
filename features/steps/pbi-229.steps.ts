@@ -23,6 +23,7 @@ import { agentOptions, type AgentArgs } from "../../src/agent/run.ts";
 import { checkDefinitionOfDone, type CiCheck } from "../../src/cell/engine.ts";
 import { loadPolicy, parseCriteria, type Policy, type Verdict } from "../../src/policy/policy.ts";
 import { pbi389 } from "./pbi-389.steps.ts";
+import { pbi399 } from "./pbi-399.steps.ts";
 
 const repo = process.cwd();
 const long = { timeout: 60_000 };
@@ -324,6 +325,7 @@ Then("the addresser the run gets is told to leave the full test suite to CI and 
 // ---- This repo's Definition of Done ----
 
 When("the factory reads this repo's {string}", async function (path: string) {
+  if (pbi399.active(this)) return pbi399.readConfig(this, path);
   const c = mine(this);
   c.policy = await loadPolicy(async (p) => (p === path && existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : null), "dod");
   assert.ok(c.policy, `this repo has no ${path}`);

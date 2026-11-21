@@ -144,6 +144,7 @@ export function judgePrompt(item: FactoryItem, dor: JudgePolicy): string {
     'Answer one JSON line per criterion, {"index":<n>,"status":"passed"|"failed","reason":"<why>"}, in index order.',
     'Then a last line {"flags":[...],"oversized":true|false}. Add a short flag for each thing the item asks for that no cell may do: credentials or secrets, changes to CI or workflows, or access outside its own repo. Leave it {"flags":[],"oversized":false} when there is none and the item fits.',
     'Set "oversized" to true when the item is too big for one Sprint, or false when it fits. Size is never a flag.',
+    'Add "rules":[...] to that last line too, naming each of the factory\'s own rules the item changes, a spec section as "§5" or a policy file by its path, such as ".factory/dor.md" or "policy/dor.md", or [] when it changes none. The item lists the rules it says it changes under "## Changes the factory\'s rules", and you name the ones it changes whether it lists them or not.',
     "Write nothing else.",
   ].join("\n");
 }
