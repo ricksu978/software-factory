@@ -2,11 +2,12 @@
 // acted on once, so a redelivery never produces a second event (spec §10).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
-import { botKey, loginKey, type ChangeCause, type FactoryWebhookEvent } from "../adapters/types.ts";
+import { botKey, loginKey, type ChangeCause, type FactoryWebhookEvent, type RepoHost } from "../adapters/types.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { IllegalTransition, transitionItem } from "../store/items.ts";
 import { CONSUMER, writeOutboxRows } from "../store/outbox.ts";
+import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
 import { logAttemptedMerge } from "./merge.ts";
 
 /** True only for `sha256=` plus the hex HMAC-SHA256 of the body. A `sha1=` header or no header is false. */
@@ -22,6 +23,11 @@ export type WebhookDeps = {
   pool: pg.Pool;
   secret: string;
   parse: (headers: Record<string, string>, body: unknown) => FactoryWebhookEvent;
+  /**
+   * PBI 235: where a `checks_completed` delivery reads the PR's head and the checks CI reported on it, so a failure on
+   * the head of an InReview item's PR sends the item back to address. Unset, such a delivery only records its event.
+   */
+  repoHost?: RepoHost;
 };
 
 /**
@@ -71,6 +77,9 @@ export async function handleWebhook(deps: WebhookDeps, req: { headers: Record<st
   // A failed move is logged, not thrown: the delivery is already recorded, so GitHub's redelivery would be dropped,
   // and the poller's next pass catches the same merge, close or review from the PR's state.
   await applyPrEvent(deps.pool, event).catch((e) => console.error(`applying ${event.kind} failed, the poller retries it:`, e));
+  if (event.kind === "checks_completed" && deps.repoHost) {
+    await applyChecksCompleted(deps.pool, deps.repoHost, event).catch((e) => console.error("applying checks_completed failed, the poller retries it:", e));
+  }
   return { status: 204 };
 }
 
@@ -122,5 +131,31 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
     }
   } catch (err) {
     if (!(err instanceof IllegalTransition)) throw err;
+  }
+}
+
+/**
+ * PBI 235: checks completed on `sha` in the repo. Each InReview item whose open run's PR in that repo has `sha` as its
+ * head, as the PR is read now, and whose CI failed there, goes back to address with the failure detail, as the poller
+ * sends it. A delivery about an older commit of the PR, one the PR has since moved past, or a commit on no PR the
+ * factory holds sends nothing back.
+ */
+async function applyChecksCompleted(pool: pg.Pool, host: RepoHost, e: Extract<FactoryWebhookEvent, { kind: "checks_completed" }>): Promise<void> {
+  // Most deliveries are for CI that passed, so one read of the commit's checks spares reading every PR's head.
+  if ((await host.checksOnSha(e.repo, e.sha)) !== "failure") return;
+  const rows = (await pool.query<{ item_id: string; run_id: string; pr_number: number }>(
+    `select i.id as item_id, r.id as run_id, r.pr_number from run r join item i on i.id = r.item_id join repo on repo.id = r.repo_id
+     where r.ended_at is null and r.pr_number is not null and i.state = 'InReview' and lower(repo.url) = lower($1)
+     order by r.pr_number`,
+    [`https://github.com/${e.repo}`],
+  )).rows;
+  // One PR that can't be read doesn't stop the others; the poller's next pass reads it again.
+  for (const row of rows) {
+    try {
+      const failed = await headCiFailure(host, e.repo, row.pr_number, { sha: e.sha }, rerunLedger(pool, row.run_id));
+      if (failed) await sendBackForCi(pool, { itemId: row.item_id, runId: row.run_id }, failed, github);
+    } catch (err) {
+      console.error(`reading CI on PR #${row.pr_number} in ${e.repo} failed, the poller retries it:`, err);
+    }
   }
 }
