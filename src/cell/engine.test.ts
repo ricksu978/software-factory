@@ -11,7 +11,7 @@ import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
 import { CI_BACK_TO_GREEN } from "../core/questions.ts";
-import { changedFiles, CI_LOGS_CHARS, ciLogs, factoryThreadsOnPr, lastFactoryRound, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { bddRunUnfinished, changedFiles, CI_LOGS_CHARS, ciLogs, factoryThreadsOnPr, lastFactoryRound, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, sh, stageMeter, stoppedFinding, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { FAILED_LOG_CHARS } from "../adapters/types.ts";
 import { shellGit } from "./git.ts";
 
@@ -192,6 +192,55 @@ describe("commandEnv", () => {
     const p = "http://factory-egress:3128", lo = "127.0.0.1,localhost";
     const proxy = { HTTPS_PROXY: p, https_proxy: p, HTTP_PROXY: p, http_proxy: p, NO_PROXY: lo, no_proxy: lo };
     assert.deepEqual(commandEnv({ PATH: "/usr/bin", ...proxy, NODE_USE_ENV_PROXY: "1" }), { CI: "true", PATH: "/usr/bin", ...proxy });
+  });
+});
+
+describe("sh's time limit (PBI 399)", () => {
+  const cwd = tmpdir();
+
+  test("a command that ends within its limit gives its exit code and output, and isn't stopped", async () => {
+    const r = await sh("echo out; echo err >&2; exit 3", cwd, 10_000);
+    assert.deepEqual(r, { code: 3, out: "out\nerr\n", all: "out\nerr\n", stopped: false });
+  });
+
+  test("a command still running at its limit is stopped, with what it printed by then", async () => {
+    const t = Date.now();
+    const r = await sh("echo working; sleep 30", cwd, 300);
+    assert.equal(r.stopped, true);
+    assert.notEqual(r.code, 0);
+    assert.equal(r.all, "working\n");
+    assert.ok(Date.now() - t < 10_000, "sh waited for the command instead of stopping it");
+  });
+
+  test("the stop reaches what the command started, so a child holding its output doesn't keep it waiting", async () => {
+    const t = Date.now();
+    const r = await sh("sh -c 'sleep 30' & sleep 30", cwd, 300);
+    assert.equal(r.stopped, true);
+    assert.ok(Date.now() - t < 10_000, "sh waited for the command's children");
+  });
+});
+
+describe("the findings for a command the cell stopped (PBI 399)", () => {
+  test("a stopped command's finding names it and the limit, and gives no exit code", () => {
+    const f = stoppedFinding("commands.test", "npm test", 15, "working...\n");
+    assert.match(f, /^the cell stopped commands\.test `npm test` at its time limit of 15 minutes: /);
+    assert.match(f, /command_timeout_minutes/);
+    assert.match(f, /The last of its output:\nworking\.\.\.$/);
+    assert.doesNotMatch(f, /exit/);
+    assert.match(stoppedFinding("commands.lint", "npm run lint", 1), /limit of 1 minute: .*within 1 minute,/);
+  });
+
+  test("bdd.run's report gives one finding when the run didn't finish, naming what was running, and none when it did", () => {
+    const msgs = (...ms: object[]) => ms.map((m) => JSON.stringify(m)).join("\n");
+    const cut = msgs({ testRunStarted: {} }, { pickle: { id: "p0", name: "Refunds show negative", tags: [], steps: [] } },
+      { testCase: { id: "c0", pickleId: "p0", testSteps: [] } }, { testCaseStarted: { id: "r0", testCaseId: "c0" } });
+    const stopped = bddRunUnfinished({ report: cut, stopped: true }, "npm run bdd", 40)!;
+    assert.match(stopped, /^the BDD run didn't finish: the cell stopped bdd\.run `npm run bdd` at its time limit of 40 minutes/);
+    assert.match(stopped, /running then was "Refunds show negative"/);
+    assert.match(bddRunUnfinished({ report: cut }, "npm run bdd", 40)!, /^the BDD run didn't finish: its report has no end of run/);
+    assert.match(bddRunUnfinished({ report: "", stopped: true }, "npm run bdd", 40)!, /No scenario was running/);
+    assert.equal(bddRunUnfinished({ report: msgs({ testRunStarted: {} }, { testRunFinished: {} }) }, "npm run bdd", 40), null);
+    assert.equal(bddRunUnfinished({ report: "" }, "npm run bdd", 40), null);
   });
 });
 

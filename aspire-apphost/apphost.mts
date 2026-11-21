@@ -203,8 +203,9 @@ if (runMode) {
     await migrate.withEnvironment('FACTORY_FLOAT_PORTS', floatPorts ? '1' : '0');
     if (floatPorts) await migrate.withReference(keycloak).waitFor(keycloak);
   }
-  // The worker signs no one in, so it needs local mode but no dev login.
-  await worker.withEnvironment('FACTORY_ENV', 'local');
+  // The worker and the cell API sign no one in, so they need local mode but no dev login. In local mode the cell API
+  // serves PBI 2's probes (redesign step 4b).
+  for (const app of [worker, cellApi]) await app.withEnvironment('FACTORY_ENV', 'local');
 }
 
 // Before any resource starts, the AppHost pulls main fast-forward-only and brings Docker up (PBI 205,

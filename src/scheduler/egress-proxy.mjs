@@ -5,7 +5,9 @@
 //   sas   plain HTTP forwarding for Azurite, only for a request that carries a SAS `sig=` and no Authorization
 //         header, so no shared-key request gets through. That does not stop a forged SAS: Azurite's default
 //         account key is public, so a steered cell can sign its own. The plan records that residual risk.
-// Everything else gets 403. Built-in modules only.
+// Everything else gets 403. So does every request, plain or CONNECT, to a port in EGRESS_REFUSED_PORTS, whatever the
+// allowlist names: unset, that is 7400 and 7402, today's dashboard and the API, which no cell may reach (redesign step
+// 4b). A test sets it to the free ports that stand for them. Built-in modules only.
 import { createServer, request } from "node:http";
 import { connect } from "node:net";
 
@@ -14,7 +16,8 @@ for (const entry of (process.env.EGRESS_ALLOW ?? "").split(",").filter(Boolean))
   const [kind, ...rest] = entry.split(":");
   rules.set(rest.join(":").toLowerCase(), kind);
 }
-const kindOf = (host, port) => rules.get(`${host.toLowerCase()}:${port}`);
+const refused = new Set((process.env.EGRESS_REFUSED_PORTS ?? "7400,7402").split(",").map((p) => p.trim()).filter(Boolean));
+const kindOf = (host, port) => (refused.has(String(port)) ? undefined : rules.get(`${host.toLowerCase()}:${port}`));
 
 const server = createServer((req, res) => {
   let url;

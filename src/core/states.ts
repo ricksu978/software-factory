@@ -9,7 +9,7 @@ export type ItemEvent =
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
-  | "returned" | "split_filed" | "children_done" | "rechecked";
+  | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -60,6 +60,14 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   // A Failed item's re-check finds today's post-merge rules no longer say its merge broke main, so it's Accepted again
   // and waits on main or goes to Done as an Accepted item does (PBI 369).
   ["Failed", "rechecked", "Accepted"],
+  // The owner's approval of an item's change to the factory's own rules is a readiness input that changed, so the item
+  // waiting for it goes back through the rest of the readiness check (PBI 395).
+  ["NotReady", "rule_change_approved", "Eligible"],
+  // A Queued or later item whose "Changes the factory's rules" section no longer reads as the owner approved it meets
+  // the readiness check again, which leaves it waiting for a new approval, so nothing built from the edit ships (PBI 395).
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map(
+    (s): [ItemState, ItemEvent, ItemState] => [s, "rules_edited", "Eligible"],
+  ),
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));

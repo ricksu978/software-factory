@@ -101,6 +101,9 @@ function same(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** A run token's shape: `runToken`'s 64 lowercase hex digits. A user's sign-in token is a JWT, which never has it. */
+const RUN_TOKEN = /^[0-9a-f]{64}$/;
+
 /** Thrown when the token is wrong or from an older generation. The route answers 409 and the transaction rolls back. */
 class Fenced extends Error {}
 
@@ -597,8 +600,9 @@ const routes: Record<string, Route> = {
 
 /**
  * The cell API's routes under /internal/cells/:runId and the model gateway under /internal/model. Mount it first, so
- * it works without a dashboard session. It reads no x-ms-client-principal header. A wrong or stale token gets 409
- * before anything else, a bad request from the current generation gets 400, and either way nothing is written.
+ * it works without a dashboard session. It reads no x-ms-client-principal header. A token that isn't a run token, a
+ * user's sign-in token or none, gets 401 before anything else. A wrong or stale run token gets 409 next, a bad request
+ * from the current generation gets 400, and either way nothing is written.
  */
 export function cellApi(deps: CellApiDeps): Handler {
   const now = deps.now ?? (() => new Date());
@@ -651,10 +655,17 @@ export function cellApi(deps: CellApiDeps): Handler {
     const name = `${req.method} /${m[2]}`;
     const w = watch(SLOW_REQUEST_MS, null, (ms) => `slow: the cell API request ${name} for run ${m[1]} has been open for ${seconds(ms)}`, deps.slow);
     return watched(w, async () => {
-      // The body is read before the token check but judged after it, so a fenced cell always gets 409, never 400.
-      const body = await readJson(req).catch((e: unknown) => e as Error);
       const auth = req.headers.authorization ?? "";
       const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+      // Only a run token gets this far. A user's sign-in token, or no token, isn't from a cell, so it gets 401 before
+      // anything is read or locked (redesign step 4b). 409 stays for a run token the run's generation has moved past.
+      if (!RUN_TOKEN.test(token)) {
+        req.resume();
+        json(res, 401, { error: "the cell API takes only a run token" });
+        return true;
+      }
+      // The body is read before the token check but judged after it, so a fenced cell always gets 409, never 400.
+      const body = await readJson(req).catch((e: unknown) => e as Error);
       try {
         const result = await withTx(deps.pool, async (c) => {
           const run = uuid.test(m[1]) ? await lockRun(c, m[1]) : null;

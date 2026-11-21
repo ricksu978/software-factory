@@ -67,6 +67,10 @@ export type Ctx = {
   afterPoll?: () => Promise<void>;
   /** PBI 255: what ran in place of a poll, such as the scheduler's claim, so a Then on the factory's state needn't follow one. */
   ranOther?: string;
+  /** PBI 395: keys the judge's last line carries beside its flags, such as the factory rules it finds the item changes. */
+  lastLine?: Record<string, unknown>;
+  /** PBI 395: more dependencies each poll hands pollOnce, such as the factory's own repo. */
+  deps?: Record<string, unknown>;
 };
 
 export function ctx(world: object): Ctx {
@@ -85,7 +89,7 @@ const judge = (c: Ctx): Judge => async (item, dor, spent) => {
     const reason = failed ? (c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
-  const last = c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized };
+  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine };
   return [...dor.criteria.map(line), JSON.stringify(last)].join("\n");
 };
 
@@ -120,7 +124,7 @@ export async function poll(c: Ctx): Promise<void> {
   await c.beforePoll?.();
   try {
     await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId,
-      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}) });
+      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}), ...c.deps });
     await c.afterPoll?.();
     c.polls++;
   } catch (e) {

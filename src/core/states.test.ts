@@ -28,6 +28,11 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Abandoned", "split_filed", "Split"],
   // PBI 369: a re-check that no longer finds the merge broke main sends the item back to Accepted.
   ["Failed", "rechecked", "Accepted"],
+  // PBI 395: the owner's approval of a rule change sends a waiting item on through the gate, and an edit to an approved
+  // section sends a Queued or later item back to it.
+  ["NotReady", "rule_change_approved", "Eligible"], ["Queued", "rules_edited", "Eligible"],
+  ["InProgress", "rules_edited", "Eligible"], ["SignOff", "rules_edited", "Eligible"],
+  ["NeedsInput", "rules_edited", "Eligible"], ["InReview", "rules_edited", "Eligible"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -46,4 +51,8 @@ test("split_filed moves only a NotReady or Abandoned item", () => {
 test("override goes anywhere", () => assert.equal(overrideTo("Done", "Queued"), "Queued"));
 test("rechecked moves only a Failed item", () => {
   for (const s of ["Accepted", "Abandoned", "Done", "Queued"] as ItemState[]) assert.equal(next(s, "rechecked"), null);
+});
+test("only a NotReady item takes a rule change approval, and only a Queued or later one a rules edit", () => {
+  for (const s of ["Eligible", "Queued", "InProgress", "Abandoned"] as ItemState[]) assert.equal(next(s, "rule_change_approved"), null);
+  for (const s of ["NotReady", "Eligible", "Accepted", "Done", "Abandoned"] as ItemState[]) assert.equal(next(s, "rules_edited"), null);
 });
