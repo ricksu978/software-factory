@@ -86,7 +86,7 @@ Feature: The BFF signs people in and keeps sessions in Postgres
       And no session exists
       And the browser holds no session cookie
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: The test owner signs in through Keycloak on 7430 and the BFF on 7403
       Given "aspire run" is up
       When a browser opens "http://localhost:7403/auth/login"

@@ -28,20 +28,20 @@ Feature: Keycloak runs locally under Aspire with the realm import
       Then it adds a Keycloak resource on port 7430
       And it hands that resource the realm import
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: aspire run brings Keycloak up on 7430 with the realm loaded
       When I start "aspire run" and wait until the Keycloak resource is healthy
       Then Keycloak answers on "http://localhost:7430"
       And the realm's OpenID discovery document on port 7430 names an issuer on port 7430
       And the discovery document has a JWKS address
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: The test owner can sign in through the e2e client
       Given "aspire run" is up
       When the e2e client asks Keycloak for a token by direct grant as the test owner
       Then Keycloak issues an access token
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: The realm import is applied again after a restart
       Given "aspire run" has run once
       When I stop "aspire run" and start it again
@@ -57,14 +57,14 @@ Feature: Keycloak runs locally under Aspire with the realm import
       And the "dashboard" client does not allow direct access grants
       And no other client in the realm import allows direct access grants
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: The dashboard client is refused a direct grant
       Given "aspire run" is up
       When the "dashboard" client asks Keycloak for a token by direct grant as the test owner
       Then Keycloak refuses the request as an unauthorized client
       And no access token is issued
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: The e2e client is refused a direct grant with a wrong password
       Given "aspire run" is up
       When the e2e client asks Keycloak for a token by direct grant as the test owner with a wrong password
@@ -79,7 +79,7 @@ Feature: Keycloak runs locally under Aspire with the realm import
       Then the AppHost sets an API_AUDIENCE value
       And the realm import's audience mapper adds that same value
 
-    @ac-3 @local
+    @ac-3 @local @serial
     Scenario: The e2e client's token is a JWT whose audience holds API_AUDIENCE
       Given "aspire run" is up
       When the e2e client asks Keycloak for a token by direct grant as the test owner
@@ -96,7 +96,7 @@ Feature: Keycloak runs locally under Aspire with the realm import
       Then the "dashboard" client accepts redirects to "http://localhost:7403"
       And the "dashboard" client accepts redirects to "http://localhost:7400"
 
-    @ac-4 @local
+    @ac-4 @local @serial
     Scenario Outline: Keycloak starts sign-in for the dashboard client on port <port>
       Given "aspire run" is up
       When a browser starts sign-in for the "dashboard" client with a redirect back to "http://localhost:<port>"
@@ -107,7 +107,7 @@ Feature: Keycloak runs locally under Aspire with the realm import
         | 7403 |
         | 7400 |
 
-    @ac-4 @local
+    @ac-4 @local @serial
     Scenario: Keycloak refuses a dashboard redirect to a port it doesn't know
       Given "aspire run" is up
       When a browser starts sign-in for the "dashboard" client with a redirect back to "http://localhost:7499"

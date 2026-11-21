@@ -120,7 +120,7 @@ Feature: The worker records a heartbeat each tick, and aspire run starts it afte
 
   Rule: Under aspire run, the worker starts after migrate, serves no port, and starts cells
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: aspire run starts the worker after migrate, with no port, and its heartbeat moves
       # The worker starts the egress proxy from the cell image, so the image comes first.
       Given the image "factory-cell:local" is built
@@ -131,7 +131,7 @@ Feature: The worker records a heartbeat each tick, and aspire run starts it afte
       And the factory database's worker heartbeat is less than 30 seconds old
       And a minute later the worker heartbeat is still less than 30 seconds old
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: Under aspire run, a queued factory item still starts a cell, and the heartbeat moves with the ticks
       Given the image "factory-cell:local" is built
       And "aspire run" is running and the worker resource's console shows its first scheduler tick

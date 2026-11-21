@@ -6,6 +6,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { freePort } from "../../src/bdd/ports.ts";
 
 // Steps record and Thens assert. The gateway module loads lazily, so while it doesn't exist every scenario fails
 // on its Then. The @local cells start from cellModelEnv, the function Task 13's launcher will use, so a cell
@@ -126,21 +127,23 @@ async function runCell(c: Ctx, command: string[]): Promise<void> {
   assert.ok(owner, "CLAUDE_CODE_OAUTH_TOKEN must hold the owner's token for this scenario");
   c.containers = true;
   sh(["network", "create", network]);
-  const start = `import(${JSON.stringify("file:///app/src/control/model-gateway.ts")}).then((m) => m.startModelGateway({ port: 7499, host: "0.0.0.0", upstream: "https://api.anthropic.com", ownerToken: () => process.env.OWNER_TOKEN, verify: (c) => (c === ${JSON.stringify(standIn)} ? { webTools: [] } : null) }))`;
+  // Any port does on the private network. A free one keeps the step clear of fixed ports (PBI 390).
+  const port = await freePort();
+  const start = `import(${JSON.stringify("file:///app/src/control/model-gateway.ts")}).then((m) => m.startModelGateway({ port: ${port}, host: "0.0.0.0", upstream: "https://api.anthropic.com", ownerToken: () => process.env.OWNER_TOKEN, verify: (c) => (c === ${JSON.stringify(standIn)} ? { webTools: [] } : null) }))`;
   const gw = sh(
     ["run", "-d", "--name", gatewayName, "--network", network, "-e", "OWNER_TOKEN", "-v", `${join(repo, "src")}:/app/src:ro`, "factory-cell:local", "node", "-e", start],
     { ...process.env, OWNER_TOKEN: owner },
   );
   assert.equal(gw.status, 0, gw.out);
   // Ready when an uncredentialed request gets the gateway's 401. Asked from inside, since nothing is published.
-  const probe = `fetch("http://127.0.0.1:7499/v1/messages", { method: "POST" }).then((r) => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))`;
+  const probe = `fetch("http://127.0.0.1:${port}/v1/messages", { method: "POST" }).then((r) => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))`;
   let ready = false;
   for (let i = 0; i < 40 && !ready; i++) {
     ready = sh(["exec", gatewayName, "node", "-e", probe]).status === 0;
     if (!ready) await new Promise((r) => setTimeout(r, 500));
   }
   assert.ok(ready, `the gateway never answered:\n${sh(["logs", gatewayName]).out}`);
-  const env = mod.cellModelEnv({ gatewayUrl: `http://${gatewayName}:7499`, credential: standIn });
+  const env = mod.cellModelEnv({ gatewayUrl: `http://${gatewayName}:${port}`, credential: standIn });
   const args = ["run", "--rm", "--name", cellName, "--network", network];
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
   // The owner's token must not reach the cell, so the cell's environment is built from scratch here.

@@ -1180,6 +1180,25 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   `npm run typecheck` runs `tsc --noEmit`.
   `npm run bdd` runs every feature file with cucumber-js and writes Cucumber Messages to `reports/bdd.ndjson`,
   the report Task 10 reads.
+  PBI 390 runs it through `scripts/bdd.ts` (`src/bdd/run.ts`),
+  which starts cucumber-js with `--parallel` and the count `BDD_WORKERS` sets,
+  4 when it's unset,
+  and refuses a count that isn't a whole number above zero with "the worker count must be a whole number above zero" before anything runs.
+  It imports `features/support/**/*.ts` before the steps.
+  `features/support/parallel.ts` hands cucumber-js the parallel rule in `src/bdd/parallel.ts`:
+  a scenario tagged `@serial`,
+  or in a feature tagged `@serial`,
+  starts only when no other runs,
+  and none starts while it runs.
+  cucumber-js 13.3.0 runs its workers as worker threads of one process,
+  so each worker has its own module state,
+  and so its own test database,
+  while ports and files stay shared.
+  No step starts a server on, or connects to, a port fixed in its code.
+  `src/bdd/ports.ts` gives a step a free port,
+  and stands each port a scenario names for a free port of that scenario's own.
+  `findFixedPorts` in `src/bdd/fixed-ports.ts` names each step file and line that listens on or connects to a fixed port,
+  and PBI 390's scenarios run it over `features/steps`.
   Imports use explicit `.ts` extensions.
   PBI 376 adds `npm run bdd:repeat -- --times <n> --name "<scenario name>"` (`scripts/bdd-repeat.ts`,
   with its logic in `src/bdd/repeat.ts`).
@@ -1210,7 +1229,7 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   the exact versions from the Tech Stack line,
   and scripts `test`,
   `typecheck`,
-  `bdd` (`cucumber-js --import "features/steps/**/*.ts" --format message:reports/bdd.ndjson`),
+  `bdd` (`cucumber-js --import "features/steps/**/*.ts" --format message:reports/bdd.ndjson`, which PBI 390 moves into `scripts/bdd.ts`),
   `start:control` (`node src/main.ts`) and `start:cell` (`node src/cell/main.ts`).
 - [ ] **Step 2:
   Write `tsconfig.json`** with `strict`,
