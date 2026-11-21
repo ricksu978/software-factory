@@ -337,7 +337,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
         const cause: ChangeCause | null = newer(pr.lastChangesRequestedAt, row.reviews_seen_at) ? pr.lastChangesRequested ?? null : { kind: "not_mergeable" };
         await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]), cause ? { cause } : undefined);
       }
-    } else if (row.state === "InReview" && (failed = await headCiFailure(repoHost, repo, row.pr_number))) {
+    } else if (row.state === "InReview" && (failed = await headCiFailure(repoHost, repo, row.pr_number, { head: pr.headSha }))) {
       // CI failed on the PR's head, so the item goes back to address with the failure detail as its findings (PBI 235).
       // A failure on an older commit of the PR never counts, so a person's push that CI hasn't judged yet waits.
       await sendBackForCi(pool, { itemId: row.id, runId: row.run_id! }, failed, system);

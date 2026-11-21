@@ -290,7 +290,7 @@ export function fakeRepoHost(): RepoHost & {
           .map((r) => ({ kind: "review" as const, author: r.author, body: r.body ?? "", submittedAt: r.submittedAt })),
         ...open.map((c) => ({ kind: "thread_comment" as const, threadId: c.threadId, author: c.author, body: c.body, submittedAt: c.submittedAt! })),
       ]);
-      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
+      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, headSha: p.headSha, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
     },
     async closePr(repo, n, comment) {
       const p = pr(repo, n);

@@ -569,12 +569,15 @@ A task that touches one of them follows this section and does not restate it.
     and the webhook names the review it was delivered (PBI 258).
     CI failing on the PR's head is a trigger too (PBI 235).
     For each InReview item whose PR has no conflict and no newer trusted text,
-    the poller reads the head from `mergeView` and,
+    the poller takes the head from `prState`'s `headSha`,
+    so the PR isn't read twice, and,
     when `checksOnSha` on it is `failure` and `ciChecksOnSha` names at least one failed check there,
     moves the item to Queued through `changes_requested` with `next_stage = "address"`.
     A failure that names no failed check gives address no detail to work from,
     so the item stays InReview and the failing required check only holds the merge,
     as Task 17's merge describes (PBI 181).
+    So does a failure whose every failed check names failing tests that the default branch's head fails too:
+    the base is at fault, as the cell finds it (PBI 215, PBI 292).
     The cause is `{ kind: "ci_failed", sha, checks: [{ name, url, failingTests }] }`,
     one entry per failed check,
     and the payload's `findings` hold the lines `ciFindings` writes for Green:

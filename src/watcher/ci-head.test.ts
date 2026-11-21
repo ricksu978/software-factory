@@ -52,14 +52,47 @@ describe("headCiFailure", () => {
     report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
     report(h, "c0ffee2", [{ name: "ci", conclusion: "pending", url: url(2) }]);
     assert.equal(await headCiFailure(h, REPO, 57), null);
-    assert.equal(await headCiFailure(h, REPO, 57, "c0ffee1"), null);
+    assert.equal(await headCiFailure(h, REPO, 57, { sha: "c0ffee1" }), null);
   });
 
   test("only reads CI when the commit it's told of is the head", async () => {
     const h = host("c0ffee1");
     report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
-    assert.equal((await headCiFailure(h, REPO, 57, "c0ffee1"))?.sha, "c0ffee1");
-    assert.equal(await headCiFailure(h, REPO, 57, "0ldc0de"), null);
+    assert.equal((await headCiFailure(h, REPO, 57, { sha: "c0ffee1" }))?.sha, "c0ffee1");
+    assert.equal(await headCiFailure(h, REPO, 57, { sha: "0ldc0de" }), null);
+  });
+
+  test("reads CI on the head it's given, without reading the PR again", async () => {
+    const h = host("c0ffee1");
+    let views = 0;
+    const view = h.mergeView.bind(h);
+    h.mergeView = async (...a) => { views++; return view(...a); };
+    report(h, "c0ffee2", [{ name: "ci", conclusion: "failure", url: url(2) }]);
+    assert.equal((await headCiFailure(h, REPO, 57, { head: "c0ffee2" }))?.sha, "c0ffee2");
+    assert.equal(await headCiFailure(h, REPO, 57, { head: null }), null);
+    assert.equal(views, 0);
+  });
+
+  test("is null when the base commit fails every test the head fails, so the base keeps the failure (PBI 215)", async () => {
+    const h = host("c0ffee1");
+    h.heads.set(REPO, "ma1n001");
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), failingTests: ["totals include VAT"] }]);
+    report(h, "ma1n001", [{ name: "ci", conclusion: "failure", url: url(9), failingTests: ["totals include VAT", "signs in"] }]);
+    assert.equal(await headCiFailure(h, REPO, 57), null);
+  });
+
+  test("still fails the head when the base fails other tests, passed, can't be read, or the check names no test", async () => {
+    const h = host("c0ffee1");
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1), failingTests: ["totals include VAT"] }]);
+    assert.equal((await headCiFailure(h, REPO, 57))?.sha, "c0ffee1", "no default branch head to read");
+    h.heads.set(REPO, "ma1n001");
+    report(h, "ma1n001", [{ name: "ci", conclusion: "failure", url: url(9), failingTests: ["signs in"] }]);
+    assert.equal((await headCiFailure(h, REPO, 57))?.sha, "c0ffee1");
+    report(h, "ma1n001", [{ name: "ci", conclusion: "success", url: url(9) }]);
+    assert.equal((await headCiFailure(h, REPO, 57))?.sha, "c0ffee1");
+    report(h, "c0ffee1", [{ name: "ci", conclusion: "failure", url: url(1) }]);
+    report(h, "ma1n001", [{ name: "ci", conclusion: "failure", url: url(9) }]);
+    assert.equal((await headCiFailure(h, REPO, 57))?.sha, "c0ffee1");
   });
 });
 

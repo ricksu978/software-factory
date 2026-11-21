@@ -5,6 +5,22 @@ import type { CiCheck } from "../adapters/types.ts";
 /** A CI failure on a commit: each failed check, with its URL and the tests it names as failing. */
 export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
 
+/** Whether the base is at fault: every test that failed on the item's branch fails on the base too, and some did. */
+export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
+  const base = new Set(onBase);
+  return onBranch.length > 0 && onBranch.every((t) => base.has(t));
+}
+
+/**
+ * Whether the base shares a CI failure: every failed check names failing tests, and the base's failed checks fail each
+ * of them too (PBI 215, PBI 292).
+ */
+export function ciSharedWithBase(f: CiFailure, onBase: CiCheck[] | null): boolean {
+  if (!f.checks.length || f.checks.some((c) => !c.failingTests.length)) return false;
+  const baseTests = (onBase ?? []).filter((c) => c.conclusion === "failure").flatMap((c) => c.failingTests ?? []);
+  return sharedWithBase(f.checks.flatMap((c) => c.failingTests), baseTests);
+}
+
 const quoted = (tests: string[]) => tests.map((t) => `"${t}"`).join(", ");
 
 /** The failed checks CI named on `sha`, each with its URL and failing tests. A check that passed or still runs isn't one. */

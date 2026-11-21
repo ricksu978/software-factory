@@ -93,11 +93,12 @@ describe("githubRepoHost", () => {
       { id: 3, state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T04:00:00Z", user: { login: "stranger" } },
     ];
     const { host } = stubGitHub({
-      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true, head: { sha: "h1" } }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => reviews,
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [] }, reviews: { nodes: [] } } } }));
+    // The head comes back too, so the poller reads CI on it with no second read of the PR (PBI 235).
     assert.deepEqual(await host.prState("o/r", 3, ["owner"]), {
-      merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: "2026-11-06T01:00:00Z",
+      merged: false, mergeSha: null, open: true, mergeable: true, headSha: "h1", lastChangesRequestedAt: "2026-11-06T01:00:00Z",
       lastChangesRequested: { kind: "review", author: "Owner", body: "Split it", submittedAt: "2026-11-06T01:00:00Z" },
     });
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
@@ -169,7 +170,7 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: true, merge_commit_sha: "m1", state: "closed", mergeable: null }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
     }, () => { throw new Error("502 Bad Gateway"); });
-    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, lastChangesRequestedAt: null, lastChangesRequested: null });
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, headSha: null, lastChangesRequestedAt: null, lastChangesRequested: null });
   });
 
   test("openReviewComments returns every comment in unresolved threads and none from resolved ones", async () => {

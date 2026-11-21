@@ -253,6 +253,8 @@ export interface RepoHost {
    */
   prState(repo: string, prNumber: number, trustedLogins: string[], trustedBot?: string | null): Promise<{
     merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null;
+    /** The PR's head as it was read, so the poller reads CI on it with no second read of the PR (PBI 235). */
+    headSha?: string | null;
     /** What `lastChangesRequestedAt` dates: the review summary or the thread comment (PBI 258). */
     lastChangesRequested?: ChangeCause | null;
   }>;

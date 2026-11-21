@@ -176,7 +176,7 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" | "ci_failed" }>>([...requested, ...open]);
       return {
         merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
-        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause,
+        mergeable: pr.mergeable ?? null, headSha: pr.head?.sha ?? null, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause,
       };
     },
 
