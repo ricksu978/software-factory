@@ -4792,7 +4792,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       A pass back to green after open-pr, pr-review or address ends at its attempt boundary too.
 
-      The run is still at that later stage, so the next claim goes back to green through the heads CI failed on,
+      The run is still at that later stage, so the next claim goes back to green, through the heads CI failed on,
+
+      or on green's carry itself when the pass came from stale Definition of Done verdicts or a moved head,
 
       and its first green attempt has green's tries spent and the failed attempt's findings.
 

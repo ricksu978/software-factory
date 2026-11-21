@@ -1938,12 +1938,24 @@ describe("runCell", () => {
     assert.ok(brief.prompt.includes(`## Your last attempt failed\n\n- ${failed.body.retryCarry.findings[0]}`), "the next claim's brief carries the failed reply's finding");
   });
 
-  test("a claim at open-pr whose head isn't one CI failed on runs open-pr and drops green's carry (PBI 393)", async () => {
-    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "green", tried: 2, findings: ["old"] } } });
+  test("a claim at open-pr with green's carry and no head CI failed on goes back to green and spends the carry (PBI 393)", async () => {
+    // A pass back to green from stale Definition of Done verdicts or a moved head leaves no head CI failed on, so the
+    // carry itself sends the claim back to green, with green's tries spent and the failed attempt's findings.
+    const h = harness({ nextStage: "open-pr", ctx: { stageAttempts: { "open-pr": 1, green: 1 }, retry: { stageId: "green", tried: 1, findings: ["the DoD line on totals fails"] } } });
     h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
-    await h.run();
-    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "green"));
-    assert.equal(h.started()[0], "open-pr");
+    assert.equal(await h.run(), "done");
+    const started = h.calls.filter((c) => c.route === "/stage" && c.body.status === "started");
+    assert.deepEqual([started[0]!.body.stageId, started[0]!.body.attempt], ["green", 2]);
+    const brief = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(brief.prompt, /## Your last attempt failed\n\n- the DoD line on totals fails/);
+  });
+
+  test("green's carry at open-pr counts only its tries left: a carry that spent them all fails the item (PBI 393)", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "green", tried: 4, findings: ["the DoD line on totals fails"] } } });
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "started"));
   });
 
   test("a restart prepared during green's push still ends the cell at the boundary", async () => {

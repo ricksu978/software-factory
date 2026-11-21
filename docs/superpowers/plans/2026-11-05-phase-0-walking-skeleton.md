@@ -4984,7 +4984,8 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     A pass back to green after open-pr, pr-review or address ends at its attempt boundary too.
     `next_stage` is still that later stage, so `/context` hands green's carry
     when green's failed attempt is the run's last one, the base merge aside,
-    and the next claim goes back to green through `failedCiHeads` and spends it there.
+    and the next claim goes back to green and spends it there,
+    through `failedCiHeads`, or on the carry itself when the pass came from stale `dod.md` verdicts or a moved head.
     Under pause the reply has `stop: true`,
     under a drain as well.
     While the factory drains,

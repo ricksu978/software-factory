@@ -317,7 +317,7 @@ const routes: Record<string, Route> = {
       l?.status === "failed" && l.retry_carry ? { stageId: run.next_stage, ...l.retry_carry } : null;
     // A pass back to green from open-pr, pr-review or address runs while the run is still at that stage, so its carry
     // is green's: the run's last attempt, at any stage but a claim's base merge, when that was green's and it failed
-    // with a carry. The next claim goes back to green through failedCiHeads and spends the carry there.
+    // with a carry. The next claim goes back to green, through failedCiHeads or on the carry itself, and spends it there.
     if (!retry && run.next_stage !== null && BACK_TO_GREEN_FROM.has(run.next_stage)) {
       const latest = await c.query<{ stage_id: string; status: string; retry_carry: { tried: number; findings: string[] } | null }>(
         `select stage_id, status, retry_carry from stage_run where run_id = $1 and stage_id <> 'merge'

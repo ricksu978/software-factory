@@ -757,7 +757,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // PBI 393: the tries and findings an earlier claim's attempt boundary left the claim's first stage. They're taken
   // once, so a later pass at the same stage in this claim, such as back to green, doesn't spend them again. A claim at
   // open-pr, pr-review or address may carry green's, from a pass back to green that ended at its attempt boundary: the
-  // claim goes back to green through failedCiHeads, and that pass spends them.
+  // claim goes back to green, through failedCiHeads or, when the pass came from stale Definition of Done verdicts or a
+  // moved head, on the carry itself, and that pass spends them.
   const backStage = ["open-pr", "pr-review", "address"].includes(ctx.nextStage);
   let carry = ctx.retry && (ctx.retry.stageId === ctx.nextStage || (ctx.retry.stageId === "green" && backStage)) ? ctx.retry : null;
   const carriedOver = (stageId: StageId): { spent: number; findings: string[] } => {
@@ -1254,8 +1255,11 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
     const known = failedHeads.get(await git.head());
     if (known) return backToGreen(known);
-    // Open-pr runs, so no pass back to green from an earlier claim is still waiting: a green carry is dropped. Open-pr's
-    // own carry, from an earlier claim that ended at its attempt boundary (PBI 393), seeds its tries and findings.
+    // PBI 393: green's carry means the run's last attempt was a pass back to green that ended at its attempt boundary.
+    // That pass may have come from stale Definition of Done verdicts or a moved head, which leave no head CI failed on,
+    // so the claim goes back to green on the carry itself, and green spends its tries and findings.
+    if (carry?.stageId === "green") return carry.findings;
+    // Open-pr's own carry, from an earlier claim that ended at its attempt boundary (PBI 393), seeds its tries and findings.
     const from = carriedOver("open-pr");
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
