@@ -5,7 +5,6 @@
 // up where the last process stopped.
 import { App } from "@octokit/app";
 import { BlobServiceClient } from "@azure/storage-blob";
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
@@ -17,6 +16,7 @@ import { TimedOctokit } from "./adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
 import { loadSop } from "./config/sop.ts";
 import { blobUploadUrl } from "./control/cell-api.ts";
+import { platformProbes } from "./control/probes.ts";
 import type { FileSplitDeps } from "./gate/file-split.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
 import { dashboardRoutes } from "./http/routes.ts";
@@ -89,17 +89,8 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     return true;
   };
 
-  // PBI 2's platform probes, locally only: a cell's ping, an upload URL, the env's names and the migrate run count.
-  const probes: Handler = async (req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
-    if (!d.local) return false;
-    if (req.method === "POST" && path === "/internal/cells/ping") json(res, 204);
-    else if (req.method === "GET" && path === "/probe/sas") json(res, 200, { url: await d.uploadUrl(`probe/${randomUUID()}`) });
-    else if (req.method === "GET" && path === "/probe/env") json(res, 200, Object.keys(process.env).sort());
-    else if (req.method === "GET" && path === "/probe/runs") json(res, 200, { count: Number((await d.pool.query("select count(*) from probe_runs")).rows[0].count) });
-    else return false;
-    return true;
-  };
+  // PBI 2's platform probes, locally only. The cell API serves them too, and cells reach only it (redesign step 4b).
+  const probes: Handler = d.local ? platformProbes(d) : async () => false;
 
   // ponytail: Phase 0 has one board, so the dashboard reads items from the first source. Route by item.source_id when a second board arrives.
   const first = d.sources[0];

@@ -90,6 +90,34 @@ describe("the cell API service", dbTest, () => {
     assert.deepEqual(seen, ["Bearer owner-secret"]);
   });
 
+  test("serves PBI 2's probes on the local platform, without a token, and only there", async () => {
+    await db.pool.query("create table if not exists probe_runs (id serial primary key, at timestamptz not null default now())");
+    await db.pool.query("insert into probe_runs default values");
+    const local = await serveCellApi({
+      pool: db.pool, sources: [], repoHost: fakeRepoHost(), secret, claudeToken: "owner-secret", modelUpstream: "http://127.0.0.1:1",
+      uploadUrl: async (path) => `http://blob.test/${path}`, local: true,
+    }, 0);
+    try {
+      const at = `http://127.0.0.1:${(local.server.address() as AddressInfo).port}`;
+      assert.equal((await fetch(`${at}/internal/cells/ping`, { method: "POST" })).status, 204);
+      const sas = (await (await fetch(`${at}/probe/sas`)).json()) as { url: string };
+      assert.match(sas.url, /^http:\/\/blob\.test\/probe\/[0-9a-f-]{36}$/);
+      const names = (await (await fetch(`${at}/probe/env`)).json()) as string[];
+      assert.ok(Array.isArray(names) && names.includes("PATH"));
+      assert.deepEqual(await (await fetch(`${at}/probe/runs`)).json(), { count: 1 });
+      // The cell routes are still the cell routes, with the run token's checks.
+      assert.equal((await fetch(`${at}/internal/cells/${run.runId}/context`)).status, 401);
+    } finally {
+      await local.stop();
+    }
+    // Outside the local platform there are none.
+    for (const [method, path] of [["POST", "/internal/cells/ping"], ["GET", "/probe/sas"], ["GET", "/probe/env"], ["GET", "/probe/runs"]]) {
+      const r = await fetch(`${base}${path}`, { method });
+      await r.text();
+      assert.equal(r.status, 404, path);
+    }
+  });
+
   test("answers 404 for the dashboard's paths", async () => {
     for (const path of ["/", "/webhooks/github", "/internal/cells/ping"]) {
       const r = await fetch(`${base}${path}`, { method: path === "/" ? "GET" : "POST", redirect: "manual" });

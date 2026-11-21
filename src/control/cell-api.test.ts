@@ -226,6 +226,22 @@ describe("cell API", dbTest, () => {
     assert.ok((await board.comments("7")).some((c) => c.includes("/approve") && c.includes("Sign these off")));
   });
 
+  test("a token that isn't a run token gets 401 on every route, before anything is read or written, and a stale run token still gets 409", async () => {
+    const cell = await claimed();
+    // A user's sign-in token is a JWT, never a run token's 64 hex digits, and a missing token is no run token either.
+    const jwt = "header.payload.signature";
+    for (const token of [jwt, "", cell.token.toUpperCase()]) {
+      for (const [method, path] of [["POST", "/stage"], ["GET", "/context"], ["POST", "/transition"], ["POST", "/nope"]]) {
+        const r = await send(cell.runId, token, method, path, method === "POST" ? { stageId: "green", attempt: 1, status: "started" } : undefined);
+        assert.equal(r.status, path === "/nope" ? 404 : 401, `${method} ${path} with ${JSON.stringify(token)}`);
+      }
+    }
+    assert.equal((await send("not-a-run", jwt, "GET", "/context")).status, 401);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run where run_id = $1", [cell.runId])).rows[0].n, 0);
+    assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "GET", "/context")).status, 409);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+  });
+
   test("a stale token with a disallowed event gets 409, not 400", async () => {
     const cell = await claimed();
     assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation - 1), "POST", "/transition", { event: "merged" })).status, 409);

@@ -4301,12 +4301,21 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   all under `/internal/cells/:runId`,
   all with `Authorization: Bearer <runToken>`.
   The token is `HMAC-SHA256(CELL_SECRET, runId + ":" + generation)` in hex.
-  Every route checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one.
-  A failure of either check gets 409 with no write.
+  A bearer token that isn't shaped like a run token,
+  64 lowercase hex digits,
+  gets 401 before the body is read or the run is locked (PBI 223,
+  redesign step 4b).
+  That covers a user's sign-in token,
+  which is a JWT,
+  and a missing token,
+  so the cell API never accepts a user's token.
+  Every route then checks the token with `timingSafeEqual` and then checks that `generation` is the item's current one.
+  A failure of either check gets 409 with no write,
+  which tells a cell its lease has moved on.
   Both checks run under the item's row lock,
   in the transaction that holds the route's writes,
   so a re-claim can't land between check and write.
-  The token is checked before the body,
+  The run token is checked before the body is judged,
   so a fenced cell gets 409 even for a request that would get 400.
   A body over 1 MiB gets 413 and is drained,
   not kept,
@@ -4857,6 +4866,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
         The two ports are:
         the control plane's from `CELL_CONTROL_URL`,
         and Azurite's from `FACTORY_BLOB`.
+        **Refused ports (PBI 223, redesign step 4b).**
+        Since step 4a `CELL_CONTROL_URL` names the cell API on 7401.
+        `egressAllow` throws an error naming the port when it names 7400,
+        today's dashboard,
+        or 7402,
+        the orchestrator API,
+        so `ensureEgress` refuses before any `docker` command and no proxy starts.
+        The proxy itself answers 403 to every request,
+        plain or CONNECT,
+        to a port in `EGRESS_REFUSED_PORTS`,
+        whatever its allowlist names.
+        Unset, that list is 7400 and 7402.
+        A test sets it to the free ports that stand for them.
         The proxy carries a SHA-256 of its whole configuration,
         the allowed hosts and both ports,
         in a container label.
@@ -6141,6 +6163,27 @@ from spec §6 rows 1 to 7:
   so the worker hands cells the cell API's address and lets its port,
   not control's,
   through the egress proxy.
+- Since step 4b of the control plane redesign (2026-11-07 design,
+  §03 and §06,
+  PBI 223),
+  cells reach the cell API and nothing else of the factory's.
+  PBI 2's probes move into `platformProbes(deps)` in `src/control/probes.ts`:
+  `POST /internal/cells/ping`,
+  `GET /probe/sas`,
+  `GET /probe/env` and `GET /probe/runs`,
+  which need no token.
+  `serveCellApi` mounts them ahead of the cell routes when `deps.local` is true,
+  and `main` sets it from `FACTORY_ENV=local`,
+  so the ping is answered before the cell routes ask for a run token.
+  Outside the local platform they get 404 there.
+  The AppHost sets `FACTORY_ENV=local` on `cell-api`,
+  as it does on `worker`,
+  so under `aspire run` PBI 2's probe scenarios pass against the cell API.
+  `controlHandlers` in `src/main.ts` serves the same `platformProbes` in local mode until the cut-over,
+  because PBI 6's scenarios still read them there.
+  The cell API answers 401 to a token that isn't a run token (Task 12),
+  and Task 13's egress proxy refuses 7400 and 7402.
+  `src/cell-api/main.test.ts` and `src/control/cell-api.test.ts` cover both.
 - Since step 6a of the control plane redesign (2026-11-07 design,
   §03,
   §04,
