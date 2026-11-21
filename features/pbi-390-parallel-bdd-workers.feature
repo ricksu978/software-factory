@@ -11,9 +11,11 @@ Feature: The BDD suite runs scenarios in parallel workers, so cells and CI finis
   The scenarios for the runner itself run `npm run bdd` against practice suites, whose passes, failures and
   timings the test sets, so cells and CI both run them. Each practice scenario takes a moment and records when
   it started and ended and which worker ran it, so the test can see what ran beside what.
-  Scenarios tagged @db run earlier items' scenarios, which need Postgres. The whole-suite comparison carries
-  the tag @local, because running the whole suite four times would add far too long to every build, and it
-  would run itself. The owner runs it once and the PR states the counts it reports.
+  Scenarios tagged @db run earlier items' scenarios, which need Postgres. Those that re-run earlier items'
+  scenarios, and the whole-suite comparison, also carry the tag @local, because running those suites again
+  on top of their normal run would add far too long to every build and multiply any flake in them. The owner
+  runs them once and the PR states the results and counts they report. In cells and CI, the fixed port check
+  and a practice suite whose steps start servers cover the port rule.
 
   Rule: npm run bdd runs the suite in several workers, as many as one setting says
 
@@ -150,7 +152,19 @@ Feature: The BDD suite runs scenarios in parallel workers, so cells and CI finis
       Then the check names the added step's file and line as connecting to port 7402
       And the check names no other step
 
-    @ac-3 @db
+    @ac-3
+    Scenario: Two practice workers that each start a server both pass while another program holds port 7402
+      Given another program on this machine already listens on port 7402
+      And a practice suite of 2 scenarios that each start a server the way the suite's steps do, and connect to it
+      And the worker count setting is 2
+      When `npm run bdd` runs the practice suite
+      Then the command exits 0
+      And the 2 practice scenarios ran at the same time as one another
+      And both practice scenarios passed
+      And each practice scenario's server listened on a port of its own, and neither was 7402
+      And the program on port 7402 was never reached by them
+
+    @ac-3 @db @local
     Scenario Outline: An earlier item's server scenarios pass while other programs hold the ports they name
       Given other programs on this machine already listen on ports 7400, 7401 and 7402
       When the scenarios of <item> run
@@ -164,7 +178,7 @@ Feature: The BDD suite runs scenarios in parallel workers, so cells and CI finis
         | PBI 286 |
         | PBI 287 |
 
-    @ac-3 @db
+    @ac-3 @db @local
     Scenario: Two runs of PBI 286's scenarios started at the same moment both pass
       When the scenarios of PBI 286 run twice at the same moment, in two separate runs
       Then every scenario of PBI 286 passes in both runs
