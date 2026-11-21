@@ -4830,6 +4830,16 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       and only while the item waits for it.
 
+      An item in FeatureChangeRequest shows a Feature change request section (PBI 364):
+
+      each file the stage asks to change,
+
+      its reason,
+
+      and its lines before and after from the lock commit,
+
+      which the control plane reads itself rather than taking the cell's copy.
+
       Then the SOP version,
 
       the policy files used,

@@ -142,16 +142,30 @@ const strings = (v: unknown, name: string): string[] => {
   if (!Array.isArray(v) || v.some((s) => typeof s !== "string")) throw new BadRequest(`${name} must be a list of strings`);
   return v;
 };
-/** PBI 364: a feature change request's files, each a file the run locked, with a reason and both versions. */
-const featureChange = (v: unknown, locked: string[]): FeatureChangeFile[] => {
+/**
+ * PBI 364: a feature change request's files, each a file the run locked, with a reason and the proposed version.
+ * The cell isn't trusted with `before`: it's read here from the lock commit, so the owner's diff runs from the text
+ * they signed off. A cell's own `before` is ignored.
+ */
+const featureChange = async (deps: CellApiDeps, run: Run, v: unknown): Promise<FeatureChangeFile[]> => {
+  const locked = run.locked_files ?? [];
   if (!Array.isArray(v) || v.length === 0) throw new BadRequest("featureChange must be a non-empty list");
-  return v.map((f: Record<string, unknown> | null, i) => {
+  const files = v.map((f: Record<string, unknown> | null, i) => {
     if (typeof f !== "object" || f === null) throw new BadRequest(`featureChange[${i}] must be an object`);
     const path = str(f.path, `featureChange[${i}].path`);
     if (!locked.includes(path)) throw new BadRequest(`featureChange[${i}].path ${path} isn't a locked feature file`);
-    if (typeof f.before !== "string" || typeof f.after !== "string") throw new BadRequest(`featureChange[${i}] needs before and after as strings`);
-    return { path, reason: str(f.reason, `featureChange[${i}].reason`), before: f.before, after: f.after };
+    if (typeof f.after !== "string") throw new BadRequest(`featureChange[${i}] needs after as a string`);
+    return { path, reason: str(f.reason, `featureChange[${i}].reason`), after: f.after };
   });
+  if (!run.features_lock_sha) throw new BadRequest("the run has no lock commit");
+  const repo = repoOf(run);
+  const out: FeatureChangeFile[] = [];
+  for (const f of files) {
+    const before = await deps.repoHost.readFile(repo, run.features_lock_sha, f.path);
+    if (before === null) throw new BadRequest(`${f.path} isn't in the lock commit ${run.features_lock_sha}`);
+    out.push({ path: f.path, reason: f.reason, before, after: f.after });
+  }
+  return out;
 };
 const optional = <T>(v: unknown, read: (v: unknown) => T): T | null => (v === undefined || v === null ? null : read(v));
 
@@ -555,7 +569,7 @@ const routes: Record<string, Route> = {
     return { ok: true };
   },
 
-  "POST transition": async (_deps, { c, run, body, now }) => {
+  "POST transition": async (deps, { c, run, body, now }) => {
     const event = body.event as ItemEvent;
     if (!cellEvents.has(event)) throw new BadRequest(`a cell may not send ${String(body.event)}`);
     let detail: Record<string, unknown> = {};
@@ -590,7 +604,7 @@ const routes: Record<string, Route> = {
       detail = { attempts: attempts.rows };
     } else if (event === "feature_change_requested") {
       // PBI 364: the request goes on the run, and the move's payload carries it for the PBI comment.
-      await requestFeatureChange(c, run.run_id, featureChange(body.featureChange, run.locked_files ?? []));
+      await requestFeatureChange(c, run.run_id, await featureChange(deps, run, body.featureChange));
       return { state: "FeatureChangeRequest" };
     } else if (event === "usage_limited") {
       const resumeAt = optional(body.resumeAt, (v) => str(v, "resumeAt"));
