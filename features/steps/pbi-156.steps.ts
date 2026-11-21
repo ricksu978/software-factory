@@ -151,12 +151,15 @@ export async function rehome(world: object, attempt = 0): Promise<void> {
   const tests = "select id from backlog_source where url like 'test:%'";
   // PBI 17 inserts an item and then seeds the board with it, so a worker polling in between ingests a copy of its own.
   // The step's item is the one the scenario names, so the poller's copy moves to a source of its own, out of the way.
+  // It's held there too. The stray source has no adapter, so a scheduler that claimed the copy would fail its whole
+  // tick on pinning it, every tick, and never reach the item behind it. A copy ingested as the first worker lost its
+  // lock did that to PBI 157's takeover scenario now and then (PBI 376).
   const copies = (await pool().query<{ id: string }>(
     `select id from item where source_id = $1 and external_id in (select external_id from item where source_id in (${tests}))`, [b.id])).rows;
   if (copies.length) {
     const stray = (await pool().query<{ id: string }>(
       "insert into backlog_source (adapter, url) values ('fake', 'stray:' || gen_random_uuid()) returning id")).rows[0].id;
-    await pool().query("update item set source_id = $1 where id = any($2)", [stray, copies.map((r) => r.id)]);
+    await pool().query("update item set source_id = $1, held = true where id = any($2)", [stray, copies.map((r) => r.id)]);
   }
   try {
     await pool().query(`update item set source_id = $1 where source_id in (${tests})`, [b.id]);
