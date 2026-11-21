@@ -1874,6 +1874,26 @@ describe("runCell", () => {
     assert.doesNotMatch(first.prompt, /Your last attempt failed/, "a carry for a stage the claim didn't start at isn't used");
   });
 
+  test("a pass back to green under a restart being prepared runs its retries in the claim, since the run is still at open-pr (PBI 393)", async () => {
+    // The run's next stage stays open-pr while green's back-pass runs, and the next claim reads a carry only from the
+    // next stage's last attempt. Ending the claim at green's failed attempt would lose its tries and findings.
+    let on = false;
+    let greens = 0;
+    const h = harness({
+      nextStage: "open-pr",
+      lease: async () => ({ stop: false, restarting: on }),
+      script: (a, stage) => { if (stage === "green") { on = true; writeFileSync(join(a.cwd, "app.txt"), `fix ${++greens}\n`); } },
+    });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    const flag = join(h.root, "green-once");
+    h.deps.config.commands.test = `test -f '${flag}' || { touch '${flag}'; echo 'not ok 1 - totals include VAT'; exit 1; }`;
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"], [2, "started"], [2, "passed"]]);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.retryCarry), "a back-pass attempt hands no carry");
+    const retry = h.agentCalls.filter((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))[1]!;
+    assert.match(retry.prompt, /totals include VAT/);
+  });
+
   test("a restart prepared during green's push still ends the cell at the boundary", async () => {
     let on = false;
     const h = harness({ nextStage: "green", lease: async () => ({ stop: false, restarting: on }) });

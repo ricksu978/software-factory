@@ -772,14 +772,17 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // Runs a stage until an attempt has no findings or its retries run out. Returns the last findings, empty on a pass.
   // `from` is the tries already spent and the last findings, as a claim after an attempt boundary carries them over.
   // Under a drain or a restart being prepared, a failed attempt with retries left ends the claim there (PBI 393): it's
-  // reported failed, with the tries spent and its findings, and the next claim runs the stage's next attempt.
+  // reported failed, with the tries spent and its findings, and the next claim runs the stage's next attempt. That holds
+  // only at the stage the run records as next, whose last attempt the next claim reads the carry from. A pass back to
+  // green after open-pr, pr-review or address runs while the run is still at that later stage, so a claim ended there
+  // would lose green's tries and findings: it runs its retries in this claim, as before.
   const attempts = async (stageId: StageId, tries: number, body: (attempt: number, findings: string[]) => Promise<string[]>,
-    from = carriedOver(stageId)) => {
+    from = carriedOver(stageId), atNext = true) => {
     let findings = from.findings;
     for (let i = from.spent; i < tries; i++) {
       findings = await body(await begin(stageId), findings);
       if (findings.length === 0) return [];
-      if (i + 1 < tries && (await endsAtAttempt())) {
+      if (atNext && i + 1 < tries && (await endsAtAttempt())) {
         if (current) current.retryCarry = { tried: i + 1, findings };
         await end("failed");
         throw new Restarting("the factory drains or a restart is being prepared, so the stage's next attempt waits for the next claim");
@@ -1102,7 +1105,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // Green's attempts are counted across the run, so open-pr sending the item back to green spends the same budget.
   let greenTries = 0;
-  const green = async (carried: string[]) => {
+  // `backPass` is a pass back to green from open-pr, pr-review or address, while the run's next stage is still that one.
+  const green = async (carried: string[], backPass = false) => {
     const max = retriesOf("green") + 1;
     const dodText = `## The team's Definition of Done\n\n${fenced(policies.dod.text, "markdown")}`;
     // PBI 292: a pass sent back to fix a CI failure is reported as fixing CI. One that leaves the commit CI failed on
@@ -1130,7 +1134,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (out.length) return out;
       const dod = dodFindings(await checkDod("green", attempt));
       return dod.length ? dod : dodHeadHeld();
-    }, { spent: greenTries, findings: [] });
+    }, { spent: greenTries, findings: [] }, !backPass);
     fixing = null;
     if (findings.length) throw new Exhausted(`Green failed after ${max} attempts:\n${findings.map((f) => `- ${f}`).join("\n")}`);
     await push();
@@ -1666,8 +1670,10 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (!resumed && !order.includes(start)) throw new Blocked(`a cell can't resume at ${start}`);
     if (start === "red") { await red(); await atBoundary(); }
     let from = resumed ? 1 : Math.max(order.indexOf(start), 1);
+    // Green after address, or after open-pr or pr-review sent the item back, runs while the run is still at that stage.
+    let backPass = resumed;
     for (;;) {
-      if (from <= 1) { await green(carried); await atBoundary(); }
+      if (from <= 1) { await green(carried, backPass); await atBoundary(); }
       if (from <= 2) { await selfReview(); await atBoundary(); }
       let back = await openPr();
       // Open-pr passed and pr-review is next, in this cell. A claim ended here resumes at open-pr, as a stop's does.
@@ -1675,6 +1681,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (!back) return "done";
       carried = back;
       from = 1;
+      backPass = true;
       // Back to green, from open-pr's or pr-review's findings: green is a further stage.
       await atBoundary();
     }
