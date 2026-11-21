@@ -480,8 +480,8 @@ When("`npm run bdd -- --tags \"not @local\"` runs the practice suite", practiceS
 
 When("the practice suite runs in {int} workers at once", practiceStep, async function (n: number) {
   const c = ctx(this);
-  const cucumber = join(repo, "node_modules", ".bin", "cucumber-js");
-  c.run = await runPractice(this, cucumber, ["--import", "features/steps/**/*.ts", "--format", "message:reports/bdd.ndjson", "--parallel", String(n)], null);
+  const cucumber = join(repo, "node_modules", "@cucumber", "cucumber", "bin", "cucumber.js");
+  c.run = await runPractice(this, process.execPath, [cucumber, "--import", "features/steps/**/*.ts", "--format", "message:reports/bdd.ndjson", "--parallel", String(n)], null);
   assert.ok(c.run.report.trim(), `the practice run wrote no report:\n${tail(c.run.out)}`);
 });
 

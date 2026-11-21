@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { blankComments, findFixedPorts, fixedPortsIn } from "./fixed-ports.ts";
+import { blankComments, findFixedPorts, fixedPortsIn, portUsers } from "./fixed-ports.ts";
 
 const where = (src: string) => fixedPortsIn("f.ts", src).map((f) => `${f.line} ${f.use} ${f.port}`);
 
@@ -45,6 +45,47 @@ test("a constant port is judged by its uses, at its own line", () => {
   ].join("\n");
   assert.deepEqual(where(src), ["1 connect 7402", "1 listen 7402"]);
   assert.deepEqual(where("const PORT = 7402;\nfetch(`http://127.0.0.1:${PORT}/`);\n"), ["1 connect 7402"]);
+});
+
+test("a port handed to a call that connects or listens, itself or through another function, is one", () => {
+  const src = [
+    "async function answers(port: number) {",
+    "  const s = connect({ host: \"127.0.0.1\", port });",
+    "}",
+    "async function settle(b: Bff, port: number, ms = 30_000) {",
+    "  while (!(await answers(port))) await sleep(100);",
+    "}",
+    "const serveOn = async (port: number) => {",
+    "  http.createServer(handler).listen(port);",
+    "};",
+    "await settle(b, 7403);",
+    "await answers(",
+    "  7404,",
+    ");",
+    "await serveOn(7405);",
+    "connect(7406);",
+  ].join("\n");
+  assert.deepEqual(where(src), ["10 connect 7403", "12 connect 7404", "14 listen 7405", "15 connect 7406"]);
+});
+
+test("a port handed to a call that neither connects nor listens isn't one, nor is one inside a larger argument", () => {
+  const src = [
+    "function env(world: object, port: number) {",
+    "  return { URL: `http://localhost:${scenarioPorts(world).real(port)}` };",
+    "}",
+    "env(this, 7401);",
+    "c.items.get(9000);",
+    "await sleep(2000);",
+    "async function answers(port: number) { return connect({ port }); }",
+    "await answers(7400 + i);",
+    'Given("answers(7402)", () => {});',
+  ].join("\n");
+  assert.deepEqual(where(src), []);
+});
+
+test("a function in one step file that connects counts where another file calls it", () => {
+  const users = portUsers(["export async function answers(port: number) {\n  return fetch(`http://127.0.0.1:${port}/`);\n}\n"]);
+  assert.deepEqual(fixedPortsIn("g.ts", "await answers(7403);\n", users), [{ file: "g.ts", line: 1, port: 7403, use: "connect" }]);
 });
 
 test("a port in a step's text or a comment isn't one", () => {

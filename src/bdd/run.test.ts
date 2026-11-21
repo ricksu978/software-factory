@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 import { cucumberArgs, DEFAULT_WORKERS, workerCount } from "./run.ts";
 
 test("with no worker count set, or an empty one, the suite runs in the default, which is more than one", () => {
@@ -28,7 +27,7 @@ test("cucumber-js runs the support code and steps in that many workers, writing 
     "--import", "features/support/**/*.ts",
     "--import", "features/steps/**/*.ts",
     "--format", "message:reports/bdd.ndjson",
-    "--plugin", pathToFileURL(new URL("./serial-last.ts", import.meta.url).pathname).href,
+    "--plugin", new URL("./serial-last.ts", import.meta.url).href,
     "--parallel", "3",
     "--tags", "not @local",
   ]);
