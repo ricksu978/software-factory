@@ -71,7 +71,7 @@ type Readiness = {
 };
 
 const system = { actor: "system", actorId: "poller" } as const;
-const ACTIVE: ItemState[] = ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"];
+const ACTIVE: ItemState[] = ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"];
 /** States an item waits in before the readiness gate passes it. It holds no run, so leaving the backlog only withdraws it. */
 const GATING: ItemState[] = ["Eligible", "NotReady"];
 const POLICIES: PolicyName[] = ["dor", "scenarios", "pr-review", "risk", "dod"];
@@ -316,9 +316,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
   //    address on a review, a conflict or CI failing on its PR's head (PBI 235), and only reviews by allowlisted users
   //    count (Run contract 10). A NeedsInput item that waits on "no trusted review text to address" goes back too, once
-  //    the factory answers it (PBI 305).
+  //    the factory answers it (PBI 305). An item waiting in FeatureChangeRequest has its PR's merge or close noticed too
+  //    (PBI 364).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
-  await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
+  await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput", "FeatureChangeRequest"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     const repo = fi?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;

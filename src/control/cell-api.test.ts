@@ -243,6 +243,60 @@ describe("cell API", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from run_file where run_id = $1", [cell.runId])).rows[0].n, 0);
   });
 
+  test("feature_change_requested stores the request, moves the item to FeatureChangeRequest and posts it on the PBI once (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    host.files.set(`${repo}@l0ck:features/a.feature`, "  Then refused\n");
+    const featureChange = [{ path: "features/a.feature", reason: "Held, not refused", before: "  Then refused\n", after: "  Then held\n" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.state, "FeatureChangeRequest");
+    const i = await item(cell.itemId);
+    assert.equal(i.state, "FeatureChangeRequest");
+    assert.equal(i.lease_owner, null);
+    assert.deepEqual((await runRow(cell.runId)).feature_change, featureChange);
+    await mirrored();
+    await mirrored();
+    const posted = (await board.comments("7")).filter((c) => c.includes("features/a.feature"));
+    assert.equal(posted.length, 1);
+    assert.match(posted[0]!, /Held, not refused[\s\S]*-  Then refused\n\+  Then held/);
+  });
+
+  test("a feature change request's before is the lock commit's text, not the cell's (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const lock = "  Then refused\n  Then the total is checked\n";
+    host.files.set(`${repo}@l0ck:features/a.feature`, lock);
+    // A steered cell sends a before that already leaves out a line, so the diff wouldn't show it dropped.
+    const sent = [{ path: "features/a.feature", reason: "Held, not refused", before: "  Then refused\n", after: "  Then held\n" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange: sent });
+    assert.equal(r.status, 200);
+    assert.deepEqual((await runRow(cell.runId)).feature_change, [{ ...sent[0], before: lock }]);
+    await mirrored();
+    const posted = (await board.comments("7")).find((c) => c.includes("features/a.feature"));
+    assert.match(posted!, /-  Then the total is checked/);
+  });
+
+  test("a feature change request for a file missing from the lock commit gets 400 (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const featureChange = [{ path: "features/a.feature", reason: "r", after: "b" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+    assert.equal(r.status, 400);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
+  test("a feature change request must name only locked files, each with a reason and both versions (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const f = { path: "features/a.feature", reason: "r", before: "a", after: "b" };
+    for (const featureChange of [undefined, [], [{ ...f, path: "features/b.feature" }], [{ ...f, reason: "" }], [{ ...f, after: 1 }]]) {
+      const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+      assert.equal(r.status, 400, JSON.stringify(featureChange));
+    }
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
   test("a token that isn't a run token gets 401 on every route, before anything is read or written, and a stale run token still gets 409", async () => {
     const cell = await claimed();
     // A user's sign-in token is a JWT, never a run token's 64 hex digits, and a missing token is no run token either.

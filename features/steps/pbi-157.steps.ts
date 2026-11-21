@@ -17,6 +17,11 @@
 //
 // PBI 158's steps run these hooks and workers too, so the hooks run for @pbi-158, and its steps reach this file's context.
 //
+// Every worker these steps start in this process, PBI 156's single worker too, runs on a fake clock of its own
+// (PBI 396), made by features/support/worker-clocks.ts. A step that waited on the real clock for a tick, a poll or a
+// lock retry moves all of them on together instead. A Then that gives the workers some seconds counts real seconds
+// still, and moves the clocks on while it waits, so a standby that doesn't take over still fails it once they're up.
+//
 // Tick intervals differ by worker, and a step that starts a worker returns just after the worker already running has
 // ticked. So until the lock keeps a second worker idle, the newest worker is the one that claims the next queued item,
 // and a scenario that says it claims nothing fails on its Then.
@@ -30,6 +35,8 @@ import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
+import type { FakeClock } from "../../src/clock.ts";
+import { moved, pass, passUntil, workerClock } from "../support/worker-clocks.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { board, ctx as w156, fakes, learnItems, rehome, type Running, startWorker as startWorker156 } from "./pbi-156.steps.ts";
 
@@ -41,9 +48,11 @@ const POLL_MS = 1_000;
 /** How long a step waits for a worker that loses its lock connection to exit. */
 const EXIT_WITHIN_MS = 15_000;
 
-type Proxy = { port: number; cut(): void; refuse(): void; close(): Promise<void> };
-type Log = { lines: string[]; sink: Pick<Console, "log" | "warn" | "error"> };
-type Exit = { error?: unknown };
+export type Proxy = { port: number; cut(): void; refuse(): void; close(): Promise<void> };
+/** What a proxy is handed for each connection it accepts: the bytes each way, and the connection's close. */
+export type Tap = () => { client(b: Buffer): void; server(b: Buffer): void; close(): void };
+export type Log = { lines: string[]; sink: Pick<Console, "log" | "warn" | "error"> };
+export type Exit = { error?: unknown };
 
 export type Worker = {
   name: string;
@@ -57,6 +66,8 @@ export type Worker = {
   polls: number;
   judged: string[];
   tickMs: number;
+  /** The fake clock it runs on, when one of this file's workers. */
+  clock?: FakeClock;
   running?: Running;
   startError?: unknown;
   exit?: Exit;
@@ -73,6 +84,8 @@ type Ctx = {
   single?: { app: string; pool: pg.Pool; proxy: Proxy; log: Log; exit?: Exit };
   /** When the first worker stopped or died, or when its lock connection ended. */
   stoppedAt?: number;
+  /** How far the scenario's fake clocks had moved on then, so a check bounded in time since the stop bounds fake time too. */
+  stoppedMoved?: number;
   /** The single worker's board polls when its lock connection ended. */
   pollsAtLoss?: number;
   /** A lock-ending step found no session holding the worker lock. */
@@ -113,7 +126,7 @@ async function within(ms: number, ok: () => boolean | Promise<boolean>): Promise
 
 // ---- The database: each worker's own pool, through a proxy ----
 
-async function dbUrl(): Promise<string> {
+export async function dbUrl(): Promise<string> {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   return (d as unknown as { url: string }).url;
@@ -140,8 +153,11 @@ function upstream(url: string): net.NetConnectOpts {
   return { host: u.host, port: Number(u.port || 5432) };
 }
 
-/** A TCP proxy to the test database whose connections a step can cut, as a lost network would. */
-async function startProxy(url: string): Promise<Proxy> {
+/**
+ * A TCP proxy to the test database whose connections a step can cut, as a lost network would. A `tap` sees each
+ * connection's bytes, as PBI 396's steps count a worker's queries.
+ */
+export async function startProxy(url: string, tap?: Tap): Promise<Proxy> {
   const pairs = new Set<[net.Socket, net.Socket]>();
   let refusing = false;
   const server = net.createServer((client) => {
@@ -149,7 +165,15 @@ async function startProxy(url: string): Promise<Proxy> {
     const up = net.connect(upstream(url));
     const pair: [net.Socket, net.Socket] = [client, up];
     pairs.add(pair);
+    const seen = tap?.();
+    if (seen) {
+      client.on("data", (b: Buffer) => seen.client(b));
+      up.on("data", (b: Buffer) => seen.server(b));
+    }
+    let ended = false;
     const close = () => {
+      if (!ended) seen?.close();
+      ended = true;
       pairs.delete(pair);
       client.destroy();
       up.destroy();
@@ -184,7 +208,7 @@ async function startProxy(url: string): Promise<Proxy> {
 }
 
 /** The test database's URL through `port`, with `app` as each connection's application_name. */
-function proxied(url: string, port: number, app: string): string {
+export function proxied(url: string, port: number, app: string): string {
   const u = parts(url);
   const auth = u.user ? `${u.user}${u.password ? `:${u.password}` : ""}@` : "";
   return `postgresql://${auth}127.0.0.1:${port}/${u.database}?application_name=${encodeURIComponent(app)}`;
@@ -195,7 +219,7 @@ function named(url: string, app: string): string {
   return `${url}${url.includes("?") ? "&" : "?"}application_name=${encodeURIComponent(app)}`;
 }
 
-function logger(name: string): Log {
+export function logger(name: string): Log {
   const lines: string[] = [];
   const line = (k: "log" | "warn" | "error") => (...args: unknown[]) => {
     const l = format(...args);
@@ -217,13 +241,13 @@ async function ownPool(name: string): Promise<{ app: string; pool: pg.Pool; prox
 const pool = () => need().pool;
 
 /** The pids of `app`'s sessions that hold a granted advisory lock: its lock session, once it holds the worker lock. */
-async function lockSessions(app: string): Promise<number[]> {
+export async function lockSessions(app: string): Promise<number[]> {
   return (await pool().query<{ pid: number }>(
     `select distinct l.pid from pg_locks l join pg_stat_activity a on a.pid = l.pid
      where l.locktype = 'advisory' and l.granted and a.application_name = $1`, [app])).rows.map((r) => r.pid);
 }
 
-async function terminate(pids: number[]): Promise<void> {
+export async function terminate(pids: number[]): Promise<void> {
   if (pids.length) await pool().query("select pg_terminate_backend(pid) from unnest($1::int[]) as pid", [pids]);
 }
 
@@ -231,7 +255,7 @@ async function terminate(pids: number[]): Promise<void> {
 
 /** Records how the worker settles: an error once it lost the lock. Attached as early as a step can. */
 const watched = new WeakSet<Running>();
-function watch(running: Running | undefined, into: { exit?: Exit }): void {
+export function watch(running: Running | undefined, into: { exit?: Exit }): void {
   if (!running?.done || watched.has(running)) return;
   watched.add(running);
   running.done.then(() => void (into.exit = {}), (error: unknown) => void (into.exit = { error }));
@@ -275,7 +299,9 @@ async function startOne(world: object): Promise<Worker> {
   const i = c.reserved = (c.reserved ?? 0) + 1;
   const name = ordinal[i - 1];
   const own = await ownPool(name);
-  const w: Worker = { name, ...own, log: logger(`${name} worker`), launched: [], polls: 0, judged: [], tickMs: TICK_MS[i - 1] };
+  const w: Worker = {
+    name, ...own, log: logger(`${name} worker`), launched: [], polls: 0, judged: [], tickMs: TICK_MS[i - 1], clock: workerClock(world),
+  };
   c.workers.push(w);
   c.workers.sort((a, b) => ordinal.indexOf(a.name) - ordinal.indexOf(b.name));
   const mod = await load<{ startWorker(d: object): Promise<Running> }>("src/worker/main.ts");
@@ -306,6 +332,7 @@ async function startOne(world: object): Promise<Worker> {
       tickMs: w.tickMs,
       pollMs: POLL_MS,
       log: w.log.sink,
+      clock: w.clock,
       ...c.deps?.(name),
     });
     watch(w.running, w);
@@ -316,9 +343,9 @@ async function startOne(world: object): Promise<Worker> {
 }
 
 /** Waits for the worker to tick and poll the board. */
-async function busy(w: Worker): Promise<void> {
+async function busy(world: object, w: Worker): Promise<void> {
   if (!w.running) return;
-  await until(`the ${w.name} worker ticks and polls the board`, () => ticks(w) >= 1 && w.polls >= 1);
+  await passUntil(world, `the ${w.name} worker ticks and polls the board`, () => ticks(w) >= 1 && w.polls >= 1);
 }
 
 /**
@@ -329,12 +356,13 @@ async function afterWorkingTick(world: object): Promise<void> {
   const w = ctx(world).workers.find((x) => x.running && !x.exit && ticks(x) > 0 && !x.stopped);
   if (!w) return;
   const n = ticks(w);
-  await until(`the ${w.name} worker ticks again`, () => ticks(w) > n, w.tickMs * 3 + 5_000);
+  await passUntil(world, `the ${w.name} worker ticks again`, () => ticks(w) > n, w.tickMs * 3 + 5_000);
 }
 
+/** Moves every worker's fake clock `ms` on. */
 async function runFor(world: object, ms: number): Promise<void> {
   await rehome(world);
-  await sleep(ms);
+  await pass(world, ms);
   await rehome(world);
   await learnItems(world);
 }
@@ -357,7 +385,8 @@ Before({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
   c.single = { ...own, log: logger("the worker") };
   // PBI 156's steps start the @ac-2 scenarios' worker with these in its deps.
   // PBI 158's steps put a clock of their own in these deps too, so they're added to, not replaced.
-  w156(this).deps = { ...w156(this).deps, pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink };
+  // It runs on a fake clock too (PBI 396).
+  w156(this).deps = { ...w156(this).deps, pool: own.pool, pollMs: POLL_MS, log: c.single.log.sink, clock: workerClock(this) };
 });
 
 const bounded = (p: Promise<unknown> | undefined) => Promise.race([Promise.resolve(p).catch(() => undefined), sleep(10_000)]);
@@ -382,15 +411,15 @@ After({ tags: "@pbi-157 or @pbi-158", ...long }, async function () {
 // ---- Given ----
 
 Given("the first worker is running and has ticked once", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("the first worker is running and has polled the board once", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("the first worker is running", long, async function () {
-  await busy(await startOne(this));
+  await busy(this, await startOne(this));
 });
 
 Given("a second worker has started beside it", long, async function () {
@@ -417,9 +446,10 @@ Given("the first worker has stopped and the second worker has taken over", long,
   await first.running.stop();
   first.stopped = true;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
   // A standby counts no tick until it takes the lock, so a tick after the stop means it has taken over.
   const n = ticks(second);
-  await until("the second worker ticks after the first one stopped", () => ticks(second) > n);
+  await passUntil(this, "the second worker ticks after the first one stopped", () => ticks(second) > n);
 });
 
 Given("the worker is running and has polled the board once", long, async function () {
@@ -505,6 +535,7 @@ When("the first worker stops", long, async function () {
   await first.running?.stop();
   first.stopped = true;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
 });
 
 When("the first worker dies without stopping cleanly, so Postgres ends its sessions", long, async function () {
@@ -516,6 +547,7 @@ When("the first worker dies without stopping cleanly, so Postgres ends its sessi
   const pids = (await pool().query<{ pid: number }>("select pid from pg_stat_activity where application_name = $1", [first.app])).rows.map((r) => r.pid);
   await terminate(pids);
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
 });
 
 /** Ends the worker's lock session as an administrator would. A worker that holds no lock is noted for the Then. */
@@ -534,6 +566,7 @@ async function singleLost(world: object): Promise<void> {
   watch(w156(world).worker, c.single!);
   c.pollsAtLoss = (await board(world)).calls.filter((call) => call.method === "listEligible").length;
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(world);
 }
 
 When("the worker's lock connection is ended by Postgres on an administrator's order", long, async function () {
@@ -557,6 +590,7 @@ When("the worker's lock connection is closed by a lost network connection", long
 When("the first worker's lock connection is ended by Postgres", long, async function () {
   const c = ctx(this);
   c.stoppedAt = Date.now();
+  c.stoppedMoved = moved(this);
   await endLock(this, worker(this, "first").app, "first worker");
 });
 
@@ -579,7 +613,7 @@ When("longer than one scheduler tick passes", long, async function () {
 });
 
 When("longer than one board poll passes", long, async function () {
-  await sleep(POLL_MS + 1_000);
+  await pass(this, POLL_MS + 1_000);
 });
 
 When("the board gains a new item {string} with acceptance criteria", long, async function (ext: string) {
@@ -637,7 +671,7 @@ Then("the first worker is still running", long, async function () {
   const w = worker(this, "first");
   assert.equal(w.exit, undefined, `the first worker exited: ${String(w.exit?.error)}`);
   const n = ticks(w);
-  await until("the first worker ticks again", () => ticks(w) > n, w.tickMs * 2 + 5_000);
+  await passUntil(this, "the first worker ticks again", () => ticks(w) > n, w.tickMs * 2 + 5_000);
 });
 
 Then("the worker is still running", long, async function () {
@@ -646,7 +680,7 @@ Then("the worker is still running", long, async function () {
   assert.ok(w, "the worker never started");
   assert.equal(c.single!.exit, undefined, `the worker exited: ${String(c.single!.exit?.error)}`);
   const n = w.runs.get("scheduler tick") ?? 0;
-  await until("the worker ticks again", () => (w.runs.get("scheduler tick") ?? 0) > n, 5_000);
+  await passUntil(this, "the worker ticks again", () => (w.runs.get("scheduler tick") ?? 0) > n, 5_000);
 });
 
 Then("exactly one of the three workers launched a cell or polled the board", function () {
@@ -656,6 +690,12 @@ Then("exactly one of the three workers launched a cell or polled the board", fun
   assert.equal(working.length, 1, `workers that worked: ${JSON.stringify(working)}`);
 });
 
+/** The fake time left of `s` seconds since the first worker stopped: what the scenario's fake clocks may still move on. */
+export function sinceStop(world: object, s: number): number {
+  const c = ctx(world);
+  return Math.max(s * 1_000 - (moved(world) - (c.stoppedMoved ?? moved(world))), 0);
+}
+
 /** That the second worker launched item `name`'s cell within `s` seconds of the first stopping, holding the worker lock. */
 async function takesOver(world: object, s: number, name: string): Promise<void> {
   const c = ctx(world);
@@ -663,10 +703,10 @@ async function takesOver(world: object, s: number, name: string): Promise<void> 
   const w = worker(world, "second");
   assert.deepEqual(w.launchedBefore ?? [], [], "the second worker launched a cell before the first one stopped");
   const deadline = c.stoppedAt! + s * 1_000;
-  await until(`the second worker launches item ${name}'s cell`, async () => {
+  await passUntil(world, `the second worker launches item ${name}'s cell`, async () => {
     await rehome(world);
     return w.launched.includes(p17(world).items[name]);
-  }, Math.max(deadline - Date.now(), 0));
+  }, Math.max(deadline - Date.now(), 0), sinceStop(world, s));
   await learnItems(world);
   assert.ok((await lockSessions(w.app)).length, "the second worker launched a cell without holding the worker lock");
 }
@@ -684,7 +724,7 @@ Then("within {int} seconds of the first worker stopping, the second worker has p
   started(c);
   const w = worker(this, "second");
   assert.equal(w.polledBefore ?? 0, 0, "the second worker polled the board before the first one stopped");
-  await until("the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0));
+  await passUntil(this, "the second worker polls the board", () => w.polls > 0, Math.max(c.stoppedAt! + s * 1_000 - Date.now(), 0), sinceStop(this, s));
 });
 
 Then("the worker exits with an error saying it lost the worker lock", long, async function () {

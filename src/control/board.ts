@@ -3,6 +3,7 @@
 // only once the transition has committed.
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
+import { featureChangeComment, type FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { effectsDone, recordEffect } from "../store/outbox.ts";
 import { repoName, runBranch } from "../store/runs.ts";
@@ -35,7 +36,7 @@ export function splitStatus(fieldMap: Row["field_map"]): string | null {
  * the board mirror outbox row's: each effect that succeeds is recorded against it, and one already recorded is skipped,
  * so a row handled again repeats no board call (PBI 220).
  */
-export type MirrorEvent = { eventId: string; seq: string; question?: string | null };
+export type MirrorEvent = { eventId: string; seq: string; question?: string | null; featureChange?: FeatureChangeFile[] | null };
 
 /**
  * Mirrors one committed transition onto the item's board, and closes its open PR when the item is withdrawn. Each
@@ -78,6 +79,10 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
   if (to === "Done") await attempt("close", () => board.close(id));
   const note = waitingFor[to];
   if (note) await attempt("comment", () => board.comment(id, e.question ? `${note}\n\n${e.question}` : note, `waiting:${e.eventId}`));
+  if (event === "feature_change_requested" && e.featureChange?.length) {
+    const featureChange = e.featureChange;
+    await attempt("featureChange", () => mirrorFeatureChange(board, id, { eventId: e.eventId, featureChange }));
+  }
   if (to === "Abandoned" && event === "withdrawn" && row.pr_number !== null && row.repo_url && row.run_number !== null) {
     const repo = repoName(row.repo_url);
     const pr = row.pr_number;
@@ -89,4 +94,14 @@ export async function mirror(deps: BoardDeps, itemId: string, to: ItemState, eve
     });
   }
   if (failed.length) throw new Error(`board mirroring failed for item ${itemId}: ${failed.join(", ")}`);
+}
+
+/**
+ * PBI 364: posts a feature change request on the item's PBI as one comment, the way sign-off posts the scenarios: for
+ * each file, its path, the stage's reason, and the lines that change from the lock commit to the proposed version,
+ * before and after. The comment's key comes from the event, so the move handled twice posts it once.
+ */
+export async function mirrorFeatureChange(board: BacklogAdapter, externalId: string, e: { eventId: string; featureChange: FeatureChangeFile[] }): Promise<void> {
+  if (!e.featureChange.length) return;
+  await board.comment(externalId, featureChangeComment(e.featureChange), `feature-change:${e.eventId}`);
 }

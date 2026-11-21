@@ -797,6 +797,11 @@ stateDiagram-v2
   InProgress --> SignOff: scenarios written
   SignOff --> InProgress: approved, or changes asked
   InProgress --> NeedsInput: agent blocked
+  InProgress --> FeatureChangeRequest: a stage after sign-off asks to change a locked feature file
+  FeatureChangeRequest --> Accepted: PR merged by a person while waiting
+  FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged
+  FeatureChangeRequest --> Queued: acceptance criteria changed
+  FeatureChangeRequest --> Eligible: its rules section no longer reads as the owner approved it
   NeedsInput --> InProgress: answered, by a person, or by the factory once CI passes on the base or the PR conflicts or gets a new review, or its question from before PBI 292 names only CI failures
   InProgress --> InReview: PR open, CI green
   InReview --> Queued: changes requested, or a conflict
@@ -1292,6 +1297,20 @@ stateDiagram-v2
     or one abandoned any other way,
 
     stays Abandoned (PBI 228).
+
+    An item waiting in FeatureChangeRequest takes the same backlog changes as one in InProgress:
+
+    a label removed,
+
+    the item closed or its PR closed unmerged withdraws it to Abandoned,
+
+    a change to its acceptance criteria queues it again for a new run,
+
+    and a rules section that no longer reads as approved sends it back to Eligible.
+
+    A person who merges its PR while it waits moves it to Accepted,
+
+    which the poller and the merge webhook both notice (PBI 364).
 
     All of these moves are logged as system events.
 
@@ -2350,6 +2369,44 @@ Feature: Export invoices to CSV
 
     since no answer would change the files.
 
+    A stage that thinks a locked scenario is wrong may ask to change it instead (PBI 364).
+
+    Its agent edits the file as it would have it,
+
+    and its report names each such file and the reason,
+
+    one line each, <code>FEATURE CHANGE: &lt;path&gt;: &lt;reason&gt;</code>.
+
+    The factory still restores the locked files to the lock commit,
+
+    pushes the rest of the stage's work,
+
+    and moves the item from InProgress to FeatureChangeRequest,
+
+    where its run goes no further.
+
+    The request holds each file's text at the lock commit and the version the stage proposed.
+
+    The item page shows it under "Feature change request":
+
+    each file's path,
+
+    the stage's reason,
+
+    and its lines before and after.
+
+    The PBI gets it as one comment,
+
+    the way sign-off posts the scenarios,
+
+    with each file's change from the lock commit as a diff.
+
+    A request that names a file the stage didn't change,
+
+    or one that isn't locked,
+
+    asks for nothing.
+
     The self-reviewer holds no finding open for a scenario change.
 
     A scenario it thinks is wrong goes in the PR body as a note for the person who merges.
@@ -2503,6 +2560,58 @@ Feature: Export invoices to CSV
     and a scenario that waits for something keeps the same deadline,
 
     so it still fails when the behaviour doesn't happen (PBI 376).
+
+    <span class="tag call">My call</span></li>
+
+    <li><b>Moving time on instead of waiting it out.</b>
+
+    The worker sets every timer it uses,
+
+    and reads every time it records,
+
+    through one clock it's given (PBI 396):
+
+    the scheduler tick,
+
+    the outbox loop,
+
+    each board poll,
+
+    the standby's lock retry,
+
+    the holder's lock check,
+
+    and the slow-work warnings of a tick or a poll.
+
+    Without one it runs on the real clock,
+
+    at the intervals it always has.
+
+    A scenario hands it a fake clock,
+
+    which stands still until the test moves it on.
+
+    Moving it on fires each timer that falls due,
+
+    one at a time and at its own time,
+
+    and waits for the work each one starts before it fires the next.
+
+    A closed lock connection still reaches the worker as an event,
+
+    so a worker whose fake clock never moves still exits when it loses the lock.
+
+    A worker that stops gives the lock back before it closes its lock connection,
+
+    so a standby's next try on its fake clock finds the lock free.
+
+    So PBI 157's and PBI 158's scenarios move their workers' clocks on where they used to sit through real lock retries and ticks,
+
+    and a takeover scenario no longer waits 15 real seconds.
+
+    A Then that gives the workers some seconds still counts real ones,
+
+    so it fails when the behaviour doesn't happen.
 
     <span class="tag call">My call</span></li>
 
@@ -4772,6 +4881,16 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       The owner alone gets the "Approve rule change" control there,
 
       and only while the item waits for it.
+
+      An item in FeatureChangeRequest shows a Feature change request section (PBI 364):
+
+      each file the stage asks to change,
+
+      its reason,
+
+      and its lines before and after from the lock commit,
+
+      which the control plane reads itself rather than taking the cell's copy.
 
       Then the SOP version,
 

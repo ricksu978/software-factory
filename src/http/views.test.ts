@@ -700,3 +700,27 @@ describe("runDetailPage's Rule changes (PBI 395)", () => {
     assert.doesNotMatch(runDetailPage(detail(null), null), /Rule changes/);
   });
 });
+
+describe("runDetailPage's Feature change request (PBI 364)", () => {
+  const detail = (featureChange: RunDetail["featureChange"]): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000364", external_id: "364", repo: "octo/repo", title: "t", state: "FeatureChangeRequest" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, featureChange,
+  });
+
+  test("shows each file under its path, its lines before and after, escaped, and the stage's reason", () => {
+    const html = runDetailPage(detail([
+      { path: "features/a.feature", reason: "Show <b>held</b> orders", before: "  Given x\n  Then refused\n", after: "  Given x\n  Then <script>1</script>\n" },
+      { path: "features/b.feature", reason: "Needs a number", before: "a\n", after: "b\n" },
+    ]), null);
+    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.match(html, /<h3>features\/a\.feature<\/h3><p data-reason>Show &lt;b&gt;held&lt;\/b&gt; orders<\/p>/);
+    assert.match(html, /<span data-side="same">  Given x<\/span>\n<del data-side="before">  Then refused<\/del>\n<ins data-side="after">  Then &lt;script&gt;1&lt;\/script&gt;<\/ins>/);
+    assert.match(html, /<h3>features\/b\.feature<\/h3><p data-reason>Needs a number<\/p>/);
+    assert.doesNotMatch(html, /<script>1|<b>held/);
+  });
+
+  test("an item with no open request has no such section", () => {
+    assert.doesNotMatch(runDetailPage(detail(null), null), /Feature change request/);
+  });
+});

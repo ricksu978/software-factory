@@ -706,6 +706,27 @@ describe("pollOnce", dbTest, () => {
     assert.equal((await db.pool.query("select merge_sha from run where id = $1", [run])).rows[0].merge_sha, null);
   });
 
+  test("a FeatureChangeRequest item whose PR merged moves to Accepted, and one whose PR closed is withdrawn (PBI 364)", async () => {
+    const merged = await held("FeatureChangeRequest", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === merged.pr)!, { open: false, merged: true, mergeSha: "m4" });
+    const closed = await held("FeatureChangeRequest", { pr: true });
+    Object.assign(host.prs.find((p) => p.number === closed.pr)!, { open: false });
+    await poll();
+    assert.equal((await row(merged.ext)).state, "Accepted");
+    assert.equal((await db.pool.query("select merge_sha from run where id = $1", [merged.run])).rows[0].merge_sha, "m4");
+    assert.equal((await row(closed.ext)).state, "Abandoned");
+  });
+
+  test("a FeatureChangeRequest item that left the backlog is withdrawn, and one whose criteria changed is queued again (PBI 364)", async () => {
+    const gone = await held("FeatureChangeRequest");
+    await fake.seed({ externalId: gone.ext, labels: [], repo: REPO });
+    const edited = await held("FeatureChangeRequest", { criteriaHash: "an older hash" });
+    await poll();
+    assert.equal((await row(gone.ext)).state, "Abandoned");
+    assert.equal((await row(edited.ext)).state, "Queued");
+    assert.equal((await db.pool.query("select ended_at from run where id = $1", [edited.run])).rows[0].ended_at !== null, true);
+  });
+
   test("a NeedsInput item whose PR merged moves to Accepted with its merge commit, and its question closes (PBI 194)", async () => {
     const { ext, id, pr, run } = await held("NeedsInput", { pr: true });
     await db.pool.query("insert into question (item_id, kind, body, asked_at) values ($1, 'needs_input', 'q', now())", [id]);

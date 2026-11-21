@@ -1046,6 +1046,45 @@ describe("runCell", () => {
     assert.match(second.prompt, /undid an edit to features\/pbi-482\.feature/);
   });
 
+  test("a green that edits a locked feature file and asks to change it moves the item to FeatureChangeRequest, the file restored on the pushed branch (PBI 364)", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => {
+      if (stage === "green" && a.prompt.includes("## The locked feature files")) {
+        appendFileSync(join(a.cwd, FEATURE), "# proposed\n");
+        writeFileSync(join(a.cwd, "app.txt"), "held\n");
+        return { text: `Done.\n\nFEATURE CHANGE: ${FEATURE}: An empty order is held` };
+      }
+    } });
+    const lock = git(h.dir, "show", `${h.lockSha}:${FEATURE}`);
+    assert.equal(await h.run(), "waiting");
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "feature_change_requested");
+    assert.deepEqual(t.featureChange, [{ path: FEATURE, reason: "An empty order is held", before: `${lock}\n`, after: `${lock}\n# proposed\n` }]);
+    const pushed = git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH);
+    assert.equal(git(h.dir, "show", `${pushed}:${FEATURE}`), lock);
+    assert.equal(git(h.dir, "show", `${pushed}:app.txt`), "held");
+    const ended = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status !== "started");
+    assert.equal(ended.at(-1)!.body.status, "failed");
+    assert.match(ended.at(-1)!.body.message, /asks to change features\/pbi-482\.feature/);
+    assert.ok(!h.prs.length, "a PR was opened");
+  });
+
+  test("a request that names a locked file the stage didn't change, or a file that isn't locked, asks for nothing (PBI 364)", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => {
+      if (stage === "green" && a.prompt.includes("## The locked feature files")) {
+        return { text: `Done.\nFEATURE CHANGE: ${FEATURE}: wrong\nFEATURE CHANGE: features/other.feature: also wrong` };
+      }
+    } });
+    assert.equal(await h.run(), "done");
+    assert.ok(h.transitions().every((t) => t.event !== "feature_change_requested"));
+  });
+
+  test("every brief after sign-off says how to ask for a change to a locked feature file (PBI 364)", async () => {
+    const h = harness({ nextStage: "green" });
+    assert.equal(await h.run(), "done");
+    const green = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## The locked feature files"))!;
+    assert.match(green.prompt, /FEATURE CHANGE: <path>: <reason>/);
+  });
+
   test("every brief after sign-off names the locked feature files", async () => {
     const h = harness({ nextStage: "red" });
     assert.equal(await h.run(), "done");

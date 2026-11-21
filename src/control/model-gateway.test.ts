@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
+import { fakeClock, type FakeClock } from "../clock.ts";
 import { cellModelEnv, GatewayUnavailable, handleModelRequest, startModelGateway, type WebTool } from "./model-gateway.ts";
 
 const port = (s: Server) => (s.address() as AddressInfo).port;
@@ -304,31 +305,8 @@ describe("model gateway request check", () => {
 
 describe("model gateway slow line (PBI 154)", () => {
   /** A clock whose timers fire only when the test says so. */
-  function handClock() {
-    let t = 0;
-    let seq = 0;
-    const timers = new Map<number, { at: number; fn: () => void }>();
-    return {
-      now: () => t,
-      setTimeout: (fn: () => void, ms: number) => {
-        timers.set(++seq, { at: t + ms, fn });
-        return seq;
-      },
-      clearTimeout: (h: unknown) => void timers.delete(h as number),
-      pending: () => timers.size,
-      advance(ms: number) {
-        t += ms;
-        for (const [id, v] of [...timers]) {
-          if (v.at > t) continue;
-          timers.delete(id);
-          v.fn();
-        }
-      },
-    };
-  }
-
   type Mode = "hang" | "answer" | "drop";
-  async function withGateway(mode: Mode, fn: (ctx: { clock: ReturnType<typeof handClock>; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>, ownerToken = "owner") {
+  async function withGateway(mode: Mode, fn: (ctx: { clock: FakeClock; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>, ownerToken = "owner") {
     let got = 0;
     const up = createServer((req, res) => {
       req.resume();
@@ -341,7 +319,7 @@ describe("model gateway slow line (PBI 154)", () => {
       });
     });
     await listen(up);
-    const clock = handClock();
+    const clock = fakeClock();
     const lines: string[] = [];
     const g = await startModelGateway({
       port: 0,
@@ -385,11 +363,11 @@ describe("model gateway slow line (PBI 154)", () => {
     await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
       const { req } = open(gatewayPort, "/v1/messages?beta=true");
       await forwarded();
-      clock.advance(59_999);
+      await clock.advance(59_999);
       assert.deepEqual(lines, []);
-      clock.advance(1);
+      await clock.advance(1);
       assert.deepEqual(lines, ["slow: the model gateway request POST /v1/messages for run 11111111-2222-3333-4444-555555555555 has had no upstream answer for 60 seconds"]);
-      clock.advance(600_000);
+      await clock.advance(600_000);
       assert.equal(lines.length, 1);
       req.destroy();
     });
@@ -401,7 +379,7 @@ describe("model gateway slow line (PBI 154)", () => {
       await forwarded();
       for (let i = 0; i < 100 && !events.includes("data"); i++) await tick(10);
       assert.equal(clock.pending(), 0);
-      clock.advance(300_000);
+      await clock.advance(300_000);
       assert.deepEqual(lines, []);
       req.destroy();
     });
@@ -414,7 +392,7 @@ describe("model gateway slow line (PBI 154)", () => {
       for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
       assert.deepEqual(events, ["status 502"]);
       assert.equal(clock.pending(), 0);
-      clock.advance(300_000);
+      await clock.advance(300_000);
       assert.deepEqual(lines, []);
     });
   });
@@ -423,11 +401,11 @@ describe("model gateway slow line (PBI 154)", () => {
     await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
       const { req } = open(gatewayPort);
       await forwarded();
-      clock.advance(20_000);
+      await clock.advance(20_000);
       req.destroy();
       for (let i = 0; i < 100 && clock.pending() > 0; i++) await tick(10);
       assert.equal(clock.pending(), 0);
-      clock.advance(300_000);
+      await clock.advance(300_000);
       assert.deepEqual(lines, []);
     });
   });
@@ -441,7 +419,7 @@ describe("model gateway slow line (PBI 154)", () => {
         for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
         assert.deepEqual(events, ["status 400"]);
         assert.equal(clock.pending(), 0);
-        clock.advance(300_000);
+        await clock.advance(300_000);
         assert.deepEqual(lines, []);
       },
       "owner\n",

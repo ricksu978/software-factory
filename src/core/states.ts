@@ -2,14 +2,17 @@
 
 export type ItemState =
   | "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput"
-  | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split";
+  | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split"
+  // PBI 364: a stage after sign-off asked to change a locked feature file, and the item waits on the owner.
+  | "FeatureChangeRequest";
 
 export type ItemEvent =
   | "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked"
   | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed"
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
-  | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited";
+  | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"
+  | "feature_change_requested";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -22,9 +25,13 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "scenarios_written", "SignOff"],
   ["InProgress", "blocked", "NeedsInput"],
   ["InProgress", "pr_opened", "InReview"],
+  // A stage after sign-off asks to change a locked feature file, and the item waits on the owner (PBI 364).
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
   ["InReview", "changes_requested", "Queued"],
   ["InReview", "merged", "Accepted"],
   ["InProgress", "merged", "Accepted"],
+  // A person may merge the PR while the item waits on the owner about a feature change (PBI 364).
+  ["FeatureChangeRequest", "merged", "Accepted"],
   // A person may merge the PR while the item waits on a question asked after the PR opened (PBI 194).
   ["NeedsInput", "merged", "Accepted"],
   ["InReview", "approvals_met", "Accepted"], // Phase 1. In Phase 0 a merge is `merged`, a person's or the factory's (PBI 181).
@@ -40,7 +47,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Abandoned", "reopened_signoff", "SignOff"],
   ["Abandoned", "reopened_question", "NeedsInput"],
   // Backlog changes (spec §5) reach every state that holds or awaits a run.
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap(
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).flatMap(
     (s): [ItemState, ItemEvent, ItemState][] => [[s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]],
   ),
   // An item that leaves the backlog before it's Queued is withdrawn too, and one withdrawn from either state that gets
@@ -65,7 +72,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "rule_change_approved", "Eligible"],
   // A Queued or later item whose "Changes the factory's rules" section no longer reads as the owner approved it meets
   // the readiness check again, which leaves it waiting for a new approval, so nothing built from the edit ships (PBI 395).
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map(
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).map(
     (s): [ItemState, ItemEvent, ItemState] => [s, "rules_edited", "Eligible"],
   ),
 ];
