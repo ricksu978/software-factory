@@ -1916,6 +1916,14 @@ stateDiagram-v2
 
       as stage 10 describes (PBI 181).
 
+      So does a failure whose every failed check names failing tests that the default branch's head fails too:
+
+      the base is at fault, not the item, as the cell finds it (PBI 215, PBI 292),
+
+      and the failing check only holds the merge.
+
+      A base whose CI can't be read leaves the failure the item's.
+
       With webhooks on,
 
       GitHub's delivery that a check suite completed does the same without waiting for the next poll.
