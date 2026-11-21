@@ -1,6 +1,7 @@
-// The clock the worker sets its timers and reads its times through (PBI 396). The worker's scheduler tick, outbox
-// loop, board polls, standby lock retry and holder lock check all run on it, and each tick's time is its now(). A
-// worker given no clock runs on realClock. A test hands it a fakeClock, which stands still until the test moves it on.
+// The one clock the factory sets its timers and reads its times through. The worker's scheduler tick, outbox loop,
+// board polls, standby lock retry and holder lock check all run on it, and each tick's time is its now() (PBI 396).
+// The slow-work warnings of a tick, a poll or a request time themselves on it too (PBI 134). Code given no clock runs
+// on realClock. A test hands it a fakeClock, which stands still until the test moves it on.
 
 /** Sets timers and tells the time. */
 export type Clock = {
@@ -17,6 +18,10 @@ export type FakeClock = Clock & {
    * for the work each one starts before it fires the next.
    */
   advance(ms: number): Promise<void>;
+  /** How many timers are still waiting that were due by now. advance() leaves none. */
+  overdue(): number;
+  /** How many timers are still waiting, due or not. */
+  pending(): number;
 };
 
 /** The process's own clock and timers. */
@@ -43,9 +48,14 @@ export function fakeClock(start: Date = new Date(0)): FakeClock {
     for (const t of timers) if (t.at <= until && (!first || t.at < first.at || (t.at === first.at && t.seq < first.seq))) first = t;
     return first;
   };
+  // Lets the event loop run before each timer and after the last, so work a timer's due time finds settled has
+  // settled, as it would have on the real clock.
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
   const move = async (ms: number) => {
     const until = at + Math.max(ms, 0);
-    for (let t = next(until); t; t = next(until)) {
+    for (await settle(); ; await settle()) {
+      const t = next(until);
+      if (!t) break;
       timers.delete(t);
       at = Math.max(at, t.at);
       await t.fn();
@@ -62,6 +72,8 @@ export function fakeClock(start: Date = new Date(0)): FakeClock {
     clearTimeout(handle) {
       timers.delete(handle as Timer);
     },
+    pending: () => timers.size,
+    overdue: () => [...timers].filter((t) => t.at <= at).length,
     advance(ms) {
       const done = moving.then(() => move(ms));
       moving = done.catch(() => {});

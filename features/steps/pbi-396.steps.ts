@@ -1,6 +1,6 @@
 // Step definitions for features/pbi-396-worker-fake-clock.feature. The @db scenarios run workers from
 // src/worker/main.ts in this process, on PBI 4's shared test database, with PBI 156's fakes and board, PBI 17's items
-// and launcher record, and PBI 157's first worker. A worker on a fake clock is handed one from src/worker/clock.ts as
+// and launcher record, and PBI 157's first worker. A worker on a fake clock is handed one from src/clock.ts as
 // its `clock`. "With its default intervals" and "given no intervals" leave tickMs, outboxMs, pollMs and lockRetryMs
 // unset, so the worker uses its own.
 //
@@ -34,7 +34,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cucumberArgs, DEFAULT_WORKERS } from "../../src/bdd/run.ts";
 import { createPool } from "../../src/store/db.ts";
-import type { FakeClock } from "../../src/worker/clock.ts";
+import type { FakeClock } from "../../src/clock.ts";
 import { realTimers, trackTimers } from "../support/real-timers.ts";
 import { moved } from "../support/worker-clocks.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
@@ -338,7 +338,7 @@ async function move(world: object, w: W, ms: number): Promise<void> {
 const standingBy = (w: W) => w.log.lines.some((l) => /another worker holds the (worker )?lock/i.test(l) && /stand(s|ing)? by/i.test(l));
 
 async function fakeClock(at: string): Promise<FakeClock | undefined> {
-  const mod = await load<{ fakeClock(start: Date): FakeClock }>("src/worker/clock.ts");
+  const mod = await load<{ fakeClock(start: Date): FakeClock }>("src/clock.ts");
   return mod?.fakeClock(new Date(at));
 }
 
@@ -417,7 +417,7 @@ After({ tags: "@pbi-396 and @db", ...long }, async function () {
 Given("a fake clock that reads {string}", long, async function (at: string) {
   const c = ctx(this);
   c.clock = await fakeClock(at);
-  if (!c.clock) c.missing = "src/worker/clock.ts doesn't exist";
+  if (!c.clock) c.missing = "src/clock.ts doesn't exist";
 });
 
 Given(/^a worker on a fake clock, with its default intervals, has run its (scheduler tick|outbox loop|board poll|lock check) once$/, long, async function (job: Job) {

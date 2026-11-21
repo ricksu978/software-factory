@@ -23,7 +23,7 @@ import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as w156, rehome, type Running } from "./pbi-156.steps.ts";
 import { ctx as w157, sinceStop, type Worker as Worker157 } from "./pbi-157.steps.ts";
-import type { Clock } from "../../src/worker/clock.ts";
+import type { Clock } from "../../src/clock.ts";
 import { pass, passUntil, passWithin } from "../support/worker-clocks.ts";
 
 /** The single worker's name, beside PBI 157's "first" and "second". */

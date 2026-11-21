@@ -4744,7 +4744,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   and it has no endpoint.
   `src/store/heartbeat.test.ts` and `src/worker/main.test.ts` cover the heartbeat.
   PBI 396 gives the worker one clock,
-  the `clock` in `WorkerDeps` (`src/worker/clock.ts`),
+  the `clock` in `WorkerDeps` (`src/clock.ts`),
   which `realClock` is by default.
   Each scheduler tick,
   the outbox loop,
@@ -4766,7 +4766,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
   Each of the worker's timers returns the work it starts,
   so a tick that awaits the database finishes before the next one fires.
   Two moves started together run one after the other.
-  `src/worker/clock.test.ts` covers the fake clock,
+  `src/clock.test.ts` covers the fake clock,
   and `src/worker/main.test.ts` a standby,
   ticks and a lost lock on one.
   PBI 157's and PBI 158's steps start each worker they run in the test's process on a fake clock from `features/support/worker-clocks.ts`,

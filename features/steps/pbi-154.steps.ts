@@ -54,15 +54,15 @@ function serve(world: object, req: IncomingMessage, res: ServerResponse): void {
   res.on("error", () => undefined);
   req.resume();
   req.on("end", () => {
-    c.received.push({ ext, path: new URL(req.url ?? "/", "http://upstream").pathname, at: clock.now() });
+    c.received.push({ ext, path: new URL(req.url ?? "/", "http://upstream").pathname, at: clock.now().getTime() });
     const b = behaviourFor(c, ext);
     if (b.kind === "never") return;
     if (b.kind === "drop") {
-      c.drops.push({ ext, at: clock.now() + b.afterMs });
+      c.drops.push({ ext, at: clock.now().getTime() + b.afterMs });
       clock.setTimeout(() => req.socket.destroy(), b.afterMs);
       return;
     }
-    const started = clock.now();
+    const started = clock.now().getTime();
     clock.setTimeout(() => {
       if (res.destroyed) return;
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -73,12 +73,12 @@ function serve(world: object, req: IncomingMessage, res: ServerResponse): void {
       const end = started + b.streamMs;
       const next = () => {
         if (res.destroyed) return;
-        if (clock.now() >= end) {
+        if (clock.now().getTime() >= end) {
           res.end("event: message_stop\ndata: {}\n\n");
           return;
         }
         res.write("event: ping\ndata: {}\n\n");
-        clock.setTimeout(next, Math.min(10_000, end - clock.now()));
+        clock.setTimeout(next, Math.min(10_000, end - clock.now().getTime()));
       };
       next();
     }, b.afterMs);
@@ -183,7 +183,7 @@ When("item {string}'s cell sends a model request to {string}", long, async funct
     assert.ok(Date.now() < until, `the gateway never forwarded item ${ext}'s model request to ${path}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  c.forwardedAt = c134.clock.now();
+  c.forwardedAt = c134.clock.now().getTime();
 });
 
 When(/^item "([^"]*)"'s cell disconnects (\d+) seconds later$/, long, async function (ext: string, n: string) {
@@ -203,18 +203,18 @@ When(/^(\d+) (seconds?|minutes?) pass after the gateway forwards (?:it|them)$/, 
   const clock = ctx134(this).clock;
   assert.ok(c.forwardedAt !== undefined, "the gateway forwarded nothing");
   const target = c.forwardedAt + ms(Number(n), unit);
-  assert.ok(target >= clock.now(), `the clock is already past ${n} ${unit} after the forward`);
+  assert.ok(target >= clock.now().getTime(), `the clock is already past ${n} ${unit} after the forward`);
   // A drop reaches the gateway through the network in real time, so the clock stops at each one until the cell's
   // request has ended, and no later timer, such as the gateway's slow check, fires before the gateway saw it. On a
   // busy machine, with the suite's parallel workers (PBI 390), the drop could otherwise land after that check.
-  for (const drop of c.drops.filter((d) => d.at > clock.now() && d.at <= target).sort((a, b) => a.at - b.at)) {
-    await clock.advance(drop.at - clock.now());
+  for (const drop of c.drops.filter((d) => d.at > clock.now().getTime() && d.at <= target).sort((a, b) => a.at - b.at)) {
+    await clock.advance(drop.at - clock.now().getTime());
     const sent = c.sent.filter((x) => x.ext === drop.ext);
     const until = Date.now() + 10_000;
     while (sent.some((x) => !x.done) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  await clock.advance(target - clock.now());
-  assert.equal(clock.now(), target, `the clock is at ${clock.now()} ms, not ${target}`);
+  await clock.advance(target - clock.now().getTime());
+  assert.equal(clock.now().getTime(), target, `the clock is at ${clock.now().getTime()} ms, not ${target}`);
   assert.equal(clock.overdue(), 0, "a timer due by now is still pending");
   // Give the cell's connections, such as a stream that just ended, a moment to settle in real time.
   await new Promise((resolve) => setTimeout(resolve, 50));

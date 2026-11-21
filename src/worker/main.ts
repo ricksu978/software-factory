@@ -23,8 +23,7 @@ import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
-import { realClock, type Clock } from "./clock.ts";
-import type { Clock as SlowClock } from "../control/slow-work.ts";
+import { realClock, type Clock } from "../clock.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { factoryRepoAt, mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
@@ -121,11 +120,6 @@ function every(clock: Clock, ms: number, what: string, fn: () => Promise<unknown
     clock.clearTimeout(timer);
     await current;
   };
-}
-
-/** The worker's clock as the slow-work warnings of a tick or a poll read it (PBI 134). */
-function slowClock(clock: Clock): SlowClock {
-  return { now: () => clock.now().getTime(), setTimeout: (fn, ms) => clock.setTimeout(fn, ms), clearTimeout: (h) => clock.clearTimeout(h) };
 }
 
 /**
@@ -293,7 +287,7 @@ function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<
   let ticked = false;
   const ciMemo: CiMemo = new Map();
   const recheckHours: RecheckHoursMemo = new Map();
-  const slow = { clock: slowClock(clock) };
+  const slow = { clock };
   const loops = [every(clock, d.tickMs ?? TICK_MS, "scheduler tick", async () => {
     const now = d.now ? d.now() : clock.now();
     try {

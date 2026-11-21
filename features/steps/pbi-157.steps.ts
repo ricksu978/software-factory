@@ -35,7 +35,7 @@ import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
-import type { FakeClock } from "../../src/worker/clock.ts";
+import type { FakeClock } from "../../src/clock.ts";
 import { moved, pass, passUntil, workerClock } from "../support/worker-clocks.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { board, ctx as w156, fakes, learnItems, rehome, type Running, startWorker as startWorker156 } from "./pbi-156.steps.ts";

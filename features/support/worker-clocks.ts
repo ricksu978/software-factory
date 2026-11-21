@@ -7,7 +7,7 @@
 // pause lets the work a worker starts outside a timer, such as the first tick after a takeover, reach the database, and
 // lets a step's check see it before the clocks move further on.
 import assert from "node:assert/strict";
-import { fakeClock, type FakeClock } from "../../src/worker/clock.ts";
+import { fakeClock, type FakeClock } from "../../src/clock.ts";
 
 /** How far each chunk moves the clocks on: under every interval PBI 157's and PBI 158's workers run at but PBI 156's tick. */
 const CHUNK_MS = 250;

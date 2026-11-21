@@ -13,7 +13,7 @@
 //   reading the PRs          an InReview item whose PR merged, its row locked, so the poll can't move it
 //   a cell API request       the run's item row locked, so the route can't take its lock
 //
-// Time is a fake Clock passed in as `slow.clock`, and warnings are what reaches `slow.log`. The line formats are the
+// Time is src/clock.ts's fakeClock passed in as `slow.clock`, and warnings are what reaches `slow.log`. The line formats are the
 // ones src/control/slow-work.ts documents.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
@@ -22,7 +22,8 @@ import type { AddressInfo } from "node:net";
 import type pg from "pg";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import type { Clock, Slow } from "../../src/control/slow-work.ts";
+import { fakeClock, type FakeClock } from "../../src/clock.ts";
+import type { Slow } from "../../src/control/slow-work.ts";
 import { startServer } from "../../src/http/server.ts";
 import { tick } from "../../src/scheduler/scheduler.ts";
 import { withTx } from "../../src/store/db.ts";
@@ -36,41 +37,6 @@ const REPO = "ricksu978/software-factory";
 const REPO_URL = `https://github.com/${REPO}`;
 const SECRET = "pbi-134-secret";
 const DAY_MS = 86_400_000;
-
-/** A fake clock. `advance` fires each timer that falls due, in order, letting the event loop run after each. */
-class FakeClock implements Clock {
-  private t = 0;
-  private seq = 0;
-  private timers = new Map<number, { at: number; fn: () => void }>();
-  now(): number {
-    return this.t;
-  }
-  setTimeout(fn: () => void, ms: number): unknown {
-    const id = ++this.seq;
-    this.timers.set(id, { at: this.t + Math.max(0, ms), fn });
-    return id;
-  }
-  clearTimeout(handle: unknown): void {
-    this.timers.delete(handle as number);
-  }
-  async advance(ms: number): Promise<void> {
-    const end = this.t + ms;
-    for (;;) {
-      await settle();
-      const due = [...this.timers.entries()].filter(([, v]) => v.at <= end).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
-      if (!due) break;
-      this.timers.delete(due[0]);
-      this.t = due[1].at;
-      due[1].fn();
-    }
-    this.t = end;
-    await settle();
-  }
-  /** How many timers are still waiting that were due by now. `advance` should leave none. */
-  overdue(): number {
-    return [...this.timers.values()].filter((v) => v.at <= this.t).length;
-  }
-}
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -100,7 +66,7 @@ export type Ctx = {
 export function ctx(world: object): Ctx {
   const w = world as { pbi134?: Ctx };
   w.pbi134 ??= {
-    clock: new FakeClock(), lines: [], holders: [], repoHost: fakeRepoHost(), backlog: fakeBacklog(),
+    clock: fakeClock(), lines: [], holders: [], repoHost: fakeRepoHost(), backlog: fakeBacklog(),
     ticks: [], polls: [], boards: new Map(), runs: new Map(), requests: [], seq: 0,
   };
   return w.pbi134;
@@ -466,9 +432,10 @@ When(/^(\d+) (?:more )?(minutes?|seconds?) pass$/, long, async function (n: stri
   // PBI 286's event streams wait on the API's own timer, which its steps hold on their clock.
   if (isPbi286(this)) return pass286(this, ms);
   const clock = ctx(this).clock;
-  const before = clock.now();
+  const before = clock.now().getTime();
   await clock.advance(ms);
-  assert.equal(clock.now() - before, ms, `the clock moved ${clock.now() - before} ms, not ${ms}`);
+  const moved = clock.now().getTime() - before;
+  assert.equal(moved, ms, `the clock moved ${moved} ms, not ${ms}`);
   assert.equal(clock.overdue(), 0, "a timer due by now is still pending");
 });
 

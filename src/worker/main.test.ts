@@ -8,7 +8,7 @@ import { format } from "node:util";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { createPool } from "../store/db.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "../clock.ts";
 import { LOCK_RETRY_MS, startWorker, type Worker, type WorkerDeps } from "./main.ts";
 
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
