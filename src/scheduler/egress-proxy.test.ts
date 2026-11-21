@@ -20,7 +20,9 @@ const freePort = () =>
 /** Starts the proxy script with `env` on a free port, and resolves once it listens. */
 async function startProxy(env: Record<string, string>): Promise<[ChildProcess, number]> {
   const port = await freePort();
-  const proxy = spawn(process.execPath, [script], { env: { ...process.env, EGRESS_PORT: String(port), ...env }, stdio: "ignore" });
+  // Drop any inherited EGRESS_REFUSED_PORTS, so a test that leaves it unset sees the script's default.
+  const { EGRESS_REFUSED_PORTS: _inherited, ...inherited } = process.env;
+  const proxy = spawn(process.execPath, [script], { env: { ...inherited, EGRESS_PORT: String(port), ...env }, stdio: "ignore" });
   // Wait until the proxy listens. A busy machine running the whole suite in parallel can take seconds to start a
   // node process, so allow 30 seconds and fail here, not in every test, if it never comes up.
   for (let i = 0; i < 300 && proxy.exitCode === null; i++) {
@@ -109,6 +111,22 @@ describe("egress proxy", () => {
       assert.equal(await viaProxy(`http://127.0.0.1:${sasPort}/devstoreaccount1/runs/x?sv=1&sig=abc`, "PUT", {}, port), 201);
     } finally {
       refusing.kill();
+    }
+  });
+
+  // A real cell's proxy runs without EGRESS_REFUSED_PORTS, so the default is the whole of AC 1's refusal. The proxy
+  // answers 403 before it connects, so this never touches whatever listens on 7400 or 7402.
+  test("unset, the refused ports are 7400 and 7402", async () => {
+    const [defaults, port] = await startProxy({
+      EGRESS_ALLOW: "http:127.0.0.1:7400,http:127.0.0.1:7402,tls:localhost:7400,tls:localhost:7402",
+    });
+    try {
+      assert.equal(await viaProxy("http://127.0.0.1:7400/", "GET", {}, port), 403);
+      assert.equal(await viaProxy("http://127.0.0.1:7402/", "GET", {}, port), 403);
+      assert.match(await tunnel("localhost:7400", port), /403/);
+      assert.match(await tunnel("localhost:7402", port), /403/);
+    } finally {
+      defaults.kill();
     }
   });
 });
