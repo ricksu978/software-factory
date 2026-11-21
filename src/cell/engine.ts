@@ -467,16 +467,87 @@ function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | null 
 }
 
 /**
+ * A Green gate run that passed (PBI 389): `bdd.run`, `commands.test` and `commands.lint` all passed at `sha`, and the
+ * report held `passed` scenarios that passed and `failed` that didn't.
+ */
+export type GateRun = { sha: string; commands: string[]; passed: number; failed: number };
+
+const squash = (cmd: string) => cmd.trim().replace(/\s+/g, " ");
+
+/**
+ * Splits `command` at each `&&` outside quotes. Null when anything else joins or wraps its parts: a pipe, `||`, `;`, a
+ * lone `&`, a newline, parentheses or a command substitution, since the parts then don't simply run one after another.
+ */
+function andParts(command: string): string[] | null {
+  const parts: string[] = [];
+  let cur = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") { cur += ch; if (ch === "'") quote = null; continue; }
+    if (ch === "\\") { cur += ch + (command[i + 1] ?? ""); i++; continue; }
+    if (ch === "`" || (ch === "$" && command[i + 1] === "(")) return null;
+    if (quote === '"') { cur += ch; if (ch === '"') quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === "&" && command[i + 1] === "&") { parts.push(cur); cur = ""; i++; continue; }
+    if ("|;&()\n".includes(ch)) return null;
+    cur += ch;
+  }
+  if (quote) return null;
+  parts.push(cur);
+  return parts.map(squash).some((p) => p === "") ? null : parts.map(squash);
+}
+
+/**
+ * Which parts of a `run:` command Green's gate commands cover (PBI 389). A command identical to a gate command is
+ * covered whole. Otherwise one made only of parts joined with `&&` is split, and `rest` holds the parts still to run.
+ * Null when no part is covered, or the parts are joined any other way, so the command runs whole as before.
+ */
+export function gateCover(command: string, gateCommands: string[]): { covered: string[]; rest: string[] } | null {
+  const gate = new Set(gateCommands.map(squash));
+  const whole = squash(command);
+  if (gate.has(whole)) return { covered: [whole], rest: [] };
+  const parts = andParts(command);
+  if (!parts) return null;
+  const covered = parts.filter((p) => gate.has(p));
+  return covered.length ? { covered, rest: parts.filter((p) => !gate.has(p)) } : null;
+}
+
+/** What a line's reason says of the gate's run that stood in for its covered parts. */
+const gateReason = (g: GateRun, covered: string[]) =>
+  `Green's gate passed ${covered.map((c) => `\`${c}\``).join(" and ")} at ${g.sha.slice(0, 7)} with ${g.passed} scenarios passed and ${g.failed} failed.`;
+
+/**
+ * The self-reviewer's note on Green's gate run (PBI 389): where the full suite passed, so the reviewer runs none, and how
+ * to run a single scenario with the repo's `bdd.run` and a further tag filter. Empty with no gate run in this claim.
+ */
+export function gateNote(g: GateRun | null, tag: string): string {
+  if (!g) return "";
+  const [bddRun, test, lint] = g.commands;
+  const short = g.sha.slice(0, 7);
+  return [
+    "## Green's gate",
+    `The full suite passed in Green's gate at ${short}: \`${bddRun}\` reported ${g.passed} scenarios passed and ${g.failed} failed, and \`${test}\` and \`${lint}\` passed there too.`,
+    "Don't run the full suite. A fix commit gets the Definition of Done check before the PR opens, and CI runs the full suite again on the PR's head.",
+    `To check a finding, run a single scenario with the repo's tag filter added to its bdd.run, such as \`${bddRun} --tags "${tag} and @ac-1"\`.`,
+    "You may also run single test files to check a finding.",
+  ].join("\n\n");
+}
+
+/**
  * Checks the Definition of Done at `head` (Run contract 11): a line whose `ci:` check passed or failed on `head` takes
  * that check's verdict, each other `run:` line's command runs in the checkout, the rest go to `judge`, and the
  * verdicts are stored with the commit they checked (PBI 229). `ciChecks` reads the checks CI reported on a commit, or
  * is null when there's no PR, and gives null when CI hasn't reported on that commit. The findings are one per failed
  * line, then one per named check CI reported no run of on `head`, whose line fell back to its command. Those are
  * `missing` as well, since a missing check alone fails nothing: the caller fails the stage on the failed lines.
+ * PBI 389: when `gate` passed at `head`, a `run:` line its commands cover isn't run again. Only the parts it didn't
+ * cover run, and the line's reason names the gate's run. A gate run at any other commit stands in for nothing.
  */
 export async function checkDefinitionOfDone(d: {
   dir: string; head: string; dod: Policy;
   ciChecks: ((sha: string) => Promise<CiCheck[] | null>) | null;
+  gate?: GateRun | null;
   judge: (judged: Criterion[]) => Promise<Verdict[]>;
   store: (checkedSha: string, verdicts: Verdict[]) => Promise<void>;
   /** PBI 215: called when a run: line's command fails. A string it returns goes before the line's reason. */
@@ -499,13 +570,21 @@ export async function checkDefinitionOfDone(d: {
       rest.push(c);
     }
   }
+  const gate = d.gate && d.gate.sha === head ? d.gate : null;
   for (const c of rest.filter((x) => x.run)) {
-    const r = await sh(c.run!, dir);
+    const cover = gate ? gateCover(c.run!, gate.commands) : null;
+    if (cover && !cover.rest.length) {
+      verdicts.push({ index: c.index, criterion: c.text, status: "passed", reason: gateReason(gate!, cover.covered) });
+      continue;
+    }
+    const command = cover ? cover.rest.join(" && ") : c.run!;
+    const r = await sh(command, dir);
     let reason = r.code === 0 ? "exit 0" : `exit ${r.code}: ${r.out.trim()}`;
     if (r.code !== 0 && d.onRunFailed) {
-      const prefix = await d.onRunFailed(c, r);
+      const prefix = await d.onRunFailed({ ...c, run: command }, r);
       if (prefix) reason = `${prefix}: ${reason}`;
     }
+    if (cover) reason = r.code === 0 ? `${gateReason(gate!, cover.covered)} \`${command}\` exited 0.` : `${reason}\n${gateReason(gate!, cover.covered)}`;
     verdicts.push({ index: c.index, criterion: c.text, status: r.code === 0 ? "passed" : "failed", reason });
   }
   const judged = rest.filter((x) => !x.run);
@@ -574,6 +653,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     notes?: string[];
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
+  // The last Green gate run that passed in this claim (PBI 389). A later claim has none, so its checks run as before.
+  let gateRun: GateRun | null = null;
   let dodSha = ctx.dodCheckedSha;
   // Attempts number on from the run's highest, so a later claim or a second pass after "back to green" writes new
   // attempt rows and blobs, never over an earlier one's.
@@ -770,7 +851,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     let baseSha = "";
     const ciChecks = (ctx.prNumber !== null || opened !== null) && api.ciChecks ? api.ciChecks.bind(api) : null;
     const { verdicts, missing, checkedSha } = await checkDefinitionOfDone({
-      dir, head: await git.head(), dod, ciChecks,
+      dir, head: await git.head(), dod, ciChecks, gate: gateRun,
       judge: async (judged) => {
         const r = await ask(stageId, brief(
           "# Definition of Done",
@@ -1062,15 +1143,24 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const undone = await keepLock("green", `green(${tag}): implementation`);
       if (undone.length) return undone;
       if (fix && (await git.head()) === fix.sha) throw new Blocked(ciQuestion(ciFailures));
+      gateRun = null;
       const run = await bdd("run");
       if (current) current.report = run.report;
       keep(greenResults, run.report);
-      const out = greenGate(classify(run.report)).findings;
+      const classified = classify(run.report);
+      const out = greenGate(classified).findings;
       for (const k of ["test", "lint"] as const) {
         const r = await sh(config.commands[k], dir);
         if (r.code !== 0) out.push(`commands.${k} exited ${r.code}: ${r.out.trim()}`);
       }
       if (out.length) return out;
+      // PBI 389: the gate passed here, so the DoD check and self-review's brief take its run instead of the suite again.
+      // The gate reads bdd.run's report, not its exit, so a bdd.run that exited non-zero stands in for nothing.
+      const results = [...classified.values()];
+      if (run.code === 0) gateRun = {
+        sha: await git.head(), commands: [config.bdd.run, config.commands.test, config.commands.lint],
+        passed: results.filter((x) => x.verdict === "green").length, failed: results.filter((x) => x.verdict !== "green").length,
+      };
       const dod = dodFindings(await checkDod("green", attempt));
       return dod.length ? dod : dodHeadHeld();
     });
@@ -1107,7 +1197,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const undoneNote = () => undone.length ? `## Edits the factory undid\n\n${undone.map((u) => `- ${u}`).join("\n")}` : "";
     for (let round = 1; round <= rounds; round++) {
       reviewRounds++;
-      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, locked, rubric, resumed("self-review"), undoneNote(), history), "factory-self-reviewer");
+      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, gateNote(gateRun, tag), locked, rubric, resumed("self-review"), undoneNote(), history), "factory-self-reviewer");
       const verdicts = parseJudgement(r.text, pr);
       await api.policyResults({ file: "pr-review", source: pr.source, stageId: "self-review", attempt: reviewRounds, checkedSha: await git.head(), verdicts });
       const last = lastLine(r.text);
