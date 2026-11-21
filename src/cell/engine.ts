@@ -1254,8 +1254,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // so CI isn't read on it again and no attempt is charged for the failure the run already knows about.
     const known = failedHeads.get(await git.head());
     if (known) return backToGreen(known);
-    // Open-pr runs, so no pass back to green from an earlier claim is still waiting: a green carry is dropped.
-    carriedOver("open-pr");
+    // Open-pr runs, so no pass back to green from an earlier claim is still waiting: a green carry is dropped. Open-pr's
+    // own carry, from an earlier claim that ended at its attempt boundary (PBI 393), seeds its tries and findings.
+    const from = carriedOver("open-pr");
     let attempt = await begin("open-pr");
     // A person may have merged the run's PR while the item was InProgress, during address for example. Opening a new
     // PR for the merged branch would only fail, claim after claim, so the attempt fails here and says why.
@@ -1269,7 +1270,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     // `## Problem` heading fails the attempt, and the next one is told to reply with the body alone.
     const tries = retriesOf("open-pr") + 1;
     let text = "";
-    for (let tried = 1, last: string[] = []; ; tried++) {
+    for (let tried = from.spent + 1, last: string[] = from.findings; ; tried++) {
       const reply = await say("open-pr", brief(await promptOf("open-pr"), item(), `The base is \`origin/${ctx.base}\`.`, lockedNote(), retryNote(last)));
       await keepLock("open-pr", `open-pr(${tag}): summary`);
       const clean = summaryOf(reply);
@@ -1277,6 +1278,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (current) current.message = clean.finding;
       if (tried >= tries) throw new Blocked(`Open-pr failed after ${tries} attempt${tries === 1 ? "" : "s"}:\n- ${clean.finding}`);
       last = [clean.finding];
+      // PBI 393: under a drain or a restart being prepared, open-pr's next try waits for the next claim too.
+      if (await endsAtAttempt()) {
+        if (current) current.retryCarry = { tried, findings: last };
+        await end("failed");
+        throw new Restarting("the factory drains or a restart is being prepared, so the stage's next attempt waits for the next claim");
+      }
       await end("failed");
       attempt = await begin("open-pr");
     }

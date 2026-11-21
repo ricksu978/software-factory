@@ -834,7 +834,7 @@ stateDiagram-v2
 
     so a dead cell's attempt never stays open.
 
-    A restart or a drain that ends a cell's claim at a stage boundary,
+    A restart or a drain that ends a cell's claim at a stage or attempt boundary,
 
     and so sends its item back to Queued,
 
@@ -845,6 +845,12 @@ stateDiagram-v2
     Like any stopped attempt,
 
     such an attempt uses up none of the stage's retries (PBI 239).
+
+    After a failed attempt with retries left,
+
+    the item waits in Queued at the same stage,
+
+    and the next claim spends only the retries left (PBI 393).
 
     Each lease carries a generation number that goes up on every claim,
 
@@ -5340,7 +5346,15 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
     nothing starts,
 
-    every cell finishes the stage it's in and ends its claim at that stage boundary (PBI 301),
+    every cell finishes the attempt it's in.
+
+    One whose attempt passes ends its claim at that stage boundary (PBI 301),
+
+    and one whose attempt fails with retries left starts no further attempt and ends its claim at that attempt boundary,
+
+    so its item waits in Queued at the same stage,
+
+    with the failed attempt counted against the stage's retries (PBI 393),
 
     and the cell API keeps answering so a cell can push and report.
 
@@ -5608,9 +5622,11 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
     so every cell has wrapped up and no cell is running when the factory or Docker stops.
 
-    Each cell ends its claim at the end of the stage it's in during the wrap-up,
+    Each cell ends its claim at a stage or attempt boundary during the wrap-up.
 
-    so the item goes back to Queued at its next stage (PBI 301).
+    After an attempt that passes, the item goes back to Queued at its next stage (PBI 301).
+
+    After a failed attempt with retries left, it waits in Queued at the same stage (PBI 393).
 
     One stopped by a pause during the wrap-up ends its claim as it exits,
 

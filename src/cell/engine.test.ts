@@ -1912,6 +1912,32 @@ describe("runCell", () => {
     assert.doesNotMatch(brief.prompt, /Carry on from the earlier work/);
   });
 
+  test("a cell told restarting whose open-pr reply fails starts no second open-pr attempt, and the next claim carries it (PBI 393)", async () => {
+    let n = 0;
+    const bad = (a: { mode: string; agent?: string }, stage: string) =>
+      stage === "open-pr" && a.mode === "cell" && !a.agent && n++ === 0 ? { text: "Here is the PR body." } : undefined;
+    let on = true;
+    const h = harness({ nextStage: "open-pr", lease: async () => ({ stop: false, restarting: on }), script: bad });
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "open-pr"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.equal(failed.body.retryCarry.findings.length, 1);
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+
+    const mark = h.calls.length;
+    const agents = h.agentCalls.length;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", stageAttempts: { "open-pr": 1 }, retry: { stageId: "open-pr", ...failed.body.retryCarry } };
+    on = false;
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    await h.run();
+    const started = h.calls.slice(mark).filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "started");
+    assert.deepEqual(started.map((c) => c.body.attempt), [2]);
+    const brief = h.agentCalls.slice(agents).find((a) => a.stage === "open-pr" && a.mode === "cell" && !a.agent)!;
+    assert.ok(brief.prompt.includes(`## Your last attempt failed\n\n- ${failed.body.retryCarry.findings[0]}`), "the next claim's brief carries the failed reply's finding");
+  });
+
   test("a claim at open-pr whose head isn't one CI failed on runs open-pr and drops green's carry (PBI 393)", async () => {
     const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "green", tried: 2, findings: ["old"] } } });
     h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });

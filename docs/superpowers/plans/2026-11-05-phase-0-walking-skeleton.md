@@ -5905,7 +5905,12 @@ from spec §6 rows 1 to 7:
     and gives its first attempt `findings` as the last attempt's.
     It's used once,
     so a later pass back to green in the same claim spends nothing of it again.
-    Open-pr's and self-review's own loops don't stop at an attempt boundary.
+    Open-pr's own loop,
+    which retries a reply that doesn't start with `## Problem`,
+    stops at its attempt boundary the same way,
+    and its next claim seeds its tries and last finding from open-pr's carry.
+    Self-review's rounds run inside one attempt,
+    so they have no attempt boundary to stop at.
   - **Lost lease.**
     A 409 from any API call makes the engine stop at once,
     with no push and no further calls.
