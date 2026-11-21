@@ -433,6 +433,11 @@ A task that touches one of them follows this section and does not restate it.
    - `stageAttempts`,
      the highest attempt in `stage_run` per stage,
      so a later claim on the same run numbers its attempts on from there and writes over no earlier row or blob;
+   - `failedCiHeads`,
+     each distinct `ci_failure` the run's attempts reported in `stage_run`,
+     of any stage,
+     oldest first,
+     so a later claim on the same run knows each head CI already failed on (PBI 315);
    - `resume`,
      which is `{ stageId, attempt }` when the last attempt at `nextStage` is `stopped`,
      and null otherwise (PBI 140).
@@ -922,6 +927,23 @@ A task that touches one of them follows this section and does not restate it.
       Green running out of retries still fails the item,
       as PBI 128 has it.
       An address retry whose head is one CI already failed on goes back to Green without reading CI again.
+      When open-pr, address or pr-review finds a CI failure that is the item's own,
+      not one the base shares,
+      its failed attempt is reported to `/stage` with that `ciFailure` too,
+      so the head is on the run even when the claim ends at the stage boundary before Green starts,
+      as on a restart, a drain or a lost lease (PBI 315).
+      The cell starts with the heads in `ctx.failedCiHeads` already kept,
+      so a head CI failed on in an earlier claim of the run counts as failed in this one too (PBI 315).
+      Before open-pr opens its attempt,
+      a head that is one of them goes back to Green with its failed checks,
+      so the claim reads no CI on it and charges no attempt for it.
+      Green's pass is then reported with that `ciFailure`,
+      and one that leaves the head unchanged asks `ciQuestion` again.
+      Any new commit,
+      Green's fix,
+      a person's push while the item waited or the claim's merge of a newer base,
+      is a head CI hasn't failed on,
+      so CI is read on it and a failure there is charged as usual.
     - **A red CI's failed checks are re-run once before it is charged (PBI 233).**
       `src/cell/ci-rerun.ts` holds the sentences.
       When `readCi` reads `failure` on a head,
@@ -2143,7 +2165,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
   - `stage_run.ci_failure jsonb`,
     added by `db/migrations/014_stage_run_ci_failure.sql` (PBI 292),
     `{ sha, checks: { name, url, failingTests }[] }` on a Green attempt the cell reported as fixing a CI failure,
+    and on a failed open-pr, address or pr-review attempt that found the item's own CI failure (PBI 315),
     and null on every other.
+    Floor and Run detail show it as fixing CI only on a Green row,
+    and `/context` reads it off every row for `failedCiHeads`.
     `POST /stage` takes it as `ciFailure`,
     cutting each string to 500 characters and keeping at most 20 checks and 20 tests a check,
     and gives 400 for one of another shape.
@@ -5378,6 +5403,7 @@ type CellContext = { externalId: string; title: string; acceptanceCriteria: stri
   scenarioNotes?: string[];   // the run's kept self-review scenario notes (PBI 152)
   trustedComments: ReviewComment[]; stageAttempts: Record<string, number>;
   trustedBot?: string | null;   // the repo's trusted bot, whose threads and reviews are the factory's own (PBI 318)
+  failedCiHeads?: CiFailure[];   // each head CI failed on in the run's earlier claims, oldest first (PBI 315)
   resume?: { stageId: string; attempt: number } | null };   // the body of GET /context (Run contract 5)
 type Git = { fetchBase(base: string): Promise<string>;   // fetches the base once per claim, returns origin/<base>'s commit
   mergeAt(base: string, commit: string): Promise<string[]>;   // merges that commit, no fetch; the paths still in conflict
@@ -6210,6 +6236,45 @@ from spec §6 rows 1 to 7:
   so it serves a build of the checkout it runs beside.
   `aspire publish` runs the same script through the BFF's `withBuildScript('build')`,
   and the build needs the devDependencies.
+- Since step 8b (2026-11-07 design,
+  §04 and §05,
+  PBI 279),
+  the SPA has Floor at `/`,
+  Run detail at `/runs/{id}`,
+  Activity at `/activity` and the Phase 0 report at `/phase0`,
+  in `web/src/pages/`,
+  routed by `web/src/routes.ts`,
+  which also names the addresses the pages link to,
+  and drawn by `web/src/App.tsx`.
+  An issue's GitHub address comes from `issueUrl` in `src/core/links.ts`,
+  which today's dashboard uses too.
+  They show what today's pages in `src/http/views.ts` show,
+  in the same words,
+  from one read each through `readFloor`,
+  `readItem`,
+  `readPhase0` and `readActivity` in `web/src/api.ts`.
+  Their sentences are in `web/src/lines.ts`,
+  and their submit handlers in `web/src/forms.ts`:
+  an override goes to `/bff/v1/overrides` and a sign-off or answer to `/bff/v1/items/{id}/decisions`,
+  a reason or an answer left empty or holding only spaces is refused and nothing is sent,
+  an accepted form reads the page again,
+  and if that read fails the page says the factory accepted it and asks for a reload before sending it again,
+  and a refused one shows the API's error as a sentence.
+  Run detail offers the Sign off form only when it has feature files up for sign-off.
+  Until the cell API stores the run's criteria and files at the scenarios sha,
+  it says the scenarios can't be shown here yet and sends the owner to today's dashboard to sign off.
+  `GET /v1/items/{id}` answers the SPA's `ItemData`,
+  filled by the dashboard's own `itemStanding`,
+  `fixingCi`,
+  `verdicts` and `criteriaWithScenarios` in `src/http/routes.ts` and the run's `run_file` snapshots,
+  and `GET /v1/floor` sends its claim keys as an object.
+  `web/src/lines.test.ts`,
+  `web/src/forms.test.ts`,
+  `web/src/routes.test.ts`,
+  `web/src/page.test.ts`,
+  `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
+  and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
+  Today's dashboard keeps serving these pages on 7400 until step 9.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,

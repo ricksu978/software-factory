@@ -119,6 +119,52 @@ describe("the API", dbTest, () => {
     assert.equal((await as("vera", "/v1/items/nope")).status, 404);
   });
 
+  test("the floor carries each claim key by item id, as JSON can", async () => {
+    const b = await (await as("vera", "/v1/floor")).json();
+    assert.equal(typeof b.keys, "object");
+    assert.ok(!Array.isArray(b.keys));
+  });
+
+  test("Run detail carries what the SPA's page shows, with override buttons only for an operator", async () => {
+    const run = (await db.pool.query<{ id: string }>(
+      `insert into run (item_id, run_number, next_stage, scenarios_sha, features_lock_sha, acceptance_criteria, started_at)
+       values ($1, 1, 'green', 'aaa', 'aaa', '{"Search finds a title"}', now()) returning id`, [itemId],
+    )).rows[0].id;
+    await db.pool.query(
+      "insert into run_file (run_id, path, sha, text) values ($1, 'features/pbi-1.feature', 'aaa', $2)", [run, "Feature: Search\n  @ac-1\n  Scenario: By title\n"],
+    );
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, model, status, tokens_in, tokens_out, restates)
+       values ($1, 'green', 1, 'opus', 'started', 1200, 80, '[{"round":1,"reason":"cut off"}]')`, [run],
+    );
+    try {
+      const viewer = await (await as("vera", `/v1/items/${itemId}`)).json();
+      assert.equal(viewer.controls, null);
+      assert.equal(viewer.run.open, true);
+      assert.equal(viewer.run.acceptance_criteria[0], "Search finds a title");
+      assert.deepEqual(viewer.stages.map((s: Record<string, unknown>) => [s.model, s.tokens_in, s.tokens_out]), [["opus", 1200, 80]]);
+      assert.deepEqual(viewer.stages[0].restates, [{ round: 1, reason: "cut off" }]);
+      assert.deepEqual(viewer.features.map((f: { path: string }) => f.path), ["features/pbi-1.feature"], "the signed-off files are the lock sha's");
+      assert.deepEqual(viewer.pending, [], "no file is up for sign-off while the item isn't waiting for it");
+      assert.equal(viewer.criteria, null);
+      assert.deepEqual(viewer.verdicts, []);
+      assert.equal(viewer.linkBlobs, true);
+      assert.deepEqual(viewer.splitInto, []);
+      for (const k of ["startNow", "moveEnded", "claim", "recheck", "fixingCi", "scope"]) assert.ok(k in viewer, `no ${k}`);
+      const operator = await (await as("otto", `/v1/items/${itemId}`)).json();
+      assert.deepEqual(operator.controls, { held: false, stoppable: true, requeueable: false, startable: false, movable: false });
+      await db.pool.query("update item set state = 'SignOff' where id = $1", [itemId]);
+      const signing = await (await as("vera", `/v1/items/${itemId}`)).json();
+      assert.deepEqual(signing.pending.map((f: { text: string }) => f.text), ["Feature: Search\n  @ac-1\n  Scenario: By title\n"]);
+      assert.deepEqual(signing.criteria, [{ criterion: "Search finds a title", scenarios: [{ name: "By title", regression: false }] }]);
+    } finally {
+      await db.pool.query("update item set state = 'InProgress' where id = $1", [itemId]);
+      await db.pool.query("delete from stage_run where run_id = $1", [run]);
+      await db.pool.query("delete from run_file where run_id = $1", [run]);
+      await db.pool.query("delete from run where id = $1", [run]);
+    }
+  });
+
   test("a blob path outside the stored patterns is 404", async () => {
     assert.equal((await as("vera", "/v1/blobs/secrets/key.txt")).status, 404);
   });

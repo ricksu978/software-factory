@@ -10,7 +10,7 @@ import { createServer, type ViteDevServer } from "vite";
 import { NO_ACCESS_TEXT, type Shell, type ShellPage } from "./shell.ts";
 
 let vite: ViteDevServer;
-let pageFor: (shown: ShellPage, call: Shell["call"]) => ReactElement;
+let pageFor: (shown: ShellPage, call: Shell["call"], path?: string) => ReactElement;
 
 before(async () => {
   vite = await createServer({
@@ -39,4 +39,12 @@ test("an app page renders App, not the no-access page", () => {
   const html = renderToString(pageFor({ kind: "app" }, call));
   assert.match(html, /Software factory/);
   assert.doesNotMatch(html, /No access/);
+});
+
+test("App shows the page its address names, before its one read comes back", () => {
+  assert.match(renderToString(pageFor({ kind: "app" }, call, "/")), /Reading the floor/);
+  assert.match(renderToString(pageFor({ kind: "app" }, call, "/runs/00000000-0000-4000-8000-000000000046")), /Reading the item/);
+  assert.match(renderToString(pageFor({ kind: "app" }, call, "/phase0")), /Reading the Phase 0 report/);
+  assert.match(renderToString(pageFor({ kind: "app" }, call, "/activity")), /Reading the activity log/);
+  assert.match(renderToString(pageFor({ kind: "app" }, call, "/configuration")), /No such page/);
 });

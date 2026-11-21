@@ -6,6 +6,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import { githubFailed } from "../adapters/github/errors.ts";
 import { botKey, loginKey, withoutFactoryThreads, type BacklogAdapter, type RepoHost, type ReviewComment } from "../adapters/types.ts";
+import type { CiFailure } from "../cell/api-client.ts";
 import { SOP_MOVED } from "../cell/sop-move.ts";
 import type { ItemEvent } from "../core/states.ts";
 import { BadRequest, json, readJson, type Handler } from "../http/server.ts";
@@ -266,6 +267,16 @@ const routes: Record<string, Route> = {
       "select stage_id, max(attempt) as attempt from stage_run where run_id = $1 group by stage_id",
       [run.run_id],
     );
+    // PBI 315: each head CI failed on in the run's earlier claims, oldest first, so the next claim neither reads CI on
+    // it again nor charges an attempt for it. Any stage's row counts: open-pr, address and pr-review report the failure
+    // they found on their failed attempt, which a claim ending before Green starts would otherwise lose.
+    const failed = await c.query<{ ci_failure: CiFailure }>(
+      `select ci_failure from stage_run where run_id = $1 and ci_failure is not null
+       order by started_at, attempt`,
+      [run.run_id],
+    );
+    const failedCiHeads: CiFailure[] = [];
+    for (const r of failed.rows) if (!failedCiHeads.some((f) => f.sha === r.ci_failure.sha)) failedCiHeads.push(r.ci_failure);
     // PBI 140: when the next stage's last attempt was stopped, by a cell wrapping up for a restart or by the launcher,
     // the cell resumes it from the work in progress on the branch instead of starting the stage over. The factory also
     // closes as stopped, with LEASE_RAN_OUT, an attempt whose cell died (PBI 239). No stop cut that one short and it may
@@ -316,6 +327,7 @@ const routes: Record<string, Route> = {
       threadCommentCounts,
       trustedBot: run.trusted_bot,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
+      failedCiHeads,
       resume,
     };
   },

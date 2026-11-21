@@ -32,6 +32,11 @@ export type Ctx = {
   dodRows?: Record<string, string>[]; trusted: { author: string; body: string }[]; stranger: { author: string; body: string }[];
   ciOldOnly: boolean; secrets: Record<string, string | undefined> | null;
   calls: Call[]; agentCalls: AgentCall[]; stage: string; prBodies: string[]; result: string | null; error: unknown;
+  /**
+   * The calls earlier claims of the same run made, oldest first, as PBI 315's next claim keeps them. `calls` holds only
+   * this claim's. Thens about the whole run, such as PBI 292's attempts and PBI 215's questions, read both.
+   */
+  earlierCalls?: Call[];
   /** Replaces the default repo host, as PBI 142's steps do to hold a merged PR or to fail a call. */
   repoHost?: Record<string, unknown>;
   /** Replaces the cell API's answer about CI, as PBI 142's steps do to fail it. */

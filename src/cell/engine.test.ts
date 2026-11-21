@@ -1451,6 +1451,47 @@ describe("runCell", () => {
     assert.equal(fixing[1], reads[0]);
   });
 
+  // PBI 315: a head CI failed on in an earlier claim of the run counts as failed in this one too.
+  test("a claim that starts on a head an earlier claim saw CI fail on goes back to Green without reading CI on it or charging open-pr", async () => {
+    const reads: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: "Try once more" } } });
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failure = { sha: head, checks: [{ name: "ci", url: "https://ci.example/7201", failingTests: ["totals include VAT"] }] };
+    h.deps.ctx.failedCiHeads = [failure];
+    h.deps.api.checks = async (sha) => (reads.push(sha), h.calls.push({ route: "/checks", body: { sha } }), ({ status: "failure", failedChecks: [] }));
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(reads, []);
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
+    assert.deepEqual(green, [null, head]);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr"));
+    const brief = h.agentCalls.filter((a) => a.stage === "green" && !String(a.prompt).startsWith("# Definition of Done")).at(-1)!.prompt;
+    assert.ok(brief.includes(`CI failed on ${head}`) && brief.includes("https://ci.example/7201") && brief.includes("totals include VAT"));
+    assert.match(h.transitions().at(-1).question.body, /gave up/);
+  });
+
+  // PBI 315: a claim that ends at the boundary after open-pr's CI failure, on a drain or a restart, before Green
+  // starts, still leaves the head on the run, so the next claim on it goes back to Green without reading CI again.
+  test("a claim that ends at the boundary after open-pr's CI failure hands the head to the next claim, which reads no CI on it and charges no open-pr", async () => {
+    let restarting = true;
+    const h = harness({ nextStage: "open-pr", lease: async () => ({ stop: false, restarting }) });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failedOpenPr = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.equal(failedOpenPr.body.ciFailure?.sha, head);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "green"));
+    const mark = h.calls.length;
+    restarting = false;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", failedCiHeads: [failedOpenPr.body.ciFailure], stageAttempts: { "open-pr": 1 } };
+    await h.run();
+    const claim2 = h.calls.slice(mark);
+    assert.equal(claim2.filter((c) => c.route === "/checks" && c.body.sha === head).length, 0);
+    // The first stage the next claim starts is Green, fixing that failure: no open-pr attempt is charged on the head.
+    const firstStarted = claim2.find((c) => c.route === "/stage" && c.body.status === "started")!;
+    assert.equal(firstStarted.body.stageId, "green");
+    assert.equal(firstStarted.body.ciFailure?.sha, head);
+  });
+
   // PBI 317: the factory's answer to an older "Address failed" question naming only CI failures sends the run to Green.
   test("a claim at green on the factory's CI answer gives Green the failed checks of the PR's head, read before the base merge", async () => {
     const asked: string[] = [];

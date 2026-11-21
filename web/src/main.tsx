@@ -1,5 +1,6 @@
 // The SPA's entry point (redesign step 8a): starts the shell (web/src/shell.ts) with the browser's own fetch,
-// matchMedia, root element and location, and renders whichever page the shell shows (web/src/page.tsx).
+// matchMedia, root element and location, and renders whichever page the shell shows (web/src/page.tsx), at the
+// address the browser is on.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { pageFor } from "./page.tsx";
@@ -12,7 +13,7 @@ let shown: ShellPage | undefined;
 
 function render() {
   if (!shell || !shown) return;
-  root.render(<StrictMode>{pageFor(shown, shell.call)}</StrictMode>);
+  root.render(<StrictMode>{pageFor(shown, shell.call, window.location.pathname)}</StrictMode>);
 }
 
 shell = await startShell({
