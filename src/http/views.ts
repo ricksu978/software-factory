@@ -305,17 +305,32 @@ function recheckLine(at: Date | null, zone: string, sentence: boolean): string {
     : "It hasn't been re-checked yet. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.";
 }
 
-export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null;
+export function floorPage(f: {
+  active: ActiveRow[];
+  waiting: WaitingRow[];
+  waitingCount: number;
+  capacity: number;
+  next: (Issue & { id: string; title: string })[];
+  notReady: NotReadyRow[];
+  blocked?: BlockedRow[];
+  factory: { kind: string; reason: string }[];
+  canOperate: boolean;
+  restart?: Restart | null;
   /** PBI 316: the cells still running, InProgress with a live lease, as Prepare restart counts them. */
-  running?: number; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
+  running?: number;
+  cellImage?: CellImage | null;
+  baseFails?: BaseFailRow[];
+  mainBreaks?: MainBreakRow[];
   split?: SplitRow[];
-  /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
-  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[];
+  /** PBI 320: every item's claim key by id. */
+  keys?: Map<string, ClaimKey>;
+  /** PBI 320: every final-stage item, in claim order. */
+  finalStage?: (Issue & { id: string; title: string; state: string })[];
   /** PBI 369: each item that went to Failed with dod_failed, and when it was last re-checked since, or null. */
   failed?: FailedRow[];
   /** The viewer's IANA time zone, from their browser's `tz` cookie. Defaults to UTC. */
-  zone?: string }, banner: string | null): string {
+  zone?: string;
+}, banner: string | null): string {
   const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
