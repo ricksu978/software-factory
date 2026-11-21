@@ -5,6 +5,7 @@ import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
 import type { ReadinessCheck } from "../store/readiness-checks.ts";
 import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
+import { lineDiff, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
@@ -433,9 +434,25 @@ export type RunDetail = {
    * whether this viewer may give it, and the owner's approval of them as they read now. Null when it read none.
    */
   ruleChanges?: { changes: RuleChangeRead[]; waiting: boolean; canApprove: boolean; approval: { by: string; at: Date } | null } | null;
+  /** PBI 364: the feature change request the item waits on in FeatureChangeRequest. Without one, no such section shows. */
+  featureChange?: FeatureChangeFile[] | null;
 };
 
 const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${escapeHtml(w.text)}</mark>` : escapeHtml(w.text))).join(" ");
+
+/**
+ * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
+ * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
+ */
+function featureChangeSection(files: FeatureChangeFile[]): string {
+  const line = (l: DiffLine | null) => l === null
+    ? `<span class="muted">…</span>`
+    : l.side === "before" ? `<del data-side="before">${escapeHtml(l.text)}</del>`
+      : l.side === "after" ? `<ins data-side="after">${escapeHtml(l.text)}</ins>`
+        : `<span data-side="same">${escapeHtml(l.text)}</span>`;
+  const entries = files.map((f) => `<h3>${escapeHtml(f.path)}</h3><p data-reason>${escapeHtml(f.reason)}</p><pre class="diff">${lineDiff(f.before, f.after).map(line).join("\n")}</pre>`);
+  return `<h2>Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}`;
+}
 
 /** The item page's Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked. */
 function ruleChangesSection(id: string, r: NonNullable<RunDetail["ruleChanges"]>, zone: string): string {
@@ -565,7 +582,7 @@ ${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n`
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
+${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
 }

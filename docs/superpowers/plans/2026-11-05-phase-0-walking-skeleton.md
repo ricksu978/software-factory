@@ -1789,14 +1789,20 @@ Azure comes in Task 19.
 
 **Interfaces:**
 - Produces:
-  - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"`.
+  - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split" | "FeatureChangeRequest"`
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited" | "feature_change_requested"`.
     `approvals_met` is reserved for Phase 1.
     In Phase 0 a merge is `merged`,
     whether a person made it or the factory did once a person approved (PBI 181).
     `rechecked` moves a Failed item back to Accepted when its re-check no longer charges its merge with breaking main (PBI 369).
     `rule_change_approved` moves a NotReady item to Eligible once the owner approves its rule changes,
-    and `rules_edited` moves a Queued, InProgress, SignOff, NeedsInput or InReview item to Eligible when its rules section no longer reads as approved (PBI 395).
+    and `rules_edited` moves a Queued, InProgress, SignOff, NeedsInput, InReview or FeatureChangeRequest item to Eligible when its rules section no longer reads as approved (PBI 395).
+    `feature_change_requested` moves an InProgress item to FeatureChangeRequest when a stage after sign-off asks to change a locked feature file (PBI 364).
+    An item waiting there takes `withdrawn` to Abandoned,
+    `criteria_changed` to Queued,
+    `rules_edited` to Eligible
+    and `merged` to Accepted,
+    as an InProgress item does (PBI 364).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -1823,13 +1829,14 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "lease_expired", "Queued"], ["InProgress", "usage_limited", "Queued"],
   ["Failed", "requeued", "Queued"], ["Abandoned", "requeued", "Queued"],
   ["Abandoned", "reopened_signoff", "SignOff"], ["Abandoned", "reopened_question", "NeedsInput"],
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).flatMap((s) => [
     [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
   ["NotReady", "split_filed", "Split"], ["Split", "children_done", "Done"], ["Abandoned", "split_filed", "Split"],
   ["Failed", "rechecked", "Accepted"],
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"], ["FeatureChangeRequest", "merged", "Accepted"],
   ["NotReady", "rule_change_approved", "Eligible"],
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map((s) => [s, "rules_edited", "Eligible"]),
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).map((s) => [s, "rules_edited", "Eligible"]),
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
@@ -2239,6 +2246,15 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     added by `db/migrations/018_ci_rerun.sql` (PBI 233).
     Each row is a commit whose failed checks a cell asked `POST /rerun-checks` to re-run,
     so a commit's checks are re-run once at most across restarts.
+  - `run.feature_change jsonb`,
+    added by `db/migrations/020_feature_change_request.sql` (PBI 364),
+    with FeatureChangeRequest added to `item_state_check`,
+    holds the run's feature change request:
+    each file's `path`,
+    the stage's `reason`,
+    its text at the lock commit as `before` and the stage's version as `after`.
+    It's null when the run made none.
+    The item page shows it while the item is in FeatureChangeRequest.
   - `item.rule_changes jsonb`,
     added by `db/migrations/019_item_rule_changes.sql` (PBI 395),
     holds what the item's last readiness check read from its `## Changes the factory's rules` section:
@@ -2832,7 +2848,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Queued,
     InProgress,
     SignOff,
-    NeedsInput or InReview,
+    NeedsInput,
+    InReview or FeatureChangeRequest,
     because `listEligible` can't see an item that lost its label or closed;
   - writes `openDependencies` into `item.blocked_by` for every Queued,
     SignOff and NeedsInput item,
@@ -2869,6 +2886,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
   - **Criteria change.**
     An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`.
+    An item waiting in FeatureChangeRequest moves the same way, and so does any item the poller holds Queued or later (PBI 364).
     In the same transaction:
     - `item.criteria_hash` takes the new value,
       so the next poll sees no change and fires nothing more;
@@ -2974,11 +2992,14 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     since a run can ask its question after the PR opened,
     and the move closes the item's open question unanswered,
     so the dashboard stops asking for an answer (PBI 194).
-    The PRs of all three states are read before withdrawal,
+    A FeatureChangeRequest item whose open run has a `pr_number` does the same,
+    since a person may merge its PR while it waits on the owner (PBI 364).
+    The PRs of all four states are read before withdrawal,
     so a merge that closed the board item still counts as a merge.
   - **Closed PR.**
     An InReview,
-    InProgress or NeedsInput item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`,
+    InProgress,
+    NeedsInput or FeatureChangeRequest item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`,
     as the `pr_closed` webhook does in Task 17.
     Without this,
     Phase 0a,
@@ -3516,7 +3537,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so deleting an approved section has the judge check the item again.
     That check stores no rule changes,
     so the next poll leaves the item Queued.
-    The same holds for an InProgress, SignOff, NeedsInput or InReview item:
+    The same holds for an InProgress, SignOff, NeedsInput, InReview or FeatureChangeRequest item:
     step 3 closes its open PR, then ends its open run with outcome `rules_edited` and closes its open questions in the move's transaction,
     and step 2 doesn't merge the PR of an item whose rules section no longer reads as approved,
     so nothing built from the edited section ships.
@@ -4499,12 +4520,19 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     A run already on `to` gets `{ ok: true }` and nothing is written,
     so a repeated call logs the move once.
     A `from` other than the run's `sop_version` gets 400.
-  - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[]; base?: string } }, scenariosSha?: string, lockedFiles?: string[], prNumber?: number, prUrl?: string, resumeAt?: string, tier?: "Low" | "Medium" | "High", tierReasons?: string[] }`.
+  - `POST /transition` takes `{ event: ItemEvent, question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[]; base?: string } }, scenariosSha?: string, lockedFiles?: string[], prNumber?: number, prUrl?: string, resumeAt?: string, tier?: "Low" | "Medium" | "High", tierReasons?: string[], featureChange?: { path: string; reason: string; before: string; after: string }[] }`.
     A cell may send only `scenarios_written`,
     `blocked`,
     `pr_opened`,
-    `retries_exhausted` and `usage_limited`,
+    `retries_exhausted`,
+    `usage_limited` and `feature_change_requested`,
     and any other event gets 400.
+    `feature_change_requested` needs a non-empty `featureChange`,
+    each entry a file in the run's `locked_files` with a reason and both versions, or it gets 400.
+    `requestFeatureChange` in `src/store/feature-change.ts` stores it in `run.feature_change` and moves the item,
+    and the move's payload carries it,
+    so the worker's board mirror posts it on the PBI once with `mirrorFeatureChange`,
+    keyed `feature-change:<eventId>` (PBI 364).
   - `POST /upload-url` takes `{ kind: "transcript" | "report", stageId, attempt }` and returns a write-only SAS URL,
     signed locally from the Azurite connection in `FACTORY_BLOB`,
     with its host swapped for `CELL_BLOB_HOST` as Task 2 Step 8 proved,
@@ -5609,6 +5637,15 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   before every `git.push` and before each stage's exit check.
   Any locked file it put back is committed as `<stage>(<tag>): restore the locked feature files`,
   so the edited form is never pushed and the next attempt or round starts from the lock (PBI 152).
+  When the stage's answer asks to change a locked file it edited,
+  with a line `FEATURE CHANGE: <path>: <reason>`,
+  the engine reads that file's version before the restore,
+  and after the restore's commit it pushes,
+  ends the attempt failed,
+  posts `feature_change_requested` with each such file's `path`, `reason`, `before` and `after`,
+  and returns `waiting` (PBI 364).
+  Every brief after sign-off says how to ask.
+  An edit no line asks for is restored silently, as before.
   The restore's note,
   which names the files,
   the lock commit and that they're locked since the owner signed off,
@@ -7279,7 +7316,8 @@ from spec §6 rows 1 to 7:
   close or review from the PR's state.
   - `pr_merged` moves InReview,
     InProgress during address,
-    or NeedsInput (PBI 194) to Accepted through `merged`,
+    NeedsInput (PBI 194)
+    or FeatureChangeRequest (PBI 364) to Accepted through `merged`,
     and stores `run.merge_sha`.
     When the cached check status of `merge_sha` reaches `success`,
     through `checks_completed` matched on `merge_sha` or the poll in Task 13,

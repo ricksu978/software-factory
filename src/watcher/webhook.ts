@@ -102,7 +102,7 @@ async function applyPrEvent(pool: pg.Pool, e: FactoryWebhookEvent): Promise<void
   if (!row) return;
   try {
     if (e.kind === "pr_merged") {
-      if (row.state !== "InReview" && row.state !== "InProgress" && row.state !== "NeedsInput") return;
+      if (row.state !== "InReview" && row.state !== "InProgress" && row.state !== "NeedsInput" && row.state !== "FeatureChangeRequest") return;
       await withTx(pool, async (c) => {
         await transitionItem(c, row.item_id, "merged", github);
         await c.query("update run set merge_sha = $2 where id = $1", [row.run_id, e.mergeSha]);

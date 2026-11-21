@@ -25,7 +25,7 @@ type Action = (cwd: string, n: number) => void;
 /** One agent call, with the locked files as the call found them in the checkout. */
 type Seen = { role: Role; n: number; prompt: string; files: Map<string, string | null> };
 
-type Ctx = {
+export type Ctx = {
   lockedFiles: string[];
   locked: boolean;
   pushLog: string;
@@ -41,7 +41,7 @@ type Ctx = {
   that: { stage: string; attempt: number } | null;
 };
 
-function mine(world: object): Ctx {
+export function mine(world: object): Ctx {
   const w = world as { pbi152?: Ctx };
   w.pbi152 ??= {
     lockedFiles: [ORDERS], locked: false, pushLog: "", openRounds: new Set(), note: null, actions: [], skip: [], seen: [],
@@ -58,7 +58,7 @@ function cell(world: object): CellCtx {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-function featureText(path: string): string {
+export function featureText(path: string): string {
   const name = path.includes("refunds") ? "Refunds" : "Orders";
   const noun = name === "Refunds" ? "refund" : "order";
   return [
@@ -85,13 +85,13 @@ function editScenario(cwd: string, path: string, n: number) {
   writeFileSync(file, text.replace(/^( {4}Then ).*$/m, `$1the order is saved as a draft, edit ${n}`));
 }
 
-function commit(cwd: string, msg: string) {
+export function commit(cwd: string, msg: string) {
   git(cwd, "add", "-A");
   git(cwd, "commit", "-q", "-m", msg);
 }
 
 /** Text of `path` at `rev`, or null when the commit doesn't hold it. */
-function at(cwd: string, rev: string, path: string): string | null {
+export function at(cwd: string, rev: string, path: string): string | null {
   try {
     return execFileSync("git", ["show", `${rev}:${path}`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch {
@@ -99,13 +99,13 @@ function at(cwd: string, rev: string, path: string): string | null {
   }
 }
 
-function lockText(c: CellCtx, path: string): string {
+export function lockText(c: CellCtx, path: string): string {
   const text = at(c.dir, c.lockSha!, path);
   assert.notEqual(text, null, `the lock commit holds no ${path}`);
   return text!;
 }
 
-function pushedHead(c: CellCtx): string {
+export function pushedHead(c: CellCtx): string {
   return git(c.root, "--git-dir", c.origin, "rev-parse", BRANCH);
 }
 
@@ -126,7 +126,7 @@ function roleOf(stage: string, a: { prompt: string; agent?: string; mode: string
  * pushes it. From then on the origin logs every push, and the scripted agent and recording repo host are in place.
  * PBI 142's open-pr step sets the run up, so every Given here calls this first, and it runs once.
  */
-function ensure(world: object): { c: CellCtx; m: Ctx } {
+export function ensure(world: object): { c: CellCtx; m: Ctx } {
   const c = cell(world);
   const m = mine(world);
   if (m.locked) return { c, m };
@@ -201,7 +201,7 @@ function stageReports(c: CellCtx, stage: string): Record<string, any>[] {
   return c.calls.filter((x) => x.route === "/stage" && x.body.stageId === stage && x.body.status !== "started").map((x) => x.body);
 }
 
-function ranClean(c: CellCtx) {
+export function ranClean(c: CellCtx) {
   assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);
 }
 
@@ -452,7 +452,7 @@ Then("the step definitions the first attempt wrote are still on the branch", fun
   assert.equal(at(c.dir, pushedHead(c), STEPS), STEPS_TEXT, `${STEPS} as pushed doesn't hold red's first step definitions`);
 });
 
-function pushes(world: object): string[] {
+export function pushes(world: object): string[] {
   const m = mine(world);
   return readFileSync(m.pushLog, "utf8").split("\n").filter((l) => l.startsWith(`refs/heads/${BRANCH} `)).map((l) => l.split(" ")[1]);
 }

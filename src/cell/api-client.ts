@@ -1,5 +1,6 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
+import type { FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent } from "../core/states.ts";
 import type { CiCheck, FailedCheck, RerunAnswer } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
@@ -43,10 +44,12 @@ export type StageReport = {
 /** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
 export type { CiFailure };
 export type TransitionBody = {
-  event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
+  event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited" | "feature_change_requested">;
   /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */
   question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[]; base?: string } }; scenariosSha?: string; lockedFiles?: string[];
   prNumber?: number; prUrl?: string; resumeAt?: string; tier?: "Low" | "Medium" | "High"; tierReasons?: string[];
+  /** PBI 364: on `feature_change_requested`, each locked feature file the stage asks to change. */
+  featureChange?: FeatureChangeFile[];
 };
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
 

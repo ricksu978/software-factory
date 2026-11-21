@@ -5,6 +5,7 @@
 // failed attempt it's marked failed and set aside (PBI 221).
 import type { FactoryWebhookEvent } from "../adapters/types.ts";
 import { mirror, type BoardDeps } from "../control/board.ts";
+import type { FeatureChangeFile } from "../core/feature-change.ts";
 import { announcement, applyComment, type DecisionKind } from "../control/decisions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { CONSUMER, type Consumer } from "../store/outbox.ts";
@@ -103,7 +104,8 @@ export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<v
   if (row.consumer === CONSUMER.boardMirror) {
     const how = event.kind === "override" ? "override" : (p.event as ItemEvent);
     const question = typeof p.question === "string" ? p.question : null;
-    await mirror(deps, row.itemId, p.to as ItemState, how, { eventId: row.eventId, seq: row.seq, question });
+    const featureChange = Array.isArray(p.featureChange) ? (p.featureChange as FeatureChangeFile[]) : null;
+    await mirror(deps, row.itemId, p.to as ItemState, how, { eventId: row.eventId, seq: row.seq, question, featureChange });
   } else if (row.consumer === CONSUMER.decisionAnnouncement) {
     const body = announcement(p.kind as DecisionKind, typeof p.text === "string" ? p.text : "");
     await deps.backlogFor(item.source_id).comment(item.external_id, body, `decision:${row.eventId}`);
