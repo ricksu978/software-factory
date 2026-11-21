@@ -946,12 +946,14 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const ciFailed = async (sha: string): Promise<CiFailure> => {
     const f = ciFailureOf(sha, api.ciChecks ? await orNull(api.ciChecks(sha)) : null);
     failedHeads.set(sha, f);
-    if (current) current.ciFailure = f;
     if (api.ciChecks && f.checks.some((c) => c.failingTests.length)) {
       const baseSha = await run("git", ["rev-parse", `origin/${ctx.base}^{commit}`], { cwd: dir }).then((r) => r.stdout.trim(), () => "");
       const shared = baseSha ? sharedCiLines(f, await orNull(api.ciChecks(baseSha, "base"))) : null;
       if (shared) throw new BaseFails(ctx.base, baseSha, shared);
     }
+    // PBI 315: the failure is the item's own, so the attempt's failed report records it for a later claim. A failure
+    // the base shares isn't reported as the item's (PBI 215, 292).
+    if (current) current.ciFailure = f;
     return f;
   };
 
