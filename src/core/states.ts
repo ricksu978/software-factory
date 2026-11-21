@@ -63,9 +63,11 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   // The owner's approval of an item's change to the factory's own rules is a readiness input that changed, so the item
   // waiting for it goes back through the rest of the readiness check (PBI 395).
   ["NotReady", "rule_change_approved", "Eligible"],
-  // A Queued item whose "Changes the factory's rules" section no longer reads as the owner approved it meets the
-  // readiness check again, which leaves it waiting for a new approval (PBI 395).
-  ["Queued", "rules_edited", "Eligible"],
+  // A Queued or later item whose "Changes the factory's rules" section no longer reads as the owner approved it meets
+  // the readiness check again, which leaves it waiting for a new approval, so nothing built from the edit ships (PBI 395).
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map(
+    (s): [ItemState, ItemEvent, ItemState] => [s, "rules_edited", "Eligible"],
+  ),
 ];
 
 const table = new Map(edges.map(([from, event, to]) => [`${from}:${event}`, to]));

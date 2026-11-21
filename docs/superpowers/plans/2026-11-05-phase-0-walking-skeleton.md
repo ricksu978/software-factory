@@ -1723,7 +1723,7 @@ Azure comes in Task 19.
     whether a person made it or the factory did once a person approved (PBI 181).
     `rechecked` moves a Failed item back to Accepted when its re-check no longer charges its merge with breaking main (PBI 369).
     `rule_change_approved` moves a NotReady item to Eligible once the owner approves its rule changes,
-    and `rules_edited` moves a Queued item to Eligible when its rules section no longer reads as approved (PBI 395).
+    and `rules_edited` moves a Queued, InProgress, SignOff, NeedsInput or InReview item to Eligible when its rules section no longer reads as approved (PBI 395).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -1755,7 +1755,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
   ["NotReady", "split_filed", "Split"], ["Split", "children_done", "Done"], ["Abandoned", "split_filed", "Split"],
   ["Failed", "rechecked", "Accepted"],
-  ["NotReady", "rule_change_approved", "Eligible"], ["Queued", "rules_edited", "Eligible"],
+  ["NotReady", "rule_change_approved", "Eligible"],
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map((s) => [s, "rules_edited", "Eligible"]),
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
@@ -3425,11 +3426,15 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     a failed `rule change approval` verdict leaves the item waiting.
     The poller stores what the gate read as `item.rule_changes` in the move's transaction,
     and the readiness comment key gains `:rules-approved` once the approval matches.
-    Step 3 moves a Queued item through `rules_edited` when its parsed section is non-empty and its hash isn't the approved one,
+    Step 3 moves a Queued or later item through `rules_edited` when its parsed section is non-empty and its hash isn't the approved one,
     or when it has no section but the last readiness check stored rule changes,
     so deleting an approved section has the judge check the item again.
     That check stores no rule changes,
     so the next poll leaves the item Queued.
+    The same holds for an InProgress, SignOff, NeedsInput or InReview item:
+    step 3 closes its open PR, then ends its open run with outcome `rules_edited` and closes its open questions in the move's transaction,
+    and step 2 doesn't merge the PR of an item whose rules section no longer reads as approved,
+    so nothing built from the edited section ships.
     Holding the section's Before to `main` and holding an item that changes the rules for the owner are engine rules,
     so `READINESS_VERSION` is 4,
     and the raise re-checks every NotReady item under them.

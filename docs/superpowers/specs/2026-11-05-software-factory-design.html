@@ -792,7 +792,7 @@ stateDiagram-v2
   Abandoned --> Split: split filed before PBI 225, every child among its sub-issues
   Split --> Done: every filed child Done
   Eligible --> Queued: ready
-  Queued --> Eligible: its rules section no longer reads as the owner approved it
+  Queued --> Eligible: its rules section no longer reads as the owner approved it, as from InProgress, SignOff, NeedsInput and InReview
   Queued --> InProgress: WIP slot + claim
   InProgress --> SignOff: scenarios written
   SignOff --> InProgress: approved, or changes asked
@@ -3750,13 +3750,19 @@ Feature: Export invoices to CSV
 
     An edit to it sends a NotReady or Eligible item back to waiting,
 
-    and moves a Queued item back to Eligible through <code>rules_edited</code>,
+    and moves an item Queued or later back to Eligible through <code>rules_edited</code>,
 
     so it waits again.
 
+    An item past Queued has its open PR closed, its run ended and its open questions closed,
+
+    so nothing built from the edited section is merged,
+
+    and the next claim after a new approval starts a new run.
+
     Deleting an approved section is an edit to it too:
 
-    a Queued item goes back to Eligible,
+    an item Queued or later goes back to Eligible,
 
     and the judge checks it again.
 

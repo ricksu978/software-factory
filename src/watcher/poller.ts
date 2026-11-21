@@ -352,8 +352,10 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       // A failure on an older commit of the PR never counts, so a person's push that CI hasn't judged yet waits.
       // The failed checks are re-run once first, and only a check still red after its re-run sends the item back (PBI 233).
       await sendBackForCi(pool, { itemId: row.id, runId: row.run_id! }, failed, system);
-    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
-      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
+    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))
+      && !(await rulesEdited(pool, row.id, fi!))) {
+      // An item withdrawn from the board, or whose criteria or rules section changed, is left for step 3 to close its
+      // PR (PBI 181, PBI 395). A
       // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
@@ -380,19 +382,15 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
-    // PBI 395: a Queued item whose "Changes the factory's rules" section no longer reads as the owner approved it, or
-    // that gained one since it was gated, meets the readiness check again in step 4, which leaves it waiting for the
-    // owner's approval. Deleting an approved section is an edit to it too, so the judge checks the item again. An edit
-    // anywhere else in the item doesn't move it.
-    if (row.state === "Queued") {
-      const changes = parseRuleChanges(fi.body);
-      const edited = changes.length > 0
-        ? ruleChangesHash(changes) !== (await approvedRulesHash(pool, row.id))
-        : !!(await ruleChangesChecked(pool, row.id))?.length;
-      if (edited) {
-        await move(pool, row.id, "rules_edited");
-        return;
-      }
+    // PBI 395: an item Queued or later whose "Changes the factory's rules" section no longer reads as the owner
+    // approved it, or that gained one since it was gated, meets the readiness check again in step 4, which leaves it
+    // waiting for the owner's approval. Its PR is closed and its run ended, so nothing built from the edit ships.
+    // Deleting an approved section is an edit to it too, so the judge checks the item again. An edit anywhere else in
+    // the item doesn't move it.
+    if (await rulesEdited(pool, row.id, fi)) {
+      await closeOpenPr(repoHost, fi.repo, row, "This item's \"Changes the factory's rules\" section changed since the owner approved it, so it waits for a new approval.");
+      await regateRules(pool, row);
+      return;
     }
     // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
     // lends its group and priority to the items it depends on (PBI 320).
@@ -770,6 +768,32 @@ function newer(review: string | null, seen: Date | null): boolean {
  * criteria_changed edge to itself, so IllegalTransition can't stop a second poll that read the old hash. The locked
  * re-read does.
  */
+/**
+ * True when the item's "Changes the factory's rules" section no longer reads as the owner last approved it: a section
+ * whose hash isn't the approved one, or none where the last readiness check read one (PBI 395).
+ */
+async function rulesEdited(pool: pg.Pool, itemId: string, fi: FactoryItem): Promise<boolean> {
+  const changes = parseRuleChanges(fi.body);
+  return changes.length > 0
+    ? ruleChangesHash(changes) !== (await approvedRulesHash(pool, itemId))
+    : !!(await ruleChangesChecked(pool, itemId))?.length;
+}
+
+/**
+ * Sends an item Queued or later back to Eligible through `rules_edited` (PBI 395). Its open run ends, so the next claim
+ * starts a new one from understand, and its open questions close. The transition bumps the lease generation, so a cell
+ * still running on the item loses it.
+ */
+async function regateRules(pool: pg.Pool, row: Row): Promise<void> {
+  await withTx(pool, async (c) => {
+    const cur = (await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [row.id])).rows[0];
+    if (cur?.state !== row.state) return;
+    await transitionItem(c, row.id, "rules_edited", system);
+    await c.query("update run set ended_at = now(), outcome = 'rules_edited' where item_id = $1 and ended_at is null", [row.id]);
+    await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [row.id]);
+  });
+}
+
 async function restart(pool: pg.Pool, row: Row, fi: FactoryItem, hash: string): Promise<void> {
   await withTx(pool, async (c) => {
     const cur = (await c.query<{ criteria_hash: string | null }>("select criteria_hash from item where id = $1 for update", [row.id])).rows[0];

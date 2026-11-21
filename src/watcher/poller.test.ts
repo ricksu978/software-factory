@@ -408,6 +408,25 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual((await db.pool.query("select rule_changes from item where id = $1", [id])).rows[0].rule_changes, []);
   });
 
+  test("an InReview item whose approved rules section was edited isn't merged: its PR closes, its run and question end, and it's gated again (PBI 395)", async () => {
+    const { ext, id, pr } = await held("InReview", { pr: true });
+    await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
+    const approved = { place: { kind: "spec", section: "§6" }, before: "A.", after: "B." };
+    await db.pool.query("update item set rule_changes = $2 where id = $1", [id, JSON.stringify([approved])]);
+    await db.pool.query("insert into event (actor, actor_id, item_id, kind, payload) values ('human', 'owner', $1, $2, $3)",
+      [id, RULE_CHANGE_APPROVED, JSON.stringify({ rulesHash: ruleChangesHash([approved as never]), changes: [approved] })]);
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, body: "## Changes the factory's rules\n\n### Spec §6\n**Before**\n> A.\n\n**After**\n> C.\n" });
+    await db.pool.query("update backlog_source set cursor = '999' where id = $1", [sourceId]);
+    await poll();
+    const events = (await db.pool.query("select payload->>'event' as e from event where item_id = $1 and kind = 'transition' order by at", [id])).rows.map((x) => x.e);
+    assert.equal(events[0], "rules_edited");
+    assert.notEqual((await row(ext)).state, "Accepted");
+    assert.equal(host.prs.find((p) => p.number === pr)?.open, false);
+    assert.equal(host.prs.find((p) => p.number === pr)?.merged ?? false, false);
+    assert.deepEqual((await db.pool.query("select outcome from run where item_id = $1", [id])).rows, [{ outcome: "rules_edited" }]);
+    assert.equal((await db.pool.query("select count(*)::int as n from question where item_id = $1 and closed_at is null", [id])).rows[0].n, 0);
+  });
+
   test("an item that fails the gate is NotReady with a reasons comment", async () => {
     verdict = "failed";
     const ext = await seed();
