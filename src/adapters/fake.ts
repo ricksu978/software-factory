@@ -285,12 +285,12 @@ export function fakeRepoHost(): RepoHost & {
       // A comment belongs to the review its author submitted at its submittedAt. Only one in a thread still unresolved
       // gives the review text (PBI 258).
       const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => !c.resolved && c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
-      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" }>>([
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" | "ci_failed" }>>([
         ...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r))
           .map((r) => ({ kind: "review" as const, author: r.author, body: r.body ?? "", submittedAt: r.submittedAt })),
         ...open.map((c) => ({ kind: "thread_comment" as const, threadId: c.threadId, author: c.author, body: c.body, submittedAt: c.submittedAt! })),
       ]);
-      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
+      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, headSha: p.headSha, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
     },
     async closePr(repo, n, comment) {
       const p = pr(repo, n);

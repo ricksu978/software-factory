@@ -5,12 +5,18 @@
 // worker does that from the outbox.
 import type pg from "pg";
 import { parseGitHubWebhook } from "../adapters/github/backlog.ts";
+import type { RepoHost } from "../adapters/types.ts";
 import { handleWebhook } from "../watcher/webhook.ts";
 
 export type WebhookIntakeDeps = {
   pool: pg.Pool;
   /** GITHUB_WEBHOOK_SECRET, which signs GitHub's deliveries. */
   secret: string;
+  /**
+   * Where a check suite's delivery reads the PR's head and its CI, so a failure there sends an InReview item back to
+   * address (PBI 235). Unset, the delivery is only recorded, and the poller's next pass reads the same failure.
+   */
+  repoHost?: RepoHost;
 };
 
 /** The webhook request as the API received it: its headers and the body's exact bytes. */
@@ -24,5 +30,5 @@ export type WebhookRequest = { headers: Record<string, string | undefined>; rawB
 export function webhookIntake(deps: WebhookIntakeDeps, req: WebhookRequest): Promise<{ status: 200 | 204 | 400 | 401 }> {
   // handleWebhook stays as it is (design §05), with no onComment: comment commands reach the worker through the
   // outbox rows written with the event.
-  return handleWebhook({ pool: deps.pool, secret: deps.secret, parse: parseGitHubWebhook }, req);
+  return handleWebhook({ pool: deps.pool, secret: deps.secret, parse: parseGitHubWebhook, repoHost: deps.repoHost }, req);
 }

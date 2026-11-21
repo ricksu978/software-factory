@@ -567,6 +567,42 @@ A task that touches one of them follows this section and does not restate it.
     the newest names it.
     `prState` returns it as `lastChangesRequested`,
     and the webhook names the review it was delivered (PBI 258).
+    CI failing on the PR's head is a trigger too (PBI 235).
+    For each InReview item whose PR has no conflict and no newer trusted text,
+    the poller takes the head from `prState`'s `headSha`,
+    so the PR isn't read twice, and,
+    when `checksOnSha` on it is `failure` and `ciChecksOnSha` names at least one failed check there,
+    moves the item to Queued through `changes_requested` with `next_stage = "address"`.
+    A failure that names no failed check gives address no detail to work from,
+    so the item stays InReview and the failing required check only holds the merge,
+    as Task 17's merge describes (PBI 181).
+    So does a failure whose every failed check names failing tests that the default branch's head fails too:
+    the base is at fault, as the cell finds it (PBI 215, PBI 292).
+    Before that, `headCiFailure` re-runs the head's failed checks once through `rerunChecksOnSha`,
+    recording the re-run in `ci_rerun` by run and sha, as `POST rerun-checks` does (PBI 233),
+    so a commit's checks are re-run once whichever asks.
+    It reads the checks again and waits while a re-run check is pending or finished no later than the ask,
+    whose time is kept past the old runs' finish so GitHub's old failure never reads as the re-run's.
+    A check with no finish time is taken as it reads,
+    a host that refuses the re-run lets the failure stand,
+    and a GitHub 5xx on the ask drops the record so the next poll asks again.
+    The cause is `{ kind: "ci_failed", sha, checks: [{ name, url, failingTests }] }`,
+    one entry per failed check,
+    and the payload's `findings` hold the lines `ciFindings` writes for Green:
+    one per failed check,
+    saying CI failed on the commit,
+    with the check,
+    its URL and its failing tests.
+    A check that passed or still runs isn't named,
+    and CI still running or passed on the head leaves the item in review.
+    Only the head as the PR is read counts,
+    so a failure on an older commit of the PR never sends the item back.
+    An InProgress or NeedsInput item's PR is left to its stage.
+    The address run reads CI on the head again itself,
+    and with no trusted review text it sends a red head on to Green with those same findings,
+    as PBI 292 does for CI failing on what address pushed.
+    `src/watcher/ci-head.ts` holds the read and the move,
+    which the webhook shares.
     A thread comment counts only once it has stood two minutes.
     A reviewer posts a verdict reply and then resolves the thread,
     and a poll between the two would send the item to address with nothing left to read.
@@ -7009,6 +7045,21 @@ from spec §6 rows 1 to 7:
   - `pr_closed` without a merge,
     by anyone but the factory,
     moves the item to Abandoned through `withdrawn`.
+  - `checks_completed` on a commit,
+    when `WebhookDeps.repoHost` is set,
+    does what the poller does for a red head (PBI 235).
+    Each InReview item whose open run's PR is in the delivery's repo goes back to address when that commit is the PR's head as `mergeView` reads it now and CI failed there,
+    with the same cause and findings.
+    A delivery about an older commit of the PR,
+    one the PR has since moved past,
+    or a commit on no PR the factory holds sends nothing back.
+    A delivery whose commit didn't fail reads no PR.
+    A PR that can't be read is logged and left to the next poll,
+    and the rest are still read.
+    Without a `repoHost`,
+    as in the API process,
+    which holds no GitHub client,
+    the delivery is only recorded and the next poll reads the failure.
 
 **Interfaces:**
 - Consumes everything above,

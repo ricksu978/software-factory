@@ -9,6 +9,7 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Server } from "node:http";
 import type pg from "pg";
+import type { RepoHost } from "../adapters/types.ts";
 import { decide, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
 import { activity, BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
@@ -34,6 +35,8 @@ export type ApiDeps = {
   audience: string;
   /** GITHUB_WEBHOOK_SECRET, which signs GitHub's deliveries to /webhooks/github. */
   webhookSecret: string;
+  /** Where a check suite's delivery reads CI on a PR's head (PBI 235). Unset, the poller reads it on its next pass. */
+  repoHost?: RepoHost;
   /** Reads a stored transcript or report by its blob path, or null when it's missing. */
   readBlob: (path: string) => Promise<string | null>;
   /** The settings the floor reads, such as CLAUDE_TOKEN_CREATED_AT. */
@@ -125,7 +128,7 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     bodyLimit({ maxSize, onError: () => { throw new Refused(413, `the ${what} is over ${maxSize / (1024 * 1024)} MiB`); } });
   app.post("/webhooks/github", capped(MAX_WEBHOOK, "payload"), async (c) => {
     const rawBody = Buffer.from(await c.req.arrayBuffer());
-    const { status } = await webhookIntake({ pool: d.pool, secret: d.webhookSecret }, { headers: c.req.header(), rawBody });
+    const { status } = await webhookIntake({ pool: d.pool, secret: d.webhookSecret, repoHost: d.repoHost }, { headers: c.req.header(), rawBody });
     return c.body(null, status);
   });
 
