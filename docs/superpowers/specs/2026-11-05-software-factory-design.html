@@ -3069,6 +3069,54 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Green's gate run (PBI 389).</b>
+
+    Green's gate runs <code>bdd.run</code>, <code>commands.test</code> and <code>commands.lint</code> before the Definition of Done check runs at the same commit.
+
+    When the gate passed at the commit being checked,
+
+    a <code>run:</code> line identical to one of those commands passes on the gate's run,
+
+    and the cell doesn't run it again.
+
+    Its reason names Green's gate, the commit and the scenario counts.
+
+    A line made only of commands joined with <code>&amp;&amp;</code> runs just the parts the gate didn't run,
+
+    and passes when those parts pass,
+
+    so this repo's line 1 runs only <code>npm run typecheck</code> at Green.
+
+    A line with a part that changes the shell's state for the parts after it, such as <code>cd web</code> or <code>export X=1</code>, runs whole.
+
+    So does a line whose parts before a gate command change the checkout's files, as <code>npm run build &amp;&amp; npm test</code> does,
+
+    since the gate's tests ran before that build: the check records each file and folder in the checkout outside <code>.git</code>, ignored ones included, with its size, inode and change times, before and after the parts it runs.
+
+    A rewrite of a file that was already there counts as a change, as a rebuild inside an existing ignored <code>dist/</code> does, which <code>git status</code> can't show, and so does a tree it can't read.
+
+    A line joined any other way,
+
+    with a pipe, <code>||</code>, <code>;</code> or a subshell,
+
+    runs whole as before,
+
+    and so does every line at a commit the gate didn't pass at.
+
+    The self-reviewer's brief says where the full suite passed, with the command and the counts,
+
+    and tells the reviewer to run no full suite,
+
+    only single scenarios with the repo's <code>bdd.run</code> and a <code>--tags</code> filter, or single test files.
+
+    A fix commit from self-review gets the full suite once, in open-pr's Definition of Done check,
+
+    and CI runs it again on the PR's head,
+
+    which nothing merges without.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Defaults.</b>
 
     The factory ships each default under <code>policy/</code> in its own repo,
