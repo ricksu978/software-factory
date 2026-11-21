@@ -5,11 +5,14 @@ Feature: While the factory drains, each cell finishes its stage and ends its cla
   every later stage until its run was done or waiting. So a drain could last as long as a whole run, and Floor's
   drain line (PBI 316) stayed above 0 all that time.
   With this item a drain ends cells as Prepare restart does (PBI 301). A running cell's lease renewal tells it to
-  carry on, so it finishes the stage it's in, with that stage's own retries. When that stage ends, the cell starts
+  carry on, so it finishes the stage it's in. When that stage ends, the cell starts
   no further stage. It ends its claim at the stage boundary, the run records the next stage as it does between
   claims, and the item waits in Queued. No attempt is recorded as stopped and no work-in-progress commit is made.
   Once the drain is cleared, each item that ended at a boundary is claimed again from the stage its run recorded.
   A pause, the kill switch or an operator's stop still tells the cell to stop, as before.
+  PBI 393 then ended the claim at the attempt boundary too: a cell whose attempt fails under a drain starts no retry,
+  and the stage's next attempt waits for the next claim. So this feature's retry scenarios check that a retry
+  already running when the drain is set isn't cut short, and those of PBI 393 check the failing attempt.
   The scheduler already starts nothing while the factory drains, so the one scenario that checks only that is
   tagged @regression and passes before the build.
   Item 482 is an issue in the repo "acme/widgets". Scenarios tagged @db need Postgres, which each test starts for
@@ -126,14 +129,15 @@ Feature: While the factory drains, each cell finishes its stage and ends its cla
       And item "A"'s run's next stage is self-review
       And no attempt of item "A"'s run is recorded as stopped
 
-  Rule: A stage's own retries are part of the stage, so a cell under a drain still runs them
+  Rule: A drain doesn't cut short a retry already running, so the cell finishes it and ends at the stage boundary
 
     @ac-3
-    Scenario: A cell whose green attempt fails under a drain runs green's retry, then ends at the boundary
+    Scenario: A cell whose green retry passes under a drain set while it ran ends at the boundary
       Given a run for item 482 that is at green's first attempt
       And green allows 1 retry
-      And the factory is draining
+      And the factory is not draining
       When green's first attempt fails its checks
+      And an operator drains the factory while green's second attempt runs
       And green's second attempt passes
       Then the cell reports green's first attempt as failed
       And the cell reports green's second attempt as passed
@@ -142,30 +146,17 @@ Feature: While the factory drains, each cell finishes its stage and ends its cla
       And the cell reports no attempt as stopped
 
     @ac-3
-    Scenario: A drain set during a stage's first attempt doesn't keep the cell from that stage's retry
+    Scenario: A drain set during a stage's retry doesn't keep the cell from finishing that retry
       Given a run for item 482 that is at red's first attempt
       And red allows 2 retries
       And the factory is not draining
-      When an operator drains the factory while red's first attempt runs
-      And red's first attempt fails
-      And red's second attempt fails
-      And red's third attempt passes
-      Then the cell reports red's third attempt as passed
+      When red's first attempt fails
+      And an operator drains the factory while red's second attempt runs
+      And red's second attempt passes
+      Then the cell reports red's second attempt as passed
       And the cell starts no green attempt
       And the cell ends its claim at the stage boundary and exits
       And the cell makes no commit "work in progress, stopped"
-
-    @ac-3 @db
-    Scenario: The item of a cell that ran a retry under a drain waits in Queued at the next stage
-      Given the control plane is running with a fake board
-      And item "A" is at green in cell "cell-a" with a live lease
-      And green allows 1 retry
-      And an operator drained the factory with the reason "upgrading Docker" 2 minutes ago
-      When cell "cell-a" runs green, whose first attempt fails and whose second attempt passes
-      Then item "A" is "Queued"
-      And item "A"'s run's next stage is self-review
-      And item "A"'s green attempts are recorded as failed, then passed
-      And no attempt of item "A"'s run is recorded as stopped
 
   Rule: Nothing starts while the factory drains, and once the drain is cleared each item that ended at a boundary is claimed again from its run's next stage
 
