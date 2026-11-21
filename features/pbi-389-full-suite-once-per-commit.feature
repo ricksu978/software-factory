@@ -5,8 +5,12 @@ Feature: A cell runs the full suite once per commit
   The self-reviewer is told nothing about the gate, so it often runs the full suite a third time.
   With this item, when Green's gate passed at a commit and its commands cover a Definition of Done line's
   `run:` command, the check doesn't run that command again. It passes the line with Green's gate run as its
-  evidence, naming the commit and the scenario counts. A line that runs anything the gate didn't run, or a
-  check at a commit the gate didn't run at, runs its command as today.
+  evidence, naming the commit and the scenario counts.
+  A `run:` line made only of commands joined with `&&` runs just the parts the gate didn't run at that
+  commit, and passes when those parts pass. This repo's own line 1 joins `npm run typecheck`, which the gate
+  doesn't run, to the gate's `npm test` and `bdd.run`, so the check runs only the typecheck.
+  A line whose parts are joined any other way, with a pipe, `||`, `;` or a subshell, runs whole, as today.
+  So does every line in a check at a commit the gate didn't run at.
   The self-reviewer's brief says where the full suite passed, so the reviewer runs no full suite. It may run
   single scenarios with the repo's `bdd.run` tag filter, or single test files.
   A commit that self-review's fixes make still gets the full suite once, in the gate it goes through. CI runs
@@ -79,6 +83,72 @@ Feature: A cell runs the full suite once per commit
       And the cell didn't run line 1's command at "c0ffee1"
       And the PR body shows Definition of Done line 1 passed at "c0ffee1"
 
+    @ac-1
+    Scenario: A line identical to the gate's lint command is covered, even though the command has a command substitution
+      Given the repo's "commands.lint" is "node scripts/prose-lint.mjs $(git ls-files '*.md' '*.html')"
+      And the repo's Definition of Done line 2 is "Prose rules hold. `run: node scripts/prose-lint.mjs $(git ls-files '*.md' '*.html')`"
+      And Green's implementation is at commit "c0ffee1"
+      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
+      When Green checks the Definition of Done at "c0ffee1"
+      Then Definition of Done line 2 passes
+      And the cell didn't run line 2's command
+
+  Rule: In a line made only of commands joined with &&, the cell runs just the parts Green's gate didn't run at that commit
+
+    @ac-1
+    Scenario: This repo's line 1 runs only the typecheck, and passes on the typecheck and Green's gate run
+      Given the repo's Definition of Done line 1 is "Typecheck, unit tests and scenarios pass, and the AppHost compiles and lints. `run: npm run typecheck && npm test && npm run bdd -- --tags \"not @local\"` `ci: ci`"
+      And Green's implementation is at commit "c0ffee1"
+      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
+      When Green checks the Definition of Done at "c0ffee1"
+      Then the cell ran "npm run typecheck" once at "c0ffee1"
+      And the cell ran "npm test" once at "c0ffee1"
+      And the cell ran "npm run bdd -- --tags \"not @local\"" once at "c0ffee1"
+      And Definition of Done line 1 passes
+      And line 1's reason says Green's gate passed it
+      And line 1's reason names the commit "c0ffee1"
+      And line 1's reason names 12 scenarios passed and 0 failed
+      And line 1's reason says "npm run typecheck" exited 0
+
+    @ac-2
+    Scenario: A line that joins a command the gate didn't run to a gate command runs only the part the gate didn't run
+      Given the repo's Definition of Done line 2 is "Types and tests pass. `run: npm run typecheck && npm test`"
+      And Green's implementation is at commit "c0ffee1"
+      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
+      When Green checks the Definition of Done at "c0ffee1"
+      Then the cell ran "npm run typecheck" once at "c0ffee1"
+      And the cell ran "npm test" once at "c0ffee1"
+      And Definition of Done line 2 passes
+
+    @ac-2
+    Scenario: A part the gate didn't run fails the line, and the gate's parts still don't run again
+      Given the repo's Definition of Done line 2 is "Tests and types pass. `run: npm test && npm run typecheck`"
+      And "npm run typecheck" fails in the checkout with exit code 2
+      And Green's implementation is at commit "c0ffee1"
+      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
+      When Green checks the Definition of Done at "c0ffee1"
+      Then the cell ran "npm run typecheck" once at "c0ffee1"
+      And the cell ran "npm test" once at "c0ffee1"
+      And Definition of Done line 2 fails with a reason that starts "exit 2"
+      And the stage's findings say Definition of Done line 2 failed
+
+    @ac-2 @regression
+    Scenario Outline: A line whose parts aren't all joined with && runs whole, as today: <how>
+      Given the repo's Definition of Done line 2 is "Types and tests pass. `run: <command>`"
+      And Green's implementation is at commit "c0ffee1"
+      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
+      When Green checks the Definition of Done at "c0ffee1"
+      Then the cell ran line 2's command at "c0ffee1"
+      And Definition of Done line 2 passes with the reason "exit 0"
+
+      Examples:
+        | how                 | command                                  |
+        | a pipe              | npm test \| tee test.log                 |
+        | an or               | npm run typecheck \|\| npm test           |
+        | a semicolon         | npm run typecheck; npm test              |
+        | a subshell          | (npm run typecheck && npm test)          |
+        | && mixed with an or | npm run typecheck && npm test \|\| true   |
+
   Rule: A line whose command Green's gate didn't cover at that commit runs as it does today
 
     Background:
@@ -103,15 +173,6 @@ Feature: A cell runs the full suite once per commit
       Then the cell ran line 2's command at "c0ffee1"
       And Definition of Done line 2 fails with a reason that starts "exit 2"
       And the stage's findings say Definition of Done line 2 failed
-
-    @ac-2 @regression
-    Scenario: A line that joins a gate command to one the gate didn't run runs its whole command
-      Given the repo's Definition of Done line 2 is "Types and tests pass. `run: npm run typecheck && npm test`"
-      And Green's implementation is at commit "c0ffee1"
-      And Green's gate passes at "c0ffee1" with 12 scenarios passed and none failed
-      When Green checks the Definition of Done at "c0ffee1"
-      Then the cell ran line 2's command at "c0ffee1"
-      And Definition of Done line 2 passes with the reason "exit 0"
 
     @ac-2 @regression
     Scenario: Green's gate run at an earlier commit doesn't stand in for the commit being checked
