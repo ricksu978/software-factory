@@ -9,6 +9,8 @@ import type { Policy } from "../policy/policy.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { SPLIT_DONE_HEADING } from "../gate/split-done.ts";
 import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT } from "../core/questions.ts";
+import { ruleChangesHash } from "../gate/rule-changes.ts";
+import { RULE_CHANGE_APPROVED } from "../store/rule-changes.ts";
 import { criteriaHash, pollOnce, readinessFingerprint, REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "./poller.ts";
 
 const REPO = "octo/repo";
@@ -389,6 +391,21 @@ describe("pollOnce", dbTest, () => {
     assert.equal(await repo(notReady.id), REPO);
     assert.equal(await repo(inProgress.id), REPO);
     assert.equal(await repo(gone.id), null);
+  });
+
+  test("a Queued item whose approved rules section was deleted is gated again, once (PBI 395)", async () => {
+    const { ext, id } = await held("Queued");
+    const change = { place: { kind: "spec", section: "§6" }, before: "A.", after: "B." };
+    await db.pool.query("update item set rule_changes = $2 where id = $1", [id, JSON.stringify([change])]);
+    await db.pool.query("insert into event (actor, actor_id, item_id, kind, payload) values ('human', 'owner', $1, $2, $3)",
+      [id, RULE_CHANGE_APPROVED, JSON.stringify({ rulesHash: ruleChangesHash([change as never]), changes: [change] })]);
+    await db.pool.query("update backlog_source set cursor = '999' where id = $1", [sourceId]);
+    await poll();
+    assert.equal((await row(ext)).state, "Queued");
+    await poll();
+    const events = (await db.pool.query("select payload->>'event' as e from event where item_id = $1 and kind = 'transition' order by at", [id])).rows.map((x) => x.e);
+    assert.deepEqual(events, ["rules_edited", "ready"], "the re-gate stored no rule changes, so the next poll leaves the item Queued");
+    assert.deepEqual((await db.pool.query("select rule_changes from item where id = $1", [id])).rows[0].rule_changes, []);
   });
 
   test("an item that fails the gate is NotReady with a reasons comment", async () => {

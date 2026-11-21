@@ -6,6 +6,8 @@ import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/
 import { tmpdir } from "node:os";
 import { childBody, factoryFiled, fileSplit, priorFiling, type ChildIssue } from "./file-split.ts";
 import { keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, rewritePrompt } from "./repair.ts";
+import { checkRuleChanges, judgedRules, parseRuleChanges, placeKey, placeName, ruleChangesHash, RULES_HEADING, type RuleChangeRead } from "./rule-changes.ts";
+import { APPROVAL_CRITERION } from "../store/rule-changes.ts";
 import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
 
 export type GateContext = {
@@ -41,6 +43,14 @@ export type GateContext = {
   missingPermissions?: string[];
   /** Where a readiness check that couldn't be recorded is reported. Defaults to console.error. */
   log?: (line: string) => void;
+  /**
+   * Reads a file of the factory's own repo on `main`, or null when it isn't there (PBI 395), so each rule an item's
+   * "Changes the factory's rules" section changes has its Before held to the rule's text on `main`. Without it, no
+   * Before can be checked, and an entry that gives one fails.
+   */
+  factoryRules?: (path: string) => Promise<string | null>;
+  /** The hash of the rule changes the owner last approved on the item, or null when none were (PBI 395). */
+  ruleApproval?: string | null;
 };
 
 /**
@@ -53,6 +63,8 @@ export type GateResult = {
   ready: boolean; results: Verdict[]; oversized?: boolean; split?: SplitOutcome | null; filed?: boolean; children?: ChildIssue[];
   /** The item as it was last gated, when the gate rewrote its body and gated it again (PBI 264). */
   item?: FactoryItem;
+  /** What the gate read from the item's "Changes the factory's rules" section, each entry with what's wrong with it (PBI 395). */
+  ruleChanges?: RuleChangeRead[];
 };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
@@ -130,7 +142,8 @@ function recordedSplit(item: FactoryItem, ctx: GateContext, deps: SplitDeps): Pr
   return recorded(item, ctx, "split", (spent) => proposeSplit(item, { ...deps, agent: spending(deps.agent, spent) }, ctx.dor ?? undefined));
 }
 
-type Judgement = { results: Verdict[]; oversized: boolean; verdict: CheckVerdict };
+/** `rules` is each factory rule the judge finds the item changes, as "§N" or a policy file's path (PBI 395). */
+type Judgement = { results: Verdict[]; oversized: boolean; rules: string[]; verdict: CheckVerdict };
 
 /** Reads the judge's reply on `dor`: its verdicts, its reading of the subject's size, and the call's verdict as recorded. */
 function readJudgement(reply: string, dor: Policy): Judgement {
@@ -144,6 +157,7 @@ function readJudgement(reply: string, dor: Policy): Judgement {
         ...dor.criteria.map((c): Verdict => ({ index: c.index, criterion: c.text, status: "failed", reason: "readiness check output unreadable" })),
       ],
       oversized: false,
+      rules: [],
       verdict: { outcome: "unreadable" },
     };
   }
@@ -154,6 +168,7 @@ function readJudgement(reply: string, dor: Policy): Judgement {
   return {
     results: [...lines, ...flags.map((f) => ({ ...engine(`The item text ${f}`), criterion: "readiness flag" }))],
     oversized: flagLines.at(-1)!.oversized === true,
+    rules: judgedRules(flagLines.at(-1)!.rules),
     verdict: failed.length === 0 && flags.length === 0 ? { outcome: "passed" } : { outcome: "failed", lines: failed, flags },
   };
 }
@@ -163,10 +178,47 @@ function readJudgement(reply: string, dor: Policy): Judgement {
  * `judge` check against `owner`, the item whose row pays for it: the subject itself, or the parent of a proposed child,
  * whose check then names the child (PBI 348).
  */
-async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean }> {
-  const { results, oversized } = await recorded(owner, ctx, "judge", async (spent) => readJudgement(await ctx.judge(subject, dor, spent), dor),
+async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean; rules: string[] }> {
+  const { results, oversized, rules } = await recorded(owner, ctx, "judge", async (spent) => readJudgement(await ctx.judge(subject, dor, spent), dor),
     { verdict: (j) => j.verdict, child: subject === owner ? undefined : subject.title });
-  return { results, oversized };
+  return { results, oversized, rules };
+}
+
+/** The dor.md line about the factory's own rules, as the repo words it: the one that names "the factory's rules". */
+const RULES_LINE = /factory['’]s\s+(own\s+)?rules/i;
+
+const names = (places: string[]) => (places.length <= 1 ? places.join("") : `${places.slice(0, -1).join(", ")} and ${places.at(-1)}`);
+const named = (key: string) => (key.startsWith("§") ? `spec section ${key}` : key);
+
+/**
+ * PBI 395: the item's "Changes the factory's rules" section, held to `main` and to what the judge found. An entry that
+ * gives no Before or no After, or whose Before isn't on `main` word for word, fails the item, naming its section. A rule
+ * the judge finds that the section doesn't cover fails dor.md's rules line, its finding naming each place the section
+ * should cover, or fails on its own when dor.md has no such line. When nothing else failed, a section the owner hasn't
+ * approved as it reads now leaves the item waiting for that approval.
+ */
+async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict[], found: string[]): Promise<{ results: Verdict[]; changes: RuleChangeRead[]; approved: boolean }> {
+  const changes = await checkRuleChanges(parseRuleChanges(item.body), ctx.factoryRules);
+  const results = judged.map((r) => ({ ...r }));
+  for (const c of changes) if (c.problem) results.push({ ...engine(c.problem), criterion: "rule change" });
+  const covered = new Set(changes.map((c) => placeKey(c.place)));
+  const missing = found.filter((f) => !covered.has(f));
+  if (missing.length > 0) {
+    const cover = `The item changes ${names(missing.map(named))}, so its "${RULES_HEADING.slice(3)}" section has to cover ${missing.length === 1 ? "it" : "each"}, quoting the rule's text on main as Before and giving its After.`;
+    const line = results.find((r) => r.index > 0 && RULES_LINE.test(r.criterion));
+    if (line) {
+      line.reason = line.status === "passed" ? cover : `${line.reason} ${cover}`;
+      line.status = "failed";
+    } else results.push({ ...engine(cover), criterion: "rule change" });
+  }
+  const approved = changes.length > 0 && ctx.ruleApproval === ruleChangesHash(changes);
+  if (changes.length > 0 && !approved && results.every((r) => r.status === "passed")) {
+    results.push({
+      ...engine(`The item waits for the owner to approve its change to ${names(changes.map((c) => placeName(c.place)))}. The owner approves it on the item's page in the factory's dashboard.`),
+      criterion: APPROVAL_CRITERION,
+    });
+  }
+  return { results, changes, approved };
 }
 
 const REWRITE_TIMEOUT_MS = 120_000;
@@ -262,7 +314,13 @@ export function gate(item: FactoryItem, ctx: GateContext): Promise<GateResult> {
 async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean): Promise<GateResult> {
   let results = engineRules(item, ctx);
   let oversized = false;
-  if (results.length === 0 && ctx.dor) ({ results, oversized } = await judgement(item, item, ctx.dor, ctx));
+  let ruleChanges: RuleChangeRead[] = [];
+  let rulesApproved = false;
+  if (results.length === 0 && ctx.dor) {
+    let found: string[];
+    ({ results, oversized, rules: found } = await judgement(item, item, ctx.dor, ctx));
+    ({ results, changes: ruleChanges, approved: rulesApproved } = await ruleVerdicts(item, ctx, results, found));
+  } else ruleChanges = await checkRuleChanges(parseRuleChanges(item.body), ctx.factoryRules);
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text and split prompt.
   // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
   // asked again and a filing that stopped partway is finished with the same children, after a restart too. A kept
@@ -299,7 +357,7 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
   }
   // A parent whose split is filed has left the factory, so it's never ready and gets no readiness comment.
   const children = split?.proposed && file && prior ? await fileSplit(item, split.children, ctx.adapter, file, prior) : null;
-  if (children) return { ready: false, results, oversized, split, filed: true, children };
+  if (children) return { ready: false, results, oversized, split, filed: true, children, ruleChanges };
   const failed = results.filter((r) => r.status !== "passed");
   // PBI 264: a child the factory filed that fails dor.md lines is rewritten once and gated again, its result standing.
   if (mayRepair && failed.length > 0 && !split?.proposed) {
@@ -309,15 +367,19 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
   if (failed.length > 0) {
     const lines = failedLines(failed);
     const noSplit = split && !split.proposed ? `\nThe judge found the item too big for one Sprint, but a split couldn't be proposed because ${split.reason}.\n` : "";
-    const body = `The factory can't start this item yet. It failed these readiness checks:\n\n${lines}\n${noSplit}`;
+    // An item that waits only for the owner's approval of its rule changes passed every check (PBI 395).
+    const waitsOnly = failed.every((r) => r.criterion === APPROVAL_CRITERION);
+    const body = waitsOnly
+      ? `The factory can't start this item yet. It passed every readiness check, and it changes the factory's own rules:\n\n${lines}\n${noSplit}`
+      : `The factory can't start this item yet. It failed these readiness checks:\n\n${lines}\n${noSplit}`;
     // A comment that says the coding model gave no answer is keyed on the item text, not updatedAt: the poller keeps
     // that item Eligible and gates it again, and the comment itself bumps updatedAt on GitHub, so an updatedAt key
     // would post it again on every poll. Its own key also lets the re-gate that gets an answer post a readiness
     // comment without that line instead of being deduplicated against it.
     const key = splitUnanswered(split)
       ? `readiness:split-unanswered:${itemTextHash(item)}:${ctx.readinessSha}`
-      : `readiness:${item.updatedAt}:${ctx.readinessSha}`;
+      : `readiness:${item.updatedAt}:${ctx.readinessSha}${rulesApproved ? ":rules-approved" : ""}`;
     await ctx.adapter.comment(item.externalId, body, key);
   }
-  return { ready: failed.length === 0, results, oversized, split };
+  return { ready: failed.length === 0, results, oversized, split, ruleChanges };
 }
