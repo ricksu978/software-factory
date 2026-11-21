@@ -1796,8 +1796,13 @@ Azure comes in Task 19.
     whether a person made it or the factory did once a person approved (PBI 181).
     `rechecked` moves a Failed item back to Accepted when its re-check no longer charges its merge with breaking main (PBI 369).
     `rule_change_approved` moves a NotReady item to Eligible once the owner approves its rule changes,
-    and `rules_edited` moves a Queued, InProgress, SignOff, NeedsInput or InReview item to Eligible when its rules section no longer reads as approved (PBI 395).
+    and `rules_edited` moves a Queued, InProgress, SignOff, NeedsInput, InReview or FeatureChangeRequest item to Eligible when its rules section no longer reads as approved (PBI 395).
     `feature_change_requested` moves an InProgress item to FeatureChangeRequest when a stage after sign-off asks to change a locked feature file (PBI 364).
+    An item waiting there takes `withdrawn` to Abandoned,
+    `criteria_changed` to Queued,
+    `rules_edited` to Eligible
+    and `merged` to Accepted,
+    as an InProgress item does (PBI 364).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -1824,14 +1829,14 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "lease_expired", "Queued"], ["InProgress", "usage_limited", "Queued"],
   ["Failed", "requeued", "Queued"], ["Abandoned", "requeued", "Queued"],
   ["Abandoned", "reopened_signoff", "SignOff"], ["Abandoned", "reopened_question", "NeedsInput"],
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).flatMap((s) => [
     [s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]] as [ItemState, ItemEvent, ItemState][]),
   ["Eligible", "withdrawn", "Abandoned"], ["NotReady", "withdrawn", "Abandoned"], ["Abandoned", "returned", "Eligible"],
   ["NotReady", "split_filed", "Split"], ["Split", "children_done", "Done"], ["Abandoned", "split_filed", "Split"],
   ["Failed", "rechecked", "Accepted"],
-  ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"], ["FeatureChangeRequest", "merged", "Accepted"],
   ["NotReady", "rule_change_approved", "Eligible"],
-  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).map((s) => [s, "rules_edited", "Eligible"]),
+  ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).map((s) => [s, "rules_edited", "Eligible"]),
 ];
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
 test("undrawn edge is null", () => assert.equal(next("Done", "claimed"), null));
@@ -2843,7 +2848,8 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Queued,
     InProgress,
     SignOff,
-    NeedsInput or InReview,
+    NeedsInput,
+    InReview or FeatureChangeRequest,
     because `listEligible` can't see an item that lost its label or closed;
   - writes `openDependencies` into `item.blocked_by` for every Queued,
     SignOff and NeedsInput item,
@@ -2880,6 +2886,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and `dodExists` is whether `loadPolicy(..., "dod")` returned a file.
   - **Criteria change.**
     An InReview item whose criteria now hash differently from `item.criteria_hash` moves to Queued through `criteria_changed`.
+    An item waiting in FeatureChangeRequest moves the same way, and so does any item the poller holds Queued or later (PBI 364).
     In the same transaction:
     - `item.criteria_hash` takes the new value,
       so the next poll sees no change and fires nothing more;
@@ -2985,11 +2992,14 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     since a run can ask its question after the PR opened,
     and the move closes the item's open question unanswered,
     so the dashboard stops asking for an answer (PBI 194).
-    The PRs of all three states are read before withdrawal,
+    A FeatureChangeRequest item whose open run has a `pr_number` does the same,
+    since a person may merge its PR while it waits on the owner (PBI 364).
+    The PRs of all four states are read before withdrawal,
     so a merge that closed the board item still counts as a merge.
   - **Closed PR.**
     An InReview,
-    InProgress or NeedsInput item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`,
+    InProgress,
+    NeedsInput or FeatureChangeRequest item whose PR reports `open: false` and `merged: false` moves to Abandoned through `withdrawn`,
     as the `pr_closed` webhook does in Task 17.
     Without this,
     Phase 0a,
@@ -3527,7 +3537,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so deleting an approved section has the judge check the item again.
     That check stores no rule changes,
     so the next poll leaves the item Queued.
-    The same holds for an InProgress, SignOff, NeedsInput or InReview item:
+    The same holds for an InProgress, SignOff, NeedsInput, InReview or FeatureChangeRequest item:
     step 3 closes its open PR, then ends its open run with outcome `rules_edited` and closes its open questions in the move's transaction,
     and step 2 doesn't merge the PR of an item whose rules section no longer reads as approved,
     so nothing built from the edited section ships.
@@ -7306,7 +7316,8 @@ from spec §6 rows 1 to 7:
   close or review from the PR's state.
   - `pr_merged` moves InReview,
     InProgress during address,
-    or NeedsInput (PBI 194) to Accepted through `merged`,
+    NeedsInput (PBI 194)
+    or FeatureChangeRequest (PBI 364) to Accepted through `merged`,
     and stores `run.merge_sha`.
     When the cached check status of `merge_sha` reaches `success`,
     through `checks_completed` matched on `merge_sha` or the poll in Task 13,

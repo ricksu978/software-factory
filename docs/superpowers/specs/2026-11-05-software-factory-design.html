@@ -798,6 +798,10 @@ stateDiagram-v2
   SignOff --> InProgress: approved, or changes asked
   InProgress --> NeedsInput: agent blocked
   InProgress --> FeatureChangeRequest: a stage after sign-off asks to change a locked feature file
+  FeatureChangeRequest --> Accepted: PR merged by a person while waiting
+  FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged
+  FeatureChangeRequest --> Queued: acceptance criteria changed
+  FeatureChangeRequest --> Eligible: its rules section no longer reads as the owner approved it
   NeedsInput --> InProgress: answered, by a person, or by the factory once CI passes on the base or the PR conflicts or gets a new review, or its question from before PBI 292 names only CI failures
   InProgress --> InReview: PR open, CI green
   InReview --> Queued: changes requested, or a conflict
@@ -1293,6 +1297,20 @@ stateDiagram-v2
     or one abandoned any other way,
 
     stays Abandoned (PBI 228).
+
+    An item waiting in FeatureChangeRequest takes the same backlog changes as one in InProgress:
+
+    a label removed,
+
+    the item closed or its PR closed unmerged withdraws it to Abandoned,
+
+    a change to its acceptance criteria queues it again for a new run,
+
+    and a rules section that no longer reads as approved sends it back to Eligible.
+
+    A person who merges its PR while it waits moves it to Accepted,
+
+    which the poller and the merge webhook both notice (PBI 364).
 
     All of these moves are logged as system events.
 
