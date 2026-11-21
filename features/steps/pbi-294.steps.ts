@@ -6,10 +6,12 @@
 //   blocks, inline code (read as a word, so a sentence that starts with code still counts), and in the spec <pre>,
 //   <code>, <script>, <style> and comments. HTML tags read as spaces. A Markdown list marker or blockquote marker at
 //   the start of a line isn't a sentence end, and a Markdown table row is left out, since its cells can't span lines.
-// - The before-text is features/fixtures/pbi-294/before-text.json. Both sides compare with whitespace collapsed, and
-//   whitespace between two tags dropped, since "</td><td>" and "</td>\n<td>" render the same, and whitespace before a
-//   <cite> dropped, since the spec shows a blockquote's <cite> as a block. Its "added" field holds the passages this
-//   item adds to describe its own rule, as the Definition of Done asks, each put in after an anchor before comparing.
+// - The before-text is each side of the spec and the plan in the replay inputs under features/fixtures/pbi-294/replay/,
+//   in the old layout, and the text it is checked against is the same side in the new layout. The live docs aren't
+//   compared with it: they keep changing after this item, so a record of how they stood would fail the next PR that
+//   edits them. The live docs are held to the layout by the sentence and table-cell checks instead. Both sides compare
+//   with whitespace collapsed, and whitespace between two tags dropped, since "</td><td>" and "</td>\n<td>" render the
+//   same, and whitespace before a <cite> dropped, since the spec shows a blockquote's <cite> as a block.
 // - AC-2 copies every .md and .html file git knows, with scripts/prose-lint.mjs, to a temp directory and runs the lint
 //   there the way .github/workflows/prose.yml does, then reads its "<file>:<line>: <message>" findings.
 // - AC-3 replays the committed inputs under features/fixtures/pbi-294/replay/ through scripts/merge-replay.ts, and reads
@@ -21,7 +23,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { replay, type MergeResult } from "../../scripts/merge-replay.ts";
+import { readInputs, replay, type MergeResult } from "../../scripts/merge-replay.ts";
 
 const repo = process.cwd();
 const SPEC = "docs/superpowers/specs/2026-11-05-software-factory-design.html";
@@ -31,8 +33,8 @@ const RESULT = `${FIXTURES}/replay-result.json`;
 const DOCS = { spec: SPEC, plan: PLAN } as const;
 type Doc = keyof typeof DOCS;
 
-type Added = { after: string; text: string };
-type Before = { spec: string; plan: string; planCodeBlocks: string[][]; added?: Partial<Record<Doc, Added[]>> };
+/** One side of a file merge in the replay inputs: its name, its text in the old layout, and in the new. */
+type Side = { name: string; old: string; now: string };
 type Finding = { file: string; line: number; message: string };
 type Lint = { status: number | null; output: string; findings: Finding[] };
 type Entry = { name: string; line: number };
@@ -112,10 +114,19 @@ function multiSentenceLines(text: string, html: boolean): string[] {
 // quote's closing mark and its <cite> renders the same, and it's the only place such a quote's last sentence can end a line.
 const collapse = (s: string) => s.replace(/\s+/g, " ").trim().replace(/> </g, "><").replace(/ <cite>/g, "<cite>");
 
-function before(): Before {
-  const path = join(repo, FIXTURES, "before-text.json");
-  assert.ok(existsSync(path), `the before-text ${FIXTURES}/before-text.json isn't in the repo`);
-  return JSON.parse(readFileSync(path, "utf8")) as Before;
+/** Every side of `doc`'s file merges in the replay inputs, the left-out merge's included, in both layouts. */
+function sides(doc: Doc): Side[] {
+  const dir = join(repo, FIXTURES, "replay");
+  assert.ok(existsSync(join(dir, "merges.json")), `the replay inputs under ${FIXTURES}/replay aren't in the repo`);
+  const out: Side[] = [];
+  for (const list of ["merges.json", "left-out.json"]) {
+    const { merges, blobs } = readInputs(dir, list);
+    for (const m of merges.filter((x) => x.file === DOCS[doc])) {
+      for (const k of ["base", "ours", "theirs"] as const) out.push({ name: `${m.name} ${k}`, old: blobs[m.old[k]], now: blobs[m.new[k]] });
+    }
+  }
+  assert.ok(out.length, `the replay inputs hold no side of ${DOCS[doc]}`);
+  return out;
 }
 
 /** Each fenced code block in a Markdown text, fences included, line by line. */
@@ -166,50 +177,35 @@ Then("no line outside code holds more than one sentence", noMultiSentenceLine);
 Then("no line outside code blocks holds more than one sentence", noMultiSentenceLine);
 
 Then(/^(?:its|the spec's) text, with whitespace collapsed, is the same as the before-text for the (spec|plan)$/, function (doc: Doc) {
-  const text = ctx(this).read[doc] ?? readDoc(doc);
-  const now = collapse(text);
-  const was = withAdded(doc);
-  if (now === was) return;
-  let i = 0;
-  while (now[i] === was[i]) i++;
-  assert.fail(`${DOCS[doc]} differs from its before-text at character ${i}:\n  now: ${now.slice(Math.max(0, i - 60), i + 60)}\n  was: ${was.slice(Math.max(0, i - 60), i + 60)}`);
+  for (const side of sides(doc)) {
+    const now = collapse(side.now);
+    const was = collapse(side.old);
+    if (now === was) continue;
+    let i = 0;
+    while (now[i] === was[i]) i++;
+    assert.fail(`${DOCS[doc]} at ${side.name} differs from its before-text at character ${i}:\n  now: ${now.slice(Math.max(0, i - 60), i + 60)}\n  was: ${was.slice(Math.max(0, i - 60), i + 60)}`);
+  }
 });
 
 Then("every sentence in the before-text for each file is still in it, word for word", function () {
-  const read = ctx(this).read;
   for (const doc of ["spec", "plan"] as Doc[]) {
-    const now = collapse(read[doc] ?? readDoc(doc));
-    // With the added passages in, since the spec's goes between two table rows, which a sentence here can span.
-    const text = withAdded(doc);
-    const starts = [0, ...sentenceBreaks(text), text.length];
-    const missing: string[] = [];
-    for (let i = 0; i + 1 < starts.length; i++) {
-      const sentence = text.slice(starts[i], starts[i + 1]).trim();
-      if (sentence && !now.includes(sentence)) missing.push(sentence.slice(0, 140));
+    for (const side of sides(doc)) {
+      const now = collapse(side.now);
+      const text = collapse(side.old);
+      const starts = [0, ...sentenceBreaks(text), text.length];
+      const missing: string[] = [];
+      for (let i = 0; i + 1 < starts.length; i++) {
+        const sentence = text.slice(starts[i], starts[i + 1]).trim();
+        if (sentence && !now.includes(sentence)) missing.push(sentence.slice(0, 140));
+      }
+      assert.equal(missing.length, 0, `${missing.length} sentences of the before-text for ${DOCS[doc]} at ${side.name} aren't in it, such as:\n${missing.slice(0, 5).join("\n")}`);
     }
-    assert.equal(missing.length, 0, `${missing.length} sentences of the before-text for ${DOCS[doc]} aren't in it, such as:\n${missing.slice(0, 5).join("\n")}`);
   }
 });
 
 Then("every code block in it is the same, line for line, as in the before-text for the plan", function () {
-  const now = codeBlocks(ctx(this).read.plan ?? readDoc("plan"));
-  assert.deepEqual(now, before().planCodeBlocks);
+  for (const side of sides("plan")) assert.deepEqual(codeBlocks(side.now), codeBlocks(side.old), `the code blocks of ${PLAN} at ${side.name} changed`);
 });
-
-/**
- * The before-text for a doc, whitespace collapsed, with the passages this item adds to describe its own rule put in.
- * Each goes right after its anchor, which must occur once, so the rest of the file still has to match the before-text.
- */
-function withAdded(doc: Doc): string {
-  const b = before();
-  let was = collapse(b[doc]);
-  for (const { after, text } of b.added?.[doc] ?? []) {
-    const at = was.indexOf(after);
-    assert.ok(at >= 0 && was.indexOf(after, at + 1) < 0, `the anchor for an added passage in ${DOCS[doc]} isn't once in its before-text: ${after}`);
-    was = was.slice(0, at + after.length) + text + was.slice(at + after.length);
-  }
-  return was;
-}
 
 // ---- Table cells ----
 
