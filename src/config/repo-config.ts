@@ -14,10 +14,18 @@ export type RepoConfig = {
   commands: { test: string; lint: string; setup?: string };
   /** PBI 369: how many hours apart the factory re-checks an item that failed its Definition of Done on main. */
   failedRecheckHours: number;
+  /**
+   * PBI 399: `command_timeout_minutes`, how many minutes the cell gives each command it runs before it stops it,
+   * DEFAULT_COMMAND_TIMEOUT_MINUTES when the key is missing.
+   */
+  commandTimeoutMinutes?: number;
 };
 
 /** `failed_recheck_hours` when the key is missing (PBI 369). */
 export const DEFAULT_FAILED_RECHECK_HOURS = 8;
+
+/** `command_timeout_minutes` when the key is missing (PBI 399). */
+export const DEFAULT_COMMAND_TIMEOUT_MINUTES = 15;
 
 /** Thrown for a missing or invalid config. `key` names the setting that's wrong. */
 export class ConfigError extends Error {

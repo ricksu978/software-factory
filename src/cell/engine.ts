@@ -73,7 +73,14 @@ export type CellDeps = {
   sop: Sop; config: RepoConfig; policies: Policies; now: () => Date;
   /** Waits between CI polls. Tests pass one that returns at once. */
   sleep?: (ms: number) => Promise<void>;
+  /** PBI 399: runs each command the cell runs, within its time limit. Tests pass one on a fake clock. Defaults to `sh`. */
+  shell?: Shell;
 };
+
+/** What a command the cell ran ended with. `stopped` is true when the cell stopped it at its time limit (PBI 399). */
+export type ShResult = { code: number; out: string; all: string; stopped?: boolean };
+/** Runs `command` in `cwd` as `sh` does, and stops it once it has run for `limitMs` (PBI 399). */
+export type Shell = (command: string, cwd: string, limitMs: number) => Promise<ShResult>;
 
 const RENEW_MS = 60_000;
 const RENEW_GIVE_UP = 3; // a cell stops itself after 3 minutes of failed renewals

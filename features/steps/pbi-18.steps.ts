@@ -64,6 +64,8 @@ export type Ctx = {
   api?: object;
   gitDeps?: object;
   prelude?: () => Promise<void>;
+  /** Extra engine dependencies, as PBI 399's steps add to run the repo's commands on a fake clock. */
+  deps?: Record<string, unknown>;
 };
 
 function ctx(world: object): Ctx {
@@ -346,6 +348,7 @@ export async function runTheCell(world: object): Promise<void> {
         risk: policy("risk", "Low by default.\n"), dod: policy("dod", c.dod) },
       now: c.now ?? (() => new Date()),
       sleep: c.sleep ?? (async () => {}),
+      ...c.deps,
     });
   } catch (e) {
     c.error = e;
