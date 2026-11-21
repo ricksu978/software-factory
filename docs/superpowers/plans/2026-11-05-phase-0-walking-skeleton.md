@@ -800,6 +800,48 @@ A task that touches one of them follows this section and does not restate it.
       so the engine adds that note to the attempt's `/stage` message,
       and the stage fails only on failed lines.
       This repo's `dod.md` line 1 names its `ci` job.
+    - **Green's gate run (PBI 389).**
+      When Green's gate passes,
+      the engine keeps a `GateRun`:
+      the commit,
+      `bdd.run`, `commands.test` and `commands.lint`,
+      and the report's scenarios passed and failed.
+      `checkDefinitionOfDone` takes it as `gate`,
+      and uses it only when its commit is `head`.
+      `gateCover` reads which parts of a `run:` command the gate covered.
+      A command identical to a gate command, after whitespace is collapsed, is covered whole,
+      even one holding a `$(...)`.
+      Otherwise a command made only of parts joined with `&&` outside quotes is split there,
+      and one with a pipe, `||`, `;`, a lone `&`, parentheses or a substitution isn't.
+      Nor is one with a part that changes the shell's state for the parts after it,
+      such as `cd web`, `export X=1`, `FOO=1`, `source` or `set`,
+      since a gate command after it doesn't run as the gate ran it.
+      So `cd web && npm test` runs whole.
+      A line covered whole passes on the gate's run, with a reason naming Green's gate, the commit and the scenario counts,
+      and runs nothing.
+      A line covered in part runs the rest joined with `&&`.
+      When that passes,
+      the reason adds that the rest exited 0,
+      and when it fails the reason starts `exit <code>` as before,
+      and the base re-run of PBI 215 runs only the rest.
+      When a part the gate didn't run comes before one it did,
+      the check records each file and folder in the checkout outside `.git`, ignored ones included,
+      with its size, inode and change times, before and after the rest runs (`fileStamps`),
+      so a rebuild inside an existing ignored `dist/` shows as a change, which `git status` can't show.
+      When the rest created, removed or rewrote a file, or either record can't be read,
+      it runs the line whole as before,
+      since a build in `npm run build && npm test` changes what the gate's `npm test` read.
+      `tsc --noEmit` writes nothing, so this repo's line 1 still runs only the typecheck.
+      A line with no covered part runs whole.
+      The gate run lasts only for the claim,
+      so a later claim's checks run every line.
+      `gateNote` adds a `## Green's gate` section to every self-review round's brief.
+      It says the full suite passed in Green's gate at the commit, with `bdd.run` and the counts,
+      and says not to run the full suite.
+      It names `bdd.run` with `--tags "<item tag> and @ac-1"` added for a single scenario,
+      and allows single test files.
+      A fix commit gets line 1 once in open-pr's check,
+      and CI runs the suite again on the PR's head.
     - **Base failures (PBI 215).**
       A `run:` line that fails is run again,
       before the failure counts against the item,
