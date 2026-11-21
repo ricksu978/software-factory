@@ -29,6 +29,7 @@ import {
   briefEntries, ctx as pr128, done, newPass, ordinal, raise, REVIEWER, review, reviewerCall, stageReports, that, threadFor,
   type AgentRecord, type Ctx as PrCtx,
 } from "./pbi-128.steps.ts";
+import { ownsClaims as ownsClaims315, runFirstClaim as runFirstClaim315 } from "./pbi-315.steps.ts";
 
 const REPO = "acme/app";
 const PR = 57;
@@ -351,6 +352,8 @@ When("the cell runs from the PR review", LONG, async function () {
 });
 
 When("the first claim's cell runs", LONG, async function () {
+  // PBI 315's first claim runs from Red to the CI question, with its own CI and Green, so its steps run it.
+  if (ownsClaims315(this)) return runFirstClaim315(this);
   const o = own(this);
   const c = pr128(this);
   const run = cell(this);
