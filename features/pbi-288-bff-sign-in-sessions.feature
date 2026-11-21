@@ -20,7 +20,7 @@ Feature: The BFF signs people in and keeps sessions in Postgres
 
   Rule: The BFF answers on port 7403
 
-    @ac-1 @db
+    @ac-1 @db @serial
     Scenario: The BFF listens on 7403 when no port is given
       Given the BFF is stopped
       When the BFF starts with no port set
