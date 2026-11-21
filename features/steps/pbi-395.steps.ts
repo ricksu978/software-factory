@@ -408,10 +408,11 @@ async function postApproval(world: object, login: string, at?: string): Promise<
 }
 
 /** The approval, then the next poll, which runs the rest of the readiness check. */
-async function approve(world: object, login: string, at?: string): Promise<void> {
+async function approve(world: object, login: string, at?: string): Promise<number> {
   await markComments(world);
-  await postApproval(world, login, at);
+  const status = await postApproval(world, login, at);
   await poll(pollCtx(world));
+  return status;
 }
 
 /** An item checked with a rules section that changes `section` and a judge that finds it does, as waiting leaves it. */
@@ -441,7 +442,8 @@ Given("{string}, the owner, approved item {string}'s change to spec section {str
 Given("the owner approved item {string}'s change to spec section {string} and the factory holds it in state {string}", long, async function (ext: string, section: string, state: string) {
   assert.equal(state, "Queued", "an approved item that passes goes on to Queued");
   await waiting(this, ext, section);
-  await approve(this, OWNER);
+  assert.equal(await approve(this, OWNER), 303, "the item page didn't accept the owner's approval");
+  assert.equal(await stateOf(this, ext), state, `the approved item isn't in ${state} before the edit`);
 });
 
 When("the owner opens item {string}'s item page", long, async function (ext: string) {
