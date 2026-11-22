@@ -300,6 +300,9 @@ export function fakeRepoHost(): RepoHost & {
     async readFile(repo, ref, path) {
       return files.get(`${repo}@${ref}:${path}`) ?? null;
     },
+    async commitFiles() {
+      throw new Error("commitFiles isn't built yet (PBI 365)");
+    },
     async defaultBranchSha(repo) {
       const head = heads.get(repo);
       if (!head) throw new Error(`no default branch head for ${repo}`);

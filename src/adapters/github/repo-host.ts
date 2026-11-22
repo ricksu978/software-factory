@@ -515,6 +515,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return readText(await client(), split(repo), ref, path);
     },
 
+    async commitFiles() {
+      throw new Error("commitFiles isn't built yet (PBI 365)");
+    },
+
     async defaultBranchSha(repo) {
       const gh = await client();
       const r = split(repo);

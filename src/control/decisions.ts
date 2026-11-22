@@ -1,7 +1,7 @@
 // Sign-off and answers (plan Task 15). The dashboard routes and item comments both go through `decide`, so the two
 // channels can't drift.
 import type pg from "pg";
-import type { BacklogAdapter } from "../adapters/types.ts";
+import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import type { ItemState } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
@@ -103,7 +103,7 @@ const refusal: Record<DecisionKind, string> = {
  * late, as from a retried row, applies only to a question asked by the time it was posted.
  */
 export async function applyComment(
-  deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string },
+  deps: { pool: pg.Pool; adapter: BacklogAdapter; sourceId: string; /** PBI 365: commits an approved feature change to the run's branch. */ repoHost?: Pick<RepoHost, "commitFiles"> },
   e: { externalId: string; repo: string; login: string; body: string; commentId: string },
   postedAt?: Date,
 ): Promise<Outcome> {

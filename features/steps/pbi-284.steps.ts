@@ -32,6 +32,7 @@ import pg from "pg";
 import { freePort } from "../../src/bdd/ports.ts";
 import { ctx as pbi175 } from "./pbi-175.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi365, person as pbi365Person } from "./pbi-365.steps.ts";
 
 /** The free port the scenario's API listens on, picked the first time a step asks, so a request before it starts reaches nothing. */
 export async function apiPort(world: object): Promise<number> {
@@ -274,10 +275,12 @@ Given("{string} is a viewer who is the Product Owner", long, async function (nam
 });
 
 Given("{string} is a viewer who isn't the Product Owner", long, async function (name: string) {
+  if (isPbi365(this)) return pbi365Person(this, name, "viewer", false);
   await person(ctx(this), name, "viewer", false);
 });
 
 Given("{string} is an owner who isn't the Product Owner", long, async function (name: string) {
+  if (isPbi365(this)) return pbi365Person(this, name, "owner", false);
   await person(ctx(this), name, "owner", false);
 });
 
