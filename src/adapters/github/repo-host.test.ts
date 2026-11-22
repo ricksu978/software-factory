@@ -354,6 +354,26 @@ describe("githubRepoHost", () => {
     assert.deepEqual((await fake.openReviewComments("o/r", number)).map((c) => [c.author, c.body, c.path]), [["lead", "Name the retry limit", null]]);
   });
 
+  test("commitFiles makes one commit of every file on the branch's head and moves the branch without force (PBI 365)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/git/ref/{ref}": () => ({ object: { sha: "head1" } }),
+      "GET /repos/{owner}/{repo}/git/commits/{commit_sha}": () => ({ tree: { sha: "tree1" } }),
+      "POST /repos/{owner}/{repo}/git/trees": () => ({ sha: "tree2" }),
+      "POST /repos/{owner}/{repo}/git/commits": () => ({ sha: "new1" }),
+      "PATCH /repos/{owner}/{repo}/git/refs/{ref}": () => ({}),
+    });
+    const sha = await host.commitFiles({ repo: "o/r", branch: "factory/x-r1", message: "m", files: [{ path: "a.feature", text: "A" }, { path: "b.feature", text: "B" }] });
+    assert.equal(sha, "new1");
+    const by = (route: string) => calls.find((c) => c.route === route)!.params;
+    assert.equal(by("GET /repos/{owner}/{repo}/git/ref/{ref}").ref, "heads/factory/x-r1");
+    assert.equal(by("GET /repos/{owner}/{repo}/git/commits/{commit_sha}").commit_sha, "head1");
+    assert.deepEqual(by("POST /repos/{owner}/{repo}/git/trees").base_tree, "tree1");
+    assert.deepEqual(by("POST /repos/{owner}/{repo}/git/trees").tree, [
+      { path: "a.feature", mode: "100644", type: "blob", content: "A" }, { path: "b.feature", mode: "100644", type: "blob", content: "B" }]);
+    assert.deepEqual([by("POST /repos/{owner}/{repo}/git/commits").tree, by("POST /repos/{owner}/{repo}/git/commits").parents], ["tree2", ["head1"]]);
+    assert.deepEqual(by("PATCH /repos/{owner}/{repo}/git/refs/{ref}"), { owner: "o", repo: "r", ref: "heads/factory/x-r1", sha: "new1", force: false });
+  });
+
   test("readFile decodes a file and gives null for a missing one", async () => {
     const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/contents/{path}": (p) => (p.path === "a.txt" ? { type: "file", content: b64("hi") } : (() => { throw Object.assign(new Error("404"), { status: 404 }); })()) });
     assert.equal(await host.readFile("o/r", "main", "a.txt"), "hi");

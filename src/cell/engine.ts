@@ -1376,7 +1376,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const fix = toFix;
     toFix = null;
     const from = carriedOver("green");
-    if (from.spent) { greenTries = Math.max(greenTries, from.spent); carried = from.findings; }
+    if (from.spent || from.findings.length) { greenTries = Math.max(greenTries, from.spent); carried = from.findings; }
     if (greenTries >= max) throw new Exhausted(`Green failed after ${max} attempts:\n${carried.map((f) => `- ${f}`).join("\n")}`);
     fixing = fix;
     const findings = await attempts("green", max, async (attempt, last) => {
@@ -1435,6 +1435,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       "If you think a scenario is wrong, write one line that starts `SCENARIO NOTE:`, names the scenario and says why, before your last line. Write it again in each round you still think so. The factory puts each scenario note from your last round in the PR body, for the person who merges, and a note holds no finding open.");
     const rounds = Number(stageOf("self-review").max_rounds ?? 5);
     await begin("self-review");
+    // PBI 365: findings carried to this stage, such as the note of a feature change request the Product Owner turned down.
+    const carriedNote = retryNote(carriedOver("self-review").findings);
     // Every earlier round goes back to the reviewer, so it can see a finding rebutted twice and answer DEADLOCK.
     let history = "";
     // Each restore a round made, for the reviewer's and the fix pass's next briefs.
@@ -1442,7 +1444,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const undoneNote = () => undone.length ? `## Edits the factory undid\n\n${undone.map((u) => `- ${u}`).join("\n")}` : "";
     for (let round = 1; round <= rounds; round++) {
       reviewRounds++;
-      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, gateNote(gateRun, tag), locked, rubric, resumed("self-review"), undoneNote(), history), "factory-self-reviewer");
+      const r = await say("self-review", brief(await promptOf("self-review"), `The base is \`origin/${ctx.base}\`.`, gateNote(gateRun, tag), locked, rubric, resumed("self-review"), carriedNote, undoneNote(), history), "factory-self-reviewer");
       const verdicts = parseJudgement(r.text, pr);
       await api.policyResults({ file: "pr-review", source: pr.source, stageId: "self-review", attempt: reviewRounds, checkedSha: await git.head(), verdicts });
       const last = lastLine(r.text);

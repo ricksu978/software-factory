@@ -107,14 +107,14 @@ export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<v
     const featureChange = Array.isArray(p.featureChange) ? (p.featureChange as FeatureChangeFile[]) : null;
     await mirror(deps, row.itemId, p.to as ItemState, how, { eventId: row.eventId, seq: row.seq, question, featureChange });
   } else if (row.consumer === CONSUMER.decisionAnnouncement) {
-    const body = announcement(p.kind as DecisionKind, typeof p.text === "string" ? p.text : "");
+    const body = announcement(p.kind as DecisionKind, typeof p.text === "string" ? p.text : "", typeof p.about === "string" ? p.about : undefined);
     await deps.backlogFor(item.source_id).comment(item.external_id, body, `decision:${row.eventId}`);
   } else if (row.consumer === CONSUMER.commentCommands) {
     const e = p.event as FactoryWebhookEvent;
     if (e?.kind !== "comment") return;
     // Run for the row's own item alone: another board's item with the same number has a row of its own. The event's
     // time bounds which question it answers, so a retried row never answers one asked after the comment was posted.
-    await applyComment({ pool: deps.pool, adapter: deps.backlogFor(item.source_id), sourceId: item.source_id }, { ...e, externalId: item.external_id }, event.at);
+    await applyComment({ pool: deps.pool, adapter: deps.backlogFor(item.source_id), sourceId: item.source_id, repoHost: deps.repoHost }, { ...e, externalId: item.external_id }, event.at);
   } else {
     throw new Error(`no handler for the outbox consumer ${String(row.consumer)}`);
   }

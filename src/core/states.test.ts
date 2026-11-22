@@ -38,6 +38,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   // PBI 364: backlog changes and a merge reach an item waiting in FeatureChangeRequest.
   ["FeatureChangeRequest", "withdrawn", "Abandoned"], ["FeatureChangeRequest", "criteria_changed", "Queued"],
   ["FeatureChangeRequest", "rules_edited", "Eligible"], ["FeatureChangeRequest", "merged", "Accepted"],
+  // PBI 365: the Product Owner's decision on the request queues the item to resume at the stage that asked.
+  ["FeatureChangeRequest", "feature_change_decided", "Queued"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -63,4 +65,7 @@ test("only a NotReady item takes a rule change approval, and only a Queued or la
 });
 test("feature_change_requested moves only an InProgress item", () => {
   for (const s of ["Queued", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as ItemState[]) assert.equal(next(s, "feature_change_requested"), null);
+});
+test("feature_change_decided moves only a FeatureChangeRequest item", () => {
+  for (const s of ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "Abandoned"] as ItemState[]) assert.equal(next(s, "feature_change_decided"), null);
 });

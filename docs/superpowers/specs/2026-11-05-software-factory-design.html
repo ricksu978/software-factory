@@ -801,6 +801,7 @@ stateDiagram-v2
   FeatureChangeRequest --> Accepted: PR merged by a person while waiting
   FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged
   FeatureChangeRequest --> Queued: acceptance criteria changed
+  FeatureChangeRequest --> Queued: the Product Owner approves or turns down the request, and the run resumes at the stage that asked
   FeatureChangeRequest --> Eligible: its rules section no longer reads as the owner approved it
   NeedsInput --> InProgress: answered, by a person, or by the factory once CI passes on the base or the PR conflicts or gets a new review, or its question from before PBI 292 names only CI failures
   InProgress --> InReview: PR open, CI green
@@ -2400,6 +2401,26 @@ Feature: Export invoices to CSV
     the way sign-off posts the scenarios,
 
     with each file's change from the lock commit as a diff.
+
+    The Product Owner answers the request with the <code>/approve</code> or <code>/changes &lt;note&gt;</code> used at sign-off,
+
+    or with Approve the change or Ask for changes on the item page (PBI 365).
+
+    Only the Product Owner decides, as at sign-off (§8).
+
+    <code>/approve</code> commits the proposed files to the item's branch in one commit on top of the stage's work,
+
+    and moves the lock to that commit,
+
+    so every later gate compares the feature files against the new lock.
+
+    <code>/changes</code> keeps the lock where it was,
+
+    and the stage that asked gets the note in its findings.
+
+    Either way the item goes back to Queued,
+
+    and the run resumes at the stage that asked.
 
     A request that names a file the stage didn't change,
 
@@ -4891,6 +4912,14 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       and its lines before and after from the lock commit,
 
       which the control plane reads itself rather than taking the cell's copy.
+
+      The Product Owner alone gets Approve the change and Ask for changes after it,
+
+      with a box for a note for the factory (PBI 365).
+
+      Once the request is answered,
+
+      the page says who approved or turned it down and when.
 
       Then the SOP version,
 

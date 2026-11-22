@@ -723,4 +723,31 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
   test("an item with no open request has no such section", () => {
     assert.doesNotMatch(runDetailPage(detail(null), null), /Feature change request/);
   });
+
+  const request = [{ path: "features/a.feature", reason: "Held, not refused", before: "a\n", after: "b\n" }];
+
+  test("a product owner gets Approve the change and Ask for changes with a note, after the change (PBI 365)", () => {
+    const html = runDetailPage({ ...detail(request), canDecideFeatureChange: true }, null);
+    const form = html.indexOf('<form method="post" action="/items/00000000-0000-0000-0000-000000000364/feature-change">');
+    assert.ok(form > html.indexOf("Held, not refused"), "the form doesn't come after the change and its reason");
+    assert.match(html, /<textarea id="feature-change-note" name="note"><\/textarea>/);
+    assert.match(html, /<button name="decision" value="approve">Approve the change<\/button> <button name="decision" value="changes">Ask for changes<\/button>/);
+    assert.doesNotMatch(html, /Approve the scenarios/);
+  });
+
+  test("anyone else sees the request without the controls (PBI 365)", () => {
+    const html = runDetailPage(detail(request), null);
+    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.doesNotMatch(html, /Approve the change|feature-change"/);
+  });
+
+  test("once no request is open, the page says who decided the last one and when (PBI 365)", () => {
+    const at = new Date("2026-11-22T01:00:00Z");
+    assert.match(runDetailPage({ ...detail(null), featureChangeDecision: { kind: "approve", by: "pia", at } }, null),
+      /<p id="feature-change-decision">pia approved the feature change request at <time/);
+    assert.match(runDetailPage({ ...detail(null), featureChangeDecision: { kind: "changes", by: "pia", at } }, null),
+      /pia turned down the feature change request/);
+    // An open request shows itself, not an earlier decision.
+    assert.doesNotMatch(runDetailPage({ ...detail(request), featureChangeDecision: { kind: "approve", by: "pia", at } }, null), /feature-change-decision/);
+  });
 });

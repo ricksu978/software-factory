@@ -752,9 +752,12 @@ async function press(world: object, login: string, label: string, note: string |
   await post(world, login, f.action, fields);
 }
 
+/**
+ * The login presses on the page as itself: each request carries its own sign-in, so a scenario that signed in someone
+ * else first, as the non-Product-Owner outline does before "pia" presses, has "pia" sign in to press.
+ */
 const signedIn = (world: object, login: string) => {
-  const x = mine(world);
-  assert.equal(x.signedIn, login, `"${login}" isn't signed in`);
+  mine(world).signedIn = login;
 };
 
 When("{string} presses {string} on item {int}'s page", long, async function (login: string, label: string, _item: number) {
