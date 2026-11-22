@@ -12,7 +12,9 @@ Feature: The Product Owner approves or turns down a feature change request with 
   and at the lock commit it holds the step "Then the order is refused". The green stage asked to change
   that step to "Then the order is held for review" because "An empty order is held, not refused", and
   item 482 waits in FeatureChangeRequest. "pia" is the Product Owner. The board, the repo and the
-  agents are fakes.
+  agents are fakes. The Product Owner can also answer on the item page, which offers Approve and Ask for
+  changes next to the request, the way sign-off does. A decision there has the same effect as the
+  comment, so a factory whose comments don't reach it can still answer a request.
 
   Rule: Only the Product Owner approves or turns down a feature change request
 
@@ -184,3 +186,107 @@ Feature: The Product Owner approves or turns down a feature change request with 
       Then the green agent's brief holds the note "Empty orders stay refused"
       And "features/pbi-482-orders.feature" on the pushed branch matches the sign-off commit
       And "features/pbi-482-orders.feature" on the pushed branch holds the step "Then the order is refused"
+
+  Rule: The Product Owner can approve or turn down the request on the item page, with the same effect as the comment
+
+    @ac-1
+    Scenario: The item page offers the Product Owner Approve and Ask for changes next to the request
+      Given "pia" is signed in
+      When "pia" opens item 482's page
+      Then the page shows the "Approve the change" button and the "Ask for changes" button
+      And the page shows a box for a note for the factory
+      And the change to "features/pbi-482-orders.feature" and its reason come before the "Approve the change" button
+      And the page doesn't show the "Approve the scenarios" button
+
+    @ac-1
+    Scenario: Approve on the item page commits the proposed file, moves the lock and resumes the stage that asked
+      Given "pia" is signed in
+      When "pia" presses "Approve the change" on item 482's page
+      Then item 482 is no longer in FeatureChangeRequest
+      And the feature change request on item 482 is recorded as approved by "pia"
+      And the item's branch has exactly one new commit
+      And at that commit "features/pbi-482-orders.feature" holds the step "Then the order is held for review"
+      And the lock of item 482 is that commit
+      And item 482's run resumes at green
+
+    @ac-1
+    Scenario Outline: Approve on the item page resumes the item at the <stage> stage that asked
+      Given the feature change request on item 482 was asked by the <stage> stage
+      And "pia" is signed in
+      When "pia" presses "Approve the change" on item 482's page
+      Then item 482's run resumes at <stage>
+
+      Examples:
+        | stage       |
+        | red         |
+        | self-review |
+        | address     |
+
+    @ac-1
+    Scenario: After Approve on the item page, a later edit to the file is put back to the new lock
+      Given "pia" has pressed "Approve the change" on item 482's page
+      When the cell runs the green stage again and the green agent edits "features/pbi-482-orders.feature" without asking
+      Then "features/pbi-482-orders.feature" on the pushed branch matches the new lock
+      And "features/pbi-482-orders.feature" on the pushed branch holds the step "Then the order is held for review"
+
+    @ac-1
+    Scenario: Once the request is approved, the item page no longer offers the controls
+      Given "pia" has pressed "Approve the change" on item 482's page
+      When "pia" opens item 482's page
+      Then the page says "pia" approved the feature change request
+      And the page doesn't show the "Approve the change" button
+
+    @ac-2
+    Scenario: Ask for changes with a note on the item page keeps the lock and resumes the stage with the note in its findings
+      Given "pia" is signed in
+      When "pia" writes the note "Empty orders stay refused" and presses "Ask for changes" on item 482's page
+      Then item 482 is no longer in FeatureChangeRequest
+      And the feature change request on item 482 is recorded as turned down by "pia"
+      And the lock of item 482 is still the sign-off commit
+      And the item's branch has no new commit
+      And item 482's run resumes at green
+      And the green stage's findings hold the note "Empty orders stay refused"
+
+    @ac-2
+    Scenario: The note from the item page reaches the resumed stage's agent
+      Given "pia" has written the note "Empty orders stay refused" and pressed "Ask for changes" on item 482's page
+      When the cell runs the green stage again and the green agent edits "features/pbi-482-orders.feature" without asking
+      Then the green agent's brief holds the note "Empty orders stay refused"
+      And "features/pbi-482-orders.feature" on the pushed branch matches the sign-off commit
+
+    @ac-2
+    Scenario: A note over several lines from the item page reaches the findings whole
+      Given "pia" is signed in
+      When "pia" writes this note and presses "Ask for changes" on item 482's page:
+        """
+        Empty orders stay refused.
+        Show the reason on the refusal.
+        """
+      Then the green stage's findings hold the note's lines "Empty orders stay refused." and "Show the reason on the refusal.", in that order
+
+    @ac-1
+    Scenario Outline: <who>, <role> who isn't the Product Owner, sees no controls, and a decision sent from that login is refused
+      Given "<who>" is <role> who isn't the Product Owner
+      And "<who>" is signed in
+      When "<who>" opens item 482's page
+      Then the page shows the change to "features/pbi-482-orders.feature"
+      And the page doesn't show the "Approve the change" button
+      And the page doesn't show the "Ask for changes" button
+      When "<who>" sends an Approve of the feature change request on item 482
+      Then the decision is refused
+      And item 482 is still in FeatureChangeRequest
+      And the lock of item 482 is still the sign-off commit
+      And the item's branch has no new commit
+      When "<who>" sends an Ask for changes with the note "Keep refusing empty orders" on item 482
+      Then the decision is refused
+      And item 482 is still in FeatureChangeRequest
+      When "pia" presses "Approve the change" on item 482's page
+      Then the feature change request on item 482 is recorded as approved by "pia"
+      And the lock of item 482 moves to a new commit
+      And the green stage's findings don't hold the note "Keep refusing empty orders"
+
+      Examples:
+        | who  | role        |
+        | olga | an owner    |
+        | otto | an operator |
+        | vera | a viewer    |
