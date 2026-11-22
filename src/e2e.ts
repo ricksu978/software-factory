@@ -106,6 +106,18 @@ export async function startFactory(pool: pg.Pool) {
       return false;
     }
   };
+  // A file the fake doesn't hold is read from the origin, as GitHub would, so the cell API's snapshot of the locked
+  // feature files at the scenarios sha (PBI 224) finds them.
+  const held = host.readFile.bind(host);
+  host.readFile = async (repo, ref, path) => {
+    const text = await held(repo, ref, path);
+    if (text !== null) return text;
+    try {
+      return (await exec("git", ["show", `${ref}:${path}`], { cwd: origin })).stdout;
+    } catch {
+      return null;
+    }
+  };
   host.checksOnSha = async (_repo, sha) => (ci.redOnMerge && mergeShas.has(sha) ? "failure" : "success");
 
   await pool.query("insert into repo (host_adapter, url, trusted_bot) values ('github', $1, 'factory[bot]')", [`https://github.com/${REPO}`]);

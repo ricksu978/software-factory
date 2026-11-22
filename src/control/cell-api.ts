@@ -15,6 +15,7 @@ import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { requestFeatureChange } from "../store/feature-change.ts";
 import { closeStartedAttempts, LEASE_RAN_OUT, renewLease, transitionItem } from "../store/items.ts";
+import { readSnapshot, SnapshotMissing, storeSnapshot } from "../store/run-snapshot.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
@@ -577,7 +578,15 @@ const routes: Record<string, Route> = {
       const q = question(body.question, "sign_off");
       const files = strings(body.lockedFiles, "lockedFiles");
       if (files.length === 0) throw new BadRequest("lockedFiles is empty");
-      await c.query("update run set scenarios_sha = $2, locked_files = $3 where id = $1", [run.run_id, str(body.scenariosSha, "scenariosSha"), files]);
+      const sha = str(body.scenariosSha, "scenariosSha");
+      // PBI 224: Run detail's snapshot, read once here so the API never reads GitHub. It replaces the run's earlier
+      // one, as a changes round can lock other files. A failed read rolls the report back, earlier snapshot and all.
+      const snapshot = await readSnapshot({ repoHost: deps.repoHost, backlog: deps.backlogFor(run.source_id) },
+        { repo: repoOf(run), externalId: run.external_id, sha, paths: files }).catch((e: unknown) => {
+        throw e instanceof SnapshotMissing ? new BadRequest(e.message) : e;
+      });
+      await c.query("update run set scenarios_sha = $2, locked_files = $3 where id = $1", [run.run_id, sha, files]);
+      await storeSnapshot(c, run.run_id, snapshot);
       await c.query("insert into question (item_id, kind, body) values ($1, 'sign_off', $2)", [run.item_id, q]);
       // The worker quotes the question on the board from the transition's payload (PBI 219).
       detail = { question: q };
