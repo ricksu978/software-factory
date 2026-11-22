@@ -209,6 +209,7 @@ describe("cell API", dbTest, () => {
 
   test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
     const cell = await claimed();
+    host.files.set(`${repo}@5c3a1f0:features/a.feature`, "Feature: A\n");
     const r = await send(cell.runId, cell.token, "POST", "/transition", {
       event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0", lockedFiles: ["features/a.feature"],
     });
@@ -220,10 +221,39 @@ describe("cell API", dbTest, () => {
     const run = await runRow(cell.runId);
     assert.equal(run.scenarios_sha, "5c3a1f0");
     assert.deepEqual(run.locked_files, ["features/a.feature"]);
+    // PBI 224: Run detail's snapshot, the item's criteria and each locked file's text at the sha.
+    assert.deepEqual(run.acceptance_criteria, ["it works"]);
+    const files = await db.pool.query("select sha, path, text from run_file where run_id = $1", [cell.runId]);
+    assert.deepEqual(files.rows, [{ sha: "5c3a1f0", path: "features/a.feature", text: "Feature: A\n" }]);
     const q = await db.pool.query("select kind, body from question where item_id = $1", [cell.itemId]);
     assert.deepEqual(q.rows, [{ kind: "sign_off", body: "Sign these off" }]);
     await mirrored();
     assert.ok((await board.comments("7")).some((c) => c.includes("/approve") && c.includes("Sign these off")));
+  });
+
+  test("scenarios_written locking a file the repo doesn't hold at the sha gets 400 and writes nothing (PBI 224)", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0", lockedFiles: ["features/a.feature"],
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /holds no features\/a\.feature at 5c3a1f0/);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+    assert.equal((await runRow(cell.runId)).scenarios_sha, null);
+    assert.equal((await db.pool.query("select count(*)::int as n from run_file where run_id = $1", [cell.runId])).rows[0].n, 0);
+  });
+
+  test("scenarios_written locking the same file twice stores it once (PBI 224)", async () => {
+    const cell = await claimed();
+    host.files.set(`${repo}@5c3a1f0:features/a.feature`, "Feature: A\n");
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0",
+      lockedFiles: ["features/a.feature", "features/a.feature"],
+    });
+    assert.equal(r.status, 200);
+    assert.equal((await item(cell.itemId)).state, "SignOff");
+    const files = await db.pool.query("select path from run_file where run_id = $1", [cell.runId]);
+    assert.deepEqual(files.rows, [{ path: "features/a.feature" }]);
   });
 
   test("feature_change_requested stores the request, moves the item to FeatureChangeRequest and posts it on the PBI once (PBI 364)", async () => {
