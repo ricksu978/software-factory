@@ -27,6 +27,7 @@ import { activeOverrides, clearRestartOnStart, setOverride } from "../../src/sto
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, freshDb, newItem, tick } from "./pbi-17.steps.ts";
 import { setUp, type Ctx as Pbi18 } from "./pbi-18.steps.ts";
+import { open as openFloor, page as dashboardPage } from "./pbi-131.steps.ts";
 import { CELL_SECRET, ctx as p89, headers, open, startControlPlane } from "./pbi-89.steps.ts";
 
 const REPO = "ricksu978/software-factory";
@@ -463,7 +464,14 @@ Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kil
   assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
 });
 
-Then("Floor shows {string}", function (text: string) {
+Then("Floor shows {string}", long, async function (text: string) {
+  // PBI 366's scenarios read Floor straight after the scheduler ticks, with no control plane running, so Floor opens
+  // then for a viewer through PBI 131's dashboard.
+  if (p89(this).html === undefined) {
+    await openFloor(this, "/");
+    assert.ok(unescape(dashboardPage(this)).includes(text), `Floor doesn't show "${text}"`);
+    return;
+  }
   assert.ok(unescape(floorHtml(this)).includes(text), `Floor doesn't show "${text}"`);
 });
 
