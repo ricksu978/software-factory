@@ -6260,6 +6260,31 @@ from spec §6 rows 1 to 7:
   The cell API answers 401 to a token that isn't a run token (Task 12),
   and Task 13's egress proxy refuses 7400 and 7402.
   `src/cell-api/main.test.ts` and `src/control/cell-api.test.ts` cover both.
+- Since step 4c of the control plane redesign (2026-11-07 design,
+  §06 and §08,
+  PBI 224),
+  the cell API stores Run detail's snapshot when it records a run's scenarios sha.
+  `readSnapshot` in `src/store/run-snapshot.ts` reads the item's acceptance criteria from its board,
+  and each locked file from the repo at the sha.
+  `storeSnapshot` writes the criteria to `run.acceptance_criteria`,
+  deletes the run's `run_file` rows and inserts one per locked file,
+  in the transaction that records the sha.
+  A locked file the repo doesn't hold at the sha,
+  or an item the board doesn't hold,
+  gets 400,
+  and the transaction rolls back,
+  so the run keeps its earlier snapshot.
+  `backfillSnapshots` in `src/worker/snapshot-backfill.ts` fills every run that has a scenarios sha and no `run_file` rows,
+  and answers `{filled, unfilled}`.
+  It skips a run with rows,
+  so a second backfill fills nothing.
+  A run it can't read is left unfilled,
+  so the next backfill tries it again.
+  `node src/worker/snapshot-backfill.ts` runs it once with the worker's `FACTORY_DB_URI`,
+  `GITHUB_APP_ID` and `GITHUB_APP_KEY`,
+  logs its report,
+  and exits 1 when a run was left unfilled.
+  `src/control/cell-api.test.ts` and `src/worker/snapshot-backfill.test.ts` cover both.
 - Since step 6a of the control plane redesign (2026-11-07 design,
   §03,
   §04,
