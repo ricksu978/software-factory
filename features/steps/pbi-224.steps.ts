@@ -396,7 +396,8 @@ When("the cell reports its scenarios written at commit {string}, locking no file
 });
 
 When("the cell on {string} reports its scenarios written at commit {string}, locking {string}", long, async function (title: string, sha: string, a: string) {
-  await report(this, title, sha, [a]);
+  // The scenario's Then steps look only at the other run, so a refused report would pass it untested: it must land.
+  await reported(this, title, sha, [a]);
 });
 
 // ---- runs from before snapshots ----
