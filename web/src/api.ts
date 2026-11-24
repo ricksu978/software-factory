@@ -42,7 +42,8 @@ export type MainBreak = {
 
 export type FloorData = {
   active: (Named & OpenPr & { state: string; stage: string | null; since: string | null; cost: string; badges: string[]; message: string | null; ci_failure?: CiFailure | null })[];
-  waiting: (Named & OpenPr & { state: string; since: string | null })[];
+  /** `featureChange`: the item waits in FeatureChangeRequest on the Product Owner (PBI 366). */
+  waiting: (Named & OpenPr & { state: string; since: string | null; featureChange?: boolean })[];
   waitingCount: number;
   capacity: number;
   next: Named[];

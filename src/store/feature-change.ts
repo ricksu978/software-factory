@@ -6,10 +6,11 @@ import { transitionItem } from "./items.ts";
 
 /**
  * Records the request on `runId`'s item and moves the item from InProgress to FeatureChangeRequest. The transition's
- * payload carries the request, so the worker posts it on the PBI as it stood when the move committed.
+ * payload carries the request, so the worker posts it on the PBI as it stood when the move committed. A new request
+ * starts its reminders again (PBI 366).
  */
 export async function requestFeatureChange(c: pg.PoolClient, runId: string, files: FeatureChangeFile[]): Promise<void> {
-  const r = await c.query<{ item_id: string }>("update run set feature_change = $2 where id = $1 returning item_id", [runId, JSON.stringify(files)]);
+  const r = await c.query<{ item_id: string }>("update run set feature_change = $2, feature_change_reminders = 0 where id = $1 returning item_id", [runId, JSON.stringify(files)]);
   if (!r.rows[0]) throw new Error(`no run ${runId}`);
   await transitionItem(c, r.rows[0].item_id, "feature_change_requested", { actor: "agent", actorId: runId }, { featureChange: files });
 }

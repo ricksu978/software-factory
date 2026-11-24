@@ -145,6 +145,8 @@ as revised on this plan's branch with the 14 flow-review fixes.
   comment and state write.
 - NeedsInput and SignOff items get reminders at day 2 and day 4,
   and move to Abandoned after 5 days with no answer.
+  A FeatureChangeRequest item does the same,
+  its clock starting at its latest move to FeatureChangeRequest (PBI 366).
   An operator re-queue or a late answer brings an Abandoned item back.
 - The scheduler starts nothing new while the waiting count (Run contract 3) reaches `review_capacity`,
   default 3,
@@ -355,6 +357,7 @@ A task that touches one of them follows this section and does not restate it.
    No other transition touches the generation.
 3. **Waiting on people.**
    The waiting count is the number of SignOff and NeedsInput items whose question is still unanswered,
+   plus every FeatureChangeRequest item (PBI 366),
    plus every InReview item.
    Answered and Abandoned items don't count.
    The brake gates only claims that start new work:
@@ -1803,6 +1806,8 @@ Azure comes in Task 19.
     `rules_edited` to Eligible
     and `merged` to Accepted,
     as an InProgress item does (PBI 364).
+    It takes `timed_out` to Abandoned,
+    as a SignOff item does (PBI 366).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -2255,6 +2260,10 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     its text at the lock commit as `before` and the stage's version as `after`.
     It's null when the run made none.
     The item page shows it while the item is in FeatureChangeRequest.
+  - `run.feature_change_reminders int not null default 0`,
+    added by `db/migrations/021_feature_change_reminders.sql` (PBI 366),
+    counts the reminders the run's open feature change request has had.
+    `requestFeatureChange` sets it back to 0 with each new request.
   - `item.rule_changes jsonb`,
     added by `db/migrations/019_item_rule_changes.sql` (PBI 395),
     holds what the item's last readiness check read from its `## Changes the factory's rules` section:
@@ -5433,6 +5442,12 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     A question 2 days old with `reminders_sent = 0` gets a comment on the item and `reminders_sent = 1`.
     At 4 days it gets the second.
     A second `tick` the same hour sends nothing more.
+  - **Feature change requests (PBI 366).**
+    `chaseFeatureChanges` times a FeatureChangeRequest item from its latest transition event to FeatureChangeRequest.
+    At 2 days and at 4 it comments a reminder on the PBI and raises `run.feature_change_reminders`,
+    once each,
+    and after more than 5 days it moves the item to Abandoned through `timed_out`.
+    The item holds no WIP slot and counts toward `review_capacity`.
   - **Waiting on people.**
     With one SignOff,
     one NeedsInput and one InReview item,
@@ -6932,6 +6947,8 @@ from spec §6 rows 1 to 7:
       An InReview item shows `PR #N` as its own link under "Waiting on you",
       in the "In flight" table,
       and after the state on Run detail's state line.
+      A FeatureChangeRequest item's state line says it waits on the Product Owner,
+      with a "Feature change request" link to the page's section of that name (PBI 366).
       `prLink` in `views.ts` renders it from the open run's `pr_number` and `pr_url`,
       the run with `ended_at` null.
       With no open run,
@@ -7137,6 +7154,9 @@ from spec §6 rows 1 to 7:
     Floor shows:
     - "Waiting on you",
       with every SignOff and NeedsInput item oldest first,
+      then every FeatureChangeRequest item,
+      shown as waiting on the Product Owner since its move there,
+      with a "Feature change request" link to `/items/<id>#feature-change-request` (PBI 366),
       plus each InReview PR and how long it has waited,
       which matches the count in Run contract 3;
     - "Next up",

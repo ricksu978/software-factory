@@ -3,6 +3,8 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
+import { withTx } from "../store/db.ts";
+import { requestFeatureChange } from "../store/feature-change.ts";
 import { clearRestartOnStart, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
@@ -652,6 +654,55 @@ describe("scheduler", dbTest, () => {
     // 4 days on, the same reminder count is due again. A key without asked_at would match the first round's and be skipped.
     await run(new Date(NOW.getTime() + 4 * DAY + 1));
     assert.equal(await reminders(), 2);
+  });
+
+  /** An item moved from InProgress to FeatureChangeRequest `ms` before NOW, as a cell's request moves it (PBI 364). */
+  async function waitsOnFeatureChange(externalId: string, ms: number): Promise<string> {
+    const id = await item(externalId, "InProgress");
+    const runId = await openRun(id);
+    await withTx(db.pool, (c) => requestFeatureChange(c, runId, [{ path: "features/a.feature", reason: "r", before: "a\n", after: "b\n" }]));
+    await db.pool.query("update event set at = $2 where item_id = $1 and payload->>'to' = 'FeatureChangeRequest'", [id, ago(ms)]);
+    return id;
+  }
+
+  test("an item in FeatureChangeRequest holds no WIP slot and counts toward review capacity (PBI 366)", async () => {
+    await waitsOnFeatureChange("1", 3_600_000);
+    await db.pool.query("update wip_policy set review_capacity = 2");
+    await item("2", "InReview");
+    await item("3", "Queued");
+    await run();
+    assert.deepEqual(started, [], "two waiting fill a review capacity of 2");
+    await db.pool.query("update wip_policy set review_capacity = 3");
+    await run();
+    assert.equal(started.length, 1, "the item in FeatureChangeRequest leaves the one WIP slot free");
+  });
+
+  test("an item in FeatureChangeRequest is reminded at 2 days and at 4 from its move, once each, and abandoned after 5 (PBI 366)", async () => {
+    const id = await waitsOnFeatureChange("1", 2 * DAY + 1);
+    const reminders = async () => (await backlog.comments("1")).filter((b) => b.startsWith("Reminder"));
+    await run();
+    await run(new Date(NOW.getTime() + 600_000));
+    assert.equal((await reminders()).length, 1);
+    assert.match((await reminders())[0], /still waiting for you/);
+    await run(new Date(NOW.getTime() + 2 * DAY));
+    assert.equal((await reminders()).length, 2);
+    assert.equal((await state(id)).state, "FeatureChangeRequest");
+    await run(new Date(NOW.getTime() + 3 * DAY));
+    assert.equal((await state(id)).state, "Abandoned");
+    const moved = (await db.pool.query("select payload->>'event' as event from event where item_id = $1 and payload->>'to' = 'Abandoned'", [id])).rows;
+    assert.deepEqual(moved, [{ event: "timed_out" }]);
+  });
+
+  test("a second feature change request on the same run starts its reminders again (PBI 366)", async () => {
+    const id = await waitsOnFeatureChange("1", 2 * DAY + 1);
+    await run();
+    // The owner's answer sends it back to work, and a later stage asks again.
+    await db.pool.query("update item set state = 'InProgress' where id = $1", [id]);
+    const runId = (await db.pool.query("select id from run where item_id = $1", [id])).rows[0].id;
+    await withTx(db.pool, (c) => requestFeatureChange(c, runId, [{ path: "features/a.feature", reason: "again", before: "a\n", after: "c\n" }]));
+    await db.pool.query("update event set at = $2 where item_id = $1 and payload->>'to' = 'FeatureChangeRequest' and at > $2", [id, NOW]);
+    await run(new Date(NOW.getTime() + 2 * DAY + 1));
+    assert.equal((await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length, 2);
   });
 
   test("resume records who lifted the pause, and why", async () => {

@@ -110,7 +110,7 @@ export function Floor({ data: f, now, zone, message, onSubmit }: FloorProps) {
       </p>
       <H2>Waiting on you</H2>
       <List empty="Nothing waits on you." rows={f.waiting.map((w) => (
-        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}, waiting {age(w.since, now)}</span>{st(w.id)}</li>
+        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}{w.featureChange ? ", waiting on the Product Owner" : ""}, waiting {age(w.since, now)}</span>{st(w.id)}</li>
       ))} />
       <H2>Next up</H2>
       <List empty="Nothing is ready to start." rows={f.next.map((n) => <li key={n.id}><ItemName r={n} />{st(n.id)}</li>)} />

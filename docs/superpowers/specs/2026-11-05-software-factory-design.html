@@ -799,7 +799,7 @@ stateDiagram-v2
   InProgress --> NeedsInput: agent blocked
   InProgress --> FeatureChangeRequest: a stage after sign-off asks to change a locked feature file
   FeatureChangeRequest --> Accepted: PR merged by a person while waiting
-  FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged
+  FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged, or no decision in 5 days
   FeatureChangeRequest --> Queued: acceptance criteria changed
   FeatureChangeRequest --> Eligible: its rules section no longer reads as the owner approved it
   NeedsInput --> InProgress: answered, by a person, or by the factory once CI passes on the base or the PR conflicts or gets a new review, or its question from before PBI 292 names only CI failures
@@ -926,6 +926,30 @@ stateDiagram-v2
 
     Reminders and the 5-day limit work as for Needs input.</li>
 
+    <li><b>Feature change request.</b>
+
+    An item in FeatureChangeRequest waits on the Product Owner the way an item in SignOff does (PBI 366).
+
+    It holds no WIP slot,
+
+    and it counts toward <code>review_capacity</code>.
+
+    The factory comments a reminder on the PBI 2 days and 4 days after the item moved to FeatureChangeRequest,
+
+    once each,
+
+    and after more than 5 days the item goes to Abandoned through <code>timed_out</code>.
+
+    The clock starts at the item's latest move to FeatureChangeRequest,
+
+    not at any sign-off or question before it,
+
+    and a new request on the same run starts the reminders again.
+
+    Floor's "Waiting on you" lists the item as waiting on the Product Owner,
+
+    with a "Feature change request" link to that section of its Run detail.</li>
+
     <li><b>Waiting on people.</b>
 
     An item that waits for a person holds no slot,
@@ -937,6 +961,8 @@ stateDiagram-v2
     default 3.
 
     Those are items whose question or sign-off is still unanswered,
+
+    plus items in FeatureChangeRequest (PBI 366),
 
     plus factory PRs waiting on a reviewer.
 
@@ -4881,6 +4907,10 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       The owner alone gets the "Approve rule change" control there,
 
       and only while the item waits for it.
+
+      An item in FeatureChangeRequest says on the line with its state that it waits on the Product Owner,
+
+      with a "Feature change request" link to its Feature change request section (PBI 366).
 
       An item in FeatureChangeRequest shows a Feature change request section (PBI 364):
 

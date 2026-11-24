@@ -38,6 +38,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   // PBI 364: backlog changes and a merge reach an item waiting in FeatureChangeRequest.
   ["FeatureChangeRequest", "withdrawn", "Abandoned"], ["FeatureChangeRequest", "criteria_changed", "Queued"],
   ["FeatureChangeRequest", "rules_edited", "Eligible"], ["FeatureChangeRequest", "merged", "Accepted"],
+  // PBI 366: an item that waits in FeatureChangeRequest more than 5 days times out, as one in SignOff does.
+  ["FeatureChangeRequest", "timed_out", "Abandoned"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));

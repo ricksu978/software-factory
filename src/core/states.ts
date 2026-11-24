@@ -40,6 +40,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "retries_exhausted", "Failed"],
   ["NeedsInput", "timed_out", "Abandoned"],
   ["SignOff", "timed_out", "Abandoned"],
+  // An item waits in FeatureChangeRequest as one in SignOff does, and more than 5 days of it times out (PBI 366).
+  ["FeatureChangeRequest", "timed_out", "Abandoned"],
   ["InProgress", "lease_expired", "Queued"],
   ["InProgress", "usage_limited", "Queued"],
   ["Failed", "requeued", "Queued"],

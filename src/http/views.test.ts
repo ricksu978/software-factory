@@ -713,7 +713,7 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
       { path: "features/a.feature", reason: "Show <b>held</b> orders", before: "  Given x\n  Then refused\n", after: "  Given x\n  Then <script>1</script>\n" },
       { path: "features/b.feature", reason: "Needs a number", before: "a\n", after: "b\n" },
     ]), null);
-    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.match(html, /<h2 id="feature-change-request">Feature change request<\/h2>/);
     assert.match(html, /<h3>features\/a\.feature<\/h3><p data-reason>Show &lt;b&gt;held&lt;\/b&gt; orders<\/p>/);
     assert.match(html, /<span data-side="same">  Given x<\/span>\n<del data-side="before">  Then refused<\/del>\n<ins data-side="after">  Then &lt;script&gt;1&lt;\/script&gt;<\/ins>/);
     assert.match(html, /<h3>features\/b\.feature<\/h3><p data-reason>Needs a number<\/p>/);
@@ -722,5 +722,31 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
 
   test("an item with no open request has no such section", () => {
     assert.doesNotMatch(runDetailPage(detail(null), null), /Feature change request/);
+  });
+
+  // PBI 366: the state line says the item waits on the Product Owner and links to the section.
+  test("the state line says the item waits on the Product Owner, with a link to the section", () => {
+    const html = runDetailPage(detail([{ path: "features/a.feature", reason: "r", before: "a\n", after: "b\n" }]), null);
+    assert.match(html, /<\/h1>\n<p>FeatureChangeRequest, waits on the Product Owner: <a href="#feature-change-request">Feature change request<\/a><\/p>/);
+  });
+
+  test("an item with no open request says nothing of the Product Owner on its state line", () => {
+    assert.doesNotMatch(runDetailPage({ ...detail(null), item: { ...detail(null).item, state: "Abandoned" } }, null), /Product Owner/);
+  });
+});
+
+describe("floorPage's Waiting on you for a feature change request (PBI 366)", () => {
+  const empty = { active: [], waitingCount: 1, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const row = { id: "00000000-0000-0000-0000-000000000482", title: "Hold empty orders", external_id: "482", repo: "acme/widgets", state: "FeatureChangeRequest", since: new Date(Date.now() - 3 * 3_600_000) };
+
+  test("shows the item as waiting on the Product Owner, with a link to its request on Run detail", () => {
+    const html = floorPage({ ...empty, waiting: [{ ...row, featureChange: true }] }, null);
+    assert.match(html, /FeatureChangeRequest, waiting on the Product Owner, waiting 3 h/);
+    assert.ok(html.includes(`<a href="/items/${row.id}#feature-change-request">Feature change request</a>`));
+  });
+
+  test("an item waiting on anything else has no such link", () => {
+    const html = floorPage({ ...empty, waiting: [{ ...row, state: "SignOff" }] }, null);
+    assert.doesNotMatch(html, /Feature change request|Product Owner/);
   });
 });

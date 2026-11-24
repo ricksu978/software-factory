@@ -1,7 +1,8 @@
 // The scheduler (plan Task 13). Every TICK_MS it applies operator overrides, sends back expired leases, times out
-// and reminds questions nobody answered, polls CI on merged items, re-checks items that failed on main (PBI 369), and
-// starts a cell for each free slot under the WIP limit. Everything it decides comes from the database, so a restarted
-// process picks up where the old one stopped and never starts a second cell for an item with a live lease (Review Focus 5).
+// and reminds questions nobody answered and feature change requests nobody decided (PBI 366), polls CI on merged
+// items, re-checks items that failed on main (PBI 369), and starts a cell for each free slot under the WIP limit.
+// Everything it decides comes from the database, so a restarted process picks up where the old one stopped and never
+// starts a second cell for an item with a live lease (Review Focus 5).
 import type pg from "pg";
 import type { BacklogAdapter, CheckRun, RepoHost } from "../adapters/types.ts";
 import { DEFAULT_FAILED_RECHECK_HOURS, failedRecheckHours } from "../config/repo-config.ts";
@@ -91,6 +92,7 @@ async function tickSteps(d: TickDeps, w: Watch): Promise<TickResult> {
   result.expired = await withTx(d.pool, (c) => expireLeases(c, d.now));
   w.step("chasing questions");
   await chaseQuestions(d);
+  await chaseFeatureChanges(d);
   w.step("polling merged CI");
   await pollMergedCi(d);
   w.step("re-checking Failed items");
@@ -259,6 +261,32 @@ async function chaseQuestions(d: TickDeps) {
       // asked_at is in the key, because a re-queue resets it and the reminders start again under new keys.
       await d.backlogFor(q.source_id).comment(q.external_id, body, `reminder:${q.id}:${q.asked_at.toISOString()}:${due}`);
       await d.pool.query("update question set reminders_sent = $2 where id = $1", [q.id, due]);
+    });
+  }
+}
+
+/**
+ * An item in FeatureChangeRequest waits on the owner as one in SignOff does (PBI 366): reminded at 2 and 4 days, once
+ * each, and abandoned after 5. Its clock starts at its latest move to FeatureChangeRequest, not at any question.
+ */
+async function chaseFeatureChanges(d: TickDeps) {
+  const r = await d.pool.query<{ id: string; run_id: string; since: Date; reminders_sent: number; source_id: string; external_id: string }>(
+    `select i.id, r.id as run_id, r.feature_change_reminders as reminders_sent, i.source_id, i.external_id,
+       (select max(at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'FeatureChangeRequest') as since
+     from item i join lateral (select id, feature_change_reminders from run where item_id = i.id order by run_number desc, started_at desc limit 1) r on true
+     where i.state = 'FeatureChangeRequest'`,
+  );
+  for (const f of r.rows) {
+    if (!f.since) continue;
+    await isolated(`chasing the feature change request of item ${f.external_id}`, async () => {
+      const age = d.now.getTime() - f.since.getTime();
+      if (age > TIMEOUT_MS) return void (await withTx(d.pool, (c) => transitionItem(c, f.id, "timed_out", system)));
+      const due = REMIND_AT_MS.filter((at) => age >= at).length;
+      if (due <= f.reminders_sent) return;
+      const body = `Reminder: this item is still waiting for you to decide on its feature change request. With no decision it's abandoned ${Math.ceil((TIMEOUT_MS - age) / DAY_MS)} days from now.`;
+      // The move's time is in the key, so a later request on the same run is reminded under new keys.
+      await d.backlogFor(f.source_id).comment(f.external_id, body, `feature-change-reminder:${f.run_id}:${f.since.toISOString()}:${due}`);
+      await d.pool.query("update run set feature_change_reminders = $2 where id = $1", [f.run_id, due]);
     });
   }
 }
@@ -630,6 +658,7 @@ async function startNext(d: TickDeps, result: TickResult) {
     `select
        (select count(*)::int from item where state = 'InProgress') as running,
        (select count(*)::int from item i where i.state = 'InReview'
+          or i.state = 'FeatureChangeRequest'
           or (i.state in ('SignOff', 'NeedsInput')
             and exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))) as waiting,
        exists (select from run where ended_at is null and resume_at > $1) as resuming`,
