@@ -6,6 +6,9 @@ export const PATHS = { floor: "/", activity: "/activity", phase0: "/phase0" } as
 /** The address of an item's Run detail. */
 export const runPath = (id: string) => `/runs/${encodeURIComponent(id)}`;
 
+/** The id of Run detail's Feature change request section, which Floor and the state line link to (PBI 366). */
+export const FEATURE_CHANGE_ID = "feature-change-request";
+
 export type Route = { page: "floor" | "activity" | "phase0" | "none" } | { page: "item"; id: string };
 
 export function routeOf(path: string): Route {

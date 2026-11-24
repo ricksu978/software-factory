@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { CiFailure, FloorData, FloorProps, MainBreak } from "../api.ts";
 import { FLOOR_KINDS } from "../forms.ts";
-import { PATHS } from "../routes.ts";
+import { FEATURE_CHANGE_ID, PATHS, runPath } from "../routes.ts";
 import { age, blockedReason, drainLine, mainRedLead, recheckLine, restartLine } from "../lines.ts";
 import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, PrLink, SplitInto, Standing } from "./parts.tsx";
 
@@ -110,7 +110,7 @@ export function Floor({ data: f, now, zone, message, onSubmit }: FloorProps) {
       </p>
       <H2>Waiting on you</H2>
       <List empty="Nothing waits on you." rows={f.waiting.map((w) => (
-        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}{w.featureChange ? ", waiting on the Product Owner" : ""}, waiting {age(w.since, now)}</span>{st(w.id)}</li>
+        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}{w.featureChange ? ", waiting on the Product Owner" : ""}, waiting {age(w.since, now)}</span>{w.featureChange && <> <A href={`${runPath(w.id)}#${FEATURE_CHANGE_ID}`}>Feature change request</A></>}{st(w.id)}</li>
       ))} />
       <H2>Next up</H2>
       <List empty="Nothing is ready to start." rows={f.next.map((n) => <li key={n.id}><ItemName r={n} />{st(n.id)}</li>)} />

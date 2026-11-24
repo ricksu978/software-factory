@@ -7,9 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "../../../src/core/durations.ts";
+import { lineDiff, type DiffLine, type FeatureChangeFile } from "../../../src/core/feature-change.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
 import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
+import { FEATURE_CHANGE_ID } from "../routes.ts";
 import { claimLines, recheckLine } from "../lines.ts";
 import { CheckLink } from "./Floor.tsx";
 import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time } from "./parts.tsx";
@@ -116,6 +118,36 @@ function Files({ files }: { files: { path: string; text: string }[] }) {
   ));
 }
 
+/**
+ * The Feature change request section (PBI 364), as today's Run detail shows it: each file under its path, the stage's
+ * reason, then its change from the lock commit, each line taken out and put in marked by its side.
+ */
+function FeatureChange({ files }: { files: FeatureChangeFile[] }) {
+  const line = (l: DiffLine | null, i: number) => (
+    <span key={i}>
+      {l === null ? <span className="text-muted-foreground">…</span>
+        : l.side === "before" ? <del data-side="before">{l.text}</del>
+          : l.side === "after" ? <ins data-side="after">{l.text}</ins>
+            : <span data-side="same">{l.text}</span>}
+      {"\n"}
+    </span>
+  );
+  const one = files.length === 1;
+  return (
+    <>
+      <H2 id={FEATURE_CHANGE_ID}>Feature change request</H2>
+      <p>A stage after sign-off asks to change {one ? "this locked feature file" : "these locked feature files"}. The branch keeps {one ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>
+      {files.map((f) => (
+        <div key={f.path}>
+          <h3 className="mt-3 font-mono text-sm font-semibold">{f.path}</h3>
+          <p data-reason>{f.reason}</p>
+          <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{lineDiff(f.before, f.after).map(line)}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** The Stages table: each attempt, how long it took, what it used and cost, its transcript and its notes. */
 function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
   const at = (s: Stage) => (s.started_at ? Date.parse(s.started_at) : NaN);
@@ -163,7 +195,7 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
     <div>
       <h1 className="mb-2 text-2xl font-semibold"><IssueRef external_id={d.item.external_id} repo={d.item.repo} /> {d.item.title}</h1>
       <Message text={message} />
-      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}</p>
+      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{d.featureChange?.length ? <>, waits on the Product Owner: <A href={`#${FEATURE_CHANGE_ID}`}>Feature change request</A></> : ""}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}</p>
       {d.recheck && <p>{recheckLine(d.recheck.last, zone, true)}</p>}
       {d.splitInto?.length ? <><H2>Split into</H2><SplitInto children={d.splitInto} /></> : null}
       {d.claim && <p>{claimLines(d.claim)}</p>}
@@ -183,6 +215,7 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
           {r?.tier_reasons?.length ? <ul className="ml-6 list-disc">{r.tier_reasons.map((t) => <li key={t}>{t}</li>)}</ul> : null}
         </Term>
       </dl>
+      {d.featureChange?.length ? <FeatureChange files={d.featureChange} /> : null}
       {d.scope && <><H2>Scope</H2><pre className="whitespace-pre-wrap font-sans">{d.scope}</pre></>}
       {d.criteria && (
         <>

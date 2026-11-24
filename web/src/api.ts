@@ -11,6 +11,7 @@
 // Run detail's address in the SPA is /runs/{id}, Activity's /activity and the Phase 0 report's /phase0. Floor is /.
 // This file is free of React and of the "@/" alias, so the BFF's and the tests' Node code can import its types.
 import type { Shell } from "./shell.ts";
+import type { FeatureChangeFile } from "../../src/core/feature-change.ts";
 
 export type Call = Shell["call"];
 
@@ -119,6 +120,8 @@ export type ItemData = {
   durations?: ItemDurations;
   splitInto?: SplitChild[];
   recheck?: { last: string | null } | null;
+  /** PBI 364: the feature change request the item waits on in FeatureChangeRequest, or null when it has none. */
+  featureChange?: FeatureChangeFile[] | null;
 };
 
 export type Phase0Data = {

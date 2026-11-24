@@ -92,8 +92,8 @@ export function SplitInto({ children }: { children: { externalId: string; title:
 }
 
 /** A section heading as Floor and Run detail head their parts. */
-export function H2({ children }: { children: ReactNode }) {
-  return <h2 className="mt-6 mb-2 text-lg font-semibold">{children}</h2>;
+export function H2({ id, children }: { id?: string; children: ReactNode }) {
+  return <h2 id={id} className="mt-6 mb-2 text-lg font-semibold">{children}</h2>;
 }
 
 /**
