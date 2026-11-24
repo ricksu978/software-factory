@@ -469,6 +469,15 @@ A task that touches one of them follows this section and does not restate it.
      The cell then spends only the tries left at that stage,
      and its first attempt's brief carries `findings` under "Your last attempt failed",
      as a retry within one claim does.
+     At open-pr,
+     pr-review or address,
+     where no attempt at `nextStage` failed with a carry,
+     `retry` is the run's last attempt's carry,
+     the base merge aside,
+     when that attempt failed at green or at pr-review:
+     green's goes to the pass back to green,
+     and pr-review's to pr-review,
+     which runs while the run is still at open-pr or address (PBI 365).
 6. **CI status.**
    Only the control plane reads checks,
    with the App's own `RepoHost`.
@@ -1804,7 +1813,8 @@ Azure comes in Task 19.
     and `merged` to Accepted,
     as an InProgress item does (PBI 364).
     `feature_change_decided` moves a FeatureChangeRequest item to Queued once the Product Owner approves or turns down its request,
-    and the run resumes at the stage that asked (PBI 365).
+    and the run resumes at the stage that asked,
+    or for pr-review at the open-pr or address stage it ran under (PBI 365).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -2245,7 +2255,9 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     `POST /stage` takes it as `retryCarry` on a `failed` report only,
     keeping at most 50 findings of 4,000 characters each,
     and gives 400 for one of another shape.
-    `/context` reads it off the next stage's last attempt for `retry`.
+    `/context` reads it off the next stage's last attempt for `retry`,
+    or at open-pr,
+    pr-review or address off the run's last attempt when that one is green's or pr-review's (PBI 365).
   - `ci_rerun(run_id, sha, checks text[], requested_at)`,
     primary key `(run_id, sha)`,
     added by `db/migrations/018_ci_rerun.sql` (PBI 233).
@@ -5203,6 +5215,11 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     when green's failed attempt is the run's last one, the base merge aside,
     and the next claim goes back to green and spends it there,
     through `failedCiHeads`, or on the carry itself when the pass came from stale `dod.md` verdicts or a moved head.
+    Pr-review runs while the run is still at open-pr or address too,
+    so when pr-review's failed attempt with a carry is the run's last one,
+    as after the Product Owner turns down a feature change request its addresser raised,
+    `/context` hands pr-review's carry instead,
+    and the engine keeps it past open-pr and address for pr-review (PBI 365).
     Under pause the reply has `stop: true`,
     under a drain as well.
     While the factory drains,
@@ -5702,6 +5719,11 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   and the retry's brief carries it.
   Self-review and open-pr carry on with the restored files:
   self-review gives the note to the reviewer's and the fix pass's later briefs.
+  Pr-review runs while the run stays at open-pr or address,
+  so the engine keeps a claim's carry from pr-review's attempt past those stages,
+  and pr-review's addresser gets its findings in its brief (PBI 365).
+  An address with no trusted review comment runs no agent,
+  so when it carries findings from the last attempt its passed attempt's message lists them as unread.
   No stage asks the owner about a changed locked file,
   since no answer would change it.
   Understand and specify skip it,
@@ -6897,7 +6919,11 @@ from spec §6 rows 1 to 7:
       to `{ tried: 0, findings: [turnedDownFinding(note)] }`,
       so `/context` hands the note to the stage that asked as its `retry`.
       Either way the item moves through `feature_change_decided` to Queued,
-      `next_stage` still the stage that asked,
+      and `next_stage` is left as it was:
+      the stage that asked,
+      or for a request pr-review's addresser raised,
+      the open-pr or address stage the run was at while pr-review ran.
+      The next claim's pr-review then gives the note to its addresser's brief under "Your last attempt failed".
       and a `decision` event with `about: "feature_change"` writes its announcement outbox row.
       A command posted before the request was asked is ignored.
       Run detail gives a product owner Approve the change and Ask for changes,

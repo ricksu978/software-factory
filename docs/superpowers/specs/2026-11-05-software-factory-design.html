@@ -2422,6 +2422,16 @@ Feature: Export invoices to CSV
 
     and the run resumes at the stage that asked.
 
+    Pr-review runs while the run stays at open-pr or address,
+
+    so a request its addresser raised resumes the run there,
+
+    and the note waits for the next pr-review, whose addresser gets it in its brief.
+
+    An address with no trusted review comment runs no agent,
+
+    so its attempt says the findings it carried went unread.
+
     A request that names a file the stage didn't change,
 
     or one that isn't locked,
