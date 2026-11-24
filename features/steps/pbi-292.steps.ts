@@ -57,6 +57,7 @@ import type { CiCheck } from "../../src/adapters/types.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { startServer } from "../../src/http/server.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi365, openPage as pbi365Page } from "./pbi-365.steps.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { ctx as pr128 } from "./pbi-128.steps.ts";
 import { ctx as dashCtx, dashboard, escapeRe, get, text } from "./pbi-175.steps.ts";
@@ -542,6 +543,7 @@ Given("item {int} is in progress at Green, with no CI failure to fix", long, asy
 });
 
 When("{string} opens item {int}'s page", long, async function (login: string, n: number) {
+  if (isPbi365(this)) return pbi365Page(this, login);
   await get(this, `/items/${itemId(this, n)}`, login);
 });
 

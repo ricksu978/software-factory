@@ -347,7 +347,7 @@ const routes: Record<string, Route> = {
     let retry: { stageId: string | null; tried: number; findings: string[] } | null =
       l?.status === "failed" && l.retry_carry ? { stageId: run.next_stage, ...l.retry_carry } : null;
     // A pass back to green from open-pr, pr-review or address runs while the run is still at that stage, so its carry
-    // is green's: the run's last attempt, at any stage but a claim's base merge, when that was green's and it failed
+    // is green's, or pr-review's own: the run's last attempt, at any stage but a claim's base merge, when that was green's and it failed
     // with a carry. The next claim goes back to green, through failedCiHeads or on the carry itself, and spends it there.
     if (!retry && run.next_stage !== null && BACK_TO_GREEN_FROM.has(run.next_stage)) {
       const latest = await c.query<{ stage_id: string; status: string; retry_carry: { tried: number; findings: string[] } | null }>(
@@ -357,6 +357,9 @@ const routes: Record<string, Route> = {
       );
       const g = latest.rows[0];
       if (g?.stage_id === "green" && g.status === "failed" && g.retry_carry) retry = { stageId: "green", ...g.retry_carry };
+      // PBI 365: pr-review runs while the run is still at open-pr or address too, so a feature change request it raised
+      // and the Product Owner turned down leaves the note on pr-review's attempt. The next claim's pr-review reads it.
+      if (g?.stage_id === "pr-review" && g.status === "failed" && g.retry_carry) retry = { stageId: "pr-review", ...g.retry_carry };
     }
     let trustedComments: ReviewComment[] = [];
     // Each open thread's comment count at the claim, every author's. Before it resolves a thread it answered, address
