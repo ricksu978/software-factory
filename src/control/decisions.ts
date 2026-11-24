@@ -188,7 +188,9 @@ export async function decideFeatureChange(
       await c.query("update run set features_lock_sha = $2 where id = $1", [run.id, sha]);
     } else {
       // The run's last attempt, at any stage but a claim's base merge, is the one that asked, which `/context` reads as
-      // the next claim's retry. No tries are spent: the owner's answer gives the stage its tries afresh.
+      // the next claim's retry. For pr-review, which runs while the run stays at open-pr or address, `/context` hands
+      // it as pr-review's, and the engine keeps it for pr-review's addresser. No tries are spent: the owner's answer
+      // gives the stage its tries afresh.
       await c.query(
         `update stage_run set retry_carry = $2 where id = (
            select id from stage_run where run_id = $1 and stage_id <> 'merge' order by started_at desc, attempt desc limit 1)`,

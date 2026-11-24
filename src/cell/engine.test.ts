@@ -1129,6 +1129,15 @@ describe("runCell", () => {
     assert.ok(!h.routes().includes("/repo/replyToThread") && !h.routes().includes("/repo/commentOnPr") && !h.routes().includes("/repo/resolveThread"));
   });
 
+  test("an address with no trusted review text that carries a turned-down note says the note went unread (PBI 365)", async () => {
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, retry: { stageId: "address", tried: 0, findings: ["The Product Owner turned down your feature change request."] } } });
+    assert.equal(await h.run(), "done");
+    assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+    const passed = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body;
+    assert.equal(passed.status, "passed");
+    assert.match(passed.message, /no agent ran, and these findings carried from the last attempt went unread:\n- The Product Owner turned down/);
+  });
+
   test("address resolves each person's thread it fixed or replied to, after CI and the reply, and leaves the rest open (PBI 258)", async () => {
     const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
     const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar"), thread("t3", "name baz"),
@@ -2256,6 +2265,21 @@ describe("the PR review stage", () => {
     assert.deepEqual(order, ["pr-review:started", "pr-review:passed", "/transition"]);
     assert.equal(h.transitions()[0].event, "pr_opened");
     assert.equal(h.transitions()[0].tier, "Low");
+  });
+
+  test("a claim carrying pr-review's turned-down feature change briefs pr-review's addresser with the note, past open-pr (PBI 365)", async () => {
+    const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"fixed"}\nAPPROVED`];
+    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "pr-review", tried: 0, findings: ["The Product Owner turned down your feature change request. Keep empty orders refused."] } },
+      script: async (a, stage) => {
+        if (a.agent === "factory-pr-addresser") { writeFileSync(join(a.cwd, "app.txt"), "fixed\n"); return; }
+        return reviewer(answers)(a, stage);
+      } });
+    assert.equal(await h.run(), "done");
+    const openPr = h.agentCalls.find((a) => a.stage === "open-pr")!;
+    assert.doesNotMatch(openPr.prompt, /turned down/);
+    const brief = h.agentCalls.find((a) => a.agent === "factory-pr-addresser")!.prompt;
+    assert.match(brief, /## Your last attempt failed\n\n- The Product Owner turned down your feature change request\. Keep empty orders refused\./);
   });
 
   test("a claim resumed after an earlier claim's round 1 posts round 2, and the PR body states 2 rounds (PBI 318)", async () => {
