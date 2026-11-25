@@ -13,7 +13,7 @@ import { After, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { ApiCall, ApiStream, StreamPlan } from "../fixtures/pbi-289-api.ts";
-import { answers, bffHost, bffUrl, browser, ctx as shared, providerOf, stopBff, type Seen } from "./pbi-288.steps.ts";
+import { bffHost, bffUrl, browser, ctx as shared, providerOf, stopBff, type Seen } from "./pbi-288.steps.ts";
 import { ctx as forwarding } from "./pbi-289.steps.ts";
 import { long } from "./pbi-8.steps.ts";
 
@@ -186,9 +186,12 @@ Given("a GitHub {string} delivery {string} with the extra header {string} set to
 Given("the API is down", long, async function () {
   const api = forwarding(this).api;
   assert.ok(api, "no stand-in API is running");
-  await api.stop();
-  const port = Number(new URL(api.url).port);
-  assert.ok(!api.up && !(await answers(port)), `the stand-in API still answers on port ${port}`);
+  api.refuse();
+  const answer = await fetch(new URL("/v1/ping", api.url), { signal: AbortSignal.timeout(5_000) }).then(
+    (r) => r.status,
+    () => null,
+  );
+  assert.ok(!api.up && answer === null, `the stand-in API still answered ${answer} at ${api.url}`);
 });
 
 const seconds = (text: string): number => {

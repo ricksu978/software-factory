@@ -1260,6 +1260,8 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   No step starts a server on, or connects to, a port fixed in its code.
   `src/bdd/ports.ts` gives a step a free port,
   and stands each port a scenario names for a free port of that scenario's own.
+  It picks a free port at random between 20000 and 32767, below the range the OS takes outgoing connections' ports from,
+  so no connection holds the port when the step listens on it.
   `findFixedPorts` in `src/bdd/fixed-ports.ts` names each step file and line that listens on or connects to a fixed port,
   and PBI 390's scenarios run it over `features/steps`.
   Imports use explicit `.ts` extensions.

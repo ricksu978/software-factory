@@ -38,6 +38,9 @@ export type StandInApi = {
   /** Whether the API is still listening. */
   readonly up: boolean;
   stop(): Promise<void>;
+  /** Goes down while keeping its port: every connection, open or new, is dropped without an answer. Stopping instead
+   * frees the port for another worker's server to take and answer on. */
+  refuse(): void;
 };
 
 export async function startApi(): Promise<StandInApi> {
@@ -47,6 +50,7 @@ export async function startApi(): Promise<StandInApi> {
   const streams: ApiStream[] = [];
   const timers = new Set<NodeJS.Timeout>();
   let up = true;
+  let refusing = false;
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (d: Buffer) => chunks.push(d));
@@ -105,6 +109,9 @@ export async function startApi(): Promise<StandInApi> {
     }
   }
 
+  server.on("connection", (socket) => {
+    if (refusing) socket.destroy();
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -125,7 +132,19 @@ export async function startApi(): Promise<StandInApi> {
     get up() {
       return up;
     },
+    refuse() {
+      up = false;
+      refusing = true;
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+      server.closeAllConnections();
+    },
     async stop() {
+      if (refusing) {
+        refusing = false;
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        return;
+      }
       if (!up) return;
       up = false;
       for (const t of timers) clearTimeout(t);
