@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { readActivity, readFloor, readItem, readPhase0, type Call, type FormName, type ItemData, type Submitted } from "./api.ts";
 import { submitAnswer, submitFloorControls, submitItemControls, submitSignOff } from "./forms.ts";
 import { Activity } from "./pages/Activity.tsx";
-import { startLiveFloor, type LiveClock, type LiveFloor } from "./live.ts";
+import { emptiedOnAccept, startLiveFloor, type LiveClock, type LiveFloor } from "./live.ts";
 import { Floor } from "./pages/Floor.tsx";
 import { Phase0 } from "./pages/Phase0.tsx";
 import { RunDetail } from "./pages/RunDetail.tsx";
@@ -62,6 +62,8 @@ function Shown<T>({ state, what, children }: { state: Loaded<T>; what: string; c
 function FloorPage({ call }: { call: Call }) {
   const [state, took, setState] = useRead(() => readFloor(call), "floor");
   const live = useRef<LiveFloor | undefined>(undefined);
+  // Counts the Controls forms the factory accepted: each draws the form afresh, with its Reason field empty.
+  const [sentForms, setSentForms] = useState(0);
   const loaded = state.data !== undefined;
   // Floor follows the events once it has drawn from its first read, and stops when the page goes.
   useEffect(() => {
@@ -78,7 +80,11 @@ function FloorPage({ call }: { call: Call }) {
       {(data) => (
         <Floor
           data={data} zone={viewerZone()} now={new Date()} message={state.message}
-          onSubmit={(_f, b, v) => took(submitFloorControls(call, b, v))}
+          controlsKey={sentForms}
+          onSubmit={(_f, b, v) => took(emptiedOnAccept(submitFloorControls(call, b, v), () => {
+            setSentForms((n) => n + 1);
+            live.current?.reasonField({ value: "", focused: false });
+          }))}
           onReasonField={(f) => live.current?.reasonField(f)}
         />
       )}

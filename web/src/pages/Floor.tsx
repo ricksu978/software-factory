@@ -112,7 +112,7 @@ function WorkerLine({ f, now }: { f: FloorData; now: Date }) {
   );
 }
 
-export function Floor({ data: f, now, zone, message, onSubmit, onReasonField }: FloorProps) {
+export function Floor({ data: f, now, zone, message, onSubmit, onReasonField, controlsKey }: FloorProps) {
   const st = (id: string) => <Standing k={f.keys[id]} />;
   return (
     <div>
@@ -178,7 +178,7 @@ export function Floor({ data: f, now, zone, message, onSubmit, onReasonField }: 
       {f.canOperate && (
         <>
           <H2>Controls</H2>
-          <form aria-label="Controls" className="max-w-xl space-y-2" onSubmit={onSubmitWith("reason", onSubmit && ((b, v) => onSubmit("Controls", b, v)))}>
+          <form key={controlsKey} aria-label="Controls" className="max-w-xl space-y-2" onSubmit={onSubmitWith("reason", onSubmit && ((b, v) => onSubmit("Controls", b, v)))}>
             <label htmlFor="floor-reason" className="block text-sm font-medium">Reason</label>
             <Input
               id="floor-reason" name="reason" required

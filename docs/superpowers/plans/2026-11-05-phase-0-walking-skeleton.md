@@ -6611,6 +6611,9 @@ from spec §6 rows 1 to 7:
   It also reads the floor every 30 seconds with no event.
   While the Controls' Reason field has focus or holds text it reads nothing,
   and it catches up once the field is empty and has lost focus.
+  Once the factory accepts the Controls form,
+  the page draws the form afresh with the field empty and tells Floor so (`emptiedOnAccept` in `web/src/live.ts`),
+  since the reason has been sent.
   Leaving Floor stops it.
   The BFF (`src/bff/app.ts`) lifts its 30-second limit from a forwarded call once the API answers `text/event-stream`.
   `GET /v1/floor` carries `outboxSetAside`,

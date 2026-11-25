@@ -158,6 +158,8 @@ export type FloorProps = {
   data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit;
   /** Told what the Controls' Reason field holds and whether it has focus, each time either changes (PBI 280). */
   onReasonField?: (field: { value: string; focused: boolean }) => void;
+  /** Changes each time the factory accepts the Controls form, which draws the form afresh with its Reason field empty. */
+  controlsKey?: number;
 };
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { setImmediate as tick } from "node:timers/promises";
 import { fakeClock } from "../../src/clock.ts";
 import type { FloorData } from "./api.ts";
-import { EVENTS_PATH, POLL_MS, RETRY_MS, startLiveFloor } from "./live.ts";
+import { emptiedOnAccept, EVENTS_PATH, POLL_MS, RETRY_MS, startLiveFloor } from "./live.ts";
 
 const enc = new TextEncoder();
 const floor = { next: [] } as unknown as FloorData;
@@ -130,6 +130,36 @@ test("a Reason field with focus or text holds Floor back, and it catches up once
   await s.pass(1000);
   assert.equal(s.reads.length, 1);
   assert.equal(s.drawn.length, 1);
+  s.live.stop();
+});
+
+test("once the factory accepts the Controls form, the reason it sent no longer holds Floor back", async () => {
+  const s = stand();
+  await s.settle();
+  // The operator types a reason and clicks a button, which leaves the field with the reason still in it.
+  s.live.reasonField({ value: "lunch", focused: true });
+  s.live.reasonField({ value: "lunch", focused: false });
+  const empty = () => s.live.reasonField({ value: "", focused: false });
+  await emptiedOnAccept(Promise.resolve({ outcome: "accepted", data: floor }), empty);
+  s.send();
+  await s.pass(1000);
+  assert.equal(s.reads.length, 1, "an event after the accepted form reads the floor");
+  assert.equal(s.drawn.length, 1);
+  await s.pass(POLL_MS);
+  assert.equal(s.reads.length, 2, "and so does the poll");
+  s.live.stop();
+});
+
+test("a Controls form the factory refuses or fails keeps its reason, which still holds Floor back", async () => {
+  const s = stand();
+  await s.settle();
+  s.live.reasonField({ value: "lunch", focused: false });
+  const empty = () => s.live.reasonField({ value: "", focused: false });
+  await emptiedOnAccept(Promise.resolve({ outcome: "failed" as const, message: "No." }), empty);
+  await emptiedOnAccept(Promise.resolve({ outcome: "refused" as const, field: "Reason" }), empty);
+  s.send();
+  await s.pass(POLL_MS);
+  assert.equal(s.reads.length, 0);
   s.live.stop();
 });
 

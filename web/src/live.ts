@@ -11,10 +11,12 @@
 //     A 401 is the shell's to handle (it sends the browser to /auth/login), and Floor stops following.
 //   - A worker that is ticking writes no event, so Floor also reads the floor every POLL_MS with no event.
 //   - While the Controls' Reason field has focus or holds text, Floor reads nothing, so the reason isn't lost. It
-//     catches up once the field is empty and has lost focus.
+//     catches up once the field is empty and has lost focus. Once the factory accepts the Controls form, the page
+//     empties the field and says so (emptiedOnAccept), since the reason has been sent and Floor would otherwise stay
+//     held back by text no one is still writing.
 // The browser's Floor page starts it with the real clock, and the scenarios with a fake one. A timer's callback
 // returns nothing long-lived, since a fake clock waits for what it returns.
-import { readFloor, type Call, type FloorData } from "./api.ts";
+import { readFloor, type Call, type FloorData, type Submitted } from "./api.ts";
 
 export const EVENTS_PATH = "/bff/v1/events";
 /** How long Floor waits after an event for more before it reads the floor. */
@@ -198,4 +200,16 @@ export function startLiveFloor(env: LiveFloorEnv): LiveFloor {
     },
     stop,
   };
+}
+
+/**
+ * Runs `empty` once the factory accepts a Controls form `sent`, before the page takes the answer, so the page can empty
+ * the Reason field and tell Floor: the reason was sent, so it no longer holds Floor back. A form the factory refuses or
+ * that fails keeps its reason, for the operator to send again.
+ */
+export function emptiedOnAccept<T>(sent: Promise<Submitted<T>>, empty: () => void): Promise<Submitted<T>> {
+  return sent.then((r) => {
+    if (r.outcome === "accepted") empty();
+    return r;
+  });
 }
