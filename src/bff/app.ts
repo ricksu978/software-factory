@@ -14,12 +14,14 @@
 // And step 7c (§03 and §05):
 //   POST /webhooks/github  GitHub's deliveries, which reach the API's /webhooks/github with their bytes and headers as
 //                        GitHub sent them, and the API's answer goes back to GitHub. No session and no Origin are
-//                        needed, and the BFF doesn't check the signature: only the API holds the webhook secret.
+//                        needed, and the BFF doesn't check the signature: only the API holds the webhook secret. A body
+//                        over GitHub's 25 MB cap gets 413 before the BFF holds it all.
 //   GET  /bff/v1/events  goes through /bff/v1/* like any call, but an answer of server-sent events streams to the
 //                        browser for as long as the API keeps it open, and closes at the API when the browser leaves.
 // And step 8a (§04 and §10):
 //   GET  everything else the SPA's built files from spaDir, or its page for a deep link (src/bff/spa.ts).
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ResponseBodyError } from "openid-client";
 import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
@@ -32,6 +34,8 @@ import {
 export const REFRESH_WITHIN_MS = 60_000;
 /** How long the API has to answer an ordinary call. A stream of server-sent events only has this long to start. */
 const API_TIMEOUT_MS = 30_000;
+/** GitHub caps a delivery at 25 MB, so a bigger body, which needs no session to send, gets 413 before it's buffered. */
+export const MAX_WEBHOOK = 25 * 1024 * 1024;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 /** The browser's request headers that go on to the API. Cookies, Authorization and Origin never do. */
 const FORWARDED_REQUEST_HEADERS = [
@@ -197,7 +201,10 @@ export function createBff(cfg: BffConfig): Hono {
     return (await toApi(c, to, { method, headers, body })) ?? c.json({ error: "the API didn't answer" }, 502);
   });
 
-  app.post("/webhooks/github", async (c) => {
+  const webhookLimit = bodyLimit({
+    maxSize: MAX_WEBHOOK, onError: (c) => c.json({ error: "the payload is over 25 MB" }, 413),
+  });
+  app.post("/webhooks/github", webhookLimit, async (c) => {
     if (!cfg.apiUrl) return c.json({ error: "the BFF has no API to forward to" }, 502);
     const headers = new Headers();
     c.req.raw.headers.forEach((v, k) => {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import { startProvider, type Provider } from "../../features/fixtures/pbi-288-provider.ts";
 import { startApi, type StandInApi } from "../../features/fixtures/pbi-289-api.ts";
-import { createBff, SIGNIN_COOKIE } from "./app.ts";
+import { createBff, MAX_WEBHOOK, SIGNIN_COOKIE } from "./app.ts";
 import { hashSessionId, openRefreshToken, SESSION_COOKIE, type NewSession, type Session, type SessionStore } from "./session.ts";
 
 const ORIGIN = "http://localhost:7403";
@@ -351,6 +351,23 @@ test("a webhook the API doesn't answer gets 502", async () => {
   });
   const r = await down.request(new URL("/webhooks/github", ORIGIN).href, { method: "POST", body: "{}" });
   assert.equal(r.status, 502);
+});
+
+test("a webhook over GitHub's 25 MB cap gets 413 and never reaches the API, with or without a Content-Length", async () => {
+  api.answer("POST", "/webhooks/github", { status: 202, body: "accepted" });
+  const big = Buffer.alloc(MAX_WEBHOOK + 1, 0x20);
+  const url = new URL("/webhooks/github", ORIGIN).href;
+  const stated = await app.request(url, { method: "POST", headers: { "content-length": String(big.length) }, body: big });
+  assert.equal(stated.status, 413);
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctl) {
+      for (let at = 0; at < big.length; at += 1024 * 1024) ctl.enqueue(big.subarray(at, at + 1024 * 1024));
+      ctl.close();
+    },
+  });
+  const chunked = await app.request(url, { method: "POST", body: stream, duplex: "half" } as RequestInit);
+  assert.equal(chunked.status, 413);
+  assert.equal(api.calls.length, 0);
 });
 
 /** A BFF that gives an ordinary call `ms` to answer. */
