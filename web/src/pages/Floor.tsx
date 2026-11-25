@@ -57,9 +57,15 @@ function MainBreakLine({ r }: { r: MainBreak }) {
   return <li>Commit <code>{short(r.sha)}</code> broke <code>{r.branch}</code>, the merge of {from}. {bug}</li>;
 }
 
+/**
+ * The API's time when it read the floor, against which the worker's heartbeat is aged: the worker's clock and the API's
+ * are both servers', where the viewer's may run fast or slow. A floor without it falls back to the viewer's time.
+ */
+const serverNow = (f: FloorData, now: Date) => (f.at ? new Date(f.at) : now);
+
 /** The factory's state and what needs attention, each as a banner, as today's Floor shows them. */
 function Banners({ f, now }: { f: FloorData; now: Date }) {
-  const stale = schedulerBanner(f.workerHeartbeat, now);
+  const stale = schedulerBanner(f.workerHeartbeat, serverNow(f, now));
   return (
     <>
       {stale && <Banner>{stale}</Banner>}
@@ -106,7 +112,7 @@ function WorkerLine({ f, now }: { f: FloorData; now: Date }) {
   if (f.workerHeartbeat === undefined && f.outboxSetAside === undefined) return null;
   return (
     <p className="text-muted-foreground">
-      {f.workerHeartbeat !== undefined && <span>{heartbeatLine(f.workerHeartbeat, now)}</span>}{" "}
+      {f.workerHeartbeat !== undefined && <span>{heartbeatLine(f.workerHeartbeat, serverNow(f, now))}</span>}{" "}
       {f.outboxSetAside !== undefined && <span>Outbox rows set aside: {f.outboxSetAside}</span>}
     </p>
   );

@@ -113,6 +113,7 @@ describe("the API", dbTest, () => {
     assert.equal(b.workerHeartbeat, null);
     assert.equal(b.outboxSetAside, 0);
     assert.equal(b.canOperate, false);
+    assert.ok(!Number.isNaN(Date.parse(b.at)), "the floor carries the API's own time, to age the heartbeat against");
   });
 
   test("an unknown item or one that isn't an id is 404", async () => {

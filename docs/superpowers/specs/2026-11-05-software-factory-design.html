@@ -4646,6 +4646,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       Beside when the worker last ticked it shows the count of outbox rows set aside,
 
       and when that heartbeat is more than a minute old,
+      measured against the API's time that comes with each read and not the viewer's clock,
       or the worker hasn't ticked yet,
       a banner says "Scheduler not ticking" (PBI 280,
       2026-11-07 redesign step 8c).</td></tr>

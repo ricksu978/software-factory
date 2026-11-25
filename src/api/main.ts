@@ -164,6 +164,8 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     return c.json({
       ...f, keys: Object.fromEntries(f.keys), canOperate: requireRole(c.get("user"), "operator"),
       claudeToken, workerHeartbeat: beat ? beat.ticked_at.toISOString() : null, outboxSetAside: setAside,
+      // The API's own time, so Floor measures the heartbeat's age against a server clock and not the viewer's.
+      at: at.toISOString(),
     });
   });
 
