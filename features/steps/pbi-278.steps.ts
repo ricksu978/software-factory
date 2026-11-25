@@ -202,7 +202,7 @@ Given("the BFF is running on {int}", long, async function (port: number) {
     PORT: String(s.port),
     BFF_ORIGIN: `http://localhost:${s.port}`,
   };
-  await startBff(s);
+  await startBff(s, { repick: true });
 });
 
 When("a browser with no session opens {string}", async function (path: string) {

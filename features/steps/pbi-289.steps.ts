@@ -70,7 +70,7 @@ Given("the BFF is running against that provider as its issuer and that stand-in 
     BFF_ORIGIN: `http://localhost:${s.port}`,
     API_URL: api.url,
   };
-  await startBff(s);
+  await startBff(s, { repick: true });
 });
 
 Given("the BFF's own origin is {string}", long, async function (origin: string) {

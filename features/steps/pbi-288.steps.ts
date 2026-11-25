@@ -223,9 +223,19 @@ export async function stopBff(c: Ctx): Promise<void> {
   }
 }
 
-export async function startBff(c: Ctx): Promise<void> {
-  const b = spawnBff(c, c.env!);
+/**
+ * Starts the BFF on c.port. With `repick`, for a port the step took from freePort(), a BFF that exits because another
+ * parallel worker took that port in the meantime (EADDRINUSE) is started again on a fresh free port, up to 3 times.
+ */
+export async function startBff(c: Ctx, { repick = false }: { repick?: boolean } = {}): Promise<void> {
+  let b = spawnBff(c, c.env!);
   await settle(b, c.port!);
+  for (let tries = 0; repick && tries < 3 && b.exit !== undefined && b.out.includes("EADDRINUSE"); tries++) {
+    c.port = await freePort();
+    c.env = { ...c.env!, PORT: String(c.port), BFF_ORIGIN: `http://localhost:${c.port}` };
+    b = spawnBff(c, c.env);
+    await settle(b, c.port);
+  }
   assert.ok(b.exit === undefined, `the BFF exited (${JSON.stringify(b.exit)}) before it answered: ${b.out}`);
   assert.ok(await answers(c.port!), `the BFF doesn't answer on port ${c.port} after 30 seconds`);
 }
@@ -335,7 +345,7 @@ Given("the BFF is running against that provider as its issuer", long, async func
     PORT: String(c.port),
     BFF_ORIGIN: `http://localhost:${c.port}`,
   };
-  await startBff(c);
+  await startBff(c, { repick: true });
 });
 
 // ---- Starting and stopping the BFF ----
