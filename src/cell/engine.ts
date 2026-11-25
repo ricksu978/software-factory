@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { factoryThread, FAILED_LOG_CHARS, LOGGED_CHECKS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type Review, type ReviewComment, type RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
+import type { Effort } from "../store/effort.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, finishedFindings, greenGate, notDryRun, redGate, traceability, unfinishedFinding, unfinishedRun } from "../bdd/messages.ts";
 import { DEFAULT_COMMAND_TIMEOUT_MINUTES, parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
@@ -31,6 +32,11 @@ export type CellContext = {
   decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
   configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null;
+  /**
+   * PBI 319: the effort setting as the control plane read it when the cell asked for its context, as it starts. The
+   * cell passes it on every agent call it makes, for every stage, until it ends.
+   */
+  effort?: Effort;
   /** The last passed self-review's scenario notes, for a PR body written in a later claim (PBI 152). */
   scenarioNotes?: string[];
   trustedComments: ReviewComment[];

@@ -7,6 +7,7 @@ import { judgedFields, type FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
 import { splitPrompt, TEMPLATE_DOR } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
+import type { Effort } from "../store/effort.ts";
 
 export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
@@ -18,6 +19,11 @@ export type AgentResult = {
 
 export type AgentArgs = {
   prompt: string; model: string; cwd: string; agent?: string;
+  /**
+   * PBI 319: the effort the call runs at. Every call names one, as it names its model: a call without either fails
+   * before any request goes to the model, instead of falling back to a default.
+   */
+  effort?: Effort;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: ("WebSearch" | "WebFetch")[]; signal: AbortSignal;
   /** A session to carry on, by the sessionId an earlier call returned, as when the PR reviewer restates (PBI 190). */
   resume?: string;
@@ -119,8 +125,11 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>, onMessage?: 
   return r;
 }
 
-export async function runAgent(a: AgentArgs): Promise<AgentResult> {
-  return { ...(await foldMessages(query({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
+/** The SDK's `query`, which sends the call to the model. Tests pass one that records each request instead (PBI 319). */
+export type Send = (q: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
+
+export async function runAgent(a: AgentArgs, send: Send = query): Promise<AgentResult> {
+  return { ...(await foldMessages(send({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
 }
 
 // Typed by the fields the judge reads, so Task 9's Sop and Policy fit without importing them.
@@ -172,9 +181,10 @@ export function readinessLogic(): ReadinessLogic {
 const JUDGE_TIMEOUT_MS = 120_000;
 
 /** What one readiness judge call spent, reported whether the call answered or failed (PBI 132). */
-export type JudgeSpend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+export type JudgeSpend = { model: string; tokensIn: number; tokensOut: number; costUsd: number; /** PBI 319 */ effort?: Effort };
 
-export function haikuJudge(sop: JudgeSop, run: (a: AgentArgs) => Promise<AgentResult> = runAgent) {
+/** `effort` reads the effort setting as it is now, each time the judge runs (PBI 319). */
+export function haikuJudge(sop: JudgeSop, run: (a: AgentArgs) => Promise<AgentResult> = runAgent, _effort?: () => Promise<Effort>) {
   return async (item: FactoryItem, dor: JudgePolicy, spent?: (s: JudgeSpend) => void): Promise<string> => {
     const model = sop.models.triage;
     let r: AgentResult;

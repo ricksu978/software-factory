@@ -123,14 +123,19 @@ Then("the Activity page has no bold element from the reason", function () {
 // ---- the logged event ----
 
 Then("the factory logged one setting change event", long, async function () {
+  await loggedOneSettingEvent(this);
+});
+
+/** Picks out the one `setting` event the factory logged, for the Thens below. PBI 319's steps share it. */
+export async function loggedOneSettingEvent(world: object): Promise<void> {
   const r = await pool().query<{ by: string | null; setting: string | null; from: string | null; to: string | null; reason: string | null }>(
     `select u.github_login as by, e.payload->>'setting' as setting, e.payload->>'from' as "from", e.payload->>'to' as "to",
        e.payload->>'reason' as reason
      from event e left join "user" u on u.id::text = e.actor_id where e.kind = 'setting'`,
   );
   assert.equal(r.rowCount, 1, `the factory logged ${r.rowCount} setting change events: ${JSON.stringify(r.rows)}`);
-  ctx(this).event = r.rows[0];
-});
+  ctx(world).event = r.rows[0];
+}
 
 function event(world: object) {
   const e = ctx(world).event;
@@ -145,8 +150,10 @@ Then("that event says it was made by {string}", function (login: string) {
 Then(/^that event says (.+) went from "([^"]*)" to "([^"]*)"$/, function (name: string, from: string, to: string) {
   const e = event(this);
   assert.equal(e.setting?.toLowerCase(), name.trim().toLowerCase());
-  assert.equal(Number(e.from), Number(from), `the event's old value is ${e.from}`);
-  assert.equal(Number(e.to), Number(to), `the event's new value is ${e.to}`);
+  // A number compares as one, so "3" and "3.0" agree; a word, such as PBI 319's effort, compares as written.
+  const same = (got: string | null, want: string) => (Number.isNaN(Number(want)) ? got === want : Number(got) === Number(want));
+  assert.ok(same(e.from, from), `the event's old value is ${e.from}, not ${from}`);
+  assert.ok(same(e.to, to), `the event's new value is ${e.to}, not ${to}`);
 });
 
 Then("that event gives the reason {string}", function (reason: string) {

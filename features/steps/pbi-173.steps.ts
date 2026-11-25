@@ -18,6 +18,7 @@ import { httpCellApi } from "../../src/cell/api-client.ts";
 import type { CellContext } from "../../src/cell/engine.ts";
 import { resumeOnImageSop, SOP_MOVED, type SopMoveApi } from "../../src/cell/sop-move.ts";
 import { loadSop, stageAfter, type Sop } from "../../src/config/sop.ts";
+import { isPbi319, runsTheStage } from "./pbi-319.steps.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { decide } from "../../src/control/decisions.ts";
 import { createAuth } from "../../src/http/auth.ts";
@@ -394,7 +395,9 @@ export async function openActivityLog(world: object): Promise<void> {
 
 // ---- Then ----
 
+// PBI 319 says the same words as its When, where the cell runs that stage for a scenario of its own.
 Then("the cell runs the {word} stage", long, async function (stage: string) {
+  if (isPbi319(this)) return runsTheStage(this, stage);
   const seen = await side(this).seen();
   assert.deepEqual(ctx(this).ran, [stage], `the cell ran ${JSON.stringify(ctx(this).ran)}; open questions: ${JSON.stringify(seen.open)}`);
   assert.deepEqual(seen.stages, [stage], `the run recorded the stages ${JSON.stringify(seen.stages)}`);

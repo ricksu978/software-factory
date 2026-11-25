@@ -8,6 +8,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { fenced } from "../core/fence.ts";
 import type { FileSplitDeps } from "./file-split.ts";
 import { jsonLines } from "../policy/policy.ts";
+import type { Effort } from "../store/effort.ts";
 
 /** One proposed child. `criteria` holds 1-based indices of the parent's acceptance criteria, `needs` 1-based child numbers. */
 export type SplitChild = { title: string; body: string; criteria: number[]; needs: number[] };
@@ -31,6 +32,8 @@ export type SplitDor = { text: string; criteria: { index: number; text: string }
 export type SplitDeps = {
   sop: { models: { coding: string } };
   agent: (a: AgentArgs) => Promise<AgentResult>;
+  /** PBI 319: reads the effort setting as it is now, each time a split is asked for. */
+  effort?: () => Promise<Effort>;
   seen?: Map<string, SplitOutcome>;
   /**
    * The coding model's instructions for an item and the dor.md the judge read for it (PBI 159, PBI 202). Unset, the
