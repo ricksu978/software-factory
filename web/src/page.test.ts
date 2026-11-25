@@ -71,7 +71,8 @@ describe("a FeatureChangeRequest item on Floor and Run detail (PBI 366)", () => 
   test("Floor's Waiting on you row says it waits on the Product Owner and links to the request on Run detail", async () => {
     const html = await render("Floor", floor(true));
     assert.match(html, /waiting on the Product Owner/);
-    assert.ok(html.includes(`href="/runs/${id}#feature-change-request"`), html);
+    const request = `/runs/${id}#feature-change-request`;
+    assert.ok(html.includes(`href="${request}"`), html);
     assert.match(html, />Feature change request</);
     assert.doesNotMatch(await render("Floor", floor(false)), /Feature change request|Product Owner/);
   });
