@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  age, blockedReason, claimLines, drainLine, mainRedLead, moveLine, recheckLine, restartLine, sentence, standing, summary,
+  age, blockedReason, claimLines, drainLine, heartbeatLine, mainRedLead, moveLine, recheckLine, restartLine, schedulerBanner,
+  sentence, standing, summary,
 } from "./lines.ts";
 
 const key = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null, bug: false };
@@ -77,4 +78,24 @@ test("an API error reads as a sentence", () => {
   assert.equal(sentence("that item isn't waiting for this decision"), "That item isn't waiting for this decision.");
   assert.equal(sentence("Done."), "Done.");
   assert.equal(sentence(""), "The factory refused it.");
+});
+
+test("the scheduler banner shows only once the heartbeat is more than a minute old, or there is none", () => {
+  const now = new Date("2026-11-20T12:00:00Z");
+  const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  assert.equal(schedulerBanner(ago(20_000), now), null);
+  assert.equal(schedulerBanner(ago(60_000), now), null);
+  assert.equal(schedulerBanner(ago(61_000), now), "Scheduler not ticking. The worker last ticked 1 min ago.");
+  assert.equal(schedulerBanner(ago(90_000), now), "Scheduler not ticking. The worker last ticked 2 min ago.");
+  assert.equal(schedulerBanner(ago(3 * 3600_000), now), "Scheduler not ticking. The worker last ticked 3 h ago.");
+  assert.equal(schedulerBanner(ago(3 * 86_400_000), now), "Scheduler not ticking. The worker last ticked 3 days ago.");
+  assert.equal(schedulerBanner(null, now), "Scheduler not ticking. The worker hasn't ticked yet.");
+  assert.equal(schedulerBanner(undefined, now), null, "a floor that carries no heartbeat says nothing about it");
+});
+
+test("the heartbeat's line says when the worker last ticked", () => {
+  const now = new Date("2026-11-20T12:00:00Z");
+  assert.equal(heartbeatLine(new Date(now.getTime() - 20_000).toISOString(), now), "The worker last ticked under a minute ago.");
+  assert.equal(heartbeatLine(new Date(now.getTime() - 3 * 3600_000).toISOString(), now), "The worker last ticked 3 h ago.");
+  assert.equal(heartbeatLine(null, now), "The worker hasn't ticked yet.");
 });

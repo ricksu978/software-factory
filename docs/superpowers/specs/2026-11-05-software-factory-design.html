@@ -4633,7 +4633,23 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       or that it's not yet re-checked (PBI 369).
 
-      Updates live from the event log.</td></tr>
+      Updates live from the event log.
+
+      The SPA's Floor follows <code>/bff/v1/events</code>,
+      reads the floor again once a burst of events settles,
+      opens a new stream when one ends and then catches up,
+      and reads the floor every 30 seconds with no event.
+
+      It holds back while the Controls' Reason field has focus or holds text,
+      so a reason being typed isn't lost.
+
+      Beside when the worker last ticked it shows the count of outbox rows set aside,
+
+      and when that heartbeat is more than a minute old,
+      measured against the API's time that comes with each read and not the viewer's clock,
+      or the worker hasn't ticked yet,
+      a banner says "Scheduler not ticking" (PBI 280,
+      2026-11-07 redesign step 8c).</td></tr>
 
       <tr><td>Inbox</td>
 

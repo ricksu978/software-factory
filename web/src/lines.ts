@@ -14,6 +14,26 @@ export function age(since: string | null, now: Date): string {
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
 }
 
+/** A heartbeat older than this means the worker's scheduler has stopped ticking (PBI 280). */
+export const STALE_HEARTBEAT_MS = 60_000;
+
+/** When the worker last ticked (PBI 158), as Floor's line beside the outbox count says it. */
+export function heartbeatLine(beat: string | null, now: Date): string {
+  if (!beat) return "The worker hasn't ticked yet.";
+  const ms = now.getTime() - Date.parse(beat);
+  return `The worker last ticked ${ms < 60_000 ? "under a minute" : age(beat, now)} ago.`;
+}
+
+/**
+ * Floor's banner when the worker's heartbeat is more than a minute old or missing (PBI 280), so a stopped worker
+ * doesn't look like a quiet factory. A floor that carries no heartbeat at all (undefined) gets no banner.
+ */
+export function schedulerBanner(beat: string | null | undefined, now: Date): string | null {
+  if (beat === undefined) return null;
+  if (beat !== null && now.getTime() - Date.parse(beat) <= STALE_HEARTBEAT_MS) return null;
+  return `Scheduler not ticking. ${heartbeatLine(beat, now)}`;
+}
+
 /** Why a blocked item waits. Each blocker is plain "#N", since GitHub may list one from another repo. */
 export function blockedReason(deps: string[]): string {
   const refs = deps.map((d) => `#${d}`);
