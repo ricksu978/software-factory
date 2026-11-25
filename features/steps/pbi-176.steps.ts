@@ -214,7 +214,7 @@ When(/^a usage report says (\d+)% of the limit is used, resetting at "([^"]*)"$/
     method: "POST",
     headers: { authorization: `Bearer ${runToken(CELL_SECRET, run.runId, run.generation)}`, "content-type": "application/json" },
     body: JSON.stringify({
-      stageId: "green", attempt: 1, status: "started", model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0,
+      stageId: "green", attempt: 1, status: "started", model: "claude-opus-5-5", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0,
       usage: { utilization: Number(percent) / 100, resetsAt },
     }),
   });

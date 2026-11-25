@@ -126,7 +126,7 @@ async function realPoll(k: Ctx, c: Ctx144): Promise<void> {
     },
   };
   const split: SplitDeps = {
-    sop: { models: { coding: "coding-model" } }, agent: agent(k, c), seen: c.seen,
+    sop: { models: { coding: "coding-model" } }, agent: agent(k, c), seen: c.seen, effort: async () => "medium",
     file: { board: scriptedBoard(c), optInLabel: c.label, backlogStatus: c.backlogStatus, criteriaHeading: HEADING },
   };
   try {

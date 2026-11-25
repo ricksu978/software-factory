@@ -67,7 +67,9 @@ export type FloorData = {
 };
 
 export type Stage = {
-  stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null;
+  stage_id: string; attempt: number; model: string | null;
+  /** The effort the attempt ran at, null on a row from before PBI 319, which ran at medium. */
+  effort?: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null;
   status: string; transcript_ref: string | null; started_at?: string; ended_at?: string | null;
   restates?: { round: number; reason: string }[]; message?: string | null;
 };
@@ -79,7 +81,9 @@ export type CheckVerdict =
   | { outcome: "error" };
 
 export type ReadinessCheck = {
-  kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: string; verdict?: CheckVerdict; child?: string;
+  kind?: "judge" | "split"; model: string;
+  /** The effort the call ran at, null on a check from before PBI 319, which ran at medium. */
+  effort?: string | null; tokensIn: number; tokensOut: number; costUsd: number; ranAt: string; verdict?: CheckVerdict; child?: string;
 };
 
 export type ItemDurations = {

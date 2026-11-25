@@ -3630,7 +3630,11 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     so re-gating text it already split doesn't call the coding model again.
     That map lives only in memory,
     so a filing's split is also kept in the database (see "Filing a split").
-    `main.ts` builds one `split: { sop, agent: runAgent, seen: new Map() }` and passes it to every poll.
+    `main.ts` builds one `split: { sop, agent: runAgent, seen: new Map(), effort }` and passes it to every poll.
+    `effort` reads the effort setting with `currentEffort` before each split or rewrite call,
+    so each runs at the setting as it is then (PBI 319).
+    One that can't be read sends nothing,
+    and the split stays due.
   - **Filing a split (PBI 144).**
     With `ctx.split.file` set and `ctx.splits` given,
     the gate first reads the split kept for the item's text with `ctx.splits.get(item)`.
@@ -3824,7 +3828,10 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     Whether the call answers or throws,
     the spend goes to `ctx.recordCheck(item, { ...spend, kind, ranAt })`,
     with `kind` `judge` or `split`.
-    The poller's `recordCheck` writes a `readiness_check` row for the item with `recordReadinessCheck` from `src/store/readiness-checks.ts`.
+    The poller's `recordCheck` writes a `readiness_check` row for the item with `recordReadinessCheck` from `src/store/readiness-checks.ts`,
+    with the model and the effort the call ran at.
+    It throws for a check whose model or effort is missing or blank,
+    and stores nothing (PBI 319).
     A call that reports no spend records nothing,
     an engine rule that fails first asks no judge,
     and a split already cached for the item text asks no coding model,
@@ -4072,14 +4079,26 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
 export type AgentResult = { ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
   model: string; limit: { resetsAt: number } | null; usage: { utilization: number; resetsAt: number | null } | null;
   transcript: string };
-export function runAgent(a: { prompt: string; model: string; cwd: string; agent?: string;
-  maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }): Promise<AgentResult>;
+export function runAgent(a: { prompt: string; model: string; effort: Effort; cwd: string; agent?: string;
+  maxTurns?: number; mode: "cell" | "judge"; webTools?: WebTool[]; signal: AbortSignal }, send?: Send): Promise<AgentResult>;
 export function foldMessages(msgs: AsyncIterable<SDKMessage>): Promise<Omit<AgentResult, "model">>;
 export function agentOptions(a: /* runAgent's argument */): Options; // the SDK options for a's mode
-export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (s: JudgeSpend) => void) => Promise<string>; // raw reply; gate() parses it
+export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: () => Promise<Effort>): (item: FactoryItem, dor: Policy, spent?: (s: JudgeSpend) => void) => Promise<string>; // raw reply; gate() parses it
 ```
 
   This is the only module that imports `@anthropic-ai/claude-agent-sdk`.
+  Every call names its model and its effort (PBI 319),
+  which `agentOptions` passes as the SDK's `model` and `effort`.
+  `runAgent` throws before `send`,
+  the SDK's `query` unless a test passes its own,
+  when either is missing or blank,
+  or the effort isn't one of `EFFORTS`,
+  with an error that names what's missing,
+  so no call runs at a default nobody chose.
+  `assertNamed` in `src/store/effort.ts` holds that check,
+  which the cell engine and `recordReadinessCheck` share.
+  `haikuJudge` reads its `effort` reader before each call,
+  so each judge call runs at the setting as it is then.
   `haikuJudge` calls `runAgent` with `model: sop.models.triage`,
   `maxTurns: 1`,
   `mode: "judge"` and a 2-minute timeout.
@@ -4116,7 +4135,7 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
 
   **Judge spend (PBI 132).**
   Before it reads the run's outcome,
-  `haikuJudge` hands `spent` the run's `{ model, tokensIn, tokensOut, costUsd }`,
+  `haikuJudge` hands `spent` the run's `{ model, effort, tokensIn, tokensOut, costUsd }`,
   so a call that failed on a usage limit,
   an API error or its timeout reports what it spent.
   A run that throws before it starts reports a spend of nothing,
@@ -4371,7 +4390,9 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     The kill switch is either half of Task 13's definition:
     `FACTORY_KILL=1` or a `kill` override.
   - `POST /github-token` returns `{ token, expiresAt }`.
-  - `GET /context` returns the fields Run contract 5 lists.
+  - `GET /context` returns the fields Run contract 5 lists,
+    and `effort`,
+    the effort setting as `currentEffort` reads it when the cell asks (PBI 319).
     `decision` comes only from questions asked since the run started,
     so a run that `criteria_changed` started never sees the previous run's decision.
   - `POST /policy-results` takes `{ file: "pr-review" | "dod", source: "repo" | "default", stageId, attempt, checkedSha, verdicts: Verdict[] }` and writes them to `policy_result` for the run.
@@ -4481,7 +4502,10 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     or one naming no test,
     leaves `failingTests` out,
     so the check still goes back with its name and URL.
-  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed" | "stopped", model, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage?, message?, scenarioNotes? }`.
+  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed" | "stopped", model, effort, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage?, message?, scenarioNotes? }`.
+    A report whose `model` is missing or blank,
+    or whose `effort` isn't one of `EFFORTS`,
+    answers 400 and stores nothing (PBI 319).
     It writes `stage_run` and,
     on `passed`,
     `run.next_stage` per Run contract 1.
@@ -5635,7 +5659,8 @@ type CellContext = { externalId: string; title: string; acceptanceCriteria: stri
   trustedBot?: string | null;   // the repo's trusted bot, whose threads and reviews are the factory's own (PBI 318)
   failedCiHeads?: CiFailure[];   // each head CI failed on in the run's earlier claims, oldest first (PBI 315)
   resume?: { stageId: string; attempt: number } | null;
-  retry?: { stageId: string; tried: number; findings: string[] } | null };   // the body of GET /context (Run contract 5); retry is PBI 393's
+  retry?: { stageId: string; tried: number; findings: string[] } | null;
+  effort?: Effort };   // the body of GET /context (Run contract 5); retry is PBI 393's, effort PBI 319's
 type Git = { fetchBase(base: string): Promise<string>;   // fetches the base once per claim, returns origin/<base>'s commit
   mergeAt(base: string, commit: string): Promise<string[]>;   // merges that commit, no fetch; the paths still in conflict
   commitAll(msg: string): Promise<string>; push(): Promise<void>; head(): Promise<string> };
@@ -5657,6 +5682,14 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   and the item's tag is `@pbi-${ctx.externalId}`.
   Every `runAgent` call in cell mode passes `webTools: config.webTools`,
   from the repo config pinned for the run.
+  Every call the cell makes,
+  the risk classifier's two passes included,
+  names `ctx.effort`,
+  the effort the cell read once as it started,
+  and every stage report names it too (PBI 319).
+  The meter checks each call with `assertNamed` before it reaches the agent,
+  so a cell whose context has no effort fails its attempt with "The agent call names no effort",
+  and no call goes out.
   Every agent call goes through `stageMeter(agent)`,
   which charges it to the stage attempt that `begin` opened and hands the sums and transcript back when `end` closes it.
   A call made while no stage is open throws "An AI call was made while no stage was open" and never reaches the model,
@@ -6763,7 +6796,8 @@ from spec §6 rows 1 to 7:
       the `wip_policy` row as it is now.
       The scheduler reads the current WIP and the review capacity on its next tick,
       and a cell reads the usage reserve.
-      Two settings carry a note shown beside them:
+      Two settings carry a note saying they do less than the heading says,
+      besides the effort's note (PBI 319):
       the WIP minimum and maximum say "Only bounds the current WIP for now.",
       since nothing else reads them yet beyond `checkChange` keeping the current WIP inside them,
       and the daily budget says "Stored,
@@ -6790,6 +6824,25 @@ from spec §6 rows 1 to 7:
       and it stores the reason trimmed (PBI 176).
       The usage reserve may be anything from 0 to 1,
       both ends included.
+      The effort (PBI 319) is `wip_policy.effort`,
+      which `021_effort.sql` adds as `not null default 'medium'`.
+      It takes one of `low`,
+      `medium`,
+      `high`,
+      `xhigh` or `max` as written,
+      and anything else,
+      an empty value included,
+      answers 400 with "Effort must be one of low, medium, high, xhigh or max.",
+      so it can't be cleared.
+      Its note says it applies to cells that start after the change,
+      and to the next readiness or split call.
+      The same migration adds a nullable `effort` to `stage_run` and `readiness_check`,
+      null on rows from before it.
+      Run detail shows each model as `<model> (<effort>)` with `withEffort`,
+      in its Stages table and its Readiness checks table,
+      the SSR page and the SPA alike,
+      and a null effort as `(medium)`,
+      the default those rows ran at.
       The activity log shows that event under the user's GitHub login,
       as "octo changed review capacity from 3 to 5 because Two more reviewers are in.".
       A change that's taken answers 303 to `/configuration?changed=<key>`.

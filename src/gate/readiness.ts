@@ -129,10 +129,10 @@ function spending(agent: SplitDeps["agent"], spent: (s: JudgeSpend) => void): Sp
       r = await agent(a);
     } catch (e) {
       // A run that throws never started, so it spent nothing, and says so.
-      spent({ model: a.model, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+      spent({ model: a.model, effort: a.effort, tokensIn: 0, tokensOut: 0, costUsd: 0 });
       throw e;
     }
-    spent({ model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
+    spent({ model: r.model, effort: a.effort, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
     return r;
   };
 }
@@ -229,8 +229,9 @@ const REWRITE_TIMEOUT_MS = 120_000;
  * thrown run throws, so the poller leaves the item Eligible and the next poll asks again.
  */
 async function rewrite(subject: FactoryItem, owner: FactoryItem, failed: Verdict[], dor: Policy, ctx: GateContext, deps: SplitDeps): Promise<string | null> {
+  const effort = await deps.effort();
   const r = await recorded(owner, ctx, "split", (spent) => spending(deps.agent, spent)({
-    prompt: rewritePrompt(subject, dor, failed), model: deps.sop.models.coding, cwd: tmpdir(), maxTurns: 1, mode: "judge",
+    prompt: rewritePrompt(subject, dor, failed), model: deps.sop.models.coding, effort, cwd: tmpdir(), maxTurns: 1, mode: "judge",
     signal: AbortSignal.timeout(REWRITE_TIMEOUT_MS),
   }));
   if (!r.ok) throw new Error(`the coding model gave no answer for the rewrite of "${subject.title}"`);

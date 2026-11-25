@@ -4307,6 +4307,54 @@ policy: .factory/               # dor, scenarios, pr-review, risk and dod; defau
 
   <span class="tag call">My call</span></p>
 
+  <p><b>Effort.</b>
+
+  Every agent call names its model and its effort,
+
+  and a call missing either one fails before any request goes to the model,
+
+  instead of running at a default nobody chose (PBI 319).
+
+  The effort is a runtime setting on the Configuration page,
+
+  not part of the SOP.
+
+  A cell reads it once,
+
+  in the context it asks the cell API for as it starts,
+
+  and passes it on every call it makes,
+
+  for every stage,
+
+  until it ends.
+
+  So a change reaches only cells that start after it,
+
+  and a running cell keeps the effort it started with,
+
+  its retries included.
+
+  The readiness judge and the split read the setting each time they run.
+
+  Each stage attempt and each readiness or split call records the model and the effort it used,
+
+  and the cell API and the store turn down a record missing either one.
+
+  Wherever the dashboard shows a model name,
+
+  the effort follows it in parentheses,
+
+  such as <code>claude-opus-5-5 (high)</code>.
+
+  A record from before PBI 319 has no effort stored,
+
+  and shows as <code>(medium)</code>,
+
+  the default it ran at.
+
+  <span class="tag call">My call</span></p>
+
   <p>The $40 item cap is a starting figure,
 
   about twice the estimated cost per item in §11.
@@ -4761,7 +4809,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       the usage reserve,
 
-      the usage pause and the daily budget.
+      the usage pause,
+
+      the daily budget and the effort.
 
       An operator can change the WIP minimum,
 
@@ -4769,7 +4819,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       the review capacity,
 
-      the usage reserve and the daily budget there.
+      the usage reserve,
+
+      the daily budget and the effort there.
 
       Each change needs a reason,
 
@@ -4816,6 +4868,36 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       and the usage reserve a number from 0 to 1,
 
       both ends included.
+
+      The effort is the one every agent call names (PBI 319).
+
+      It always has a value,
+
+      starting at <code>medium</code>,
+
+      Opus 5.5's own default,
+
+      so nothing changes until an operator changes it.
+
+      It must be one of <code>low</code>,
+
+      <code>medium</code>,
+
+      <code>high</code>,
+
+      <code>xhigh</code> or <code>max</code>,
+
+      written that way,
+
+      or the change is turned down with "Effort must be one of low, medium, high, xhigh or max."
+
+      It can't be cleared.
+
+      A change reaches only cells that start after it,
+
+      and the next readiness judge or split call,
+
+      and it never stops or restarts a running cell.
 
       A new minimum or maximum that leaves the current WIP outside the range moves the current WIP to the nearest end.
 
@@ -4941,7 +5023,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       The signed-off feature files with each scenario's red and green runs.
 
-      Each stage attempt's prompts,
+      Each stage attempt's model with its effort,
+
+      prompts,
 
       tool calls,
 
@@ -4985,7 +5069,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       whether it was the judge or a split proposal,
 
-      its model,
+      its model with its effort,
 
       its tokens and its cost,
 
@@ -7646,6 +7730,8 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       model,
 
+      effort,
+
       status,
 
       started_at,
@@ -7671,6 +7757,8 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       kind,
 
       model,
+
+      effort,
 
       tokens_in,
 
@@ -7821,6 +7909,8 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       usage_reserve_at,
 
       daily_budget,
+
+      effort,
 
       current_wip,
 

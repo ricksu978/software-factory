@@ -374,7 +374,7 @@ async function runInProgress(c: Ctx, ext: string): Promise<void> {
 }
 
 const ROUTES: Record<string, { method: string; path: string; body?: unknown }> = {
-  "report a stage": { method: "POST", path: "/stage", body: { stageId: "understand", attempt: 1, status: "passed", model: "claude-opus-5-5" } },
+  "report a stage": { method: "POST", path: "/stage", body: { stageId: "understand", attempt: 1, status: "passed", model: "claude-opus-5-5", effort: "medium" } },
   "fetch its context": { method: "GET", path: "/context" },
 };
 

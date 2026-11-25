@@ -30,7 +30,7 @@ for (const status of [500, 502, 503, 504]) {
 
 test("a connection that fails or times out is tried again, with the same request", async () => {
   const s = scripted([new TypeError("fetch failed"), new DOMException("timed out", "TimeoutError"), 200]);
-  await s.api.stage({ stageId: "green", attempt: 1, status: "started", model: "m", tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  await s.api.stage({ stageId: "green", attempt: 1, status: "started", model: "m", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 });
   assert.equal(s.tries.length, 3);
   assert.equal(new Set(s.tries.map((t) => `${t.url} ${t.body}`)).size, 1);
 });
