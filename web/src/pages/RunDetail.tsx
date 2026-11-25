@@ -142,7 +142,7 @@ function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
             <TableCell>{s.stage_id}</TableCell>
             <TableCell>{s.attempt}</TableCell>
             <TableCell>{status(s)}</TableCell>
-            <TableCell>{s.model ? withEffort(s.model, s.effort) : ""}</TableCell>
+            <TableCell>{s.model ? withEffort(s.model, s.effort) : "model not recorded"}</TableCell>
             <TableCell>{s.started_at ? <Time at={s.started_at} zone={zone} /> : ""}</TableCell>
             <TableCell>{took(s)}</TableCell>
             <TokensCell tokensIn={s.tokens_in} tokensOut={s.tokens_out} />

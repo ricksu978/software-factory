@@ -366,11 +366,12 @@ describe("readiness spend (PBI 132)", () => {
       { model: "claude-haiku-4-5", effort: "xhigh", tokensIn: 1, tokensOut: 1, costUsd: 0.001, ranAt: at },
       { kind: "split", model: "claude-opus-5-5", effort: null, tokensIn: 1, tokensOut: 1, costUsd: 0.001, ranAt: at },
     ]);
-    d.stages = [{ ...d.stages[0], effort: "high" }, { ...d.stages[0], stage_id: "red", effort: null }];
+    d.stages = [{ ...d.stages[0], effort: "high" }, { ...d.stages[0], stage_id: "red", effort: null }, { ...d.stages[0], stage_id: "green", model: null, effort: null }];
     const html = runDetailPage(d, null);
     const [stages, checks] = html.split("<h2>Stages</h2>")[1].split("<h2>Readiness checks</h2>");
     assert.match(stages, /<td>specify<\/td><td>1<\/td><td>[^<]*<\/td><td>claude-opus-5-5 \(high\)<\/td>/);
     assert.match(stages, /<td>red<\/td><td>1<\/td><td>[^<]*<\/td><td>claude-opus-5-5 \(medium\)<\/td>/);
+    assert.match(stages, /<td>green<\/td><td>1<\/td><td>[^<]*<\/td><td>model not recorded<\/td>/);
     assert.match(checks, /<td>Judge<\/td><td>claude-haiku-4-5 \(xhigh\)<\/td>/);
     assert.match(checks, /<td>Split proposal<\/td><td>claude-opus-5-5 \(medium\)<\/td>/);
   });
