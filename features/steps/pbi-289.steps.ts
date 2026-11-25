@@ -20,13 +20,13 @@ import {
 } from "./pbi-288.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
-type Ctx = {
+export type Ctx = {
   api?: StandInApi;
   /** The BFF's answer to the last call a browser made. */
   last?: Seen;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi289?: Ctx };
   w.pbi289 ??= {};
   return w.pbi289;

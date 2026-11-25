@@ -203,15 +203,21 @@ async function shift(world: object, ms: number): Promise<void> {
  */
 async function moveOn(world: object, ms: number, until?: () => Promise<boolean>): Promise<void> {
   const end = (await factoryNow(world)) + ms;
+  // `covered` is the factory time at which the last pass started: a row due by then was the pass's to take, so the next
+  // pass is for the earliest row due after it. Measuring from the pass, not from the clock now, keeps a row that falls
+  // due a few milliseconds after another (and so is already due once the first is tried) from being skipped.
+  let covered = end - ms;
   for (;;) {
     if (until && (await until())) return;
     const r = await pool().query<{ wait: number | null; due: Date | null }>(
       `select extract(epoch from min(next_attempt_at) - clock_timestamp()) * 1000 as wait, min(next_attempt_at) as due
-       from outbox where failed_at is null and next_attempt_at > clock_timestamp()`,
+       from outbox where failed_at is null and next_attempt_at > $1::timestamptz`,
+      [new Date(covered - p219(world).offsetMs)],
     );
     const { wait, due } = r.rows[0];
     if (wait === null || !due || due.getTime() + p219(world).offsetMs > end) break;
-    await shift(world, Math.ceil(Number(wait)) + 1);
+    if (Number(wait) >= 0) await shift(world, Math.ceil(Number(wait)) + 1);
+    covered = await factoryNow(world);
     await workPass(world);
   }
   assert.ok(!until, "the condition didn't come about in time");

@@ -25,9 +25,10 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { connect, createServer } from "node:net";
+import { connect } from "node:net";
 import { join } from "node:path";
 import pg from "pg";
+import { freePort } from "../../src/bdd/ports.ts";
 import { startProvider, type Provider } from "../fixtures/pbi-288-provider.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
@@ -182,13 +183,8 @@ export async function answers(port: number): Promise<boolean> {
   return (await on("127.0.0.1")) || (await on("::1"));
 }
 
-export async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", () => resolve()));
-  const port = (s.address() as { port: number }).port;
-  await new Promise((resolve) => s.close(resolve));
-  return port;
-}
+/** PBI 390's free port, below the OS's ephemeral range, kept here for the steps that import it from this file. */
+export { freePort };
 
 function spawnBff(c: Ctx, env: Record<string, string>): Bff {
   const child = spawn(process.execPath, [BFF_MAIN], {

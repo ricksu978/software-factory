@@ -306,7 +306,7 @@ flowchart LR
       <tr><td><code>POST /items/{id}/signoff</code>, <code>/answer</code></td><td><code>POST /v1/items/{id}/decisions</code></td><td>Today's rules in <code>src/control/decisions.ts</code></td></tr>
       <tr><td><code>POST /overrides</code></td><td><code>POST /v1/overrides</code></td><td>Operator</td></tr>
       <tr><td><code>POST /users</code></td><td><code>POST /v1/users</code></td><td>Owner</td></tr>
-      <tr><td><code>POST /webhooks/github</code></td><td>Same path. The BFF passes the bytes and headers through untouched.</td><td>A valid HMAC signature</td></tr>
+      <tr><td><code>POST /webhooks/github</code></td><td>Same path. The BFF passes the bytes and headers through untouched. A body over 25 MiB, the API's own cap, gets 413 at the BFF before it's read.</td><td>A valid HMAC signature</td></tr>
       <tr><td><code>GET /dev-login</code></td><td>Removed</td><td></td></tr>
     </tbody>
   </table></div>
@@ -477,7 +477,7 @@ flowchart LR
       <tr><td>Are <code>setStatus</code>, <code>claim</code>, <code>release</code>, <code>close</code> and <code>linkPr</code> safe to repeat?</td><td>Reading each adapter call, then a test that hands the worker one outbox row twice. Step 3: they aren't, so the worker records each board mirror effect once it succeeds and skips it after (§07, <code>features/pbi-220-outbox-row-twice.feature</code>).</td><td>3</td></tr>
       <tr><td>Can a Container Apps job reach an internal-ingress app in the same environment, and how are cells kept from reaching the API?</td><td>The Container Apps networking docs, then one job in Azure</td><td>Azure</td></tr>
       <tr><td>Which broker lets Google and Microsoft accounts in through one issuer in Azure?</td><td>A choice between running Keycloak and a managed broker, once the accounts that must sign in are known</td><td>Azure</td></tr>
-      <tr><td>Does a server-sent event stream pass cleanly through a Hono proxy in the BFF?</td><td>A one-route prototype</td><td>7</td></tr>
+      <tr><td>Does a server-sent event stream pass cleanly through a Hono proxy in the BFF?</td><td>A one-route prototype. Step 7c: yes. <code>@hono/node-server</code> 2.1 writes each chunk of the API's answer to the browser as it arrives, and cancels the call to the API when the browser leaves. The BFF only had to stop its 30-second limit from cutting the stream off, so that limit now covers the API's first answer and no more for <code>text/event-stream</code>. The PBI 290 scenarios hold a stream open for 70 seconds through the BFF.</td><td>7</td></tr>
       <tr><td>Does <code>openid-client</code> run on Node 26? Its package declares no Node range.</td><td>One sign-in round trip against local Keycloak. Step 7a: <code>openid-client</code> 6.8.9 runs on Node 26.13 through every BFF unit test and every non-<code>@local</code> PBI 288 scenario, against the test provider. The Keycloak round trip is the <code>@local</code> scenario in <code>features/pbi-288-bff-sign-in-sessions.feature</code>, and closes this once it passes under <code>aspire run</code>.</td><td>7</td></tr>
     </tbody>
   </table></div>

@@ -13,11 +13,11 @@ import { After, AfterAll, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify, format } from "node:util";
 import pg from "pg";
+import { freePort } from "../../src/bdd/ports.ts";
 import { attempt } from "../../src/worker/main.ts";
 import { createPool, migrate, withTx } from "../../src/store/db.ts";
 import { appendEvent } from "../../src/store/events.ts";
@@ -38,14 +38,6 @@ const LOST = /lost/i;
 // ---- a Postgres these scenarios can stop and start ----
 
 type OwnPg = { url: string; stop(): Promise<void>; start(): Promise<void>; shutdown(): Promise<void> };
-
-async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
-  const port = (s.address() as { port: number }).port;
-  await new Promise<void>((resolve) => s.close(() => resolve()));
-  return port;
-}
 
 /** From FACTORY_PG_BIN, as in a cell, or a Testcontainers Postgres on a fixed host port, so its URL survives a restart. */
 async function ownPostgres(): Promise<OwnPg> {

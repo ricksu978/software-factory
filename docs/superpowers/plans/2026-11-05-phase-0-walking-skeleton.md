@@ -1260,6 +1260,8 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   No step starts a server on, or connects to, a port fixed in its code.
   `src/bdd/ports.ts` gives a step a free port,
   and stands each port a scenario names for a free port of that scenario's own.
+  It picks a free port at random between 20000 and 32767, below the range the OS takes outgoing connections' ports from,
+  so no connection holds the port when the step listens on it.
   `findFixedPorts` in `src/bdd/fixed-ports.ts` names each step file and line that listens on or connects to a fixed port,
   and PBI 390's scenarios run it over `features/steps`.
   Imports use explicit `.ts` extensions.
@@ -6496,6 +6498,32 @@ from spec §6 rows 1 to 7:
   because the API's `/v1` routes come in a later step.
   The `@db` scenarios in `features/pbi-289-bff-guards-and-forwards.feature` forward to the stand-in API in `features/fixtures/pbi-289-api.ts`,
   and `src/bff/session.db.test.ts` checks `pgSessions` against Postgres.
+- Since step 7c (2026-11-07 design,
+  §03 and §05,
+  PBI 290),
+  `createBff` passes GitHub's webhooks and the live event stream through.
+  `POST /webhooks/github` needs no session and no `Origin`,
+  sits outside the `/bff/*` guard,
+  and goes to `API_URL` + `/webhooks/github` with its body byte for byte and every header GitHub sent,
+  less hop-by-hop headers,
+  `Host`,
+  `Content-Length`,
+  `Cookie` and `Authorization`.
+  The BFF adds no bearer token and doesn't check `X-Hub-Signature-256`,
+  because only the API holds the webhook secret.
+  A body over 25 MiB (`MAX_WEBHOOK`,
+  the API's own cap) gets 413 before the BFF reads it,
+  and never reaches the API.
+  The API's status and body go back to GitHub,
+  and an API that doesn't answer gives 502,
+  so GitHub can redeliver.
+  `/bff/v1/events` goes through `/bff/v1/*` like any call.
+  The API has 30 seconds (`apiTimeoutMs` in `BffConfig`) to answer any call,
+  and an ordinary answer has that long to arrive whole.
+  An answer of `text/event-stream` streams to the browser for as long as the API keeps it open,
+  and the browser leaving cancels the call to the API.
+  The `@db` scenarios in `features/pbi-290-bff-webhooks-and-events.feature` use the same stand-in API,
+  which can now hold a stream open.
 - Since step 8a (2026-11-07 design,
   §04,
   §09 and §10,
