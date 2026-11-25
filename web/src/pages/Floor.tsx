@@ -1,6 +1,7 @@
 // Floor in the SPA (redesign step 8b): what waits on a person, what's next, the final-stage, not-ready, blocked, split
 // and failed items, what's in flight, the factory's banners, and an operator's Controls, as today's Floor in
-// src/http/views.ts shows them.
+// src/http/views.ts shows them. Since step 8c (PBI 280) it also shows when the worker last ticked, with the count of
+// outbox rows set aside beside it, and a "Scheduler not ticking" banner once that heartbeat is more than a minute old.
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import type { CiFailure, FloorData, FloorProps, MainBreak } from "../api.ts";
 import { FLOOR_KINDS } from "../forms.ts";
 import { PATHS } from "../routes.ts";
-import { age, blockedReason, drainLine, mainRedLead, recheckLine, restartLine } from "../lines.ts";
+import { age, blockedReason, drainLine, heartbeatLine, mainRedLead, recheckLine, restartLine, schedulerBanner } from "../lines.ts";
 import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, PrLink, SplitInto, Standing } from "./parts.tsx";
 
 export { submitFloorControls } from "../forms.ts";
@@ -57,9 +58,11 @@ function MainBreakLine({ r }: { r: MainBreak }) {
 }
 
 /** The factory's state and what needs attention, each as a banner, as today's Floor shows them. */
-function Banners({ f }: { f: FloorData }) {
+function Banners({ f, now }: { f: FloorData; now: Date }) {
+  const stale = schedulerBanner(f.workerHeartbeat, now);
   return (
     <>
+      {stale && <Banner>{stale}</Banner>}
       {f.mainBreaks.length > 0 && (
         <Banner>
           <p>{mainRedLead(f.mainBreaks)}</p>
@@ -98,13 +101,25 @@ function Banners({ f }: { f: FloorData }) {
   );
 }
 
-export function Floor({ data: f, now, zone, message, onSubmit }: FloorProps) {
+/** The worker's heartbeat and, beside it, the outbox rows the worker set aside after their tenth failed attempt. */
+function WorkerLine({ f, now }: { f: FloorData; now: Date }) {
+  if (f.workerHeartbeat === undefined && f.outboxSetAside === undefined) return null;
+  return (
+    <p className="text-muted-foreground">
+      {f.workerHeartbeat !== undefined && <span>{heartbeatLine(f.workerHeartbeat, now)}</span>}{" "}
+      {f.outboxSetAside !== undefined && <span>Outbox rows set aside: {f.outboxSetAside}</span>}
+    </p>
+  );
+}
+
+export function Floor({ data: f, now, zone, message, onSubmit, onReasonField }: FloorProps) {
   const st = (id: string) => <Standing k={f.keys[id]} />;
   return (
     <div>
       <h1 className="mb-3 text-2xl font-semibold">Floor</h1>
       <Message text={message} />
-      <Banners f={f} />
+      <Banners f={f} now={now} />
+      <WorkerLine f={f} now={now} />
       <p>
         {f.waitingCount} of {f.capacity} waiting. <A href={PATHS.activity}>Activity</A> <A href={PATHS.phase0}>Phase 0 report</A>
       </p>
@@ -165,7 +180,12 @@ export function Floor({ data: f, now, zone, message, onSubmit }: FloorProps) {
           <H2>Controls</H2>
           <form aria-label="Controls" className="max-w-xl space-y-2" onSubmit={onSubmitWith("reason", onSubmit && ((b, v) => onSubmit("Controls", b, v)))}>
             <label htmlFor="floor-reason" className="block text-sm font-medium">Reason</label>
-            <Input id="floor-reason" name="reason" required />
+            <Input
+              id="floor-reason" name="reason" required
+              onFocus={(e) => onReasonField?.({ value: e.currentTarget.value, focused: true })}
+              onChange={(e) => onReasonField?.({ value: e.currentTarget.value, focused: true })}
+              onBlur={(e) => onReasonField?.({ value: e.currentTarget.value, focused: false })}
+            />
             <p className="flex flex-wrap gap-2">
               {Object.keys(FLOOR_KINDS).map((b) => <Button key={b} type="submit" variant={b === "Kill switch" ? "destructive" : "outline"}>{b}</Button>)}
             </p>

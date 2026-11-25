@@ -1,12 +1,14 @@
 // The SPA's page once the shell has found a session and a user (redesign steps 8a and 8b): the header, then the page
 // the address names (web/src/routes.ts). Each page draws from one read of the factory, and reads it again once a form
-// it sent is accepted. Live updates come in a later step.
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+// it sent is accepted. Floor also follows the factory's events (step 8c, web/src/live.ts) and draws each read it hands
+// back, so it stays live without reloading.
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { readActivity, readFloor, readItem, readPhase0, type Call, type FormName, type ItemData, type Submitted } from "./api.ts";
 import { submitAnswer, submitFloorControls, submitItemControls, submitSignOff } from "./forms.ts";
 import { Activity } from "./pages/Activity.tsx";
+import { startLiveFloor, type LiveClock, type LiveFloor } from "./live.ts";
 import { Floor } from "./pages/Floor.tsx";
 import { Phase0 } from "./pages/Phase0.tsx";
 import { RunDetail } from "./pages/RunDetail.tsx";
@@ -35,8 +37,15 @@ function useRead<T>(read: () => Promise<T>, key: string) {
       : { ...s, message: r.outcome === "failed" ? r.message : `${r.field} can't be empty.` }),
     (e: unknown) => setState((s) => ({ ...s, message: `It wasn't sent: ${e instanceof Error ? e.message : String(e)}` })));
   }, []);
-  return [state, took] as const;
+  return [state, took, setState] as const;
 }
+
+/** The browser's own clock and timers, for the live Floor. */
+const browserClock: LiveClock = {
+  now: () => new Date(),
+  setTimeout: (fn, ms) => window.setTimeout(() => void fn(), ms),
+  clearTimeout: (handle) => window.clearTimeout(handle as number),
+};
 
 function Shown<T>({ state, what, children }: { state: Loaded<T>; what: string; children: (data: T) => ReactNode }) {
   if (state.error) {
@@ -51,10 +60,28 @@ function Shown<T>({ state, what, children }: { state: Loaded<T>; what: string; c
 }
 
 function FloorPage({ call }: { call: Call }) {
-  const [state, took] = useRead(() => readFloor(call), "floor");
+  const [state, took, setState] = useRead(() => readFloor(call), "floor");
+  const live = useRef<LiveFloor | undefined>(undefined);
+  const loaded = state.data !== undefined;
+  // Floor follows the events once it has drawn from its first read, and stops when the page goes.
+  useEffect(() => {
+    if (!loaded) return;
+    const l = startLiveFloor({ call, clock: browserClock, onFloor: (data) => setState((s) => ({ ...s, data })) });
+    live.current = l;
+    return () => {
+      l.stop();
+      live.current = undefined;
+    };
+  }, [loaded, call, setState]);
   return (
     <Shown state={state} what="floor">
-      {(data) => <Floor data={data} zone={viewerZone()} now={new Date()} message={state.message} onSubmit={(_f, b, v) => took(submitFloorControls(call, b, v))} />}
+      {(data) => (
+        <Floor
+          data={data} zone={viewerZone()} now={new Date()} message={state.message}
+          onSubmit={(_f, b, v) => took(submitFloorControls(call, b, v))}
+          onReasonField={(f) => live.current?.reasonField(f)}
+        />
+      )}
     </Shown>
   );
 }

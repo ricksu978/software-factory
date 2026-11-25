@@ -111,6 +111,7 @@ describe("the API", dbTest, () => {
     const b = await (await as("vera", "/v1/floor")).json();
     assert.equal(b.claudeToken, null);
     assert.equal(b.workerHeartbeat, null);
+    assert.equal(b.outboxSetAside, 0);
     assert.equal(b.canOperate, false);
   });
 

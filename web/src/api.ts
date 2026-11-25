@@ -154,7 +154,11 @@ export type Submitted<T> =
  * when react-dom/server renders the page, a submit does nothing. */
 export type FormName = "Controls" | "Sign off" | "Answer";
 export type OnSubmit = (form: FormName, button: string, value: string) => void;
-export type FloorProps = { data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
+export type FloorProps = {
+  data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit;
+  /** Told what the Controls' Reason field holds and whether it has focus, each time either changes (PBI 280). */
+  onReasonField?: (field: { value: string; focused: boolean }) => void;
+};
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
 export type ActivityProps = { data: ActivityData };

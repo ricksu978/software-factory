@@ -10,7 +10,8 @@
 //                        or gets 403.
 //   *    /bff/v1/*       needs a live session, or gets 401. The BFF refreshes an access token that expires within 60
 //                        seconds, then forwards the call one for one to the API's /v1/*, with the session's access token
-//                        as a bearer token and none of the browser's cookies or credentials.
+//                        as a bearer token and none of the browser's cookies or credentials. A call gets 30 seconds,
+//                        except that an event stream (text/event-stream) runs on until the API ends it (PBI 280).
 // And step 8a (§04 and §10):
 //   GET  everything else the SPA's built files from spaDir, or its page for a deep link (src/bff/spa.ts).
 import { Hono, type Context } from "hono";
@@ -151,9 +152,17 @@ export function createBff(cfg: BffConfig): Hono {
     }
     const method = c.req.method;
     const body = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
+    // A call gets API_TIMEOUT_MS to finish, but an event stream (PBI 280) runs for as long as the API keeps it open,
+    // five minutes, so once one has begun the limit no longer ends it. The browser closing its stream still does.
+    const limit = cfg.timeout ? cfg.timeout(API_TIMEOUT_MS) : AbortSignal.timeout(API_TIMEOUT_MS);
+    const call = new AbortController();
+    const onLimit = () => call.abort(limit.reason);
+    if (limit.aborted) onLimit();
+    else limit.addEventListener("abort", onLimit, { once: true });
     let r: Response;
     try {
-      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: cfg.timeout ? cfg.timeout(API_TIMEOUT_MS) : AbortSignal.timeout(API_TIMEOUT_MS) });
+      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: call.signal });
+      if (/^text\/event-stream\b/i.test(r.headers.get("content-type") ?? "")) limit.removeEventListener("abort", onLimit);
     } catch (e) {
       console.error(`the BFF couldn't reach the API for ${method} ${from.pathname}:`, (e as Error).message);
       return c.json({ error: "the API didn't answer" }, 502);
