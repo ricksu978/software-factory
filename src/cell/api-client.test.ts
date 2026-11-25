@@ -63,3 +63,8 @@ test("lease({ once: true }) tries once, for the renewal loop's own tolerance", a
   assert.equal(s.tries.length, 1);
   assert.deepEqual(await s.api.lease(), { stop: false });
 });
+
+test("lease passes on restarting from the cell API's reply, so the cell ends at the stage boundary (PBI 301)", async () => {
+  const fetch = (async () => json(200, { ok: true, stop: false, restarting: true })) as unknown as typeof globalThis.fetch;
+  assert.deepEqual(await httpCellApi(cfg, { fetch }).lease(), { stop: false, restarting: true });
+});

@@ -24,6 +24,22 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "split_filed", "Split"],
   // PBI 226: a Split parent whose filed children are all Done moves to Done.
   ["Split", "children_done", "Done"],
+  // PBI 228: a parent withdrawn to Abandoned after its split was filed, before PBI 225, moves to Split.
+  ["Abandoned", "split_filed", "Split"],
+  // PBI 369: a re-check that no longer finds the merge broke main sends the item back to Accepted.
+  ["Failed", "rechecked", "Accepted"],
+  // PBI 395: the owner's approval of a rule change sends a waiting item on through the gate, and an edit to an approved
+  // section sends a Queued or later item back to it.
+  ["NotReady", "rule_change_approved", "Eligible"], ["Queued", "rules_edited", "Eligible"],
+  ["InProgress", "rules_edited", "Eligible"], ["SignOff", "rules_edited", "Eligible"],
+  ["NeedsInput", "rules_edited", "Eligible"], ["InReview", "rules_edited", "Eligible"],
+  // PBI 364: a stage after sign-off asks to change a locked feature file.
+  ["InProgress", "feature_change_requested", "FeatureChangeRequest"],
+  // PBI 364: backlog changes and a merge reach an item waiting in FeatureChangeRequest.
+  ["FeatureChangeRequest", "withdrawn", "Abandoned"], ["FeatureChangeRequest", "criteria_changed", "Queued"],
+  ["FeatureChangeRequest", "rules_edited", "Eligible"], ["FeatureChangeRequest", "merged", "Accepted"],
+  // PBI 365: the Product Owner's decision on the request queues the item to resume at the stage that asked.
+  ["FeatureChangeRequest", "feature_change_decided", "Queued"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -36,5 +52,20 @@ test("a Split item has no way back to the gate", () => {
 test("children_done moves only a Split item", () => {
   for (const s of ["NotReady", "Eligible", "Abandoned", "Failed", "Done"] as ItemState[]) assert.equal(next(s, "children_done"), null);
 });
-test("split_filed moves only a NotReady item", () => assert.equal(next("Eligible", "split_filed"), null));
+test("split_filed moves only a NotReady or Abandoned item", () => {
+  for (const s of ["Eligible", "Queued", "Failed", "Done", "Split"] as ItemState[]) assert.equal(next(s, "split_filed"), null);
+});
 test("override goes anywhere", () => assert.equal(overrideTo("Done", "Queued"), "Queued"));
+test("rechecked moves only a Failed item", () => {
+  for (const s of ["Accepted", "Abandoned", "Done", "Queued"] as ItemState[]) assert.equal(next(s, "rechecked"), null);
+});
+test("only a NotReady item takes a rule change approval, and only a Queued or later one a rules edit", () => {
+  for (const s of ["Eligible", "Queued", "InProgress", "Abandoned"] as ItemState[]) assert.equal(next(s, "rule_change_approved"), null);
+  for (const s of ["NotReady", "Eligible", "Accepted", "Done", "Abandoned"] as ItemState[]) assert.equal(next(s, "rules_edited"), null);
+});
+test("feature_change_requested moves only an InProgress item", () => {
+  for (const s of ["Queued", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as ItemState[]) assert.equal(next(s, "feature_change_requested"), null);
+});
+test("feature_change_decided moves only a FeatureChangeRequest item", () => {
+  for (const s of ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "Abandoned"] as ItemState[]) assert.equal(next(s, "feature_change_decided"), null);
+});

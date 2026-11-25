@@ -111,14 +111,21 @@ export function fakeLauncher(): Launcher & { started: Record<string, string>[]; 
   };
 }
 
+/** The dashboard's port and the API's, which cells never reach. egress-proxy.mjs refuses them too. */
+const REFUSED_PORTS = ["7400", "7402"];
+
 const proxyScript = readFileSync(new URL("./egress-proxy.mjs", import.meta.url), "utf8");
 
 /**
  * What the proxy admits, as `kind:host:port` (see egress-proxy.mjs): tunnels to GitHub and npm on 443, plain HTTP to
- * the control plane, and SAS-signed plain HTTP to Azurite, each on its pinned port.
+ * the cell API, and SAS-signed plain HTTP to Azurite, each on its pinned port. A cell API address on 7400 or 7402,
+ * the dashboard's port or the API's, throws.
  */
 export function egressAllow(cfg: { controlUrl: string; blob: string }): string[] {
   const controlPort = new URL(cfg.controlUrl).port;
+  if (REFUSED_PORTS.includes(controlPort)) {
+    throw new Error(`refusing to let cells through to port ${controlPort}: CELL_CONTROL_URL must name the cell API on 7401, not today's dashboard on 7400 or the API on 7402`);
+  }
   const endpoint = /(?:^|;)\s*BlobEndpoint=([^;]+)/i.exec(cfg.blob)?.[1];
   const blobPort = endpoint ? new URL(endpoint).port : "";
   if (!controlPort || !blobPort) throw new Error("the control plane and Azurite need explicit ports for the egress allowlist");
@@ -132,12 +139,13 @@ export function egressAllow(cfg: { controlUrl: string; blob: string }): string[]
  */
 export async function ensureEgress(cfg: { image: string; controlUrl: string; blob: string; run?: Run }): Promise<void> {
   const run = cfg.run ?? defaultRun;
+  // Before any docker command, so an address on a refused port starts nothing.
+  const allow = egressAllow(cfg).join(",");
   try {
     await run("docker", ["network", "create", "--internal", CELL_NETWORK]);
   } catch (e) {
     if (!stderrOf(e).includes("already exists")) throw e;
   }
-  const allow = egressAllow(cfg).join(",");
   const label = createHash("sha256").update(JSON.stringify({ image: cfg.image, allow, proxyScript })).digest("hex");
   let current: string | null = null;
   try {

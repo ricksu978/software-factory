@@ -2,7 +2,9 @@
 // and today's control plane from src/main.ts in this process, on PBI 4's shared test database, with fakes. PBI 17's
 // steps own the items, the launcher's record and the item states, so the worker's launcher records into PBI 17's
 // context. The worker module loads lazily, so while it doesn't exist every scenario fails on a Then.
-// PBI 158's steps run this file's worker too, so its hooks run for @pbi-158.
+// PBI 158's steps run this file's worker too, so its hooks run for @pbi-158. There, and under PBI 157, the worker runs
+// on a fake clock, so the steps that wait for its ticks, polls and outbox passes move that clock on as they wait
+// (features/support/worker-clocks.ts, PBI 396).
 // Each process mirrors only the transitions it commits, so the control plane gets a pool of its own on the same
 // database, as it has in its own process.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
@@ -16,13 +18,15 @@ import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
+import { passUntil } from "../support/worker-clocks.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, freshDb, newItem } from "./pbi-17.steps.ts";
 
 const REPO = "ricksu978/software-factory";
 const IMAGE = "factory-cell:scenario";
-const CONTROL_URL = "http://host.docker.internal:7400";
-const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;";
+// Settings the worker hands on and never connects to, so their hosts are names that reach nothing (PBI 390).
+const CONTROL_URL = "http://control.test:7400";
+const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://blob.test:7410/devstoreaccount1;";
 // The worker ticks this often here. It polls once at start and not again within a scenario, so an item a step adds
 // later reaches the worker only through the tick.
 const TICK_MS = 100;
@@ -146,19 +150,28 @@ export async function board(world: object, name = "the board"): Promise<Board> {
 }
 
 /** PBI 17 gives each item a backlog source of its own. Here they all sit on the scenario's one board. */
-export async function rehome(world: object): Promise<void> {
+export async function rehome(world: object, attempt = 0): Promise<void> {
   const b = await board(world);
   const tests = "select id from backlog_source where url like 'test:%'";
   // PBI 17 inserts an item and then seeds the board with it, so a worker polling in between ingests a copy of its own.
   // The step's item is the one the scenario names, so the poller's copy moves to a source of its own, out of the way.
+  // It's held there too. The stray source has no adapter, so a scheduler that claimed the copy would fail its whole
+  // tick on pinning it, every tick, and never reach the item behind it. A copy ingested as the first worker lost its
+  // lock did that to PBI 157's takeover scenario now and then (PBI 376).
   const copies = (await pool().query<{ id: string }>(
     `select id from item where source_id = $1 and external_id in (select external_id from item where source_id in (${tests}))`, [b.id])).rows;
   if (copies.length) {
     const stray = (await pool().query<{ id: string }>(
       "insert into backlog_source (adapter, url) values ('fake', 'stray:' || gen_random_uuid()) returning id")).rows[0].id;
-    await pool().query("update item set source_id = $1 where id = any($2)", [stray, copies.map((r) => r.id)]);
+    await pool().query("update item set source_id = $1, held = true where id = any($2)", [stray, copies.map((r) => r.id)]);
   }
-  await pool().query(`update item set source_id = $1 where source_id in (${tests})`, [b.id]);
+  try {
+    await pool().query(`update item set source_id = $1 where source_id in (${tests})`, [b.id]);
+  } catch (e) {
+    // The poller can ingest another copy between the move above and this update. Move that one aside too, and go again.
+    if ((e as { code?: string }).code !== "23505" || attempt >= 5) throw e;
+    await rehome(world, attempt + 1);
+  }
 }
 
 /** Maps each board item the factory now holds to its id, so PBI 17's state steps can name it. */
@@ -216,11 +229,12 @@ export async function fakes(world: object) {
     blob: BLOB,
     sopVersion: "default@1",
     tickMs: TICK_MS,
+    outboxMs: TICK_MS,
     pollMs: POLL_MS,
     // The control plane's own settings.
     local: false,
     auth: createAuth({ mode: "azure" }),
-    origin: "http://127.0.0.1:7400",
+    origin: "http://control.test:7400",
     webhookSecret: "webhook-secret",
     claudeToken: "unused",
     uploadUrl: async (path: string) => `http://blob.test/${path}`,
@@ -259,10 +273,15 @@ export async function startWorker(world: object, n: number): Promise<void> {
 async function waitFor(world: object, n: number): Promise<void> {
   const c = ctx(world);
   const w = c.worker!;
-  for (const b of c.boards) await until(`the worker polls board ${b.name}`, () => (w.runs.get(`polling source ${b.id}`) ?? 0) >= 1);
+  for (const b of c.boards) await passUntil(world, `the worker polls board ${b.name}`, () => (w.runs.get(`polling source ${b.id}`) ?? 0) >= 1);
   // The tick under way as the poll ended started beside it, so it doesn't count.
   const base = ticks(w) + 1;
-  await until(`the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
+  await passUntil(world, `the worker ticks ${n} time(s)`, () => ticks(w) >= base + n);
+  // The board shows what those ticks did once the worker has worked through the outbox after them (PBI 219). The pass
+  // under way as the last tick ended may have started before it, so it doesn't count.
+  const passes = () => w.runs.get("working through the outbox") ?? 0;
+  const after = passes() + 1;
+  await passUntil(world, "the worker works through the outbox", () => passes() >= after + 1);
   await learnItems(world);
 }
 
@@ -386,6 +405,9 @@ Given("the worker is running and has ticked once", long, async function () {
 // ---- When ----
 
 When("the worker starts", long, async function () {
+  // PBI 300's scenarios start the real worker as a standby, so it runs no tick of its own, through `workerStart`.
+  const own = (this as { workerStart?: () => Promise<void> }).workerStart;
+  if (own) return own();
   const c = ctx(this);
   if (!c.env) return startWorker(this, 1);
   const mod = await load<WorkerModule>("src/worker/main.ts");
@@ -417,7 +439,7 @@ When("the worker ticks again", long, async function () {
   await rehome(this);
   const w = c.worker;
   const now = ticks(w);
-  await until("the worker ticks again", () => ticks(w) > now + 1);
+  await passUntil(this, "the worker ticks again", () => ticks(w) > now + 1);
 });
 
 When("the worker starts and polls the board once", long, async function () {

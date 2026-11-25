@@ -22,8 +22,8 @@ export type Mods = {
     cellApi: (deps: object) => Handler;
   };
   server: { startServer: (handlers: Handler[], opts: { port: number; host?: string }) => Promise<Server> };
-  board: { mirrorBoard: (deps: object) => () => void };
-  fake: { fakeBacklog: () => Target; fakeRepoHost: () => object };
+  outbox: { workOutbox: (deps: object) => Promise<void> };
+  fake: { fakeBacklog: () => Target; fakeRepoHost: () => { files: Map<string, string> } };
   items: {
     claimNext: (c: pg.PoolClient, owner: string, now: Date) => Promise<{ itemId: string; runId: string; generation: number } | null>;
     expireLeases: (c: pg.PoolClient, now: Date) => Promise<string[]>;
@@ -33,7 +33,9 @@ export type Mods = {
 };
 export type Cell = { runId: string; generation: number; token: string };
 export type Ctx = {
-  mods?: Mods; server?: Server; upstream?: Server; seen: { headers: IncomingHttpHeaders; body: string }[]; off?: () => void;
+  mods?: Mods; server?: Server; upstream?: Server; seen: { headers: IncomingHttpHeaders; body: string }[];
+  /** The worker's pass over the outbox, which mirrors the API's transitions onto the board (PBI 219). */
+  mirror?: () => Promise<void>;
   board?: Target; sourceId?: string; items: Map<string, string>; first?: Cell; statuses: number[]; before?: string; at: Date;
 };
 
@@ -44,11 +46,11 @@ export function ctx(world: object): Ctx {
 }
 
 export async function mods(): Promise<Mods | null> {
-  const [cellApi, server, board, fake, items, db] = await Promise.all([
-    load<Mods["cellApi"]>("src/control/cell-api.ts"), load<Mods["server"]>("src/http/server.ts"), load<Mods["board"]>("src/control/board.ts"),
+  const [cellApi, server, outbox, fake, items, db] = await Promise.all([
+    load<Mods["cellApi"]>("src/control/cell-api.ts"), load<Mods["server"]>("src/http/server.ts"), load<Mods["outbox"]>("src/worker/outbox.ts"),
     load<Mods["fake"]>("src/adapters/fake.ts"), load<Mods["items"]>("src/store/items.ts"), load<Mods["db"]>("src/store/db.ts"),
   ]);
-  return cellApi && server && board && fake && items && db ? { cellApi, server, board, fake, items, db } : null;
+  return cellApi && server && outbox && fake && items && db ? { cellApi, server, outbox, fake, items, db } : null;
 }
 
 function listen(server: Server): Promise<number> {
@@ -132,7 +134,6 @@ Before({ tags: "@pbi-16", ...long }, async function () {
 
 After({ tags: "@pbi-16" }, async function () {
   const c = ctx(this);
-  c.off?.();
   for (const s of [c.server, c.upstream]) if (s) await new Promise((r) => s.close(r));
 });
 
@@ -160,9 +161,11 @@ Given("a backlog source whose field map sets these board statuses:", long, async
   const upstreamPort = await listen(c.upstream);
   const board = m.fake.fakeBacklog();
   const repoHost = m.fake.fakeRepoHost();
+  // The file a scenarios_written report locks, so the cell API's snapshot of it (PBI 224) finds it at the sha.
+  repoHost.files.set(`${repoName}@5c3a1f0:features/pbi-16-cell-api.feature`, "Feature: Cell API\n");
   c.board = board;
   const backlogFor = () => board.adapter;
-  c.off = m.board.mirrorBoard({ pool: d.pool, backlogFor, repoHost });
+  c.mirror = () => m.outbox.workOutbox({ pool: d.pool, backlogFor, repoHost });
   const api = m.cellApi.cellApi({
     pool: d.pool, secret, repoHost, backlogFor,
     stageAfter: (_sop: string | null, stageId: string) => ({ understand: "specify", specify: "sign-off", red: "green" })[stageId] ?? null,
@@ -312,6 +315,8 @@ Then("item {string} has no lease owner and is at lease generation {int}", long, 
 async function boardItem(c: Ctx, name: string) {
   base(c);
   assert.ok(c.board, "no board");
+  // The board shows a transition once the worker has worked through the outbox.
+  await c.mirror?.();
   const item = await c.board.adapter.getItem(name);
   assert.ok(item, `no board item ${name}`);
   return item;

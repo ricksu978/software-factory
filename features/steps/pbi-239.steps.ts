@@ -30,7 +30,6 @@ import { setUp, type Ctx as Pbi18 } from "./pbi-18.steps.ts";
 import { CELL_SECRET, ctx as p89 } from "./pbi-89.steps.ts";
 
 const REPO = "ricksu978/software-factory";
-const WAIT = "FACTORY_RESTART_WAIT_MINUTES";
 const SOP_TEXT = readFileSync(join(process.cwd(), "sop/default.yml"), "utf8");
 const migrationsDir = join(process.cwd(), "db", "migrations");
 /** Today's schema: the migrations that exist before this item's. This item's migration is the one the scenarios run. */
@@ -92,9 +91,6 @@ Before({ tags: "@pbi-239" }, function () {
   // PBI 140's steps read its context's clock, and PBI 17's scheduler its `now`. Both are this scenario's clock.
   (this as { pbi140?: unknown }).pbi140 = { clock: c.clock, logs: [], restore: [], renewals: [], origins: new Map(), steps: [] };
   p17(this).now = c.clock;
-  const wait = process.env[WAIT];
-  delete process.env[WAIT];
-  c.restore.push(() => (wait === undefined ? delete process.env[WAIT] : (process.env[WAIT] = wait)));
 });
 
 Before({ tags: "@pbi-239 and @db", ...long }, async function () {
@@ -284,12 +280,6 @@ async function itemAtGreen(world: object, name: string, cell: string, expires: D
   return run;
 }
 
-Given("item {string} is running in cell {string} with a live lease, at green attempt {int}, started and never reported", long, async function (name: string, cell: string, n: number) {
-  const c = ctx(this);
-  const run = await itemAtGreen(this, name, cell, minutesFrom(c.clock, 4));
-  await startedAttempt(need().pool, run, "green", n, minutesFrom(c.clock, -20));
-});
-
 Given("item {string} is running in cell {string} with a live lease, at green attempt {int}", long, async function (name: string, cell: string, n: number) {
   const c = ctx(this);
   const run = await itemAtGreen(this, name, cell, minutesFrom(c.clock, 4));
@@ -347,15 +337,6 @@ When("cell {string} reports {word}'s attempt {int} as stopped", long, async func
 
 Then("item {string}'s {word} attempt {int} is recorded as stopped", long, async function (name: string, stage: string, n: number) {
   stopped(await itemAttempt(this, name, stage, n), `item ${name}'s ${stage} attempt ${n}`);
-});
-
-Then("item {string}'s {word} attempt {int} is recorded as stopped, ended at the moment of that tick", long, async function (name: string, stage: string, n: number) {
-  const s = p17(this);
-  assert.ok(s.ticked, "the scheduler never ticked");
-  const a = await itemAttempt(this, name, stage, n);
-  const what = `item ${name}'s ${stage} attempt ${n}`;
-  stopped(a, what);
-  endedAt(a, s.now!, what);
 });
 
 Then("item {string}'s {word} attempt {int} has a message saying the cell's lease ran out", long, async function (name: string, stage: string, n: number) {
@@ -421,6 +402,8 @@ async function tickAndRun(world: object, name: string, mode: Engine["mode"]): Pr
     async transition(b: Record<string, any>) { e.calls.push({ route: "/transition", body: b }); },
     async policyResults(b: Record<string, any>) { e.calls.push({ route: "/policy-results", body: b }); },
     async pr(b: Record<string, any>) { e.calls.push({ route: "/pr", body: b }); },
+    // A stop the lease check at the boundary after green finds leaves no attempt open, so the cell releases its claim.
+    async release() { e.calls.push({ route: "/release", body: {} }); },
     async checks() { return "success"; },
     async upload() {},
   };

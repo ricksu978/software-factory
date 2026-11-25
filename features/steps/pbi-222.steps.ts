@@ -1,9 +1,10 @@
 // Step definitions for features/pbi-222-cell-api-service.feature. The @db scenarios run the cell API service from
-// src/cell-api/main.ts and today's control plane from src/main.ts in this process on the ports the scenarios name,
-// on PBI 4's shared test database, with a fake board, a fake repo host and a fake model upstream. The PORT scenarios
+// src/cell-api/main.ts and today's control plane from src/main.ts in this process, on PBI 4's shared test database, with a fake board, a fake repo host and a fake model upstream. The PORT scenarios
 // run src/main.ts itself as a child process from the environment they set, as `npm run start:control` does.
 // PBI 16's steps own the claimed item, the cell's token, the snapshot and the cell API's Thens, so this file runs the
 // cell API through PBI 16's context. PBI 156's "today's control plane starts" hands over to `todaysControlStart`.
+// Each port a scenario names, 7400 or 7401, stands for a free port of the scenario's own (src/bdd/ports.ts), so
+// scenarios in parallel workers never collide, and a program that really holds 7400 or 7401 is never reached.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -12,15 +13,16 @@ import type { AddressInfo } from "node:net";
 import { connect } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { runToken } from "../../src/control/cell-api.ts";
+import { scenarioPorts } from "../../src/bdd/ports.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p16ctx, mods as p16mods, routeCall, snapshot, stageBody } from "./pbi-16.steps.ts";
 
-const SECRET = "cell-secret";
+export const SECRET = "cell-secret";
 const REPO = "ricksu978/software-factory";
 const DEV_LOGIN = "owner";
 const CONFIG = "bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n";
-const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://127.0.0.1:7410/devstoreaccount1;";
+const BLOB = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;BlobEndpoint=http://blob.test:7410/devstoreaccount1;";
 
 type Serving = { server: Server; stop(): Promise<void> };
 type CellApiModule = {
@@ -67,7 +69,8 @@ export function ctx(world: object): Ctx {
 const pool = () => need().pool;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-After({ tags: "@pbi-222", ...long }, async function () {
+// PBI 223's scenarios run the cell API service through this context too.
+After({ tags: "@pbi-222 or @pbi-223", ...long }, async function () {
   const c = ctx(this);
   await c.cellApi?.stop();
   await c.cellApiMain?.stop();
@@ -81,7 +84,9 @@ After({ tags: "@pbi-222", ...long }, async function () {
 });
 
 /** True when something accepts a TCP connection on `port`, over IPv4 or IPv6. */
-async function answers(port: number): Promise<boolean> {
+/** Whether anything answers on the free port the scenario's `named` port stands for. */
+export async function answers(world: object, named: number): Promise<boolean> {
+  const port = await scenarioPorts(world).real(named);
   const on = (host: string) => new Promise<boolean>((resolve) => {
     const s = connect({ host, port, timeout: 2_000 });
     s.once("connect", () => { s.destroy(); resolve(true); });
@@ -119,7 +124,7 @@ export function deps(world: object) {
     // Today's control plane's own settings.
     local: false,
     auth: createAuth({ mode: "azure" }),
-    origin: "http://127.0.0.1:7400",
+    origin: "http://control.test:7400",
     webhookSecret: "webhook-secret",
     readBlob: async () => null,
   };
@@ -139,7 +144,7 @@ async function fakeUpstream(c: Ctx, owner?: string): Promise<void> {
   c.upstreamUrl = `http://127.0.0.1:${(c.upstream.address() as AddressInfo).port}`;
 }
 
-async function startCellApi(world: object, port: number): Promise<void> {
+export async function startCellApi(world: object, port: number): Promise<void> {
   const c = ctx(world);
   const mod = await load<CellApiModule>("src/cell-api/main.ts");
   if (!mod?.serveCellApi) {
@@ -147,7 +152,7 @@ async function startCellApi(world: object, port: number): Promise<void> {
     return;
   }
   try {
-    c.cellApi = await mod.serveCellApi(deps(world), port);
+    c.cellApi = await mod.serveCellApi(deps(world), await scenarioPorts(world).real(port));
     // PBI 16's Thens check the cell API it calls is up.
     p16ctx(world).server = c.cellApi.server;
   } catch (e) {
@@ -158,16 +163,16 @@ async function startCellApi(world: object, port: number): Promise<void> {
 async function startControl(world: object, port: number): Promise<void> {
   const c = ctx(world);
   const mod = (await load<MainModule>("src/main.ts"))!;
-  c.control = await mod.serveControl(deps(world), port);
+  c.control = await mod.serveControl(deps(world), await scenarioPorts(world).real(port));
   p16ctx(world).server = c.control.server;
 }
 
 /** A cell's call to `port` under /internal/cells/<run>, with its token, unless the service on it never started. */
-async function cellCall(world: object, port: number, method: string, path: string, body?: unknown, token?: string): Promise<number | null> {
+export async function cellCall(world: object, port: number, method: string, path: string, body?: unknown, token?: string): Promise<number | null> {
   const first = p16ctx(world).first;
   assert.ok(first, "no run was claimed");
-  if (!(await answers(port))) return null;
-  const r = await fetch(`http://127.0.0.1:${port}/internal/cells/${first.runId}${path}`, {
+  if (!(await answers(world, port))) return null;
+  const r = await fetch(`http://127.0.0.1:${await scenarioPorts(world).real(port)}/internal/cells/${first.runId}${path}`, {
     method,
     headers: { authorization: `Bearer ${token ?? first.token}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -179,8 +184,8 @@ async function cellCall(world: object, port: number, method: string, path: strin
 async function modelRequest(world: object, port: number, token?: string): Promise<{ status: number; body: string } | null> {
   const first = p16ctx(world).first;
   assert.ok(first, "no run was claimed");
-  if (!(await answers(port))) return null;
-  const r = await fetch(`http://127.0.0.1:${port}/internal/model/v1/messages`, {
+  if (!(await answers(world, port))) return null;
+  const r = await fetch(`http://127.0.0.1:${await scenarioPorts(world).real(port)}/internal/model/v1/messages`, {
     method: "POST",
     headers: { authorization: `Bearer sk-ant-oat01-${first.runId}.${first.generation}.${token ?? first.token}`, "content-type": "application/json" },
     body: JSON.stringify({ model: "claude-haiku-5-5" }),
@@ -188,8 +193,8 @@ async function modelRequest(world: object, port: number, token?: string): Promis
   return { status: r.status, body: await r.text() };
 }
 
-/** Records an answer from `port`: the cell API's go to PBI 16's context, today's control plane's to this one's. */
-function record(world: object, port: number, status: number | null): void {
+/** Records an answer from the scenario's `port`: the cell API's, on 7401, go to PBI 16's context, today's control plane's to this one's. */
+export function record(world: object, port: number, status: number | null): void {
   if (status === null) return;
   if (port === 7401) p16ctx(world).statuses.push(status);
   else ctx(world).statuses.push(status);
@@ -201,13 +206,15 @@ function cellApiStarted(c: Ctx): void {
 
 // ---- src/main.ts as its own process ----
 
-function controlEnv(port: string | null, cellApiPort: number): Record<string, string> {
+/** The environment for the scenario's `port` and `cellApiPort`, set to the free ports they stand for. */
+async function controlEnv(world: object, port: number | null, cellApiPort: number): Promise<Record<string, string>> {
+  const ports = scenarioPorts(world);
   const env: Record<string, string> = {
     FACTORY_ENV: "local", FACTORY_DEV_LOGIN: DEV_LOGIN, FACTORY_BLOB: BLOB, CELL_SECRET: SECRET,
     GITHUB_WEBHOOK_SECRET: "webhook-secret", GITHUB_APP_ID: "1", GITHUB_APP_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t",
-    CELL_CONTROL_URL: `http://localhost:${cellApiPort}`,
+    CELL_CONTROL_URL: `http://localhost:${await ports.real(cellApiPort)}`,
   };
-  if (port !== null) env.PORT = port;
+  if (port !== null) env.PORT = String(await ports.real(port));
   return env;
 }
 
@@ -268,19 +275,19 @@ Given("a fresh factory database where item {string} waits for sign-off", long, a
   await pool().query(`insert into "user" (provider, subject, github_login, role, product_owner) values ('dev', $1, $1, 'owner', true)`, [DEV_LOGIN]);
 });
 
-Given("the cell API service's environment doesn't set CELL_SECRET", function () {
-  const env = controlEnv("7401", 7401);
+Given("the cell API service's environment doesn't set CELL_SECRET", async function () {
+  const env = await controlEnv(this, 7401, 7401);
   delete env.CELL_SECRET;
   ctx(this).env = { ...env, FACTORY_DB_URI: "postgres://nobody@127.0.0.1:1/none" };
 });
 
-Given("today's control plane's environment sets PORT to {int} and points cells at the cell API on {int}", function (port: number, cellApi: number) {
-  ctx(this).env = controlEnv(String(port), cellApi);
+Given("today's control plane's environment sets PORT to {int} and points cells at the cell API on {int}", async function (port: number, cellApi: number) {
+  ctx(this).env = await controlEnv(this, port, cellApi);
   (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart = () => spawnControl(this);
 });
 
-Given("today's control plane's environment points cells at the cell API on {int} but doesn't set PORT", function (cellApi: number) {
-  ctx(this).env = controlEnv(null, cellApi);
+Given("today's control plane's environment points cells at the cell API on {int} but doesn't set PORT", async function (cellApi: number) {
+  ctx(this).env = await controlEnv(this, null, cellApi);
   (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart = () => spawnControl(this);
 });
 
@@ -348,14 +355,15 @@ When("a cell sends a model request to port {int} with a token signed by another 
 });
 
 When("someone asks port {int} for the dashboard's home page", long, async function (port: number) {
-  if (!(await answers(port))) return;
-  const r = await fetch(`http://127.0.0.1:${port}/`, { redirect: "manual" });
+  if (!(await answers(this, port))) return;
+  const r = await fetch(`http://127.0.0.1:${await scenarioPorts(this).real(port)}/`, { redirect: "manual" });
   await r.text();
   record(this, port, r.status);
 });
 
-When("the owner signs in to the dashboard on {string}", long, async function (origin: string) {
+When("the owner signs in to the dashboard on {string}", long, async function (named: string) {
   const c = ctx(this);
+  const origin = await scenarioPorts(this).url(named);
   const token = /\/dev-login\?token=([0-9a-f]{64})/.exec(c.stdout)?.[1];
   if (!token) {
     c.failure = `no sign-in link in the console:\n${c.stdout}\n${c.stderr}`;
@@ -371,8 +379,9 @@ When("the owner signs in to the dashboard on {string}", long, async function (or
   }
 });
 
-When("the owner signs off item {string} from the dashboard on {string}", long, async function (_name: string, origin: string) {
+When("the owner signs off item {string} from the dashboard on {string}", long, async function (_name: string, named: string) {
   const c = ctx(this);
+  const origin = await scenarioPorts(this).url(named);
   if (!c.cookie) return;
   try {
     const r = await fetch(`${origin}/items/${c.itemId}/signoff`, {
@@ -423,7 +432,7 @@ Then("it exits with an error naming CELL_SECRET", function () {
 });
 
 Then("nothing answers on port {int}", long, async function (port: number) {
-  assert.equal(await answers(port), false, `something answers on port ${port}`);
+  assert.equal(await answers(this, port), false, `something answers on port ${port}`);
 });
 
 Then("today's control plane answers {int}", function (status: number) {
@@ -436,7 +445,7 @@ Then("the dashboard answers on port {int}", long, async function (port: number) 
   const c = ctx(this);
   assert.ok(c.exit === undefined, `today's control plane exited ${c.exit?.code}:\n${c.stderr}`);
   // A request without a sign-in gets the dashboard's sign-in page.
-  const r = await fetch(`http://localhost:${port}/`, { redirect: "manual" });
+  const r = await fetch(`http://localhost:${await scenarioPorts(this).real(port)}/`, { redirect: "manual" });
   const page = await r.text();
   assert.equal(r.status, 401, `port ${port} answered ${r.status}`);
   assert.match(page, /sign in/i);
@@ -444,12 +453,14 @@ Then("the dashboard answers on port {int}", long, async function (port: number) 
 
 Then("nothing from today's control plane answers on port {int}", long, async function (port: number) {
   const c = ctx(this);
-  assert.doesNotMatch(c.stdout, new RegExp(`answers on port ${port}\\b`), `today's control plane says it answers on port ${port}`);
-  assert.equal(await answers(port), false, `something answers on port ${port}`);
+  const real = await scenarioPorts(this).real(port);
+  assert.doesNotMatch(c.stdout, new RegExp(`answers on port ${real}\\b`), `today's control plane says it answers on port ${port}, on ${real}`);
+  assert.equal(await answers(this, port), false, `something answers on port ${port}`);
 });
 
-Then("its console shows a dashboard sign-in link on {string}", function (origin: string) {
+Then("its console shows a dashboard sign-in link on {string}", async function (named: string) {
   const c = ctx(this);
+  const origin = await scenarioPorts(this).url(named);
   const link = /Sign in to the factory dashboard: (\S+)\/dev-login\?token=[0-9a-f]{64}/.exec(c.stdout);
   assert.ok(link, `no sign-in link in the console:\n${c.stdout}`);
   assert.equal(link[1], origin);

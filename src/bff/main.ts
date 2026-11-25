@@ -6,8 +6,10 @@
 // usable BFF_SESSION_KEY.
 // Routes: GET /auth/login, GET /auth/callback, POST /auth/logout, GET /auth/session, and, since step 7b, /bff/v1/*,
 // which it forwards to the API's /v1/*, streaming /bff/v1/events, and, since step 7c, POST /webhooks/github, which it
-// passes to the API's /webhooks/github byte for byte (src/bff/app.ts).
+// passes to the API's /webhooks/github byte for byte (src/bff/app.ts). Since step 8a it serves the SPA that
+// `npm run build` writes to web/dist on every other GET (src/bff/spa.ts).
 import { serve } from "@hono/node-server";
+import { join } from "node:path";
 import { createBff } from "./app.ts";
 import { pgSessions, rolePool } from "./session.ts";
 import { readSettings, type BffSettings } from "./settings.ts";
@@ -36,6 +38,7 @@ const app = createBff({
   key: settings.key,
   sessions: pgSessions(pool),
   apiUrl: settings.apiUrl,
+  spaDir: join(import.meta.dirname, "..", "..", "web", "dist"),
 });
 
 const server = serve({ fetch: app.fetch, port: settings.port }, (info) => {

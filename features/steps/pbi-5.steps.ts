@@ -1,30 +1,33 @@
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
 
 const repo = process.cwd();
 
-type Result = { status: number | null; out: string };
+export type Result = { status: number | null; out: string };
 type Ctx = { result?: Result; scratch?: string; doc?: unknown; cleanup: string[] };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi5?: Ctx };
   w.pbi5 ??= { cleanup: [] };
   return w.pbi5;
 }
 
 // These nested runs check that the scripts work, such as npm test finding a test file. FACTORY_DB_TESTS=skip keeps them
-// from also running the DB suites, which the outer npm test already runs, in CI and in a cell alike.
+// from also running the DB suites, which the outer npm test already runs, in CI and in a cell alike. Leaving out
+// GITHUB_ACTIONS lets the nuget.org check skip when nuget.org can't be reached, since the outer npm test already makes
+// that check on GitHub Actions, and a nuget.org hiccup here would fail a scenario about finding test files.
 function run(command: string, cwd: string): Result {
-  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...process.env, FACTORY_DB_TESTS: "skip" } });
+  const { GITHUB_ACTIONS: _, ...env } = process.env;
+  const r = spawnSync(command, { cwd, shell: true, encoding: "utf8", env: { ...env, FACTORY_DB_TESTS: "skip" } });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
-function tail(out: string): string {
+export function tail(out: string): string {
   return out.split("\n").slice(-30).join("\n");
 }
 
@@ -85,6 +88,9 @@ Given("a scratch project with the repo's package.json, its installed packages an
   c.cleanup.push(dir);
   copyFileSync(join(repo, "package.json"), join(dir, "package.json"));
   symlinkSync(join(repo, "node_modules"), join(dir, "node_modules"), "junction");
+  // The package's scripts run from scripts/ with their logic in src/, as `npm run bdd` does since PBI 390.
+  cpSync(join(repo, "scripts"), join(dir, "scripts"), { recursive: true });
+  symlinkSync(join(repo, "src"), join(dir, "src"), "junction");
   mkdirSync(join(dir, "features", "steps"), { recursive: true });
   writeFileSync(join(dir, "features", "scratch.feature"), "Feature: Scratch\n  Scenario: Passes\n    Given nothing\n");
   writeFileSync(join(dir, "features", "steps", "scratch.steps.ts"), 'import { Given } from "@cucumber/cucumber";\nGiven("nothing", () => {});\n');

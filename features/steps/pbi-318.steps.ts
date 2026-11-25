@@ -29,6 +29,7 @@ import {
   briefEntries, ctx as pr128, done, newPass, ordinal, raise, REVIEWER, review, reviewerCall, stageReports, that, threadFor,
   type AgentRecord, type Ctx as PrCtx,
 } from "./pbi-128.steps.ts";
+import { ownsClaims as ownsClaims315, runFirstClaim as runFirstClaim315 } from "./pbi-315.steps.ts";
 
 const REPO = "acme/app";
 const PR = 57;
@@ -351,6 +352,8 @@ When("the cell runs from the PR review", LONG, async function () {
 });
 
 When("the first claim's cell runs", LONG, async function () {
+  // PBI 315's first claim runs from Red to the CI question, with its own CI and Green, so its steps run it.
+  if (ownsClaims315(this)) return runFirstClaim315(this);
   const o = own(this);
   const c = pr128(this);
   const run = cell(this);
@@ -568,11 +571,13 @@ Then("in the next claim the factory replied {string} inside the thread {string},
     `the next claim's replies in the thread don't say "${text}" at ${sha}: ${JSON.stringify(replies.map((x) => x.body))}`);
 });
 
-Then("the factory resolved the thread {string}", function (body: string) {
-  const { c } = done(this);
+// PBI 258's steps register this phrase too, for a person's thread address resolved, and hand a PR review scenario's
+// world here, so the one step serves both features.
+export function factoryResolvedThread(world: object, body: string): void {
+  const { c } = done(world);
   reviewerCall(c, 1);
-  assert.ok(resolved(c, threadFor(c, body).threadId, own(this).resolvedBefore), `the factory didn't resolve the thread "${body}"`);
-});
+  assert.ok(resolved(c, threadFor(c, body).threadId, own(world).resolvedBefore), `the factory didn't resolve the thread "${body}"`);
+}
 
 Then("the factory resolved the thread {string} in the next claim", function (body: string) {
   const { c, o } = nextClaim(this);

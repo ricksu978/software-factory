@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { loginKey, type CheckRun, type FailedCheck, type MergeState, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { type ChangeCause, loginKey, type CheckRun, type FailedCheck, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -160,6 +160,8 @@ export function fakeRepoHost(): RepoHost & {
   pendingChecks: Map<string, string[]>;
   /** The named checks CI reported, by `repo@sha` (PBI 229). */
   ciChecks: Map<string, CiCheck[]>;
+  /** Each re-run asked for, as `<repo>@<sha>` with the checks named (PBI 233). */
+  reruns: { key: string; checks: string[] }[];
   files: Map<string, string>;
   heads: Map<string, string>;
   branches: Map<string, string[]>;
@@ -185,6 +187,7 @@ export function fakeRepoHost(): RepoHost & {
   const failedChecks = new Map<string, FailedCheck[]>();
   const pendingChecks = new Map<string, string[]>();
   const ciChecks = new Map<string, CiCheck[]>();
+  const reruns: { key: string; checks: string[] }[] = [];
   const files = new Map<string, string>();
   const heads = new Map<string, string>();
   const branches = new Map<string, string[]>();
@@ -200,8 +203,24 @@ export function fakeRepoHost(): RepoHost & {
   const url = (p: FakePr) => `https://github.com/${p.repo}/pull/${p.number}`;
 
   return {
-    prs, checks, failedChecks, pendingChecks, ciChecks, files, heads, branches, reviewComments, postedReviews, resolvedThreads, diffs,
-    mergeCalls, runs, logs, parents, permissionsMissing,
+    prs,
+    checks,
+    failedChecks,
+    pendingChecks,
+    ciChecks,
+    reruns,
+    files,
+    heads,
+    branches,
+    reviewComments,
+    postedReviews,
+    resolvedThreads,
+    diffs,
+    mergeCalls,
+    runs,
+    logs,
+    parents,
+    permissionsMissing,
     async cellToken(repo) {
       return { token: `fake-token-${repo}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     },
@@ -237,6 +256,13 @@ export function fakeRepoHost(): RepoHost & {
     async ciChecksOnSha(repo, sha) {
       return ciChecks.get(`${repo}@${sha}`) ?? null;
     },
+    async rerunChecksOnSha(repo, sha, names) {
+      const failed = (ciChecks.get(`${repo}@${sha}`) ?? []).filter((c) => c.conclusion === "failure").map((c) => c.name);
+      const not = names.filter((n) => !failed.includes(n));
+      if (not.length) throw new Error(`${not.join(", ")} didn't fail on ${sha}`);
+      reruns.push({ key: `${repo}@${sha}`, checks: [...names] });
+      return { rerun: [...names], refused: [] };
+    },
     async onBranch(repo, branch, sha) {
       return branches.get(`${repo}@${branch}`)?.includes(sha) ?? false;
     },
@@ -255,11 +281,16 @@ export function fakeRepoHost(): RepoHost & {
       const settled = Date.now() - THREAD_SETTLE_MS;
       const trusted = new Set(trustedLogins.map(loginKey));
       const own = withoutFactoryThreads(p.open ? reviewComments.get(`${repo}#${n}`) ?? [] : [], trustedBot);
-      const open = own.filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author))).map((c) => c.submittedAt!);
-      // A comment belongs to the review its author submitted at its submittedAt.
-      const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
-      const requested = [...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r)).map((r) => r.submittedAt), ...open].sort();
-      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, lastChangesRequestedAt: requested.at(-1) ?? null };
+      const open = own.filter((c) => !c.resolved && c.submittedAt && Date.parse(c.submittedAt) <= settled && trusted.has(loginKey(c.author)));
+      // A comment belongs to the review its author submitted at its submittedAt. Only one in a thread still unresolved
+      // gives the review text (PBI 258).
+      const withText = (r: FakePr["reviews"][number]) => (r.body ?? "").trim() !== "" || own.some((c) => !c.resolved && c.submittedAt === r.submittedAt && loginKey(c.author) === loginKey(r.author));
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" | "ci_failed" }>>([
+        ...p.reviews.filter((r) => r.state === "changes_requested" && trusted.has(loginKey(r.author)) && withText(r))
+          .map((r) => ({ kind: "review" as const, author: r.author, body: r.body ?? "", submittedAt: r.submittedAt })),
+        ...open.map((c) => ({ kind: "thread_comment" as const, threadId: c.threadId, author: c.author, body: c.body, submittedAt: c.submittedAt! })),
+      ]);
+      return { merged: p.merged, mergeSha: p.mergeSha, open: p.open, mergeable: p.mergeable, headSha: p.headSha, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause };
     },
     async closePr(repo, n, comment) {
       const p = pr(repo, n);
@@ -268,6 +299,16 @@ export function fakeRepoHost(): RepoHost & {
     },
     async readFile(repo, ref, path) {
       return files.get(`${repo}@${ref}:${path}`) ?? null;
+    },
+    async commitFiles({ repo, branch, files: changed }) {
+      // A branch's line in `branches`, oldest first: the new commit goes on its head, holding the files given.
+      const line = branches.get(`${repo}@${branch}`);
+      if (!line?.length) throw new Error(`no branch ${branch} in ${repo}`);
+      const sha = `commit-${branch}-${line.length + 1}`;
+      parents.set(`${repo}@${sha}`, line.at(-1)!);
+      for (const f of changed) files.set(`${repo}@${sha}:${f.path}`, f.text);
+      line.push(sha);
+      return sha;
     },
     async defaultBranchSha(repo) {
       const head = heads.get(repo);

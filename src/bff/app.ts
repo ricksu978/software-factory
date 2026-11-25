@@ -17,10 +17,13 @@
 //                        needed, and the BFF doesn't check the signature: only the API holds the webhook secret.
 //   GET  /bff/v1/events  goes through /bff/v1/* like any call, but an answer of server-sent events streams to the
 //                        browser for as long as the API keeps it open, and closes at the API when the browser leaves.
+// And step 8a (§04 and §10):
+//   GET  everything else the SPA's built files from spaDir, or its page for a deep link (src/bff/spa.ts).
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ResponseBodyError } from "openid-client";
 import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
+import { serveSpa } from "./spa.ts";
 import {
   hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type Session, type SessionStore,
 } from "./session.ts";
@@ -68,6 +71,8 @@ export type BffConfig = {
   /** How long the API has to answer an ordinary call, 30 seconds unless set. */
   apiTimeoutMs?: number;
   fetch?: typeof fetch;
+  /** Where `npm run build` writes the SPA, web/dist. Without it the BFF serves no SPA. */
+  spaDir?: string;
 };
 
 type SignIn = SignInChecks;
@@ -280,6 +285,9 @@ export function createBff(cfg: BffConfig): Hono {
     if (!who) return c.json({ error: "not signed in" }, 401);
     return c.json({ issuer: who.issuer, subject: who.subject });
   });
+
+  // Last, so the routes above keep their addresses.
+  if (cfg.spaDir) app.get("*", serveSpa(cfg.spaDir));
 
   return app;
 }

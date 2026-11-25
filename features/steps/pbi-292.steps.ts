@@ -57,6 +57,7 @@ import type { CiCheck } from "../../src/adapters/types.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { startServer } from "../../src/http/server.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi365, openPage as pbi365Page } from "./pbi-365.steps.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { ctx as pr128 } from "./pbi-128.steps.ts";
 import { ctx as dashCtx, dashboard, escapeRe, get, text } from "./pbi-175.steps.ts";
@@ -98,10 +99,10 @@ export function ctx(world: object): Ctx {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const quoted = (s: string) => [...s.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-const keyOf = (r: Role) => (r.kind === "fix" ? `fix${r.n}` : r.kind === "sha" ? `sha:${r.sha}` : r.kind);
+export const keyOf = (r: Role) => (r.kind === "fix" ? `fix${r.n}` : r.kind === "sha" ? `sha:${r.sha}` : r.kind);
 
 /** Whether the text names the word as one of its own, so "ci" isn't found inside "decision". */
-function namesWord(t: string, word: string): boolean {
+export function namesWord(t: string, word: string): boolean {
   return new RegExp(`(^|[^\\w-])${escapeRe(word)}([^\\w-]|$)`, "i").test(t);
 }
 
@@ -170,6 +171,11 @@ function classify(c: Ctx, run: CellCtx, sha: string): string {
 
 function checksOn(c: Ctx, run: CellCtx, sha: string): Check[] {
   return c.rules.get(classify(c, run, sha)) ?? [{ name: "ci", conclusion: "success", url: "https://github.com/acme/widgets/actions/runs/1", failingTests: [] }];
+}
+
+/** PBI 233's steps lay re-runs over the checks this CI reports on a commit. */
+export function checksAt(world: object, sha: string): Check[] {
+  return checksOn(ctx(world), cell(world), sha);
 }
 
 export function install(world: object) {
@@ -287,7 +293,7 @@ Given(new RegExp(`^these checks report on ${ON}:$`), function (head: string | un
 
 // ---- the cell's Thens ----
 
-function settled(run: CellCtx): void {
+export function settled(run: CellCtx): void {
   assert.equal(run.error, null, `the cell failed: ${run.error instanceof Error ? run.error.stack : String(run.error)}`);
 }
 
@@ -299,16 +305,16 @@ function greenBriefs(world: object): string[] {
 
 const ORDINALS: Record<string, number> = { "": 1, "first ": 1, "second ": 2, "third ": 3 };
 
-function brief(world: object, which: string): string {
+export function brief(world: object, which: string): string {
   const n = ORDINALS[which];
   const all = greenBriefs(world);
   assert.ok(all[n - 1], `Green ran ${all.length} time(s), so it has no brief ${n}`);
   return all[n - 1];
 }
 
-const tddPrompt = () => readFileSync(join(repo, "sop/prompts/tdd.md"), "utf8");
+export const tddPrompt = () => readFileSync(join(repo, "sop/prompts/tdd.md"), "utf8");
 
-function saysFailedOn(t: string, sha: string): boolean {
+export function saysFailedOn(t: string, sha: string): boolean {
   return t.split("\n").some((l) => /CI failed/i.test(l) && l.includes(sha.slice(0, 7)));
 }
 
@@ -350,11 +356,11 @@ Then("Green's brief says CI named no failing test for the check {string}", funct
   assert.ok(b.split("\n").some((l) => namesWord(l, check) && /no failing test/i.test(l)), `Green's brief doesn't say CI named no failing test for "${check}":\n${b}`);
 });
 
-/** The messages of the attempts the cell ended, with each attempt's stage. */
-function ended(world: object): { stageId: string; attempt: number; message: string }[] {
+/** The messages of the attempts the run ended, with each attempt's stage: an earlier claim's (PBI 315), then this cell's. */
+export function ended(world: object): { stageId: string; attempt: number; message: string }[] {
   const run = cell(world);
   settled(run);
-  return run.calls.filter((x) => x.route === "/stage" && x.body.status !== "started")
+  return [...(run.earlierCalls ?? []), ...run.calls].filter((x) => x.route === "/stage" && x.body.status !== "started")
     .map((x) => ({ stageId: String(x.body.stageId), attempt: Number(x.body.attempt), message: String(x.body.message ?? "") }));
 }
 
@@ -537,6 +543,7 @@ Given("item {int} is in progress at Green, with no CI failure to fix", long, asy
 });
 
 When("{string} opens item {int}'s page", long, async function (login: string, n: number) {
+  if (isPbi365(this)) return pbi365Page(this, login);
   await get(this, `/items/${itemId(this, n)}`, login);
 });
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { APPHOST_CHANGED, DOCKER_NOT_INSTALLED, DOCKER_TIMED_OUT, DOCKER_WAIT_MS, StartStopped, startAppHost, type GitResult, type StartDeps } from "./start.ts";
+import { APPHOST_CHANGED, appHostResources, DOCKER_NOT_INSTALLED, DOCKER_TIMED_OUT, DOCKER_WAIT_MS, StartStopped, startAppHost, type GitResult, type StartDeps } from "./start.ts";
 
 type Fake = {
   deps: StartDeps;
@@ -45,6 +45,7 @@ function fake(opts: { branch?: string; pull?: GitResult; diff?: GitResult; docke
     now: () => clock.now,
     say: (l) => void said.push(l),
     warn: (l) => void warned.push(l),
+    dockerBuild: async () => 0,
     async startResources() {
       log.push("start");
     },
@@ -161,3 +162,51 @@ test("with Docker Desktop not installed it stops with today's message and launch
   assert.equal(e.message, DOCKER_NOT_INSTALLED);
   assert.ok(!f.log.some((l) => l.startsWith("launch") || l === "start"));
 });
+
+test("the worker waits for migrate and for cell-image, which builds the cell image", async () => {
+  const builds: string[] = [];
+  const resources = appHostResources({
+    git: () => ({ status: 0, stdout: "", stderr: "" }),
+    dockerBuild: async (b) => (builds.push(b.tag), 0),
+  });
+  const byName = new Map(resources.map((r) => [r.name, r]));
+  assert.deepEqual(byName.get("worker")?.waitsFor.toSorted(), ["cell-image", "migrate"]);
+  assert.deepEqual(byName.get("cell-image")?.waitsFor, []);
+  await byName.get("cell-image")?.run?.(() => {});
+  assert.deepEqual(builds, ["factory-cell:local"]);
+});
+
+test("the start hands the resources a cell-image resource", async () => {
+  const f = fake();
+  let names: string[] = [];
+  await startAppHost({ ...f.deps, startResources: async (rs) => void (names = rs.map((r) => r.name)) });
+  assert.ok(names.includes("cell-image"), JSON.stringify(names));
+});
+
+test("a test run (FACTORY_FLOAT_PORTS=1) on main runs no git at all, checks Docker and starts the checkout as it is", async () => {
+  const f = fake();
+  f.deps.env = { FACTORY_FLOAT_PORTS: "1" };
+  await startAppHost(f.deps);
+  assert.deepEqual(f.log, ["docker up", "start"]);
+  assert.deepEqual(f.warned, []);
+  assert.equal(f.said.length, 1);
+  assert.match(f.said[0]!, /test run.*pulls nothing/i);
+});
+
+test("a test run still launches Docker Desktop when Docker doesn't answer", async () => {
+  const f = fake({ dockerUp: false, answersAfterLaunchMs: 6_000 });
+  f.deps.env = { FACTORY_FLOAT_PORTS: "1" };
+  await startAppHost(f.deps);
+  assert.ok(f.log.includes("launch Docker Desktop.exe"));
+  assert.equal(f.log.at(-1), "start");
+  assert.ok(!f.log.some((l) => l.startsWith("git ")));
+});
+
+for (const value of [undefined, "0", ""]) {
+  test(`with FACTORY_FLOAT_PORTS ${value === undefined ? "unset" : JSON.stringify(value)} it is no test run, and pulls main`, async () => {
+    const f = fake();
+    f.deps.env = value === undefined ? {} : { FACTORY_FLOAT_PORTS: value };
+    await startAppHost(f.deps);
+    assert.ok(f.log.includes("git pull --ff-only"));
+  });
+}

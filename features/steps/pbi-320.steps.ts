@@ -94,7 +94,7 @@ async function boardPriority(world: object, name: string, raw: string | null): P
 }
 
 /** Gives an item a priority on the board and in the factory, as a poll reading the board would. */
-async function setPriority(world: object, name: string, priority: number): Promise<void> {
+export async function setPriority(world: object, name: string, priority: number): Promise<void> {
   await boardPriority(world, name, String(priority));
   await pool().query("update item set board_priority = $2 where id = $1", [itemOf(world, name).id, priority]);
 }
@@ -210,7 +210,7 @@ async function lease(id: string): Promise<void> {
 }
 
 /** An item with an open PR, at `stage` of the review loop. */
-async function finalStage(world: object, name: string, stage: string): Promise<void> {
+export async function finalStage(world: object, name: string, stage: string): Promise<void> {
   switch (stage) {
     case "InReview": {
       const id = await newItem(world, name, "InReview");
@@ -265,7 +265,7 @@ Given(re(`item "([^"]+)" has an open PR, is Queued to address requested changes,
 
 // ---- dependencies ----
 
-function depend(world: object, dependent: string, on: string): void {
+export function depend(world: object, dependent: string, on: string): void {
   const deps = ctx(world).deps;
   const list = deps.get(dependent) ?? [];
   if (!list.includes(on)) list.push(on);
@@ -305,6 +305,8 @@ function syncDependencies(world: object): void {
 Given(re(`the poller (?:reads|has read) the board`), long, async function () {
   syncDependencies(this);
   await poll(this);
+  // PBI 311's steps learn the new issues a poll read, by name.
+  await (this as { afterPoll?: () => Promise<void> }).afterPoll?.();
 });
 
 // ---- WIP ----

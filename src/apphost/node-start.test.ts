@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { dockerDesktopPaths, nodeStartDeps } from "./node-start.ts";
+import { dockerBuild, dockerBuildArgs, dockerDesktopPaths, nodeStartDeps } from "./node-start.ts";
 import { APPHOST_CHANGED, startAppHost } from "./start.ts";
 
-test("it looks for Docker Desktop where scripts/factory.ps1 looks", () => {
+test("it looks for Docker Desktop where Windows installs it, per user and machine-wide", () => {
   assert.deepEqual(dockerDesktopPaths({ LOCALAPPDATA: "L", ProgramFiles: "P" }), [
     join("L", "Programs", "DockerDesktop", "Docker Desktop.exe"),
     join("P", "Docker", "Docker", "Docker Desktop.exe"),
@@ -74,4 +74,46 @@ test("with the real git, a pull that changes only src/ asks for no restart", asy
   const r = realCheckout(t);
   r.commit("src/main.ts");
   assert.deepEqual(await startIn(r.checkout), []);
+});
+
+test("docker build gets the Dockerfile, the tag, each label and the context, in that order", () => {
+  assert.deepEqual(dockerBuildArgs({ tag: "factory-cell:local", dockerfile: "cell/Dockerfile", context: ".", labels: { a: "1", b: "2" } }), [
+    "build", "--progress=plain", "-f", "cell/Dockerfile", "-t", "factory-cell:local", "--label", "a=1", "--label", "b=2", ".",
+  ]);
+});
+
+/** A stand-in for the docker CLI that prints its arguments and cwd, an error line, then exits with `exit`. */
+function fakeDocker(t: { after(fn: () => void): void }, exit: number): { dir: string; docker: string } {
+  const dir = mkdtempSync(join(tmpdir(), "node-start-docker-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const docker = join(dir, "docker");
+  writeFileSync(docker, `#!/usr/bin/env node\nconsole.log(JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }));\nconsole.error("ERROR: failed to solve");\nprocess.exit(${exit});\n`);
+  chmodSync(docker, 0o755);
+  return { dir, docker };
+}
+
+const posixOnly = { skip: process.platform === "win32" ? "the fake docker is a shebang script" : false };
+
+test("docker build runs in the repo, logs each line it prints and resolves to its exit status", posixOnly, async (t) => {
+  const { dir, docker } = fakeDocker(t, 3);
+  const log: string[] = [];
+  const exit = await dockerBuild(dir, { tag: "t", dockerfile: "cell/Dockerfile", context: ".", labels: {} }, (l) => void log.push(l), docker);
+  assert.equal(exit, 3);
+  const said = JSON.parse(log.find((l) => l.startsWith("{")) ?? "{}") as { args: string[]; cwd: string };
+  assert.deepEqual(said.args, ["build", "--progress=plain", "-f", "cell/Dockerfile", "-t", "t", "."]);
+  assert.equal(realpathSync(said.cwd), realpathSync(dir));
+  assert.ok(log.includes("ERROR: failed to solve"), JSON.stringify(log));
+});
+
+test("a docker CLI that can't be run logs why and resolves to 1", async () => {
+  const log: string[] = [];
+  const exit = await dockerBuild(".", { tag: "t", dockerfile: "f", context: ".", labels: {} }, (l) => void log.push(l), "no-such-docker-cli-206");
+  assert.equal(exit, 1);
+  assert.match(log.join("\n"), /no-such-docker-cli-206/);
+});
+
+test("the real deps take the AppHost's environment, the process's by default", () => {
+  assert.deepEqual(nodeStartDeps(".", { FACTORY_FLOAT_PORTS: "1" }).env, { FACTORY_FLOAT_PORTS: "1" });
+  assert.deepEqual(nodeStartDeps(".", {}).env, { FACTORY_FLOAT_PORTS: undefined });
+  assert.equal(nodeStartDeps(".").env?.FACTORY_FLOAT_PORTS, process.env.FACTORY_FLOAT_PORTS);
 });

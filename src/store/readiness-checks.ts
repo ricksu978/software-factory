@@ -6,25 +6,39 @@ import type { JudgeSpend } from "../agent/run.ts";
 export type ReadinessCheckKind = "judge" | "split";
 
 /**
- * One readiness gate AI call: which call, what it spent and when it ran. A failed call records what it spent before
- * failing. `kind` defaults to judge.
+ * What a judge call decided (PBI 348): passed every dor.md line with no flag, failed with each failed line and the
+ * judge's reason and each flag it raised, a reply the gate couldn't read, or an error before the judge replied.
  */
-export type ReadinessCheck = JudgeSpend & { kind?: ReadinessCheckKind; ranAt: Date };
+export type CheckVerdict =
+  | { outcome: "passed" }
+  | { outcome: "failed"; lines: { criterion: string; reason: string }[]; flags: string[] }
+  | { outcome: "unreadable" }
+  | { outcome: "error" };
+
+/**
+ * One readiness gate AI call: which call, what it spent and when it ran. A failed call records what it spent before
+ * failing. `kind` defaults to judge. A judge call recorded since PBI 348 has its `verdict`, and `child` is the title of
+ * the proposed split child it judged, when the call is recorded against that child's parent. A split call has neither,
+ * and neither does a check recorded before PBI 348.
+ */
+export type ReadinessCheck = JudgeSpend & { kind?: ReadinessCheckKind; ranAt: Date; verdict?: CheckVerdict; child?: string };
 
 /** Records one readiness check against the item's row. */
 export async function recordReadinessCheck(c: pg.Pool | pg.PoolClient, itemId: string, check: ReadinessCheck): Promise<void> {
   await c.query(
-    "insert into readiness_check (item_id, kind, model, tokens_in, tokens_out, cost_usd, ran_at) values ($1, $2, $3, $4, $5, $6, $7)",
-    [itemId, check.kind ?? "judge", check.model, check.tokensIn, check.tokensOut, check.costUsd, check.ranAt],
+    "insert into readiness_check (item_id, kind, model, tokens_in, tokens_out, cost_usd, ran_at, verdict, child) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    [itemId, check.kind ?? "judge", check.model, check.tokensIn, check.tokensOut, check.costUsd, check.ranAt,
+      check.verdict ? JSON.stringify(check.verdict) : null, check.child ?? null],
   );
 }
 
-/** The item's readiness checks, oldest first. */
+/** The item's readiness checks, oldest first. A check with no verdict or child has no such key. */
 export async function readinessChecks(c: pg.Pool | pg.PoolClient, itemId: string): Promise<ReadinessCheck[]> {
-  return (await c.query<ReadinessCheck>(
-    `select kind, model, tokens_in as "tokensIn", tokens_out as "tokensOut", cost_usd::float8 as "costUsd", ran_at as "ranAt"
+  const rows = (await c.query<ReadinessCheck & { verdict: CheckVerdict | null; child: string | null }>(
+    `select kind, model, tokens_in as "tokensIn", tokens_out as "tokensOut", cost_usd::float8 as "costUsd", ran_at as "ranAt", verdict, child
      from readiness_check where item_id = $1 order by ran_at, id`, [itemId],
   )).rows;
+  return rows.map(({ verdict, child, ...check }) => ({ ...check, ...(verdict ? { verdict } : {}), ...(child !== null ? { child } : {}) }));
 }
 
 /** What every readiness check has cost, across every item, the turned-away ones included. */

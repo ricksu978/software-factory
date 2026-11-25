@@ -8,10 +8,15 @@ const run = promisify(execFile);
 
 export type Git = {
   /**
-   * Merges the base into the branch. Returns the paths still in conflict, empty when the merge is clean.
+   * Fetches the base once for the claim, retrying a network fault. Returns the commit `origin/<base>` then points at.
    * `fence` stops the fetch's retries, as for push.
    */
-  mergeBase(base: string, fence?: RetryFence): Promise<string[]>;
+  fetchBase(base: string, fence?: RetryFence): Promise<string>;
+  /**
+   * Merges `commit`, the base as `fetchBase` fetched it, into the branch, without fetching again (PBI 331). Returns the
+   * paths still in conflict, empty when the merge is clean or the commit is already merged.
+   */
+  mergeAt(base: string, commit: string): Promise<string[]>;
   /** Commits every change, deletions included. Returns HEAD, unchanged when there's nothing to commit. */
   commitAll(msg: string): Promise<string>;
   /**
@@ -69,13 +74,16 @@ export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
       { transient: gitNetworkFault, sleep, ...fence });
   const unmerged = async () => (await git("diff", "--name-only", "--diff-filter=U")).split("\n").filter(Boolean);
   return {
-    async mergeBase(base, fence = {}) {
+    async fetchBase(base, fence = {}) {
+      await remote(fence, "fetch", "-q", "origin", base);
+      return git("rev-parse", `origin/${base}^{commit}`);
+    },
+    async mergeAt(base, commit) {
       // A merge an agent left half done is still a conflict, whatever the base holds now.
       const left = await unmerged();
       if (left.length) return left;
-      await remote(fence, "fetch", "-q", "origin", base);
       try {
-        await git("merge", "-q", "--no-edit", `origin/${base}`);
+        await git("merge", "-q", "--no-edit", "-m", `Merge origin/${base} at ${commit.slice(0, 7)}`, commit);
         return [];
       } catch (e) {
         const paths = await unmerged();

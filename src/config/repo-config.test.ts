@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { ConfigError, parseRepoConfig } from "./repo-config.ts";
+import { ConfigError, failedRecheckHours, parseRepoConfig } from "./repo-config.ts";
 
 const valid = `bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n`;
 
@@ -42,6 +42,33 @@ describe("parseRepoConfig", () => {
     assert.deepEqual(parseRepoConfig(valid).webTools, []);
     assert.deepEqual(parseRepoConfig(`${valid}web_tools: [WebSearch]\n`).webTools, ["WebSearch"]);
     assert.throws(() => parseRepoConfig(`${valid}web_tools: [Bash]\n`), (e: unknown) => e instanceof ConfigError && e.key === "web_tools");
+  });
+
+  test("failed_recheck_hours is 8 when it's missing, and reads through when set (PBI 369)", () => {
+    assert.equal(parseRepoConfig(valid).failedRecheckHours, 8);
+    assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: 2\n`).failedRecheckHours, 2);
+    assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: 0.5\n`).failedRecheckHours, 0.5);
+    assert.equal(failedRecheckHours(null), 8);
+    assert.equal(failedRecheckHours("failed_recheck_hours: 3\n"), 3);
+  });
+
+  test("command_timeout_minutes is 15 when it's missing, and reads through when set (PBI 399)", () => {
+    assert.equal(parseRepoConfig(valid).commandTimeoutMinutes, 15);
+    assert.equal(parseRepoConfig(`${valid}command_timeout_minutes: 40\n`).commandTimeoutMinutes, 40);
+  });
+
+  test("a command_timeout_minutes that isn't a whole number above zero makes the config invalid (PBI 399)", () => {
+    for (const bad of ["0", "-5", "2.5", "'forty'", "'40'", "[40]", ".inf", "null"]) {
+      assert.throws(() => parseRepoConfig(`${valid}command_timeout_minutes: ${bad}\n`),
+        (e: unknown) => e instanceof ConfigError && e.key === "command_timeout_minutes" && e.message.includes("missing or invalid command_timeout_minutes"), bad);
+    }
+  });
+
+  test("a failed_recheck_hours that isn't a number above zero counts as 8 and leaves the config valid (PBI 369)", () => {
+    for (const bad of ["0", "-1", "'8'", "8h", "[8]", ".nan", ".inf"]) {
+      assert.equal(parseRepoConfig(`${valid}failed_recheck_hours: ${bad}\n`).failedRecheckHours, 8, bad);
+      assert.equal(failedRecheckHours(`failed_recheck_hours: ${bad}\n`), 8, bad);
+    }
   });
 
   test("this repo's own .factory/config.yml parses", () => {

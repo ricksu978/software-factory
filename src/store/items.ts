@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { next, overrideTo, type ItemEvent, type ItemState } from "../core/states.ts";
-import { inTx, runAfterCommit, txPool } from "./db.ts";
+import { transitionLine } from "../control/console-log.ts";
+import { inTx, runAfterCommit } from "./db.ts";
 import { appendEvent, type Actor } from "./events.ts";
 import { CONSUMER, writeOutboxRows } from "./outbox.ts";
 
@@ -11,38 +12,23 @@ export class IllegalTransition extends Error {
   }
 }
 
-// "override" marks an operator's move through overrideItem, which follows no edge of the state machine.
-type Hook = (itemId: string, from: ItemState, to: ItemState, event: ItemEvent | "override") => Promise<void>;
-const hooks: { hook: Hook; pool?: pg.Pool }[] = [];
-
 /**
- * Registers a hook that runs after each committed transition, and returns the call that removes it. Board mirroring is
- * one (Run contract 8). Given a pool, the hook runs only for transitions committed through that pool, so a process
- * handles the transitions it made, and two in one test process don't each handle the other's.
+ * Writes the control plane's console line for a transition or override once its transaction commits (PBI 105), and
+ * none when it rolls back. Its board effects are the worker's, from the event's outbox row (PBI 219).
  */
-export function onTransition(hook: Hook, pool?: pg.Pool): () => void {
-  const entry = { hook, pool };
-  hooks.push(entry);
-  return () => {
-    const i = hooks.indexOf(entry);
-    if (i !== -1) hooks.splice(i, 1);
-  };
-}
-
-function runHooks(c: pg.PoolClient, ...args: Parameters<Hook>): void {
-  const pool = txPool(c);
-  for (const h of hooks) if (!h.pool || h.pool === pool) runAfterCommit(c, () => h.hook(...args));
+function logAfterCommit(c: pg.PoolClient, externalId: string, from: ItemState, to: ItemState, event: ItemEvent | "override"): void {
+  runAfterCommit(c, async () => console.log(transitionLine(externalId, from, to, event)));
 }
 
 /**
  * Moves an item along one state-machine edge. It writes the state, its event and the event's board mirror outbox row
  * on the caller's withTx transaction, so all commit or none does, and leaving InProgress fences the old cell (Run contract 2).
- * Outside withTx it refuses before any write: the row lock, the atomicity and the hooks all depend on it.
+ * Outside withTx it refuses before any write: the row lock, the atomicity and the console line all depend on it.
  * `detail` adds fields to the event's payload, such as the attempts behind retries_exhausted.
  */
 export async function transitionItem(c: pg.PoolClient, itemId: string, event: ItemEvent, actor: Actor, detail: Record<string, unknown> = {}): Promise<ItemState> {
   if (!inTx(c)) throw new Error("transitionItem needs a client inside withTx");
-  const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
+  const r = await c.query<{ state: ItemState; external_id: string }>("select state, external_id from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
   const from = r.rows[0].state;
   const to = next(from, event);
@@ -58,18 +44,19 @@ export async function transitionItem(c: pg.PoolClient, itemId: string, event: It
   }
   const eventId = await appendEvent(c, { ...actor, itemId, kind: "transition", payload: { ...detail, from, to, event } });
   await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
-  runHooks(c, itemId, from, to, event);
+  logAfterCommit(c, r.rows[0].external_id, from, to, event);
   return to;
 }
 
 /**
  * An operator's move to any state, such as a stopped run going to Failed (overrideTo, plan Task 3). It writes like
- * transitionItem, fences the old cell when leaving InProgress, logs an override event with the reason and its board
- * mirror outbox row, and runs the same hooks, so the board mirrors it.
+ * transitionItem, fences the old cell when leaving InProgress, and logs an override event with the reason and its board
+ * mirror outbox row, so the worker mirrors it onto the board. An override into SignOff or NeedsInput records the open
+ * question of that kind in its payload, so the board's waiting comment quotes it.
  */
 export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemState, actor: Actor, reason: string): Promise<ItemState> {
   if (!inTx(c)) throw new Error("overrideItem needs a client inside withTx");
-  const r = await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [itemId]);
+  const r = await c.query<{ state: ItemState; external_id: string }>("select state, external_id from item where id = $1 for update", [itemId]);
   if (r.rowCount === 0) throw new Error(`no item ${itemId}`);
   const from = r.rows[0].state;
   const target = overrideTo(from, to);
@@ -78,9 +65,18 @@ export async function overrideItem(c: pg.PoolClient, itemId: string, to: ItemSta
   } else {
     await c.query("update item set state = $2 where id = $1", [itemId, target]);
   }
-  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason } });
+  // An override into a wait quotes the item's open question on the board, as a transition into one does, so the
+  // worker's board mirror reads it from the payload as it was when the override committed.
+  const waitKind = target === "SignOff" ? "sign_off" : target === "NeedsInput" ? "needs_input" : null;
+  const question = waitKind
+    ? (await c.query<{ body: string }>(
+        "select body from question where item_id = $1 and kind = $2 and answer is null and closed_at is null order by asked_at desc limit 1",
+        [itemId, waitKind],
+      )).rows[0]?.body
+    : undefined;
+  const eventId = await appendEvent(c, { ...actor, itemId, kind: "override", payload: { from, to: target, reason, ...(question ? { question } : {}) } });
   await writeOutboxRows(c, CONSUMER.boardMirror, eventId, [itemId]);
-  runHooks(c, itemId, from, target, "override");
+  logAfterCommit(c, r.rows[0].external_id, from, target, "override");
   return target;
 }
 
@@ -95,7 +91,8 @@ const activeOn = (kinds: string) =>
 // Start now (PBI 265, spec §8) puts an item ahead of every other claimable item, answered ones included.
 const START_NOW = `exists (select from override o where ${activeOn("'start_now'")})`;
 // Move up and Move down (PBI 265) give an item a place in the factory queue, its latest move's key, in place of its
-// board one. The board's own order is never touched, and a board poll leaves the move as it is. A key is a rank and a
+// board one. The board's own order is never touched. A board poll holds the move on its side of the item it passed, or ends it
+// when the board itself puts the two the other way round (PBI 311, keepMovesInPlace). A key is a rank and a
 // tie: an unmoved item's rank is its board rank and its tie is its id read as a 128-bit number, so no two items' keys
 // are equal, even when two backlog sources both rank from 1. A move stores a key strictly between the two items it
 // lands between, its rank null when it lands among items with no board rank, which sort last. A moved item that has a
@@ -131,11 +128,12 @@ const LIVE = `i.state in ('Eligible', 'NotReady', 'Queued', 'InProgress', 'SignO
  * and those of the items in its group that depend on it: in the final-stage group the final-stage dependents, outside
  * it every dependent. `fs_from` names the dependent the group comes from, and `p_from` the one the priority comes from,
  * only when it's higher than the item's own; the higher priority wins, then the lower board rank, then the id.
+ * `bug` is the item's own "bug" label (PBI 378), never one of the items it takes its group or priority from.
  */
 export const CLAIM_KEYS = `with recursive
   own as (
     select i.id, i.source_id, i.external_id, i.blocked_by, i.backlog_rank, ${LIVE} as live,
-      coalesce(i.board_priority, 3)::int as p, ${OWN_FINAL_STAGE} as fs
+      coalesce(i.board_priority, 3)::int as p, ${OWN_FINAL_STAGE} as fs, i.bug_label as bug
     from item i
   ),
   reach (root, id) as (
@@ -149,17 +147,17 @@ export const CLAIM_KEYS = `with recursive
     from reach r join own l on l.id = r.root where r.root <> r.id
   ),
   grouped as (
-    select o.id, o.p as own_p, o.fs as own_fs, o.fs or coalesce(bool_or(l.fs), false) as fs,
+    select o.id, o.p as own_p, o.fs as own_fs, o.bug, o.fs or coalesce(bool_or(l.fs), false) as fs,
       min(l.p) filter (where l.fs) as fs_p,
       (array_agg(l.from_id order by l.p, l.backlog_rank nulls last, l.from_id) filter (where l.fs))[1] as fs_id,
       (array_agg(l.from_ext order by l.p, l.backlog_rank nulls last, l.from_id) filter (where l.fs))[1] as fs_ext,
       min(l.p) as any_p,
       (array_agg(l.from_id order by l.p, l.backlog_rank nulls last, l.from_id))[1] as any_id,
       (array_agg(l.from_ext order by l.p, l.backlog_rank nulls last, l.from_id))[1] as any_ext
-    from own o left join lent l on l.id = o.id group by o.id, o.p, o.fs
+    from own o left join lent l on l.id = o.id group by o.id, o.p, o.fs, o.bug
   ),
   claim_key as (
-    select g.id, g.own_p, g.fs,
+    select g.id, g.own_p, g.fs, g.bug,
       case when g.fs and not g.own_fs then g.fs_id end as fs_from, case when g.fs and not g.own_fs then g.fs_ext end as fs_from_ext,
       least(g.own_p, case when g.fs then g.fs_p else g.any_p end) as p,
       case when (case when g.fs then g.fs_p else g.any_p end) < g.own_p then (case when g.fs then g.fs_id else g.any_id end) end as p_from,
@@ -177,23 +175,29 @@ export type ClaimKey = {
   finalStage: boolean;
   /** The final-stage item that depends on it, when it's in the group only because of that item. */
   finalStageFrom: { id: string; externalId: string } | null;
+  /** PBI 378: whether the item itself carries the board's "bug" label. It never comes from another item. */
+  bug: boolean;
 };
 
 /** The claim keys of the given items, or of every item, by id. */
 export async function claimKeys(c: pg.Pool | pg.PoolClient, ids?: string[]): Promise<Map<string, ClaimKey>> {
-  const rows = (await c.query<{ id: string; own_p: number; p: number; fs: boolean; fs_from: string | null; fs_from_ext: string | null; p_from: string | null; p_from_ext: string | null }>(
+  const rows = (await c.query<{ id: string; own_p: number; p: number; fs: boolean; bug: boolean; fs_from: string | null; fs_from_ext: string | null; p_from: string | null; p_from_ext: string | null }>(
     `${CLAIM_KEYS} select * from claim_key k where $1::uuid[] is null or k.id = any($1::uuid[])`, [ids ?? null],
   )).rows;
   return new Map(rows.map((r) => [r.id, {
-    own: r.own_p, priority: r.p, finalStage: r.fs,
+    own: r.own_p, priority: r.p, finalStage: r.fs, bug: r.bug,
     priorityFrom: r.p_from ? { id: r.p_from, externalId: r.p_from_ext! } : null,
     finalStageFrom: r.fs_from ? { id: r.fs_from, externalId: r.fs_from_ext! } : null,
   }]));
 }
 
+// PBI 378: an item that carries the "bug" label itself comes first within its priority in the final-stage group, and
+// outside the group only at claim priority 1. At priorities 2 to 5 outside the group the label doesn't order the claim.
+const BUG_FIRST = `((k.fs or k.p = 1) and k.bug)`;
 // PBI 320: the final-stage group comes after Start now and before everything else, then the claim priority, 1 first.
-// Within one priority today's order holds: answered items, the older priority column, then the queue rank.
-const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, k.fs desc, k.p asc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
+// Within one priority, the bug items where BUG_FIRST puts them first (PBI 378), then today's order holds: answered
+// items, the older priority column, then the queue rank.
+const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, k.fs desc, k.p asc, ${BUG_FIRST} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
 
 // The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
 // `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
@@ -212,7 +216,7 @@ const CLAIMABLE = `from item i join claim_key k on k.id = i.id
  * the person and the reason. The queue here is every Queued or answered item in the claim order, held and blocked ones
  * included, so a held item keeps the place it was moved to once it's released. A move stays among the items it's
  * ordered with: those that match it on being a standing break's bug item, Start now, the final-stage group, the claim
- * priority (PBI 320), Queued or answered, and the older priority column.
+ * priority (PBI 320), coming first as a bug item (PBI 378), Queued or answered, and the older priority column.
  * The item's new queue key, strictly between the two items it lands between even when their board ranks tie, is kept
  * on the override, so it ends when the override does. Its rank is kept as an offset from the item's board rank where it
  * has one, so a board reorder that shifts the item and its neighbours alike leaves the moved order as it was. An item
@@ -225,14 +229,14 @@ export async function moveInQueue(
   if (!o.reason.trim()) throw new Error("an override needs a reason");
   // Two moves at once would read the same neighbours, so they take turns.
   await c.query("select pg_advisory_xact_lock(265)");
-  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null }>(
-    `${CLAIM_KEYS} select i.id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, i.state = 'Queued' as queued, i.priority,
+  const rows = (await c.query<{ id: string; bug: boolean; first: boolean; fs: boolean; p: number; bug_first: boolean; queued: boolean; priority: number; rank: string | null; tie: string; idnum: string; board: string | null; source_id: string }>(
+    `${CLAIM_KEYS} select i.id, i.source_id, ${MAIN_BREAK_BUG} as bug, ${START_NOW} as first, k.fs, k.p, ${BUG_FIRST} as bug_first, i.state = 'Queued' as queued, i.priority,
        ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum, i.backlog_rank::text as board
      from item i join claim_key k on k.id = i.id where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
   )).rows;
   const me = rows.find((r) => r.id === itemId);
   if (!me) throw new Error(`item ${itemId} isn't in the factory queue`);
-  const group = rows.filter((r) => r.bug === me.bug && r.first === me.first && r.fs === me.fs && r.p === me.p && r.queued === me.queued && r.priority === me.priority);
+  const group = rows.filter((r) => r.bug === me.bug && r.first === me.first && r.fs === me.fs && r.p === me.p && r.bug_first === me.bug_first && r.queued === me.queued && r.priority === me.priority);
   const at = group.indexOf(me);
   const last = group.length - 1;
   // The two items the move lands between, either of them missing at an end of the queue. An item already at the end
@@ -240,8 +244,26 @@ export async function moveInQueue(
   const [before, after] = dir === "up" ? [group[at - 2], group[at - 1]] : [group[at + 1], group[at + 2]];
   const stays = dir === "up" ? at === 0 : at === last;
   const key = stays ? { rank: me.rank, tie: me.tie } : keyBetween(before, after, me.idnum);
-  // Kept relative to the item's own board rank where it has one, so a board change that shifts it carries the move.
-  const value = key.rank !== null && me.board !== null ? { offset: decAdd(key.rank, `-${me.board}`.replace(/^--/, "")), tie: key.tie } : key;
+  // PBI 311: the item it passed, so a later board poll can hold it on its side of that item (keepMovesInPlace), and
+  // which side of that item the board had it on, so the poll ends the move only when the board flips the two.
+  // A press that leaves the item where it is keeps the hold its latest move of the same direction already had, so the
+  // new override, now its latest move, doesn't drop it back to an offset only.
+  const passedRow = stays ? undefined : group[dir === "up" ? at - 1 : at + 1];
+  let hold: { passed?: string; boardSide?: BoardSide } = {};
+  if (passedRow) {
+    const boardSide = boardSideOf(me, passedRow);
+    hold = { passed: passedRow.id, ...(boardSide ? { boardSide } : {}) };
+  } else {
+    const prev = (await c.query<{ kind: string; passed: string | null; board_side: BoardSide | null }>(
+      `select o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side from override o
+       where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+       order by o.created_at desc, o.id desc limit 1`, [itemId],
+    )).rows[0];
+    if (prev?.passed && prev.kind === (dir === "up" ? "move_up" : "move_down")) {
+      hold = { passed: prev.passed, ...(prev.board_side ? { boardSide: prev.board_side } : {}) };
+    }
+  }
+  const value = { ...storedKey(key, me.board), ...hold };
   await c.query(
     "insert into override (scope, target_id, kind, value, reason, created_by) values ('item', $1, $2, $3, $4, $5)",
     [itemId, dir === "up" ? "move_up" : "move_down", value, o.reason.trim(), o.createdBy],
@@ -249,6 +271,91 @@ export async function moveInQueue(
 }
 
 type QueueKey = { rank: string | null; tie: string };
+
+/** A queue key as a move stores it: its rank as an offset from the item's board rank where it has one, so a board change that shifts it carries the move. */
+function storedKey(key: QueueKey, board: string | null): { offset: string; tie: string } | QueueKey {
+  return key.rank !== null && board !== null ? { offset: decAdd(key.rank, `-${board}`.replace(/^--/, "")), tie: key.tie } : key;
+}
+
+/** -1 when `a` comes before `b` in the queue key order, rank (nulls last) then tie, 1 when after, 0 when equal. */
+function keyCmp(a: QueueKey, b: QueueKey): number {
+  if (a.rank !== b.rank) {
+    if (a.rank === null) return 1;
+    if (b.rank === null) return -1;
+    const r = decCmp(a.rank, b.rank);
+    if (r !== 0) return r;
+  }
+  return decCmp(a.tie, b.tie);
+}
+
+/** Which side of `passed` the board has `me` on (PBI 311): only for two items of one backlog source, each with a distinct board rank. */
+type BoardSide = "ahead" | "behind";
+function boardSideOf(me: { source_id: string; board: string | null }, passed: { source_id: string; board: string | null }): BoardSide | null {
+  if (me.source_id !== passed.source_id || me.board === null || passed.board === null) return null;
+  const r = decCmp(me.board, passed.board);
+  return r < 0 ? "ahead" : r > 0 ? "behind" : null;
+}
+
+/** Why the board ended a Move up or Move down (PBI 311), as `override.cleared_cause` records it. */
+export const ENDED_BY_BOARD_ORDER = "board_order";
+
+/**
+ * Holds every active Move up and Move down on its side of the item it passed (PBI 311). The poller calls it once the
+ * board's order is read. Each item's latest move is taken in the order the moves were made:
+ * - When the board itself now puts the moved item and the passed item the other way round from the order it had them
+ *   in when the move was made (`boardSide` on the move), the board wins: every active Move up and Move down on the item
+ *   ends, each recording `ENDED_BY_BOARD_ORDER` and an event, so no earlier move takes the latest one's place and the
+ *   item follows the board from then on. Only two items of the same backlog source, each with a board rank, are
+ *   compared. A move with no `boardSide` had the two tied or not comparable on the board, so it's never ended this way.
+ * - Otherwise, when a board change left the moved item on the wrong side of the passed one, such as a new issue that
+ *   landed between them, its key is set again, just ahead of or just behind the passed item. The neighbour it lands
+ *   beside is read among every live item, not only the Queued ones, so an item the gate passes later can't come between.
+ * - A move that passed no item, or whose passed item has left the factory's live states, is left as it is. Nor is one
+ *   whose passed item has a later move that passed this item back: the later move settles the pair.
+ */
+export async function keepMovesInPlace(c: pg.PoolClient): Promise<void> {
+  if (!inTx(c)) throw new Error("keepMovesInPlace needs a client inside withTx");
+  await c.query("select pg_advisory_xact_lock(265)");
+  const moves = (await c.query<{ id: string; target_id: string; kind: "move_up" | "move_down"; passed: string | null; board_side: BoardSide | null }>(
+    `select * from (select distinct on (o.target_id) o.id, o.target_id, o.kind, o.value->>'passed' as passed, o.value->>'boardSide' as board_side, o.created_at
+       from override o where o.scope = 'item' and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+       order by o.target_id, o.created_at desc, o.id desc) m
+     order by m.created_at, m.id`,
+  )).rows;
+  for (const m of moves) {
+    if (!m.passed) continue;
+    // Read afresh for each move, since setting one item's key can change where the next one stands.
+    const live = (await c.query<{ id: string; source_id: string; board: string | null; rank: string | null; tie: string; idnum: string }>(
+      `select i.id, i.source_id, i.backlog_rank::text as board, ${QUEUE_RANK}::text as rank, ${QUEUE_TIE}::text as tie, ${ID_NUM}::text as idnum
+       from item i where ${LIVE} order by ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`,
+    )).rows;
+    const me = live.find((r) => r.id === m.target_id);
+    const passed = live.find((r) => r.id === m.passed);
+    if (!me || !passed) continue;
+    const up = m.kind === "move_up";
+    const now = boardSideOf(me, passed);
+    if (m.board_side && now && now !== m.board_side) {
+      const ended = (await c.query<{ id: string; kind: "move_up" | "move_down" }>(
+        `update override o set cleared_at = now(), cleared_cause = $2
+         where o.scope = 'item' and o.target_id = $1 and o.kind in ('move_up', 'move_down') and o.cleared_at is null and (o.expires_at is null or o.expires_at > now())
+         returning o.id, o.kind`, [me.id, ENDED_BY_BOARD_ORDER],
+      )).rows;
+      for (const e of ended) {
+        await appendEvent(c, { ...system("poller"), itemId: me.id, kind: "move_ended", payload: { override: e.id, control: e.kind, passed: e.id === m.id ? passed.id : null, cause: ENDED_BY_BOARD_ORDER } });
+      }
+      continue;
+    }
+    // Two moves that each passed the other: the newer one settles the pair, so the older isn't set again on every poll.
+    const back = moves.findIndex((x) => x.target_id === m.passed && x.passed === m.target_id);
+    if (back > moves.indexOf(m)) continue;
+    const side = keyCmp(me, passed);
+    if (up ? side < 0 : side > 0) continue;
+    const others = live.filter((r) => r.id !== me.id);
+    const at = others.indexOf(passed);
+    const key = up ? keyBetween(others[at - 1], passed, me.idnum) : keyBetween(passed, others[at + 1], me.idnum);
+    await c.query("update override set value = $2 where id = $1", [m.id, { ...storedKey(key, me.board), passed: passed.id, ...(m.board_side ? { boardSide: m.board_side } : {}) }]);
+  }
+}
 
 /**
  * A queue key strictly after `lo` and strictly before `hi`, in the order rank (nulls last) then tie. Either may be
@@ -309,7 +416,8 @@ export async function nextUp(
 /**
  * Claims the next item for `owner` and leases it until now + LEASE_EXPIRY_MS. The bug item of a standing break on main
  * comes first (PBI 255), then an item marked Start now, then the final-stage group, then by claim priority, 1 first
- * (PBI 320, see CLAIM_KEYS), then answered SignOff and NeedsInput items before Queued ones, then highest priority
+ * (PBI 320, see CLAIM_KEYS), then, in the final-stage group or at claim priority 1, an item carrying the "bug" label
+ * itself (PBI 378), then answered SignOff and NeedsInput items before Queued ones, then highest priority
  * column, then lowest queue rank: the latest Move up or Move down's, or else the backlog rank (PBI 265). Held items and
  * items with an open dependency are skipped. SKIP LOCKED means two concurrent claims never get the same item, and a claim never waits.
  * The claim raises the generation by 1 (Run contract 2) and reuses the item's open run, or starts one at understand.
@@ -363,7 +471,7 @@ export const LEASE_RAN_OUT = "The cell's lease ran out before it reported this a
 /**
  * Closes every attempt of the item's open run that is still started: it gets the status stopped, ends at `now` and
  * carries LEASE_RAN_OUT (PBI 239). The factory calls it whenever an InProgress item goes back to Queued because its
- * lease ran out or a restart ended its cell's claim, so no attempt is left started for a cell that's gone. Like any
+ * lease ran out or a cell wrapping up for a restart ended its claim, so no attempt is left started for a cell that's gone. Like any
  * stopped attempt, it uses up none of the stage's retries.
  */
 export async function closeStartedAttempts(c: pg.PoolClient, itemId: string, now: Date): Promise<void> {
@@ -423,7 +531,7 @@ export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Pro
  * True when an Abandoned item's last move to Abandoned was a withdrawal from Eligible or NotReady, so it never passed
  * the readiness gate. Such an item comes back only through `returned`, to Eligible, never to Queued (PBI 168).
  */
-export async function withdrawnBeforeQueue(c: pg.PoolClient, itemId: string): Promise<boolean> {
+export async function withdrawnBeforeQueue(c: pg.Pool | pg.PoolClient, itemId: string): Promise<boolean> {
   const last = (await c.query<{ from: string; event: string | null }>(
     `select payload->>'from' as from, payload->>'event' as event from event
      where item_id = $1 and kind in ('transition', 'override') and payload->>'to' = 'Abandoned' order by at desc limit 1`,

@@ -7,7 +7,7 @@ import { startServer } from "../http/server.ts";
 import { withTx } from "../store/db.ts";
 import { claimNext, expireLeases, LEASE_RAN_OUT, transitionItem } from "../store/items.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { mirrorBoard } from "./board.ts";
+import { workOutbox } from "../worker/outbox.ts";
 import { cellApi, runToken } from "./cell-api.ts";
 
 const secret = "cell-secret";
@@ -22,7 +22,6 @@ describe("cell API", dbTest, () => {
   let board: ReturnType<typeof fakeBacklog>;
   let host: ReturnType<typeof fakeRepoHost>;
   let clock: Date;
-  let off: () => void;
   let sourceId: string;
   let configReads = 0;
   let killed = false;
@@ -49,16 +48,17 @@ describe("cell API", dbTest, () => {
       now: () => clock,
     });
     server = await startServer([api], { port: 0 });
-    off = mirrorBoard({ pool: db.pool, backlogFor: () => board.adapter, repoHost: hostProxy() });
   });
 
-  // The API and the hook hold one RepoHost for the whole suite, so each test's fresh fake sits behind this proxy.
+  /** The worker's pass over the outbox, which mirrors the API's transitions onto the board (PBI 219). */
+  const mirrored = () => workOutbox({ pool: db.pool, backlogFor: () => board.adapter, repoHost: hostProxy() });
+
+  // The API and the worker hold one RepoHost for the whole suite, so each test's fresh fake sits behind this proxy.
   function hostProxy(): ReturnType<typeof fakeRepoHost> {
     return new Proxy({} as ReturnType<typeof fakeRepoHost>, { get: (_t, k) => (host as unknown as Record<string | symbol, unknown>)[k] });
   }
 
   after(async () => {
-    off();
     await new Promise((r) => server.close(r));
     await new Promise((r) => upstream.close(r));
     await db.stop();
@@ -179,6 +179,7 @@ describe("cell API", dbTest, () => {
     assert.equal(run.risk_tier, "Medium");
     assert.deepEqual(run.tier_reasons, ["touches src/control"]);
     assert.deepEqual(run.reviews_seen_at, at);
+    await mirrored();
     assert.equal((await board.adapter.getItem("7"))?.fields.pr, `https://github.com/${repo}/pull/9`);
   });
 
@@ -208,6 +209,7 @@ describe("cell API", dbTest, () => {
 
   test("scenarios_written stores the sha and files, asks for sign-off and releases the lease", async () => {
     const cell = await claimed();
+    host.files.set(`${repo}@5c3a1f0:features/a.feature`, "Feature: A\n");
     const r = await send(cell.runId, cell.token, "POST", "/transition", {
       event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0", lockedFiles: ["features/a.feature"],
     });
@@ -219,9 +221,109 @@ describe("cell API", dbTest, () => {
     const run = await runRow(cell.runId);
     assert.equal(run.scenarios_sha, "5c3a1f0");
     assert.deepEqual(run.locked_files, ["features/a.feature"]);
+    // PBI 224: Run detail's snapshot, the item's criteria and each locked file's text at the sha.
+    assert.deepEqual(run.acceptance_criteria, ["it works"]);
+    const files = await db.pool.query("select sha, path, text from run_file where run_id = $1", [cell.runId]);
+    assert.deepEqual(files.rows, [{ sha: "5c3a1f0", path: "features/a.feature", text: "Feature: A\n" }]);
     const q = await db.pool.query("select kind, body from question where item_id = $1", [cell.itemId]);
     assert.deepEqual(q.rows, [{ kind: "sign_off", body: "Sign these off" }]);
+    await mirrored();
     assert.ok((await board.comments("7")).some((c) => c.includes("/approve") && c.includes("Sign these off")));
+  });
+
+  test("scenarios_written locking a file the repo doesn't hold at the sha gets 400 and writes nothing (PBI 224)", async () => {
+    const cell = await claimed();
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0", lockedFiles: ["features/a.feature"],
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.body.error, /holds no features\/a\.feature at 5c3a1f0/);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+    assert.equal((await runRow(cell.runId)).scenarios_sha, null);
+    assert.equal((await db.pool.query("select count(*)::int as n from run_file where run_id = $1", [cell.runId])).rows[0].n, 0);
+  });
+
+  test("scenarios_written locking the same file twice stores it once (PBI 224)", async () => {
+    const cell = await claimed();
+    host.files.set(`${repo}@5c3a1f0:features/a.feature`, "Feature: A\n");
+    const r = await send(cell.runId, cell.token, "POST", "/transition", {
+      event: "scenarios_written", question: { kind: "sign_off", body: "Sign these off" }, scenariosSha: "5c3a1f0",
+      lockedFiles: ["features/a.feature", "features/a.feature"],
+    });
+    assert.equal(r.status, 200);
+    assert.equal((await item(cell.itemId)).state, "SignOff");
+    const files = await db.pool.query("select path from run_file where run_id = $1", [cell.runId]);
+    assert.deepEqual(files.rows, [{ path: "features/a.feature" }]);
+  });
+
+  test("feature_change_requested stores the request, moves the item to FeatureChangeRequest and posts it on the PBI once (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    host.files.set(`${repo}@l0ck:features/a.feature`, "  Then refused\n");
+    const featureChange = [{ path: "features/a.feature", reason: "Held, not refused", before: "  Then refused\n", after: "  Then held\n" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.state, "FeatureChangeRequest");
+    const i = await item(cell.itemId);
+    assert.equal(i.state, "FeatureChangeRequest");
+    assert.equal(i.lease_owner, null);
+    assert.deepEqual((await runRow(cell.runId)).feature_change, featureChange);
+    await mirrored();
+    await mirrored();
+    const posted = (await board.comments("7")).filter((c) => c.includes("features/a.feature"));
+    assert.equal(posted.length, 1);
+    assert.match(posted[0]!, /Held, not refused[\s\S]*-  Then refused\n\+  Then held/);
+  });
+
+  test("a feature change request's before is the lock commit's text, not the cell's (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const lock = "  Then refused\n  Then the total is checked\n";
+    host.files.set(`${repo}@l0ck:features/a.feature`, lock);
+    // A steered cell sends a before that already leaves out a line, so the diff wouldn't show it dropped.
+    const sent = [{ path: "features/a.feature", reason: "Held, not refused", before: "  Then refused\n", after: "  Then held\n" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange: sent });
+    assert.equal(r.status, 200);
+    assert.deepEqual((await runRow(cell.runId)).feature_change, [{ ...sent[0], before: lock }]);
+    await mirrored();
+    const posted = (await board.comments("7")).find((c) => c.includes("features/a.feature"));
+    assert.match(posted!, /-  Then the total is checked/);
+  });
+
+  test("a feature change request for a file missing from the lock commit gets 400 (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const featureChange = [{ path: "features/a.feature", reason: "r", after: "b" }];
+    const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+    assert.equal(r.status, 400);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
+  test("a feature change request must name only locked files, each with a reason and both versions (PBI 364)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update run set features_lock_sha = 'l0ck', locked_files = $2 where id = $1", [cell.runId, ["features/a.feature"]]);
+    const f = { path: "features/a.feature", reason: "r", before: "a", after: "b" };
+    for (const featureChange of [undefined, [], [{ ...f, path: "features/b.feature" }], [{ ...f, reason: "" }], [{ ...f, after: 1 }]]) {
+      const r = await send(cell.runId, cell.token, "POST", "/transition", { event: "feature_change_requested", featureChange });
+      assert.equal(r.status, 400, JSON.stringify(featureChange));
+    }
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
+  test("a token that isn't a run token gets 401 on every route, before anything is read or written, and a stale run token still gets 409", async () => {
+    const cell = await claimed();
+    // A user's sign-in token is a JWT, never a run token's 64 hex digits, and a missing token is no run token either.
+    const jwt = "header.payload.signature";
+    for (const token of [jwt, "", cell.token.toUpperCase()]) {
+      for (const [method, path] of [["POST", "/stage"], ["GET", "/context"], ["POST", "/transition"], ["POST", "/nope"]]) {
+        const r = await send(cell.runId, token, method, path, method === "POST" ? { stageId: "green", attempt: 1, status: "started" } : undefined);
+        assert.equal(r.status, path === "/nope" ? 404 : 401, `${method} ${path} with ${JSON.stringify(token)}`);
+      }
+    }
+    assert.equal((await send("not-a-run", jwt, "GET", "/context")).status, 401);
+    assert.equal((await db.pool.query("select count(*)::int as n from stage_run where run_id = $1", [cell.runId])).rows[0].n, 0);
+    assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "GET", "/context")).status, 409);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
   });
 
   test("a stale token with a disallowed event gets 409, not 400", async () => {
@@ -235,6 +337,7 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/transition", { event: "retries_exhausted" })).body.state, "Failed");
     const e = await db.pool.query("select payload from event where item_id = $1 and payload->>'event' = 'retries_exhausted'", [cell.itemId]);
     assert.deepEqual(e.rows[0].payload.attempts.map((a: { attempt: number }) => a.attempt), [1, 2, 3]);
+    await mirrored();
     assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"));
     assert.ok((await board.comments("7")).some((c) => c.includes("re-queue")));
   });
@@ -277,9 +380,12 @@ describe("cell API", dbTest, () => {
       dodVerdicts: [{ index: 1, criterion: "Deployed to staging", status: "person", reason: "after merge" }], dodCheckedSha: "abc1234",
       scenarioNotes: [],
       trustedComments: [],
+      threadCommentCounts: {},
       trustedBot: "factory[bot]",
       stageAttempts: { specify: 2 },
+      failedCiHeads: [],
       resume: null,
+      retry: null,
     });
   });
 
@@ -295,6 +401,7 @@ describe("cell API", dbTest, () => {
     ]);
     const { body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
+    assert.deepEqual(body.threadCommentCounts, { t1: 3 }, "every author's comment counts, so address can tell one that came later (PBI 258)");
   });
 
   test("an address run's context holds none of a thread the factory's own review opened, a person's reply included (PBI 130)", async () => {
@@ -319,27 +426,44 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body, { ok: true, stop: true });
   });
 
-  // Plan Task 13: drain and the usage reserve let a running cell finish, and a kill override stops it.
-  test("lease says carry on under a drain or the usage reserve, and stop under a kill override", async () => {
+  // Plan Task 13: the usage reserve lets a running cell finish, and a kill override stops it. A drain lets it finish
+  // its stage and ends its claim at that stage boundary, as a restart being prepared does (PBI 379).
+  test("lease says carry on under the usage reserve, carry on to the stage boundary under a drain, and stop under a kill override", async () => {
     const cell = await claimed();
     const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
-    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'release')");
     await db.pool.query("update wip_policy set usage_paused_until = $1", [new Date(at.getTime() + 3_600_000)]);
     assert.deepEqual(await lease(), { ok: true, stop: false });
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'release')");
+    assert.deepEqual(await lease(), { ok: true, stop: false, restarting: true });
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'kill', 'incident')");
     assert.deepEqual(await lease(), { ok: true, stop: true });
   });
 
-  // PBI 140: a restart being prepared tells every live cell to stop at its next renewal, and the cell API keeps
-  // answering it, so it can push and report its attempt stopped. That report ends the claim, so the restarted factory
-  // can start the item again at once, at the stage it was in.
-  test("lease says stop while a restart is being prepared, and carry on again once it's cleared", async () => {
+  // PBI 301: a restart being prepared tells a live cell to carry on and finish its stage, and says it's restarting, so
+  // the cell starts no further stage. A pause still tells it to stop. Once the restart is cleared, `restarting` goes.
+  test("lease says carry on and restarting while a restart is being prepared, and stop under a pause as well", async () => {
     const cell = await claimed();
     const lease = async () => (await send(cell.runId, cell.token, "POST", "/lease", { generation: cell.generation })).body;
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.deepEqual(await lease(), { ok: true, stop: false, restarting: true });
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'maintenance')");
     assert.deepEqual(await lease(), { ok: true, stop: true });
-    await db.pool.query("update override set cleared_at = now() where kind = 'restart'");
+    await db.pool.query("update override set cleared_at = now()");
     assert.deepEqual(await lease(), { ok: true, stop: false });
+  });
+
+  test("a release while a restart is being prepared ends the claim at the run's next stage, with no attempt stopped (PBI 301)", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    const post = (route: string, body: unknown) => send(cell.runId, cell.token, "POST", route, body);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "passed" })).status, 200);
+    assert.equal((await post("/release", {})).status, 200);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    const run = await db.pool.query("select next_stage from run where id = $1", [cell.runId]);
+    assert.equal(run.rows[0].next_stage, "self-review");
+    const statuses = await db.pool.query("select status from stage_run where run_id = $1", [cell.runId]);
+    assert.deepEqual(statuses.rows.map((r) => r.status), ["passed"]);
   });
 
   test("a stopped attempt reported while a restart is being prepared ends the claim and keeps the stage", async () => {
@@ -392,6 +516,55 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(paused.runId, paused.token, "POST", "/release")).status, 409);
   });
 
+  // PBI 379: a cell that finished its stage under a drain ends its claim at the boundary, once, and the release records
+  // the drain. A stopped attempt under a drain alone keeps the claim: its stop came from a pause, the kill switch or an
+  // operator, whose handling holds.
+  test("a release under a drain ends the claim at the run's next stage, once, recording the drain", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'upgrading Docker')");
+    const post = (route: string, body: unknown) => send(cell.runId, cell.token, "POST", route, body);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await post("/stage", { stageId: "green", attempt: 1, status: "passed" })).status, 200);
+    assert.equal((await post("/release", {})).status, 200);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    assert.equal((await runRow(cell.runId)).next_stage, "self-review");
+    const e = await db.pool.query<{ payload: Record<string, unknown> }>(
+      "select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'lease_expired'", [cell.itemId]);
+    assert.deepEqual(e.rows.map((r) => [r.payload.reason, r.payload.drain]), [["drain", true]]);
+    assert.equal((await post("/release", {})).status, 409);
+  });
+
+  test("a release under a drain and a restart being prepared records both, once", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'upgrading Docker'), ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/release")).status, 200);
+    const e = await db.pool.query<{ payload: Record<string, unknown> }>(
+      "select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'lease_expired'", [cell.itemId]);
+    assert.deepEqual(e.rows.map((r) => [r.payload.reason, r.payload.drain]), [["restart", true]]);
+  });
+
+  test("a stopped attempt reported under a drain alone keeps the claim", async () => {
+    const cell = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "green", attempt: 1, status: "stopped" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+  });
+
+  // A cell an operator's stop or a pause caught between stages releases with no attempt open. Under a drain too, the
+  // claim stays, so the scheduler fails and holds the stopped item, and a pause holds it InProgress.
+  test("a release under a drain and an operator's stop or a pause keeps the claim", async () => {
+    const stopped = await claimed("green");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'drain', 'upgrading Docker')");
+    await db.pool.query("insert into override (scope, kind, target_id, reason) values ('item', 'stop_run', $1, 'wrong item')", [stopped.itemId]);
+    assert.equal((await send(stopped.runId, stopped.token, "POST", "/release")).status, 200);
+    assert.equal((await item(stopped.itemId)).state, "InProgress");
+    await db.pool.query("update override set cleared_at = now() where kind = 'stop_run'");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");
+    assert.equal((await send(stopped.runId, stopped.token, "POST", "/release")).status, 200);
+    assert.equal((await item(stopped.itemId)).state, "InProgress");
+    assert.equal((await db.pool.query("select 1 from event where item_id = $1 and payload->>'event' = 'lease_expired'", [stopped.itemId])).rowCount, 0);
+  });
+
   test("sop-move records the image's SOP on the run and logs one system event on the item, once", async () => {
     const cell = await claimed("green");
     assert.equal((await send(cell.runId, cell.token, "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 200);
@@ -412,6 +585,74 @@ describe("cell API", dbTest, () => {
     assert.equal((await runRow(cell.runId)).sop_version, "default@1");
     assert.equal((await send(cell.runId, runToken(secret, cell.runId, cell.generation + 1), "POST", "/sop-move", { from: "default@1", to: "default@2" })).status, 409);
     assert.equal((await db.pool.query("select 1 from event where kind = 'sop_moved'")).rowCount, 0);
+  });
+
+  test("context hands the next claim each head CI failed on in the run's earlier claims, oldest first, once each (PBI 315)", async () => {
+    const cell = await claimed("green");
+    const a = { sha: "c0ffee1", checks: [{ name: "ci", url: "https://github.com/acme/widgets/actions/runs/1", failingTests: ["totals"] }] };
+    const b = { sha: "c0ffee2", checks: [] };
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, ci_failure, started_at) values
+         ($1, 'green', 1, 'passed', null, now() - interval '3 minutes'), ($1, 'green', 2, 'failed', $2, now() - interval '2 minutes'),
+         ($1, 'green', 3, 'failed', $2, now() - interval '1 minute'), ($1, 'green', 4, 'failed', $3, now())`,
+      [cell.runId, JSON.stringify(a), JSON.stringify(b)],
+    );
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a, b]);
+  });
+
+  test("context hands the next claim a head CI failed on that only open-pr's failed attempt recorded (PBI 315)", async () => {
+    const cell = await claimed("open-pr");
+    const a = { sha: "c0ffee3", checks: [{ name: "ci", url: "https://github.com/acme/widgets/actions/runs/2", failingTests: [] }] };
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, ci_failure) values ($1, 'open-pr', 1, 'failed', $2)", [cell.runId, JSON.stringify(a)]);
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.failedCiHeads, [a]);
+  });
+
+  test("context hands the next claim the tries and findings of a failed attempt that ended its claim at the attempt boundary (PBI 393)", async () => {
+    const cell = await claimed("green");
+    const report = (attempt: number, status: string, extra: Record<string, unknown> = {}) => send(cell.runId, cell.token, "POST", "/stage",
+      { stageId: "green", attempt, status, model: "m", tokensIn: 0, tokensOut: 0, costUsd: 0, ...extra });
+    assert.equal((await report(1, "started")).status, 200);
+    assert.equal((await report(1, "failed", { retryCarry: { tried: 1, findings: ["totals include VAT fails"] } })).status, 200);
+    const body = (await send(cell.runId, cell.token, "GET", "/context")).body;
+    assert.deepEqual(body.retry, { stageId: "green", tried: 1, findings: ["totals include VAT fails"] });
+    assert.equal(body.resume, null);
+    assert.equal((await report(2, "failed", { retryCarry: { tried: "x" } })).status, 400);
+    // A later attempt that failed within its claim carries nothing over.
+    await report(2, "started");
+    await report(2, "failed");
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.retry, null);
+  });
+
+  test("context hands a claim at open-pr green's carry when a pass back to green ended its claim at a failed attempt (PBI 393)", async () => {
+    const cell = await claimed("open-pr");
+    const carry = { tried: 2, findings: ["totals include VAT fails"] };
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, retry_carry, started_at) values
+         ($1, 'open-pr', 1, 'failed', null, now() - interval '2 minutes'), ($1, 'green', 2, 'failed', $2, now() - interval '1 minute')`,
+      [cell.runId, JSON.stringify(carry)],
+    );
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.retry, { stageId: "green", ...carry });
+    // A later claim's open-pr attempt means that pass is over, so the carry is stale.
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, started_at) values ($1, 'open-pr', 2, 'started', now())", [cell.runId]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.retry, null);
+  });
+
+  test("context hands a claim at open-pr pr-review's carry when pr-review's turned-down feature change was the run's last attempt (PBI 365)", async () => {
+    const cell = await claimed("open-pr");
+    const carry = { tried: 0, findings: ["The Product Owner turned down your feature change request."] };
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, retry_carry, started_at) values
+         ($1, 'open-pr', 1, 'passed', null, now() - interval '2 minutes'), ($1, 'pr-review', 1, 'failed', $2, now() - interval '1 minute')`,
+      [cell.runId, JSON.stringify(carry)],
+    );
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.retry, { stageId: "pr-review", ...carry });
+  });
+
+  test("context hands a claim at red no green carry, since no pass back to green runs before red (PBI 393)", async () => {
+    const cell = await claimed("red");
+    await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, retry_carry) values ($1, 'green', 1, 'failed', $2)",
+      [cell.runId, JSON.stringify({ tried: 1, findings: ["x"] })]);
+    assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.retry, null);
   });
 
   test("context names the stopped attempt at the run's next stage that the cell resumes", async () => {
@@ -592,6 +833,49 @@ describe("cell API", dbTest, () => {
     assert.deepEqual((await send(cell.runId, cell.token, "GET", "/pending-checks?sha=abc1234")).body, { checks: ["ci", "e2e"] });
   });
 
+  test("rerun-checks: re-runs the named failed checks on the run's own commit, and a sha off the branch or on main gets 400 (PBI 233)", async () => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "failure", url: "u" }]);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "0ff0ff0", checks: ["ci"] })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "0a0a0a0", checks: ["ci"] })).status, 400);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: [] })).status, 400);
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true, rerun: ["ci"], refused: [] });
+    assert.deepEqual(host.reruns, [{ key: `${repo}@abc1234`, checks: ["ci"] }]);
+    // Once per commit, kept on the control plane, so a cell resuming the run after a restart can't re-run it again.
+    const again = await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] });
+    assert.equal(again.status, 400);
+    assert.match(JSON.stringify(again.body), /already re-run once/);
+    assert.equal(host.reruns.length, 1);
+  });
+
+  test("rerun-checks: a re-run the host refuses isn't recorded, so it can be asked for again (PBI 233)", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "success", url: "u" }]);
+    // A 400 with the host's reason, so the cell's note says why, not "internal error".
+    const refused = await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] });
+    assert.equal(refused.status, 400);
+    assert.match(JSON.stringify(refused.body), /re-ran none of the checks: .+/);
+    host.ciChecks.set(`${repo}@abc1234`, [{ name: "ci", conclusion: "failure", url: "u" }]);
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci"] })).body, { ok: true, rerun: ["ci"], refused: [] });
+  });
+
+  test("rerun-checks: a partial re-run is recorded, names the refused checks, and can't be asked for again (PBI 233)", async (t) => {
+    const cell = await claimed();
+    host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234"]);
+    host.branches.set(`${repo}@main`, ["0a0a0a0"]);
+    t.mock.method(host as Required<typeof host>, "rerunChecksOnSha", async () => ({ rerun: ["ci"], refused: [{ check: "e2e", reason: "already running" }] }));
+    assert.deepEqual((await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["ci", "e2e"] })).body,
+      { ok: true, rerun: ["ci"], refused: [{ check: "e2e", reason: "already running" }] });
+    const again = await send(cell.runId, cell.token, "POST", "/rerun-checks", { sha: "abc1234", checks: ["e2e"] });
+    assert.equal(again.status, 400);
+    assert.match(JSON.stringify(again.body), /already re-run once/);
+  });
+
   test("ci-checks: the checks CI named on the run's own commit, and null for a sha off its branch, on main, or with none (PBI 229)", async () => {
     const cell = await claimed();
     host.branches.set(`${repo}@factory/pbi-7-r1`, ["0a0a0a0", "abc1234", "def5678"]);
@@ -663,7 +947,10 @@ describe("cell API", dbTest, () => {
       throw new Error("502 from GitHub");
     };
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    // The failed release keeps the row for a retry, after every other effect has run.
+    await mirrored();
     assert.equal(host.prs[0].open, false);
+    assert.equal((await db.pool.query("select 1 from outbox where item_id = $1", [cell.itemId])).rowCount, 1);
   });
 
   test("Done releases and closes the board item, and withdrawal closes the open PR naming the kept branch", async () => {
@@ -671,18 +958,21 @@ describe("cell API", dbTest, () => {
     await db.pool.query("update run set pr_number = 1, pr_url = $2 where id = $1", [cell.runId, `https://github.com/${repo}/pull/1`]);
     await host.openOrUpdatePr({ repo, branch: "factory/pbi-7-r1", base: "main", title: "t", body: "b" });
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "withdrawn", { actor: "system", actorId: "watcher" }));
+    await mirrored();
     assert.equal(host.prs[0].open, false);
     assert.match(host.prs[0].comments[0], /factory\/pbi-7-r1/);
     assert.ok(!(await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "Abandoned didn't release the marker");
     // A revived item's re-claim puts the marker back.
     await withTx(db.pool, (c) => transitionItem(c, cell.itemId, "requeued", { actor: "human", actorId: "operator" }));
     await withTx(db.pool, (c) => claimNext(c, "cell-b", at));
+    await mirrored();
     assert.ok((await board.adapter.getItem("7"))?.labels.includes("factory:in-progress"), "the re-claim didn't claim the board item");
 
     await board.seed({ externalId: "8" });
     const done = await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '8', 'x', 'Accepted') returning id", [sourceId]);
     await board.adapter.claim("8");
     await withTx(db.pool, (c) => transitionItem(c, done.rows[0].id, "dod_verified", { actor: "system", actorId: "ci" }));
+    await mirrored();
     const shown = await board.adapter.getItem("8");
     assert.equal(shown?.status, "Done");
     assert.equal(shown?.closed, true);

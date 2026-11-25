@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
-import { fakeBacklog } from "../adapters/fake.ts";
+import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
-import { applyComment, parseCommand } from "./decisions.ts";
+import { announcement, applyComment, decideFeatureChange, parseCommand, turnedDownFinding } from "./decisions.ts";
 
 describe("parseCommand", () => {
   test("reads only a leading /approve, /changes or /answer", () => {
@@ -12,6 +12,14 @@ describe("parseCommand", () => {
     assert.equal(parseCommand("Looks good, /approve"), null);
     assert.equal(parseCommand("/approved"), null);
     assert.equal(parseCommand("thanks"), null);
+  });
+});
+
+describe("announcement", () => {
+  test("names a feature change decision as one, and quotes its note (PBI 365)", () => {
+    assert.match(announcement("approve", "", "feature_change"), /^Feature change approved\./);
+    assert.match(announcement("changes", "Keep refusing\nthem", "feature_change"), /^Feature change turned down\.[^\n]*\n\n> Keep refusing\n> them$/);
+    assert.match(announcement("approve", ""), /^Scenarios signed off\./);
   });
 });
 
@@ -60,7 +68,8 @@ describe("decisions", dbTest, () => {
     assert.deepEqual(await state(id), { state: "SignOff", next_stage: "specify", features_lock_sha: null });
     const ev = (await db.pool.query("select actor, payload from event where item_id = $1 and kind = 'decision'", [id])).rows[0];
     assert.deepEqual(ev, { actor: "human", payload: { kind: "changes", via: "comment", text: "add the empty month" } });
-    assert.match((await fake.comments(ext))[0], /sent back for changes/);
+    // The worker announces it from the decision's outbox row (PBI 219), so applying it posts nothing.
+    assert.deepEqual(await fake.comments(ext), []);
   });
 
   test("/answer from an operator answers a NeedsInput item and leaves its resume point", async () => {
@@ -131,6 +140,90 @@ describe("decisions", dbTest, () => {
     t.mock.method(console, "error", () => {});
     assert.equal(await comment(ext, "octo", "/approve"), "applied");
     assert.deepEqual(await state(id), { state: "SignOff", next_stage: "red", features_lock_sha: "abc" });
+  });
+
+  describe("on a feature change request (PBI 365)", () => {
+    const files = [
+      { path: "features/a.feature", reason: "Held, not refused", before: "Then refused\n", after: "Then held\n" },
+      { path: "features/b.feature", reason: "Needs a number", before: "b\n", after: "b2\n" },
+    ];
+    let repo: ReturnType<typeof fakeRepoHost>;
+
+    /** An item waiting in FeatureChangeRequest, its `stage` attempt 1 failed after asking. */
+    async function requested(stage = "green") {
+      repo = fakeRepoHost();
+      repo.branches.set("octo/repo@factory/x-r1", ["lock1", "pushed"]);
+      const ext = await fake.seed({ repo: "octo/repo" });
+      const id = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, $2, 't', 'FeatureChangeRequest') returning id", [sourceId, ext])).rows[0].id;
+      const repoId = (await db.pool.query<{ id: string }>("insert into repo (host_adapter, url) values ('github', 'https://github.com/octo/repo') on conflict (url) do update set url = excluded.url returning id")).rows[0].id;
+      const run = (await db.pool.query<{ id: string }>(
+        `insert into run (item_id, repo_id, run_number, next_stage, branch, scenarios_sha, features_lock_sha, feature_change)
+         values ($1, $2, 1, $3, 'factory/x-r1', 'lock1', 'lock1', $4) returning id`, [id, repoId, stage, JSON.stringify(files)])).rows[0].id;
+      await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, ended_at) values ($1, $2, 1, 'failed', now())", [run, stage]);
+      await db.pool.query(
+        `insert into event (actor, actor_id, item_id, kind, payload) values ('agent', $2, $1, 'transition', '{"from":"InProgress","to":"FeatureChangeRequest","event":"feature_change_requested"}')`,
+        [id, run]);
+      return { ext, id, run };
+    }
+    const say = (ext: string, login: string, body: string, commentId = "c1", postedAt?: Date) =>
+      applyComment({ pool: db.pool, adapter: fake.adapter, sourceId, repoHost: repo }, { externalId: ext, repo: "octo/repo", login, body, commentId }, postedAt);
+    const runOf = async (id: string) => (await db.pool.query("select i.state, r.next_stage, r.features_lock_sha from item i join run r on r.item_id = i.id where i.id = $1", [id])).rows[0];
+    const decisions = async (id: string) => (await db.pool.query("select actor, payload from event where item_id = $1 and kind = 'decision'", [id])).rows;
+
+    test("/approve from a product owner commits every proposed file in one commit, moves the lock there and queues the item at the stage", async () => {
+      await person("pia", "viewer", true);
+      const { ext, id } = await requested("self-review");
+      assert.equal(await say(ext, "pia", "/approve"), "applied");
+      const line = repo.branches.get("octo/repo@factory/x-r1")!;
+      assert.equal(line.length, 3);
+      const sha = line[2];
+      assert.equal(repo.parents.get(`octo/repo@${sha}`), "pushed");
+      assert.equal(repo.files.get(`octo/repo@${sha}:features/a.feature`), "Then held\n");
+      assert.equal(repo.files.get(`octo/repo@${sha}:features/b.feature`), "b2\n");
+      assert.deepEqual(await runOf(id), { state: "Queued", next_stage: "self-review", features_lock_sha: sha });
+      assert.deepEqual(await decisions(id), [{ actor: "human", payload: { about: "feature_change", kind: "approve", via: "comment", text: "" } }]);
+      // Handled a second time, the item no longer waits, so nothing is committed again.
+      assert.equal(await say(ext, "pia", "/approve"), "ignored");
+      assert.equal(line.length, 3);
+    });
+
+    test("/changes keeps the lock and hands the stage that asked the note, whole, with no try spent", async () => {
+      await person("pia", "viewer", true);
+      const { ext, id, run } = await requested("red");
+      assert.equal(await say(ext, "pia", "/changes Empty orders stay refused.\nShow the reason."), "applied");
+      assert.deepEqual(await runOf(id), { state: "Queued", next_stage: "red", features_lock_sha: "lock1" });
+      assert.equal(repo.branches.get("octo/repo@factory/x-r1")!.length, 2);
+      const carry = (await db.pool.query("select retry_carry from stage_run where run_id = $1", [run])).rows[0].retry_carry;
+      assert.deepEqual(carry, { tried: 0, findings: [turnedDownFinding("Empty orders stay refused.\nShow the reason.")] });
+      assert.match(carry.findings[0], /Empty orders stay refused\.\nShow the reason\.$/);
+    });
+
+    test("anyone but a product owner is refused with one reply naming who decides, and nothing changes", async () => {
+      await person("olga", "owner", false);
+      const { ext, id } = await requested();
+      assert.equal(await say(ext, "olga", "/approve"), "forbidden");
+      assert.equal(await say(ext, "stranger", "/changes no", "c2"), "forbidden");
+      assert.deepEqual(await runOf(id), { state: "FeatureChangeRequest", next_stage: "green", features_lock_sha: "lock1" });
+      const replies = await fake.comments(ext);
+      assert.equal(replies.length, 2);
+      assert.match(replies[0], /^@olga Only a product owner can approve or turn down a feature change request\./);
+      assert.deepEqual(await decisions(id), []);
+    });
+
+    test("a command posted before the request was asked is ignored", async () => {
+      await person("pia", "viewer", true);
+      const { ext, id } = await requested();
+      assert.equal(await say(ext, "pia", "/approve", "c1", new Date(Date.now() - 3_600_000)), "ignored");
+      assert.equal((await runOf(id)).state, "FeatureChangeRequest");
+    });
+
+    test("an approval with no repo host to commit through fails and changes nothing", async () => {
+      await person("pia", "viewer", true);
+      const { id } = await requested();
+      const pia = (await db.pool.query<{ id: string }>(`select id from "user" where github_login = 'pia'`)).rows[0].id;
+      await assert.rejects(decideFeatureChange({ pool: db.pool }, { itemId: id, userId: pia, kind: "approve", text: "", via: "dashboard" }), /repo host/);
+      assert.equal((await runOf(id)).state, "FeatureChangeRequest");
+    });
   });
 
   test("an item with no open question of that kind is ignored", async () => {

@@ -16,8 +16,7 @@ import type { FactoryWebhookEvent } from "./adapters/types.ts";
 import type { AgentArgs, AgentResult } from "./agent/run.ts";
 import { classify } from "./bdd/messages.ts";
 import { loadSop, stageAfter } from "./config/sop.ts";
-import { applyComment, decideAndAnnounce } from "./control/decisions.ts";
-import { mirrorBoard } from "./control/board.ts";
+import { decide } from "./control/decisions.ts";
 import { cellApi } from "./control/cell-api.ts";
 import { httpCellApi } from "./cell/api-client.ts";
 import { loadInputs, runCell } from "./cell/engine.ts";
@@ -27,6 +26,8 @@ import type { Launcher } from "./scheduler/launcher.ts";
 import { tick } from "./scheduler/scheduler.ts";
 import { handleWebhook } from "./watcher/webhook.ts";
 import { pollOnce } from "./watcher/poller.ts";
+import { withTx } from "./store/db.ts";
+import { workOutbox } from "./worker/outbox.ts";
 
 const exec = promisify(execFile);
 const SECRET = "cell-secret";
@@ -105,6 +106,18 @@ export async function startFactory(pool: pg.Pool) {
       return false;
     }
   };
+  // A file the fake doesn't hold is read from the origin, as GitHub would, so the cell API's snapshot of the locked
+  // feature files at the scenarios sha (PBI 224) finds them.
+  const held = host.readFile.bind(host);
+  host.readFile = async (repo, ref, path) => {
+    const text = await held(repo, ref, path);
+    if (text !== null) return text;
+    try {
+      return (await exec("git", ["show", `${ref}:${path}`], { cwd: origin })).stdout;
+    } catch {
+      return null;
+    }
+  };
   host.checksOnSha = async (_repo, sha) => (ci.redOnMerge && mergeShas.has(sha) ? "failure" : "success");
 
   await pool.query("insert into repo (host_adapter, url, trusted_bot) values ('github', $1, 'factory[bot]')", [`https://github.com/${REPO}`]);
@@ -145,7 +158,8 @@ export async function startFactory(pool: pg.Pool) {
   });
   const server = await startServer([api], { port: 0 });
   const controlUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const off = mirrorBoard({ pool, backlogFor, repoHost: host });
+  // The worker's outbox pass, which each step below runs once its own changes have committed, as the worker would next.
+  const worker = () => workOutbox({ pool, backlogFor, repoHost: host });
 
   // Every scenario any item wrote, and the items whose code is in, so each bdd run reports them the way a real
   // runner would: an item's own scenarios red until its Green, and everyone else's green.
@@ -220,25 +234,17 @@ export async function startFactory(pool: pg.Pool) {
     [sourceId, ext],
   )).rows[0];
 
-  /** Delivers one signed GitHub webhook, and waits for anything it set off, such as an /approve comment. */
+  /** Delivers one signed GitHub webhook, and lets the worker run anything it set off, such as an /approve comment. */
   const deliver = async (event: FactoryWebhookEvent, githubEvent: string) => {
     const rawBody = Buffer.from(JSON.stringify({ event }));
-    const after: Promise<unknown>[] = [];
-    const r = await handleWebhook({
-      pool, secret: WEBHOOK_SECRET, parse: () => event,
-      onComment: (e) => {
-        const p = applyComment({ pool, adapter: board.adapter, sourceId }, e);
-        after.push(p);
-        return p;
-      },
-    }, {
+    const r = await handleWebhook({ pool, secret: WEBHOOK_SECRET, parse: () => event }, {
       headers: {
         "x-hub-signature-256": `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(rawBody).digest("hex")}`,
         "x-github-delivery": randomUUID(), "x-github-event": githubEvent,
       },
       rawBody,
     });
-    await Promise.all(after);
+    await worker();
     return r.status;
   };
 
@@ -247,18 +253,25 @@ export async function startFactory(pool: pg.Pool) {
     /** A labelled item on the board, in the repo, with these criteria. Returns its external id. */
     addItem: (title: string, criteria: string[]) => board.seed({ title, acceptanceCriteria: criteria, repo: REPO }),
     /** One poll, with a judge that passes every dor.md criterion by index. */
-    poll: () => pollOnce({
-      pool, adapter: board.adapter, repoHost: host, sourceId,
-      judge: async (_item, dor) => [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "passed", reason: "ok" })), '{"flags":[]}'].join("\n"),
-    }),
+    async poll() {
+      await pollOnce({
+        pool, adapter: board.adapter, repoHost: host, sourceId,
+        judge: async (_item, dor) => [...dor.criteria.map((c) => JSON.stringify({ index: c.index, status: "passed", reason: "ok" })), '{"flags":[]}'].join("\n"),
+      });
+      await worker();
+    },
     /** One scheduler tick, then waits for the cell it started, if any, to finish. */
     async tick() {
       await tick({ pool, launcher, now: new Date(), killFlag: false, repoHost: host, backlogFor, secret: SECRET, controlUrl, sopVersion: sop.version });
       await Promise.all(running.splice(0));
       if (errors.length) throw errors[0];
+      await worker();
     },
     async approveInRunDetail(ext: string) {
-      return decideAndAnnounce({ pool, adapter: board.adapter }, { itemId: (await itemId(ext))!, userId: ownerId, kind: "approve", text: "", via: "dashboard" }, ext);
+      const id = (await itemId(ext))!;
+      const outcome = await withTx(pool, (c) => decide(c, { itemId: id, userId: ownerId, kind: "approve", text: "", via: "dashboard" }));
+      await worker();
+      return outcome;
     },
     commentOnItem: (ext: string, body: string) => deliver({ kind: "comment", externalId: ext, repo: REPO, login: OWNER_LOGIN, body, commentId: randomUUID() }, "issue_comment"),
     /** A trusted reviewer requests changes with a summary, as GitHub would show it and deliver it. */
@@ -310,7 +323,6 @@ export async function startFactory(pool: pg.Pool) {
       return new Map([...classify(blobs.get(key)!).values()].map((v) => [v.name, v.verdict]));
     },
     async stop() {
-      off();
       await new Promise((r) => server.close(r));
       await new Promise((r) => blobServer.close(r));
       rmSync(root, { recursive: true, force: true });

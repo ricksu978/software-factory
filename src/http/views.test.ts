@@ -162,8 +162,9 @@ describe("floorPage", () => {
 });
 
 describe("issueRef", () => {
-  // PBI 140: Prepare restart sits among the factory's Controls, and Floor counts down its wrap-up until no cell runs.
-  const floor = (restart: { minutesLeft: number; running: number } | null, canOperate = true) =>
+  // PBI 140: Prepare restart sits among the factory's Controls, and Floor says how many cells still wrap up until none
+  // does. PBI 300: the factory stops none of them, so Floor names no deadline.
+  const floor = (restart: { running: number } | null, canOperate = true) =>
     floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate, restart }, null);
 
   test("offers Prepare restart among the Controls to an operator", () => {
@@ -171,21 +172,36 @@ describe("issueRef", () => {
     assert.doesNotMatch(floor(null, false), /Prepare restart/);
   });
 
-  test("counts the cells still running and the wrap-up's minutes, and says it's ready once none runs", () => {
-    assert.match(floor({ minutesLeft: 9, running: 2 }), /Preparing to restart: 2 cells still running\. 9 minutes left in the wrap-up\./);
-    assert.match(floor({ minutesLeft: 1, running: 1 }), /Preparing to restart: 1 cell still running\. 1 minute left in the wrap-up\./);
-    const ready = floor({ minutesLeft: 9, running: 0 });
+  test("counts the cells still running, with no deadline, and says it's ready once none runs", () => {
+    assert.match(floor({ running: 2 }), /Preparing to restart: 2 cells still running\. The factory won&#39;t stop them\./);
+    assert.match(floor({ running: 1 }), /Preparing to restart: 1 cell still running\. The factory won&#39;t stop it\./);
+    assert.doesNotMatch(floor({ running: 1 }), /minutes? left/);
+    const ready = floor({ running: 0 });
     assert.match(ready, /Ready to restart\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
     assert.doesNotMatch(ready, /Preparing to restart/);
     assert.doesNotMatch(floor(null), /restart\./);
   });
 
-  // PBI 302: a cell whose stop failed once the wrap-up ran out still counts, with no minutes claimed and no "Ready".
-  test("says the wrap-up has run out while a cell whose stop failed still runs", () => {
-    const out = floor({ minutesLeft: 0, running: 1 });
-    assert.match(out, /Preparing to restart: 1 cell still running\. The wrap-up has run out/);
-    assert.doesNotMatch(out, /minutes? left/);
-    assert.doesNotMatch(out, /Ready to restart/);
+  // PBI 316: while the factory drains, Floor counts the cells still running, as Prepare restart does, and says the
+  // drain is done once none runs.
+  const drained = (running: number | undefined) =>
+    floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [{ kind: "drain", reason: "upgrading Docker" }], canOperate: true, running }, null);
+
+  test("counts the cells still running while the factory drains, with the drain's reason", () => {
+    assert.match(drained(2), /Draining: 2 cells still running\. Reason: upgrading Docker\./);
+    assert.match(drained(1), /Draining: 1 cell still running\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(drained(1), /Drain done/);
+  });
+
+  test("says the drain is done once no cell runs", () => {
+    const done = drained(0);
+    assert.match(done, /Drain done\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(done, /still running/);
+  });
+
+  test("shows neither the drain's count nor that it's done without a drain", () => {
+    const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: true, running: 0 }, null);
+    assert.doesNotMatch(html, /Drain done|Draining/);
   });
 
   test("links #N to its issue on GitHub when the repo is known", () => {
@@ -358,6 +374,32 @@ describe("readiness spend (PBI 132)", () => {
     assert.match(row, /<td>The cell&#39;s &lt;lease&gt; ran out<br>Needed a second ask of the PR reviewer in round 1: unread<\/td><\/tr>/);
   });
 
+  test("each judge call's row shows its own verdict in a Verdict column, and a split proposal's is empty (PBI 348)", () => {
+    const at = (m: number) => new Date(Date.parse("2026-11-09T10:00:00Z") + m * 60_000);
+    const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+    const html = runDetailPage(detail([
+      { ...spend, ranAt: at(0), kind: "judge", verdict: { outcome: "passed" } },
+      { ...spend, ranAt: at(1), kind: "judge", verdict: { outcome: "failed", lines: [{ criterion: "Names its spec section", reason: "It cites <b>§9</b>." }], flags: ["changes CI"] } },
+      { ...spend, ranAt: at(2), kind: "judge", verdict: { outcome: "unreadable" } },
+      { ...spend, ranAt: at(3), kind: "judge", verdict: { outcome: "error" } },
+      { ...spend, ranAt: at(4), kind: "judge" },
+      { ...spend, ranAt: at(5), kind: "split" },
+      { ...spend, ranAt: at(6), kind: "judge", verdict: { outcome: "passed" }, child: "Export as <CSV>" },
+    ]), null);
+    const section = html.split("<h2>Readiness checks</h2>")[1];
+    assert.match(section, /<th scope="col">Cost<\/th><th scope="col">Verdict<\/th><\/tr>/);
+    const verdicts = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(section)![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => /<td>((?:(?!<td>)[\s\S])*)<\/td>$/.exec(m[1])![1]);
+    assert.deepEqual(verdicts, [
+      "Passed",
+      "Failed<ul><li>Names its spec section: It cites &lt;b&gt;§9&lt;/b&gt;.</li><li>Flag: changes CI</li></ul>",
+      "No verdict: the judge&#39;s output was unreadable",
+      "The call failed with no verdict",
+      "No verdict was recorded",
+      "",
+      "On the proposed child “Export as &lt;CSV&gt;”: Passed",
+    ]);
+  });
+
   test("Run detail says so when no readiness check has run", () => {
     assert.match(runDetailPage(detail([]), null), /<h2>Readiness checks<\/h2><p class="muted">No readiness check has run yet.<\/p>/);
   });
@@ -491,6 +533,59 @@ describe("Run detail's Time section (PBI 187)", () => {
   });
 });
 
+// PBI 227: a Split parent shows as "Split into", with a link to each child and the child's state.
+describe("a Split parent's children", () => {
+  const kids = [
+    { externalId: "41", title: "Card <b>payments</b>", url: "https://github.com/acme/shop/issues/41", state: "Queued" as const },
+    { externalId: "42", title: "Bank transfers", url: "https://github.com/acme/shop/issues/42", state: null },
+  ];
+  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000040", external_id: "40", repo: "acme/shop", title: "Checkout redesign", state: "Split" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ...over,
+  });
+  const items = (html: string) => [.../<ol class="split-into">([\s\S]*?)<\/ol>/.exec(html)![1].matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]);
+
+  test("Run detail lists each child under \"Split into\", in order, linked to its issue, with its state or that it isn't in the factory", () => {
+    const html = runDetailPage(detail({ splitInto: kids }), null);
+    assert.match(html, /<h2>Split into<\/h2><ol class="split-into">/);
+    const [a, b] = items(html);
+    assert.ok(a.includes(`<a href="https://github.com/acme/shop/issues/41">#41</a> Card &lt;b&gt;payments&lt;/b&gt;`), a);
+    assert.match(a, /Queued/);
+    assert.ok(b.includes(`<a href="https://github.com/acme/shop/issues/42">#42</a> Bank transfers`), b);
+    assert.match(b, /Not in the factory/);
+    assert.doesNotMatch(html, /<b>payments/);
+  });
+
+  test("Run detail of an item with no children shows no \"Split into\"", () => {
+    assert.doesNotMatch(runDetailPage(detail(), null), /Split into/);
+    assert.doesNotMatch(runDetailPage(detail({ splitInto: [] }), null), /Split into/);
+  });
+
+  test("Floor shows each Split parent, linked as any item is, then \"Split into\" and its own children", () => {
+    const html = floorPage({ ...empty, split: [
+      { id: "p1", external_id: "40", repo: "acme/shop", title: "Checkout redesign", children: kids },
+      { id: "p2", external_id: "50", repo: "acme/shop", title: "Search revamp", children: [{ externalId: "51", title: "Search filters", url: "https://github.com/acme/shop/issues/51", state: "Done" }] },
+    ] }, null);
+    const section = /<h2>Split<\/h2>([\s\S]*?)<h2>/.exec(html)![1];
+    const first = section.indexOf("Checkout redesign");
+    const second = section.indexOf("Search revamp");
+    assert.ok(first >= 0 && second > first);
+    assert.ok(section.includes(`<a href="https://github.com/acme/shop/issues/40">#40</a> <a href="/items/p1">Checkout redesign</a>`));
+    const own = section.slice(first, second);
+    assert.match(own, /Split into/);
+    assert.match(own, /#41[\s\S]*#42/);
+    assert.doesNotMatch(own, /#51/);
+    assert.match(section.slice(second), /#51<\/a> Search filters <span class="muted">Done<\/span>/);
+    assert.doesNotMatch(html, /<b>payments/);
+  });
+
+  test("Floor says when no Split parent is left to show", () => {
+    assert.match(floorPage(empty, null), /<h2>Split<\/h2>\s*<p class="muted">No item is split into children that are still open\.<\/p>/);
+  });
+});
+
 describe("Floor's Cost column (PBI 263)", () => {
   const floor = (cost: string) => floorPage({
     active: [{ id: "i1", title: "Export a month", external_id: "263", repo: "acme/widgets", state: "InProgress", stage: "build", since: null, cost, badges: [], message: null }],
@@ -519,8 +614,8 @@ describe("runDetailPage fixing CI", () => {
 });
 
 describe("an item's priority and group (PBI 320)", () => {
-  const own = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null };
-  const lent = { own: 5, priority: 1, priorityFrom: { id: "a", externalId: "12" }, finalStage: true, finalStageFrom: { id: "a", externalId: "12" } };
+  const own = { own: 3, priority: 3, priorityFrom: null, finalStage: false, finalStageFrom: null, bug: false };
+  const lent = { own: 5, priority: 1, priorityFrom: { id: "a", externalId: "12" }, finalStage: true, finalStageFrom: { id: "a", externalId: "12" }, bug: false };
 
   test("Floor names the priority, and the item it comes from", () => {
     assert.equal(standing(own), ` <span class="muted">priority 3</span>`);
@@ -533,5 +628,126 @@ describe("an item's priority and group (PBI 320)", () => {
     assert.match(claimLines(lent), /Priority 1, from #12, which depends on it\. Its own priority on the board is 5\. Final-stage because #12 depends on it/);
     assert.match(claimLines({ ...own, finalStage: true }), /^<p>Priority 3\. Final-stage: its PR is open/);
     assert.equal(claimLines(own), "<p>Priority 3.</p>");
+  });
+
+  // PBI 378: an item carrying the "bug" label itself is marked; one that takes its priority or group from one isn't.
+  test("Floor marks a bug item, and not one without the label", () => {
+    assert.equal(standing({ ...own, bug: true }), ` <span class="badge">bug</span> <span class="muted">priority 3</span>`);
+    assert.doesNotMatch(standing(lent), /\bbug\b/);
+  });
+
+  test("the item page says it carries the bug label, and where that puts it first", () => {
+    assert.match(claimLines({ ...lent, bug: true }), /Carries the bug label, so it's claimed before the items at priority 1 in the final-stage group that don't\./);
+    assert.match(claimLines({ ...own, priority: 1, bug: true }), /Carries the bug label, so it's claimed before the priority-1 items outside the final-stage group that don't\./);
+    assert.match(claimLines({ ...own, bug: true }), /Carries the bug label, which puts it first only in the final-stage group or at priority 1\./);
+    assert.doesNotMatch(claimLines(lent), /\bbug\b/);
+  });
+});
+
+describe("PBI 369: when a Failed item was last re-checked", () => {
+  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const item = { id: "i1", title: "Export a month", external_id: "482", repo: "acme/widgets" };
+
+  test("Floor lists each item that failed its Definition of Done on main, with its last re-check in the viewer's zone", () => {
+    const html = floorPage({ ...empty, zone: "Europe/Amsterdam", failed: [{ ...item, rechecked: new Date("2026-11-20T16:00:00Z") }, { ...item, id: "i2", external_id: "483", rechecked: null }] }, null);
+    assert.match(html, /<li>[^\n]*#482[^\n]*last re-checked at <time[^>]*>2026-11-20 17:00<\/time>[^\n]*<\/li>/);
+    assert.match(html, /<li>[^\n]*#483[^\n]*not yet re-checked[^\n]*<\/li>/);
+  });
+
+  test("Floor says so when no item failed on main", () => {
+    assert.match(floorPage(empty, null), /No item failed its Definition of Done on main/);
+  });
+
+  const detail = (recheck: { last: Date | null } | null) => runDetailPage({
+    item: { ...item, state: "Failed" }, run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, recheck,
+  }, null);
+
+  test("Run detail shows when the item was last re-checked, or that it hasn't been yet", () => {
+    assert.match(detail({ last: new Date("2026-11-20T16:00:00Z") }), /Last re-checked at <time[^>]*>2026-11-20 16:00<\/time>/);
+    assert.match(detail({ last: null }), /hasn't been re-checked yet/);
+    assert.doesNotMatch(detail(null), /re-checked/);
+  });
+});
+
+describe("runDetailPage's Rule changes (PBI 395)", () => {
+  const detail = (ruleChanges: RunDetail["ruleChanges"]): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000395", external_id: "395", repo: "octo/repo", title: "t", state: "NotReady" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, ruleChanges,
+  });
+  const change = { place: { kind: "spec" as const, section: "§6" }, before: "A lease lasts ten <b>minutes</b>.", after: "A lease lasts five <b>minutes</b>." };
+
+  test("shows each Before beside its After, escaped, with the changed words marked, and the owner's control", () => {
+    const html = runDetailPage(detail({ changes: [change], waiting: true, canApprove: true, approval: null }), null);
+    assert.match(html, /<h2>Rule changes<\/h2><p>This item waits for the owner to approve its rule changes: spec section §6\.<\/p>/);
+    assert.match(html, /data-rule="§6"/);
+    assert.match(html, /<blockquote data-side="before">A lease lasts <mark>ten<\/mark> &lt;b&gt;minutes&lt;\/b&gt;\.<\/blockquote>/);
+    assert.match(html, /<blockquote data-side="after">A lease lasts <mark>five<\/mark> /);
+    assert.match(html, /<form method="post" action="\/items\/00000000-0000-0000-0000-000000000395\/rule-approval"><input type="hidden" name="ruleChangesHash" value="[0-9a-f]{64}"><p><button>Approve rule change<\/button>/);
+  });
+
+  test("no control without the right to approve, an entry's problem and a missing part shown, and the approval once given", () => {
+    const off = runDetailPage(detail({ changes: [{ ...change, after: null, problem: "The entry for spec section §6 gives no After." }], waiting: false, canApprove: false, approval: null }), null);
+    assert.doesNotMatch(off, /Approve rule change/);
+    assert.match(off, /gives no After\./);
+    assert.match(off, /No After given\./);
+    const done = runDetailPage({ ...detail({ changes: [change], waiting: false, canApprove: false, approval: { by: "olive", at: new Date("2026-11-21T10:00:00Z") } }), zone: "UTC" }, null);
+    assert.match(done, /olive approved the rule change at <time datetime="2026-11-21T10:00:00.000Z">2026-11-21 10:00<\/time>/);
+  });
+
+  test("an item that read no rule change has no such section", () => {
+    assert.doesNotMatch(runDetailPage(detail(null), null), /Rule changes/);
+  });
+});
+
+describe("runDetailPage's Feature change request (PBI 364)", () => {
+  const detail = (featureChange: RunDetail["featureChange"]): RunDetail => ({
+    item: { id: "00000000-0000-0000-0000-000000000364", external_id: "364", repo: "octo/repo", title: "t", state: "FeatureChangeRequest" },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: false, controls: null, featureChange,
+  });
+
+  test("shows each file under its path, its lines before and after, escaped, and the stage's reason", () => {
+    const html = runDetailPage(detail([
+      { path: "features/a.feature", reason: "Show <b>held</b> orders", before: "  Given x\n  Then refused\n", after: "  Given x\n  Then <script>1</script>\n" },
+      { path: "features/b.feature", reason: "Needs a number", before: "a\n", after: "b\n" },
+    ]), null);
+    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.match(html, /<h3>features\/a\.feature<\/h3><p data-reason>Show &lt;b&gt;held&lt;\/b&gt; orders<\/p>/);
+    assert.match(html, /<span data-side="same">  Given x<\/span>\n<del data-side="before">  Then refused<\/del>\n<ins data-side="after">  Then &lt;script&gt;1&lt;\/script&gt;<\/ins>/);
+    assert.match(html, /<h3>features\/b\.feature<\/h3><p data-reason>Needs a number<\/p>/);
+    assert.doesNotMatch(html, /<script>1|<b>held/);
+  });
+
+  test("an item with no open request has no such section", () => {
+    assert.doesNotMatch(runDetailPage(detail(null), null), /Feature change request/);
+  });
+
+  const request = [{ path: "features/a.feature", reason: "Held, not refused", before: "a\n", after: "b\n" }];
+
+  test("a product owner gets Approve the change and Ask for changes with a note, after the change (PBI 365)", () => {
+    const html = runDetailPage({ ...detail(request), canDecideFeatureChange: true }, null);
+    const form = html.indexOf('<form method="post" action="/items/00000000-0000-0000-0000-000000000364/feature-change">');
+    assert.ok(form > html.indexOf("Held, not refused"), "the form doesn't come after the change and its reason");
+    assert.match(html, /<textarea id="feature-change-note" name="note"><\/textarea>/);
+    assert.match(html, /<button name="decision" value="approve">Approve the change<\/button> <button name="decision" value="changes">Ask for changes<\/button>/);
+    assert.doesNotMatch(html, /Approve the scenarios/);
+  });
+
+  test("anyone else sees the request without the controls (PBI 365)", () => {
+    const html = runDetailPage(detail(request), null);
+    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.doesNotMatch(html, /Approve the change|feature-change"/);
+  });
+
+  test("once no request is open, the page says who decided the last one and when (PBI 365)", () => {
+    const at = new Date("2026-11-22T01:00:00Z");
+    assert.match(runDetailPage({ ...detail(null), featureChangeDecision: { kind: "approve", by: "pia", at } }, null),
+      /<p id="feature-change-decision">pia approved the feature change request at <time/);
+    assert.match(runDetailPage({ ...detail(null), featureChangeDecision: { kind: "changes", by: "pia", at } }, null),
+      /pia turned down the feature change request/);
+    // An open request shows itself, not an earlier decision.
+    assert.doesNotMatch(runDetailPage({ ...detail(request), featureChangeDecision: { kind: "approve", by: "pia", at } }, null), /feature-change-decision/);
   });
 });

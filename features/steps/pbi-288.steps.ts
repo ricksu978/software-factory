@@ -73,14 +73,18 @@ export type Ctx = {
   audited?: boolean;
   revoked?: boolean;
   aspireStarted?: boolean;
+  /** The port the BFF's settings resolve to with no PORT set, which "the BFF starts with no port set" reads. */
+  defaultPort?: number;
   local?: { browser: Browser; page?: Seen; back?: Seen };
   /** The source of src/bff/main.ts, as "I read src/bff/main.ts" read it. */
   mainSource?: string;
+  /** PBI 278: what the BFF answered for each path a browser with no session opened, in order. */
+  opened: Seen[];
 };
 
 export function ctx(world: object): Ctx {
   const w = world as { pbi288?: Ctx };
-  w.pbi288 ??= { browsers: [], checks: [], issuedBefore: 0 };
+  w.pbi288 ??= { browsers: [], checks: [], issuedBefore: 0, opened: [] };
   return w.pbi288;
 }
 
@@ -227,6 +231,15 @@ export async function startBff(c: Ctx): Promise<void> {
 }
 
 export const bffUrl = (c: Ctx, path: string) => new URL(path, `http://localhost:${c.port}`);
+
+/** Opens `path` on the running BFF in a browser with no session, records the answer in ctx.opened, and returns it. */
+export async function openOnBff(c: Ctx, path: string): Promise<Seen> {
+  assert.ok(c.port && c.bff, "the BFF isn't running");
+  const seen = await new Browser().request(bffUrl(c, path));
+  assert.notEqual(seen.status, 0, `nothing answered at ${path}: ${seen.body}`);
+  c.opened.push(seen);
+  return seen;
+}
 export const bffHost = "localhost";
 
 // ---- The database ----
@@ -342,12 +355,19 @@ async function settled(b: Bff, port: number): Promise<void> {
   assert.ok(b.exit !== undefined || (await answers(port)), `the BFF neither answered on port ${port} nor exited within 30 seconds: ${b.out}`);
 }
 
+// The BFF's default port is fixed, so the scenario that uses it carries @serial and runs alone (PBI 390 AC-2). The step
+// spawns src/bff/main.ts with PORT and BFF_ORIGIN removed and records the port the process itself says it listens on,
+// from its startup log line, so the Then checks the BFF's own choice and that it answers there. No port is written here.
 When("the BFF starts with no port set", long, async function () {
   const c = ctx(this);
   const { PORT: _port, BFF_ORIGIN: _origin, ...env } = c.env!;
   const b = spawnBff(c, env);
-  await settle(b, 7403);
-  await settled(b, 7403);
+  const listening = /the BFF is listening on port (\d+)/;
+  const end = Date.now() + 30_000;
+  while (b.exit === undefined && !listening.test(b.out) && Date.now() < end) await sleep(100);
+  const m = listening.exec(b.out);
+  assert.ok(m, `the BFF never logged the port it listens on (exit ${JSON.stringify(b.exit)}): ${b.out}`);
+  c.defaultPort = Number(m[1]);
 });
 
 When("the BFF starts with no session key set", long, async function () {
@@ -377,9 +397,13 @@ Given("the BFF has been stopped and started again", long, async function () {
 });
 
 Then("the BFF answers on port {int}", long, async function (port: number) {
-  const b = ctx(this).bff;
+  const c = ctx(this);
+  const b = c.bff;
   assert.ok(b, "the BFF was never started");
   assert.equal(b.exit, undefined, `the BFF exited: ${b.out}`);
+  if (c.defaultPort !== undefined) {
+    assert.equal(c.defaultPort, port, `with no PORT set, the BFF listens on ${c.defaultPort}, not ${port}`);
+  }
   assert.ok(await answers(port), `nothing answers on port ${port}`);
 });
 
@@ -1124,6 +1148,9 @@ async function follow(b: Browser, at: Seen): Promise<Seen> {
 }
 
 When("a browser opens {string}", local, async function (url: string) {
+  // A path rather than an address, as PBI 278's scenarios give, opens that path on the BFF the scenario started, in a
+  // browser with no session, without following redirects (features/steps/pbi-278.steps.ts reads ctx.opened).
+  if (url.startsWith("/")) return void (await openOnBff(ctx(this), url));
   const l = lc(ctx(this));
   l.page = await follow(l.browser, await l.browser.request(new URL(url)));
   assert.notEqual(l.page.status, 0, `nothing answered on the way from ${url}: ${l.page.body}`);

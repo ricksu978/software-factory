@@ -11,7 +11,7 @@ import { loadSop } from "../config/sop.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../policy/policy.ts";
 import { LeaseLost } from "./api-client.ts";
 import { CI_BACK_TO_GREEN } from "../core/questions.ts";
-import { changedFiles, CI_LOGS_CHARS, ciLogs, factoryThreadsOnPr, lastFactoryRound, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, stageMeter, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
+import { bddRunUnfinished, changedFiles, CI_LOGS_CHARS, ciLogs, factoryThreadsOnPr, lastFactoryRound, LOGGED_CHECKS, NAMED_CHECKS, commandEnv, loadInputs, placeFindings, readReview, reviewBody, runCell, sh, stageMeter, stoppedFinding, TRANSCRIPT_UPLOAD_MS, type CellContext, type CellDeps, type ReviewThread } from "./engine.ts";
 import { FAILED_LOG_CHARS } from "../adapters/types.ts";
 import { shellGit } from "./git.ts";
 
@@ -46,7 +46,7 @@ type Script = (a: AgentArgs, stage: string) => Partial<AgentResult> | undefined 
 
 /** A signed-off run (or a fresh one) in a real repo, with every dependency recorded. */
 function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; ctx?: Partial<CellContext>; deps?: Partial<CellDeps>;
-  lease?: () => Promise<{ stop: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
+  lease?: () => Promise<{ stop: boolean; restarting?: boolean }>; failOn?: string; failUpload?: boolean; conflict?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "engine-"));
   roots.push(root);
   const origin = join(root, "origin.git");
@@ -160,9 +160,12 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
         return { threads: p.comments.map((c, i) => ({ threadId: `rt-${calls.length}-${i}`, ...c })) };
       },
       resolveThread: async (_r, threadId) => rec("/repo/resolveThread", { threadId }),
+      // The PR's open threads as they stand: the claim's comments, then each reply posted since (PBI 258).
+      openReviewComments: async () => (rec("/repo/openReviewComments"), [...deps.ctx.trustedComments,
+        ...calls.filter((c) => c.route === "/repo/replyToThread").map((c) => ({ threadId: c.body.threadId, path: "app.txt", line: 1, author: "factory[bot]", body: c.body.body }))]),
     },
     sop: SOP,
-    config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
+    config: { sensitivePaths: [], reviewers: ["owner"], webTools: [], failedRecheckHours: 8,
       bdd: { parse: `mkdir -p reports && cp "${fwd(join(fixtures, "parse.ndjson"))}" reports/bdd.ndjson`,
         run: `sh "${fwd(join(fixtures, "run.sh"))}"`, report: "reports/bdd.ndjson" },
       commands: { test: "true", lint: "true" } },
@@ -189,6 +192,55 @@ describe("commandEnv", () => {
     const p = "http://factory-egress:3128", lo = "127.0.0.1,localhost";
     const proxy = { HTTPS_PROXY: p, https_proxy: p, HTTP_PROXY: p, http_proxy: p, NO_PROXY: lo, no_proxy: lo };
     assert.deepEqual(commandEnv({ PATH: "/usr/bin", ...proxy, NODE_USE_ENV_PROXY: "1" }), { CI: "true", PATH: "/usr/bin", ...proxy });
+  });
+});
+
+describe("sh's time limit (PBI 399)", () => {
+  const cwd = tmpdir();
+
+  test("a command that ends within its limit gives its exit code and output, and isn't stopped", async () => {
+    const r = await sh("echo out; echo err >&2; exit 3", cwd, 10_000);
+    assert.deepEqual(r, { code: 3, out: "out\nerr\n", all: "out\nerr\n", stopped: false });
+  });
+
+  test("a command still running at its limit is stopped, with what it printed by then", async () => {
+    const t = Date.now();
+    const r = await sh("echo working; sleep 30", cwd, 300);
+    assert.equal(r.stopped, true);
+    assert.notEqual(r.code, 0);
+    assert.equal(r.all, "working\n");
+    assert.ok(Date.now() - t < 10_000, "sh waited for the command instead of stopping it");
+  });
+
+  test("the stop reaches what the command started, so a child holding its output doesn't keep it waiting", async () => {
+    const t = Date.now();
+    const r = await sh("sh -c 'sleep 30' & sleep 30", cwd, 300);
+    assert.equal(r.stopped, true);
+    assert.ok(Date.now() - t < 10_000, "sh waited for the command's children");
+  });
+});
+
+describe("the findings for a command the cell stopped (PBI 399)", () => {
+  test("a stopped command's finding names it and the limit, and gives no exit code", () => {
+    const f = stoppedFinding("commands.test", "npm test", 15, "working...\n");
+    assert.match(f, /^the cell stopped commands\.test `npm test` at its time limit of 15 minutes: /);
+    assert.match(f, /command_timeout_minutes/);
+    assert.match(f, /The last of its output:\nworking\.\.\.$/);
+    assert.doesNotMatch(f, /exit/);
+    assert.match(stoppedFinding("commands.lint", "npm run lint", 1), /limit of 1 minute: .*within 1 minute,/);
+  });
+
+  test("bdd.run's report gives one finding when the run didn't finish, naming what was running, and none when it did", () => {
+    const msgs = (...ms: object[]) => ms.map((m) => JSON.stringify(m)).join("\n");
+    const cut = msgs({ testRunStarted: {} }, { pickle: { id: "p0", name: "Refunds show negative", tags: [], steps: [] } },
+      { testCase: { id: "c0", pickleId: "p0", testSteps: [] } }, { testCaseStarted: { id: "r0", testCaseId: "c0" } });
+    const stopped = bddRunUnfinished({ report: cut, stopped: true }, "npm run bdd", 40)!;
+    assert.match(stopped, /^the BDD run didn't finish: the cell stopped bdd\.run `npm run bdd` at its time limit of 40 minutes/);
+    assert.match(stopped, /running then was "Refunds show negative"/);
+    assert.match(bddRunUnfinished({ report: cut }, "npm run bdd", 40)!, /^the BDD run didn't finish: its report has no end of run/);
+    assert.match(bddRunUnfinished({ report: "", stopped: true }, "npm run bdd", 40)!, /No scenario was running/);
+    assert.equal(bddRunUnfinished({ report: msgs({ testRunStarted: {} }, { testRunFinished: {} }) }, "npm run bdd", 40), null);
+    assert.equal(bddRunUnfinished({ report: "" }, "npm run bdd", 40), null);
   });
 });
 
@@ -403,7 +455,7 @@ describe("runCell", () => {
   test("a base merge that fails, not on a conflict, ends an attempt of the stage the run resumes at with its message (PBI 259)", async () => {
     const h = harness();
     const boom = new Error("git fetch failed on a network or GitHub error after 5 tries: HTTP 503");
-    h.deps.git = { ...h.deps.git, mergeBase: async () => { throw boom; } };
+    h.deps.git = { ...h.deps.git, fetchBase: async () => { throw boom; } };
     await assert.rejects(h.run(), (e) => e === boom);
     const stages = h.calls.filter((c) => c.route === "/stage").map((c) => c.body);
     assert.deepEqual(stages.map((b) => `${b.stageId} ${b.status}`), ["red started", "red failed"]);
@@ -414,7 +466,7 @@ describe("runCell", () => {
     mock.timers.enable({ apis: ["setInterval"] });
     const h = harness({ lease: async () => { throw new Error("control plane unreachable"); } });
     // The fetch keeps retrying until the fence fires, as withRetries does, then rejects with the fence's reason.
-    h.deps.git = { ...h.deps.git, mergeBase: async (_base, fence) => {
+    h.deps.git = { ...h.deps.git, fetchBase: async (_base, fence) => {
       for (let i = 0; i < 3 && !fence?.signal?.aborted; i++) {
         mock.timers.tick(60_000);
         await new Promise((r) => setImmediate(r));
@@ -968,7 +1020,8 @@ describe("runCell", () => {
     const asked: string[] = [];
     const h = harness({ nextStage: "green", ctx: { prNumber: null } });
     h.deps.api.ciChecks = async (sha) => (asked.push(sha), [{ name: "ci", conclusion: "failure", url: "https://ci/3" }]);
-    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: true` `ci: ci`\n");
+    // A command Green's gate didn't run, so the line isn't passed on the gate's run (PBI 389).
+    h.deps.policies.dod = policy("dod", "- [ ] Unit tests pass. `run: echo ok` `ci: ci`\n");
     assert.equal(await h.run(), "done");
     const green = h.calls.find((c) => c.route === "/policy-results" && c.body.stageId === "green")!.body;
     assert.deepEqual(green.verdicts.map((v: any) => v.reason), ["exit 0"]);
@@ -991,6 +1044,45 @@ describe("runCell", () => {
     assert.match(git(h.dir, "log", "--format=%s"), /restore the locked feature files/);
     const second = h.agentCalls.filter((a) => a.agent === "factory-self-reviewer")[1]!;
     assert.match(second.prompt, /undid an edit to features\/pbi-482\.feature/);
+  });
+
+  test("a green that edits a locked feature file and asks to change it moves the item to FeatureChangeRequest, the file restored on the pushed branch (PBI 364)", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => {
+      if (stage === "green" && a.prompt.includes("## The locked feature files")) {
+        appendFileSync(join(a.cwd, FEATURE), "# proposed\n");
+        writeFileSync(join(a.cwd, "app.txt"), "held\n");
+        return { text: `Done.\n\nFEATURE CHANGE: ${FEATURE}: An empty order is held` };
+      }
+    } });
+    const lock = git(h.dir, "show", `${h.lockSha}:${FEATURE}`);
+    assert.equal(await h.run(), "waiting");
+    const t = h.transitions().at(-1)!;
+    assert.equal(t.event, "feature_change_requested");
+    assert.deepEqual(t.featureChange, [{ path: FEATURE, reason: "An empty order is held", before: `${lock}\n`, after: `${lock}\n# proposed\n` }]);
+    const pushed = git(h.root, "--git-dir", h.origin, "rev-parse", BRANCH);
+    assert.equal(git(h.dir, "show", `${pushed}:${FEATURE}`), lock);
+    assert.equal(git(h.dir, "show", `${pushed}:app.txt`), "held");
+    const ended = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status !== "started");
+    assert.equal(ended.at(-1)!.body.status, "failed");
+    assert.match(ended.at(-1)!.body.message, /asks to change features\/pbi-482\.feature/);
+    assert.ok(!h.prs.length, "a PR was opened");
+  });
+
+  test("a request that names a locked file the stage didn't change, or a file that isn't locked, asks for nothing (PBI 364)", async () => {
+    const h = harness({ nextStage: "green", script: (a, stage) => {
+      if (stage === "green" && a.prompt.includes("## The locked feature files")) {
+        return { text: `Done.\nFEATURE CHANGE: ${FEATURE}: wrong\nFEATURE CHANGE: features/other.feature: also wrong` };
+      }
+    } });
+    assert.equal(await h.run(), "done");
+    assert.ok(h.transitions().every((t) => t.event !== "feature_change_requested"));
+  });
+
+  test("every brief after sign-off says how to ask for a change to a locked feature file (PBI 364)", async () => {
+    const h = harness({ nextStage: "green" });
+    assert.equal(await h.run(), "done");
+    const green = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## The locked feature files"))!;
+    assert.match(green.prompt, /FEATURE CHANGE: <path>: <reason>/);
   });
 
   test("every brief after sign-off names the locked feature files", async () => {
@@ -1027,11 +1119,70 @@ describe("runCell", () => {
     assert.deepEqual(h.calls.filter((c) => c.route === "/repo/replyToThread").map((c) => c.body), [{ threadId: "t1", body: "kept, it matches the spec" }]);
   });
 
-  test("an address run with no trusted review text and a clean merge blocks, and never posts pr_opened", async () => {
-    const h = harness({ nextStage: "address" });
-    assert.equal(await h.run(), "waiting");
-    assert.deepEqual(h.transitions(), [{ event: "blocked", question: { kind: "needs_input", body: "no trusted review text to address" } }]);
+  test("an address run with no trusted review text and a clean merge passes without a question, and the PR review hands the PR back (PBI 258)", async () => {
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7 } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started(), ["address", "pr-review"]);
+    assert.equal(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body.status, "passed");
+    assert.deepEqual(h.transitions(), [{ event: "pr_opened", prNumber: 7 }]);
     assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+    assert.ok(!h.routes().includes("/repo/replyToThread") && !h.routes().includes("/repo/commentOnPr") && !h.routes().includes("/repo/resolveThread"));
+  });
+
+  test("an address with no trusted review text that carries a turned-down note says the note went unread (PBI 365)", async () => {
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, retry: { stageId: "address", tried: 0, findings: ["The Product Owner turned down your feature change request."] } } });
+    assert.equal(await h.run(), "done");
+    assert.ok(!h.agentCalls.some((a) => a.agent === "factory-pr-addresser"));
+    const passed = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "address").at(-1)!.body;
+    assert.equal(passed.status, "passed");
+    assert.match(passed.message, /no agent ran, and these findings carried from the last attempt went unread:\n- The Product Owner turned down/);
+  });
+
+  test("address resolves each person's thread it fixed or replied to, after CI and the reply, and leaves the rest open (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar"), thread("t3", "name baz"),
+      { threadId: "PRR_9", path: null, line: null, author: "owner", body: "Split run.ts" }] },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        writeFileSync(file, '{"threadId":"t1","body":"kept, it matches the spec"}\n{"threadId":"t2","fixed":true}\n{"threadId":"PRR_9","body":"split"}\n{"threadId":"t9","fixed":true}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1", "t2"], "not t3, which it didn't answer, nor a summary or a stranger's id");
+    const at = (route: string, id?: string) => h.calls.findIndex((c) => c.route === route && (id === undefined || c.body.threadId === id));
+    assert.ok(at("/repo/resolveThread", "t1") > at("/repo/replyToThread", "t1"), "resolved after its reply");
+    const checked = h.calls.map((c, i) => [c, i] as const).filter(([c]) => c.route === "/checks").at(0)![1];
+    assert.ok(at("/repo/resolveThread", "t2") > checked, "resolved after CI passed on the fix");
+  });
+
+  test("address leaves open a thread it marked fixed when it changed no code, and resolves the one it replied to (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "Not fixed, the total still skips the tax table.")] },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(file, '{"threadId":"t1","body":"kept, it matches the spec"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2: no commit, so no fix, and no reply");
+  });
+
+  test("address leaves open a thread it answered that a reviewer replied in while CI ran, and resolves the rest (PBI 258)", async () => {
+    const thread = (threadId: string, body: string) => ({ threadId, path: "app.txt", line: 1, author: "owner", body });
+    const h = harness({ nextStage: "address", ctx: { prNumber: 7, trustedComments: [thread("t1", "rename foo"), thread("t2", "split bar")], threadCommentCounts: { t1: 1, t2: 1 } },
+      script: (a, stage) => {
+        const file = /The reply file is `([^`]+)`/.exec(a.prompt)?.[1];
+        if (stage !== "address" || !file) return;
+        writeFileSync(join(a.cwd, "app.txt"), "fixed\n");
+        writeFileSync(file, '{"threadId":"t1","body":"renamed"}\n{"threadId":"t2","fixed":true}\n');
+      } });
+    const read = h.deps.repoHost.openReviewComments!;
+    h.deps.repoHost.openReviewComments = async (r, n) => [...await read(r, n), thread("t2", "Not fixed")];
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/repo/resolveThread").map((c) => c.body.threadId), ["t1"], "not t2, whose newer reply address never read");
+    const at = (route: string) => h.calls.findIndex((c) => c.route === route);
+    assert.ok(at("/repo/openReviewComments") > at("/repo/replyToThread"), "the threads are read again after the replies are posted");
   });
 
   for (const [what, comments] of [["review text", [ownerComment]], ["no review text", []]] as const) {
@@ -1110,7 +1261,8 @@ describe("runCell", () => {
 
   test("a stop that arrives while the cell reports a block still ends the run as stopped", async () => {
     let leases = 0;
-    const h = harness({ nextStage: "address", lease: async () => ({ stop: ++leases > 0 }) });
+    // A stage no cell resumes at blocks before any stage starts.
+    const h = harness({ nextStage: "nowhere", lease: async () => ({ stop: ++leases > 0 }) });
     assert.equal(await h.run(), "stopped");
     assert.ok(!h.transitions().length);
   });
@@ -1145,6 +1297,165 @@ describe("runCell", () => {
     assert.match(finding, /CI failed on [0-9a-f]{40}: the check "lint" failed, https:\/\/ci\/lint/);
     for (const text of ['"unit"', "https://ci/unit", "line 1\nAssertionError: expected 3 to equal 4", '"lint"', "https://ci/lint", "Its log couldn't be read"]) assert.ok(finding.includes(text), `the finding lacks ${text}:\n${finding}`);
     assert.ok(!finding.includes("named no failed check"), finding);
+  });
+
+  // PBI 233: a red CI's failed checks are re-run once before the failure is charged to the attempt.
+  test("CI failing at open-pr re-runs only the failed checks once, and a pass on the re-run goes on without Green", async () => {
+    let rerun = false;
+    const h = harness({});
+    const reruns: { sha: string; checks: string[] }[] = [];
+    h.deps.api.checks = async () => (rerun ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => [
+      { name: "lint", conclusion: "success", url: "https://ci/lint" },
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+    ];
+    h.deps.api.rerunFailedChecks = async (sha, checks) => { reruns.push({ sha, checks }); rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(reruns.map((r) => r.checks), [["unit"]]);
+    const greens = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started");
+    assert.equal(greens.length, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, new RegExp(`The check "unit" failed on ${reruns[0].sha.slice(0, 7)}, so the factory re-ran it once, and it passed on the re-run\\.`));
+    assert.doesNotMatch(openPr.body.message, /CI failed on/);
+  });
+
+  test("CI read right after a re-run that still shows the old failed run is waited past until the re-run reports", async () => {
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({});
+    // GitHub hasn't registered the re-run yet on the first two reads after it's asked for: the old failed run still shows.
+    const fresh = () => rerun && readsSinceRerun > 2;
+    h.deps.api.checks = async () => {
+      if (rerun) readsSinceRerun++;
+      return fresh() ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] };
+    };
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: fresh() ? "success" : "failure", url: fresh() ? "https://ci/unit/2" : "https://ci/unit" }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    assert.ok(readsSinceRerun >= 3, `CI was read ${readsSinceRerun} times after the re-run`);
+    const greens = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started");
+    assert.equal(greens.length, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.doesNotMatch(openPr.body.message, /CI failed on|failed again/);
+  });
+
+  test("CI failing while other checks still run waits for them to finish, then re-runs every check that failed", async () => {
+    let reads = 0;
+    let rerun = false;
+    const h = harness({});
+    const reruns: string[][] = [];
+    // "unit" fails at once while "e2e" still runs; "e2e" fails too on the third read. Both pass on the re-run.
+    h.deps.api.checks = async () => (rerun ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => {
+      if (!rerun) reads++;
+      return [
+        { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+        { name: "e2e", conclusion: rerun ? "success" : reads < 3 ? "pending" : "failure", url: rerun ? "https://ci/e2e/2" : "https://ci/e2e" },
+      ];
+    };
+    h.deps.api.rerunFailedChecks = async (_sha, checks) => { reruns.push(checks); rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(reruns, [["unit", "e2e"]]);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+  });
+
+  test("a re-run check that fails again fast is read only once the other re-run checks finish, so a running one isn't called passed", async () => {
+    let greens = 0;
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    // After the re-run, "unit" fails again at once while "e2e" runs for three more reads, then fails too.
+    const e2eDone = () => readsSinceRerun > 3;
+    h.deps.api.checks = async () => {
+      if (greens >= 2) return { status: "success", failedChecks: [] };
+      if (rerun) readsSinceRerun++;
+      return {
+        status: "failure",
+        failedChecks: rerun && e2eDone()
+          ? [{ name: "unit", url: "https://ci/unit/2", log: "unit boom" }, { name: "e2e", url: "https://ci/e2e/2", log: "e2e boom" }]
+          : [{ name: "unit", url: rerun ? "https://ci/unit/2" : "https://ci/unit", log: "unit boom" }],
+      };
+    };
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      { name: "e2e", conclusion: !rerun ? "failure" : e2eDone() ? "failure" : "pending", url: rerun ? "https://ci/e2e/2" : "https://ci/e2e" },
+    ];
+    h.deps.api.rerunFailedChecks = async () => { rerun = true; };
+    assert.equal(await h.run(), "done");
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, so the factory re-ran it once, and it failed again on the re-run\./);
+    assert.doesNotMatch(failed.body.message, /"e2e"[^.]*passed on the re-run/);
+    const retry = h.agentCalls.find((a) => a.stage === "green" && a.prompt.includes("## Your last attempt failed"))?.prompt ?? "";
+    assert.match(retry, /e2e boom/);
+  });
+
+  test("a re-requested check that finishes again under the same URL counts as re-run once it finished after its old run", async () => {
+    let rerun = false;
+    let readsSinceRerun = 0;
+    const h = harness({});
+    const fresh = () => rerun && readsSinceRerun > 1;
+    h.deps.api.checks = async () => {
+      if (rerun) readsSinceRerun++;
+      return fresh() ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] };
+    };
+    h.deps.api.ciChecks = async () => [{
+      name: "external", url: "https://ci/external", conclusion: fresh() ? "success" : "failure",
+      completedAt: fresh() ? "2026-11-20T10:05:00Z" : "2026-11-20T10:00:00Z",
+    }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; rerun = true; };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    const openPr = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status !== "started").at(-1)!;
+    assert.equal(openPr.body.status, "passed");
+    assert.match(openPr.body.message, /The check "external" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+  });
+
+  test("CI failing at open-pr whose re-run is refused is charged to the attempt, saying the check couldn't be re-run", async (t) => {
+    t.mock.method(console, "error", () => {});
+    let checks = 0;
+    let greens = 0;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (++checks === 1 ? { status: "failure", failedChecks: [] } : { status: "success", failedChecks: [] });
+    h.deps.api.ciChecks = async () => [{ name: "unit", conclusion: checks === 1 ? "failure" : "success", url: "https://ci/unit" }];
+    let asked = 0;
+    h.deps.api.rerunFailedChecks = async () => { asked++; throw new Error("403 Forbidden"); };
+    assert.equal(await h.run(), "done");
+    assert.equal(asked, 1);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /CI failed on [0-9a-f]{40}: the check "unit" failed/);
+    assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(403 Forbidden\)/);
+  });
+
+  test("CI failing at open-pr with a partial re-run waits only on the checks re-run and charges the refused one as it stands (PBI 233)", async () => {
+    let greens = 0;
+    let rerun = false;
+    const h = harness({ script: (a, stage) => { if (stage === "green" && ++greens === 2) writeFileSync(join(a.cwd, "app.txt"), "fixed for CI\n"); } });
+    h.deps.api.checks = async () => (greens >= 2 ? { status: "success", failedChecks: [] } : { status: "failure", failedChecks: [] });
+    h.deps.api.ciChecks = async () => greens >= 2 ? [] : [
+      { name: "unit", conclusion: rerun ? "success" : "failure", url: rerun ? "https://ci/unit/2" : "https://ci/unit" },
+      // e2e wasn't re-run, so it keeps its old failed run: waiting on it would wait out the cap.
+      { name: "e2e", conclusion: "failure", url: "https://ci/e2e" },
+    ];
+    const asked: string[][] = [];
+    h.deps.api.rerunFailedChecks = async (_sha, checks) => {
+      asked.push(checks);
+      rerun = true;
+      return { rerun: ["unit"], refused: [{ check: "e2e", reason: "already running" }] };
+    };
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(asked, [["unit", "e2e"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.match(failed.body.message, /The check "unit" failed on [0-9a-f]{7}, so the factory re-ran it once, and it passed on the re-run\./);
+    assert.match(failed.body.message, /The check "e2e" failed on [0-9a-f]{7}, and the factory couldn't re-run it \(already running\)/);
+    assert.doesNotMatch(failed.body.message, /The check "unit"[^.]*couldn't re-run/);
   });
 
   test("CI failing at open-pr with `/ci-checks` unreadable doesn't say no check was named while `/checks` named some (PBI 232)", async () => {
@@ -1235,6 +1546,47 @@ describe("runCell", () => {
     const fixing = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
     assert.equal(fixing[0], null);
     assert.equal(fixing[1], reads[0]);
+  });
+
+  // PBI 315: a head CI failed on in an earlier claim of the run counts as failed in this one too.
+  test("a claim that starts on a head an earlier claim saw CI fail on goes back to Green without reading CI on it or charging open-pr", async () => {
+    const reads: string[] = [];
+    const h = harness({ nextStage: "green", ctx: { decision: { kind: "answer", text: "Try once more" } } });
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failure = { sha: head, checks: [{ name: "ci", url: "https://ci.example/7201", failingTests: ["totals include VAT"] }] };
+    h.deps.ctx.failedCiHeads = [failure];
+    h.deps.api.checks = async (sha) => (reads.push(sha), h.calls.push({ route: "/checks", body: { sha } }), ({ status: "failure", failedChecks: [] }));
+    assert.equal(await h.run(), "waiting");
+    assert.deepEqual(reads, []);
+    const green = h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.ciFailure?.sha ?? null);
+    assert.deepEqual(green, [null, head]);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr"));
+    const brief = h.agentCalls.filter((a) => a.stage === "green" && !String(a.prompt).startsWith("# Definition of Done")).at(-1)!.prompt;
+    assert.ok(brief.includes(`CI failed on ${head}`) && brief.includes("https://ci.example/7201") && brief.includes("totals include VAT"));
+    assert.match(h.transitions().at(-1).question.body, /gave up/);
+  });
+
+  // PBI 315: a claim that ends at the boundary after open-pr's CI failure, on a drain or a restart, before Green
+  // starts, still leaves the head on the run, so the next claim on it goes back to Green without reading CI again.
+  test("a claim that ends at the boundary after open-pr's CI failure hands the head to the next claim, which reads no CI on it and charges no open-pr", async () => {
+    let restarting = true;
+    const h = harness({ nextStage: "open-pr", lease: async () => ({ stop: false, restarting }) });
+    h.deps.api.checks = async (sha) => (h.calls.push({ route: "/checks", body: { sha } }), { status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    const head = git(h.dir, "rev-parse", "HEAD");
+    const failedOpenPr = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.equal(failedOpenPr.body.ciFailure?.sha, head);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "green"));
+    const mark = h.calls.length;
+    restarting = false;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", failedCiHeads: [failedOpenPr.body.ciFailure], stageAttempts: { "open-pr": 1 } };
+    await h.run();
+    const claim2 = h.calls.slice(mark);
+    assert.equal(claim2.filter((c) => c.route === "/checks" && c.body.sha === head).length, 0);
+    // The first stage the next claim starts is Green, fixing that failure: no open-pr attempt is charged on the head.
+    const firstStarted = claim2.find((c) => c.route === "/stage" && c.body.status === "started")!;
+    assert.equal(firstStarted.body.stageId, "green");
+    assert.equal(firstStarted.body.ciFailure?.sha, head);
   });
 
   // PBI 317: the factory's answer to an older "Address failed" question naming only CI failures sends the run to Green.
@@ -1509,6 +1861,247 @@ describe("runCell", () => {
     assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "started").map((c) => c.body.attempt), [2]);
   });
 
+  // PBI 301: a restart being prepared lets the cell finish its stage. At the stage boundary it starts no further stage
+  // and ends its claim, with no attempt stopped and no work-in-progress commit.
+  for (const [stage, next] of [["red", "green"], ["green", "self-review"], ["self-review", "open-pr"]] as const) {
+    test(`a cell told restarting finishes ${stage}, starts no ${next} and releases its claim`, async () => {
+      const h = harness({ nextStage: stage, lease: async () => ({ stop: false, restarting: true }) });
+      assert.equal(await h.run(), "restarting");
+      assert.deepEqual(h.started(), [stage]);
+      assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => c.body.status), ["started", "passed"]);
+      assert.equal(h.routes().at(-1), "/release");
+      assert.ok(!h.transitions().length);
+      assert.ok(!git(h.root, "--git-dir", h.origin, "log", "--format=%s", BRANCH).split("\n").some((m) => m.startsWith("work in progress")));
+    });
+  }
+
+  // The other boundaries in a claim: understand to specify, open-pr to pr-review, and back to green from open-pr or address.
+  const told = async () => ({ stop: false, restarting: true });
+  const ended = (h: ReturnType<typeof harness>, stage: string, status: string) => {
+    assert.deepEqual(h.started(), [stage]);
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => c.body.status), ["started", status]);
+    assert.equal(h.routes().at(-1), "/release");
+    assert.ok(!h.transitions().length);
+  };
+
+  test("a cell told restarting finishes understand, starts no specify and releases its claim", async () => {
+    const h = harness({ nextStage: "understand", signedOff: false, lease: told,
+      script: (_a, stage) => (stage === "understand" ? { text: h.deps.ctx.acceptanceCriteria.map((_, i) => `@ac-${i + 1}`).join(" ") } : undefined) });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "understand", "passed");
+    assert.ok(!h.agentCalls.some((a) => a.stage === "specify"));
+  });
+
+  test("a cell told restarting finishes open-pr, starts no pr-review and releases its claim", async () => {
+    const h = harness({ nextStage: "open-pr", lease: told });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "open-pr", "passed");
+    assert.ok(!h.routes().includes("/repo/postReview"));
+  });
+
+  test("a cell told restarting whose open-pr sends it back to green starts no green and releases its claim", async () => {
+    const h = harness({ nextStage: "open-pr", lease: told });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "open-pr", "failed");
+  });
+
+  test("a cell told restarting whose address sends it back to green starts no green and releases its claim", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] }, lease: told });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "address", "failed");
+  });
+
+  test("a cell told restarting whose address passes starts no pr-review and releases its claim", async () => {
+    const h = harness({ nextStage: "address", ctx: { trustedComments: [ownerComment] }, lease: told });
+    assert.equal(await h.run(), "restarting");
+    ended(h, "address", "passed");
+    assert.ok(!h.routes().includes("/repo/postReview"));
+  });
+
+  // PBI 393: under a drain or a restart being prepared, a failed attempt with retries left ends the claim at that
+  // attempt boundary. Its failed report carries the tries the stage spent and its findings, for the next claim.
+  const statuses = (h: ReturnType<typeof harness>, stage: string) =>
+    h.calls.filter((c) => c.route === "/stage" && c.body.stageId === stage).map((c) => [c.body.attempt, c.body.status]);
+  test("a cell told restarting whose green attempt fails starts no retry and releases its claim (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", lease: told });
+    h.deps.config.commands.test = "echo 'not ok 1 - totals include VAT'; exit 1";
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.ok(failed.body.retryCarry.findings.some((f: string) => f.includes("totals include VAT")));
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.transitions().length);
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+    assert.ok(!git(h.root, "--git-dir", h.origin, "log", "--format=%s", BRANCH).split("\n").some((m) => m.startsWith("work in progress")));
+  });
+
+  test("a cell told restarting whose red attempt fails starts no retry and releases its claim (PBI 393)", async () => {
+    // Red's scenarios pass before any behaviour exists, so its attempt fails.
+    const h = harness({ nextStage: "red", lease: told, script: (_a, stage) => { if (stage === "red") writeFileSync(join(h.root, "fx", "run.ndjson"), report(["Criterion 1 holds", "Criterion 2 holds"], "green")); } });
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "red"), [[1, "started"], [1, "failed"]]);
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+  });
+
+  test("a cell told restarting whose green has no retries left fails the item as before (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", lease: told, ctx: { stageAttempts: { green: 3 }, retry: { stageId: "green", tried: 3, findings: ["x"] } } });
+    h.deps.config.commands.test = "false";
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(statuses(h, "green"), [[4, "started"], [4, "failed"]]);
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+  });
+
+  test("a claim after an attempt boundary spends the stage's remaining retries, with the failed attempt's findings in its brief (PBI 393)", async () => {
+    const h = harness({ nextStage: "green", ctx: { stageAttempts: { green: 1 }, retry: { stageId: "green", tried: 1, findings: ["totals include VAT fails"] } } });
+    h.deps.config.commands.test = "false";
+    assert.equal(await h.run(), "failed");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.status === "started").map((c) => c.body.attempt), [2, 3, 4]);
+    const first = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(first.prompt, /## Your last attempt failed\n\n- totals include VAT fails/);
+    assert.doesNotMatch(first.prompt, /Carry on from the earlier work/);
+  });
+
+  test("a carried-over attempt counts only once: a later pass back to green doesn't spend it again (PBI 393)", async () => {
+    const h = harness({ nextStage: "red", ctx: { retry: { stageId: "green", tried: 1, findings: ["old"] } } });
+    assert.equal(await h.run(), "done");
+    assert.deepEqual(h.started().filter((s) => s === "green"), ["green"]);
+    const first = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.doesNotMatch(first.prompt, /Your last attempt failed/, "a carry for a stage the claim didn't start at isn't used");
+  });
+
+  test("a pass back to green under a restart being prepared ends the claim at its failed attempt, and the next claim at open-pr spends green's carry (PBI 393)", async () => {
+    // The run's next stage stays open-pr while green's back-pass runs. Its failed report carries green's tries and
+    // findings, and the next claim goes back to green through failedCiHeads and picks them up.
+    let on = false;
+    const h = harness({
+      nextStage: "open-pr",
+      lease: async () => ({ stop: false, restarting: on }),
+      script: (a, stage) => { if (stage === "green") { on = true; writeFileSync(join(a.cwd, "app.txt"), `fix ${Math.random()}\n`); } },
+    });
+    h.deps.api.checks = async () => ({ status: "failure", failedChecks: [{ name: "unit", url: "https://ci/unit", log: "boom" }] });
+    h.deps.config.commands.test = "echo 'not ok 1 - totals include VAT'; exit 1";
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "green"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "green" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.ok(failed.body.retryCarry.findings.some((f: string) => f.includes("totals include VAT")));
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+
+    const ciFailure = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!.body.ciFailure;
+    on = false;
+    // A new claim clones the branch as pushed: the failed green attempt's commit was never pushed.
+    git(h.dir, "fetch", "-q", "origin");
+    git(h.dir, "reset", "-q", "--hard", `origin/${BRANCH}`);
+    assert.equal(git(h.dir, "rev-parse", "HEAD"), ciFailure.sha);
+    const mark = h.calls.length;
+    const agents = h.agentCalls.length;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", failedCiHeads: [ciFailure], stageAttempts: { "open-pr": 1, green: 1 },
+      retry: { stageId: "green", ...failed.body.retryCarry } };
+    h.deps.config.commands.test = "true";
+    await h.run();
+    const started = h.calls.slice(mark).filter((c) => c.route === "/stage" && c.body.status === "started");
+    assert.deepEqual([started[0]!.body.stageId, started[0]!.body.attempt], ["green", 2]);
+    const brief = h.agentCalls.slice(agents).find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(brief.prompt, /## Your last attempt failed[\s\S]*totals include VAT/);
+    assert.doesNotMatch(brief.prompt, /Carry on from the earlier work/);
+  });
+
+  test("a cell told restarting whose open-pr reply fails starts no second open-pr attempt, and the next claim carries it (PBI 393)", async () => {
+    let n = 0;
+    const bad = (a: { mode: string; agent?: string }, stage: string) =>
+      stage === "open-pr" && a.mode === "cell" && !a.agent && n++ === 0 ? { text: "Here is the PR body." } : undefined;
+    let on = true;
+    const h = harness({ nextStage: "open-pr", lease: async () => ({ stop: false, restarting: on }), script: bad });
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(statuses(h, "open-pr"), [[1, "started"], [1, "failed"]]);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "failed")!;
+    assert.equal(failed.body.retryCarry.tried, 1);
+    assert.equal(failed.body.retryCarry.findings.length, 1);
+    assert.equal(h.routes().filter((r) => r !== "/lease" && r !== "/upload-url").at(-1), "/release");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+
+    const mark = h.calls.length;
+    const agents = h.agentCalls.length;
+    h.deps.ctx = { ...h.deps.ctx, nextStage: "open-pr", stageAttempts: { "open-pr": 1 }, retry: { stageId: "open-pr", ...failed.body.retryCarry } };
+    on = false;
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    await h.run();
+    const started = h.calls.slice(mark).filter((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "started");
+    assert.deepEqual(started.map((c) => c.body.attempt), [2]);
+    const brief = h.agentCalls.slice(agents).find((a) => a.stage === "open-pr" && a.mode === "cell" && !a.agent)!;
+    assert.ok(brief.prompt.includes(`## Your last attempt failed\n\n- ${failed.body.retryCarry.findings[0]}`), "the next claim's brief carries the failed reply's finding");
+  });
+
+  test("a claim at open-pr with green's carry and no head CI failed on goes back to green and spends the carry (PBI 393)", async () => {
+    // A pass back to green from stale Definition of Done verdicts or a moved head leaves no head CI failed on, so the
+    // carry itself sends the claim back to green, with green's tries spent and the failed attempt's findings.
+    const h = harness({ nextStage: "open-pr", ctx: { stageAttempts: { "open-pr": 1, green: 1 }, retry: { stageId: "green", tried: 1, findings: ["the DoD line on totals fails"] } } });
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    assert.equal(await h.run(), "done");
+    const started = h.calls.filter((c) => c.route === "/stage" && c.body.status === "started");
+    assert.deepEqual([started[0]!.body.stageId, started[0]!.body.attempt], ["green", 2]);
+    const brief = h.agentCalls.find((a) => a.stage === "green" && a.mode === "cell" && !a.prompt.startsWith("# Definition of Done"))!;
+    assert.match(brief.prompt, /## Your last attempt failed\n\n- the DoD line on totals fails/);
+  });
+
+  test("green's carry at open-pr counts only its tries left: a carry that spent them all fails the item (PBI 393)", async () => {
+    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "green", tried: 4, findings: ["the DoD line on totals fails"] } } });
+    h.deps.api.checks = async () => ({ status: "success", failedChecks: [] });
+    assert.equal(await h.run(), "failed");
+    assert.equal(h.transitions().at(-1)!.event, "retries_exhausted");
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.stageId === "open-pr" && c.body.status === "started"));
+  });
+
+  test("a restart prepared during green's push still ends the cell at the boundary", async () => {
+    let on = false;
+    const h = harness({ nextStage: "green", lease: async () => ({ stop: false, restarting: on }) });
+    const push = h.deps.git.push;
+    h.deps.git = { ...h.deps.git, push: async (...args: Parameters<typeof push>) => { const r = await push(...args); on = true; return r; } };
+    assert.equal(await h.run(), "restarting");
+    assert.deepEqual(h.started(), ["green"]);
+    assert.equal(h.routes().at(-1), "/release");
+  });
+
+  test("a restart cleared before the stage ends lets the cell go on to the next stage (PBI 301)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let restarting = true;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: false, restarting }),
+      script: async (_a, stage) => {
+        if (stage !== "green" || !restarting) return;
+        mock.timers.tick(60_000);
+        await new Promise((r) => setImmediate(r));
+        restarting = false;
+      },
+    });
+    assert.equal(await h.run(), "done");
+    assert.ok(h.started().includes("self-review"));
+    assert.ok(!h.calls.some((c) => c.route === "/stage" && c.body.status === "stopped"));
+  });
+
+  test("a stop outranks restarting: the cell still wraps up its stage as stopped (PBI 301)", async () => {
+    mock.timers.enable({ apis: ["setInterval"] });
+    let armed = false;
+    const h = harness({
+      nextStage: "green",
+      lease: async () => ({ stop: armed, restarting: true }),
+      script: async (a, stage) => {
+        if (stage !== "green") return;
+        armed = true;
+        mock.timers.tick(60_000);
+        await new Promise((r) => a.signal.addEventListener("abort", r, { once: true }));
+        return { ok: false, text: "Claude Code process aborted by user" };
+      },
+    });
+    assert.equal(await h.run(), "stopped");
+    assert.deepEqual(h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "green").map((c) => c.body.status), ["started", "stopped"]);
+  });
+
   test("a 409 from the cell API stops the run at once, with no push and no further calls", async () => {
     const h = harness({ failOn: "/policy-results" });
     assert.equal(await h.run(), "stopped");
@@ -1672,6 +2265,21 @@ describe("the PR review stage", () => {
     assert.deepEqual(order, ["pr-review:started", "pr-review:passed", "/transition"]);
     assert.equal(h.transitions()[0].event, "pr_opened");
     assert.equal(h.transitions()[0].tier, "Low");
+  });
+
+  test("a claim carrying pr-review's turned-down feature change briefs pr-review's addresser with the note, past open-pr (PBI 365)", async () => {
+    const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"fixed"}\nAPPROVED`];
+    const h = harness({ nextStage: "open-pr", ctx: { retry: { stageId: "pr-review", tried: 0, findings: ["The Product Owner turned down your feature change request. Keep empty orders refused."] } },
+      script: async (a, stage) => {
+        if (a.agent === "factory-pr-addresser") { writeFileSync(join(a.cwd, "app.txt"), "fixed\n"); return; }
+        return reviewer(answers)(a, stage);
+      } });
+    assert.equal(await h.run(), "done");
+    const openPr = h.agentCalls.find((a) => a.stage === "open-pr")!;
+    assert.doesNotMatch(openPr.prompt, /turned down/);
+    const brief = h.agentCalls.find((a) => a.agent === "factory-pr-addresser")!.prompt;
+    assert.match(brief, /## Your last attempt failed\n\n- The Product Owner turned down your feature change request\. Keep empty orders refused\./);
   });
 
   test("a claim resumed after an earlier claim's round 1 posts round 2, and the PR body states 2 rounds (PBI 318)", async () => {

@@ -57,6 +57,8 @@ export type Ctx = {
    */
   metered?: GateJudge;
   polls: number;
+  /** PBI 258: webhook deliveries a scenario made, which act in place of a poll. */
+  deliveries?: number;
   error?: unknown;
   /**
    * PBI 255: what else each poll runs once the poller has, such as the scheduler's CI check on merged items. A throw
@@ -65,6 +67,10 @@ export type Ctx = {
   afterPoll?: () => Promise<void>;
   /** PBI 255: what ran in place of a poll, such as the scheduler's claim, so a Then on the factory's state needn't follow one. */
   ranOther?: string;
+  /** PBI 395: keys the judge's last line carries beside its flags, such as the factory rules it finds the item changes. */
+  lastLine?: Record<string, unknown>;
+  /** PBI 395: more dependencies each poll hands pollOnce, such as the factory's own repo. */
+  deps?: Record<string, unknown>;
 };
 
 export function ctx(world: object): Ctx {
@@ -83,7 +89,7 @@ const judge = (c: Ctx): Judge => async (item, dor, spent) => {
     const reason = failed ? (c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
-  const last = c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized };
+  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine };
   return [...dor.criteria.map(line), JSON.stringify(last)].join("\n");
 };
 
@@ -118,7 +124,7 @@ export async function poll(c: Ctx): Promise<void> {
   await c.beforePoll?.();
   try {
     await poller.pollOnce({ pool: need().pool, adapter: c.fake.adapter, repoHost: c.host, judge: judge(c), sourceId: c.sourceId,
-      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}) });
+      ...(c.logic ? { logic: c.logic } : {}), ...(c.split ? { split: c.split } : {}), ...(c.defaults ? { defaults: c.defaults } : {}), ...c.deps });
     await c.afterPoll?.();
     c.polls++;
   } catch (e) {
@@ -146,7 +152,7 @@ export async function baseline(c: Ctx): Promise<Baseline> {
 
 export function polled(c: Ctx): void {
   assert.equal(c.error, undefined, `the poll failed: ${String(c.error)}`);
-  assert.ok(c.polls > 0 || c.ranOther, "the poller didn't run");
+  assert.ok(c.polls > 0 || (c.deliveries ?? 0) > 0 || c.ranOther, "the poller didn't run");
 }
 
 export async function stateOf(c: Ctx, extId: string): Promise<string | undefined> {

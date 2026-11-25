@@ -70,7 +70,7 @@ Feature: Migrate seeds the Keycloak test owner and resolves the issuer under flo
       Then it exits with an error naming Keycloak
       And no user from the issuer "http://localhost:7430/realms/factory" exists
 
-    @ac-2 @local
+    @ac-2 @local @serial
     Scenario: Under aspire run with floating ports, migrate seeds the test owner on the live realm's issuer
       Given "aspire run" is up with FACTORY_FLOAT_PORTS=1
       When I read the issuer from the live realm's OpenID discovery document

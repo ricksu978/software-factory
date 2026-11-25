@@ -13,7 +13,7 @@
 //   reading the PRs          an InReview item whose PR merged, its row locked, so the poll can't move it
 //   a cell API request       the run's item row locked, so the route can't take its lock
 //
-// Time is a fake Clock passed in as `slow.clock`, and warnings are what reaches `slow.log`. The line formats are the
+// Time is src/clock.ts's fakeClock passed in as `slow.clock`, and warnings are what reaches `slow.log`. The line formats are the
 // ones src/control/slow-work.ts documents.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
@@ -22,54 +22,21 @@ import type { AddressInfo } from "node:net";
 import type pg from "pg";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import type { Clock, Slow } from "../../src/control/slow-work.ts";
+import { fakeClock, type FakeClock } from "../../src/clock.ts";
+import type { Slow } from "../../src/control/slow-work.ts";
 import { startServer } from "../../src/http/server.ts";
 import { tick } from "../../src/scheduler/scheduler.ts";
 import { withTx } from "../../src/store/db.ts";
 import { claimNext } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi286, pass as pass286 } from "./pbi-286.steps.ts";
 
 const NOW = new Date("2026-11-06T10:00:00Z");
 const REPO = "ricksu978/software-factory";
 const REPO_URL = `https://github.com/${REPO}`;
 const SECRET = "pbi-134-secret";
 const DAY_MS = 86_400_000;
-
-/** A fake clock. `advance` fires each timer that falls due, in order, letting the event loop run after each. */
-class FakeClock implements Clock {
-  private t = 0;
-  private seq = 0;
-  private timers = new Map<number, { at: number; fn: () => void }>();
-  now(): number {
-    return this.t;
-  }
-  setTimeout(fn: () => void, ms: number): unknown {
-    const id = ++this.seq;
-    this.timers.set(id, { at: this.t + Math.max(0, ms), fn });
-    return id;
-  }
-  clearTimeout(handle: unknown): void {
-    this.timers.delete(handle as number);
-  }
-  async advance(ms: number): Promise<void> {
-    const end = this.t + ms;
-    for (;;) {
-      await settle();
-      const due = [...this.timers.entries()].filter(([, v]) => v.at <= end).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
-      if (!due) break;
-      this.timers.delete(due[0]);
-      this.t = due[1].at;
-      due[1].fn();
-    }
-    this.t = end;
-    await settle();
-  }
-  /** How many timers are still waiting that were due by now. `advance` should leave none. */
-  overdue(): number {
-    return [...this.timers.values()].filter((v) => v.at <= this.t).length;
-  }
-}
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -78,7 +45,7 @@ type Holder = { client: pg.PoolClient; pid: number; done: boolean };
 
 type Work = { done: boolean; error?: unknown; promise: Promise<void> };
 type Board = { name: string; sourceId: string; backlog: ReturnType<typeof fakeBacklog> };
-type Ctx = {
+export type Ctx = {
   clock: FakeClock;
   lines: string[];
   holders: Holder[];
@@ -89,24 +56,27 @@ type Ctx = {
   polls: Work[];
   boards: Map<string, Board>;
   server?: Server;
-  runs: Map<string, { runId: string; token: string; itemId: string }>;
+  runs: Map<string, { runId: string; token: string; itemId: string; generation: number }>;
   requests: Work[];
   seq: number;
+  /** The model gateway's upstream. PBI 154's steps point it at a fake upstream before the cell API starts. */
+  upstream?: string;
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi134?: Ctx };
   w.pbi134 ??= {
-    clock: new FakeClock(), lines: [], holders: [], repoHost: fakeRepoHost(), backlog: fakeBacklog(),
+    clock: fakeClock(), lines: [], holders: [], repoHost: fakeRepoHost(), backlog: fakeBacklog(),
     ticks: [], polls: [], boards: new Map(), runs: new Map(), requests: [], seq: 0,
   };
   return w.pbi134;
 }
 
 const pool = () => need().pool;
-const slow = (c: Ctx): Slow => ({ clock: c.clock, log: (line) => c.lines.push(line) });
+export const slow = (c: Ctx): Slow => ({ clock: c.clock, log: (line) => c.lines.push(line) });
 
-Before({ tags: "@pbi-134 and @db", ...long }, async function () {
+// PBI 154's steps share this database, the cell API and its clock.
+Before({ tags: "(@pbi-134 and @db) or @pbi-154", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
@@ -115,7 +85,7 @@ Before({ tags: "@pbi-134 and @db", ...long }, async function () {
   ctx(this).repoHost.heads.set(REPO, "c0ffee0");
 });
 
-After({ tags: "@pbi-134", ...long }, async function () {
+After({ tags: "@pbi-134 or @pbi-154", ...long }, async function () {
   const c = ctx(this);
   for (const h of c.holders) await finish(h, "rollback").catch(() => undefined);
   await Promise.race([
@@ -378,7 +348,7 @@ async function cellServer(c: Ctx): Promise<string> {
     const api = cellApi({
       pool: pool(), secret: SECRET, repoHost: c.repoHost, backlogFor: () => backlog,
       stageAfter: () => null, uploadUrl: async (path: string) => `http://blob.test/${path}`,
-      gateway: { upstream: "http://127.0.0.1:9", ownerToken: () => "owner" }, webToolsOf: () => [],
+      gateway: { upstream: c.upstream ?? "http://127.0.0.1:9", ownerToken: () => "owner" }, webToolsOf: () => [],
       killSwitch: () => false, now: () => NOW, slow: slow(c),
     });
     c.server = await startServer([api], { port: 0 });
@@ -400,7 +370,7 @@ async function runInProgress(c: Ctx, ext: string): Promise<void> {
     [claim.runId, REPO_URL],
   );
   await pool().query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'understand', 1, 'started')", [claim.runId]);
-  c.runs.set(ext, { runId: claim.runId, itemId, token: runToken(SECRET, claim.runId, claim.generation) });
+  c.runs.set(ext, { runId: claim.runId, itemId, token: runToken(SECRET, claim.runId, claim.generation), generation: claim.generation });
 }
 
 const ROUTES: Record<string, { method: string; path: string; body?: unknown }> = {
@@ -458,11 +428,14 @@ Given("the cell's request to {} is answered after {int} seconds", long, async fu
 // --- time ----------------------------------------------------------------------------------------------------------
 
 When(/^(\d+) (?:more )?(minutes?|seconds?) pass$/, long, async function (n: string, unit: string) {
-  const clock = ctx(this).clock;
   const ms = Number(n) * (unit.startsWith("minute") ? 60_000 : 1000);
-  const before = clock.now();
+  // PBI 286's event streams wait on the API's own timer, which its steps hold on their clock.
+  if (isPbi286(this)) return pass286(this, ms);
+  const clock = ctx(this).clock;
+  const before = clock.now().getTime();
   await clock.advance(ms);
-  assert.equal(clock.now() - before, ms, `the clock moved ${clock.now() - before} ms, not ${ms}`);
+  const moved = clock.now().getTime() - before;
+  assert.equal(moved, ms, `the clock moved ${moved} ms, not ${ms}`);
   assert.equal(clock.overdue(), 0, "a timer due by now is still pending");
 });
 

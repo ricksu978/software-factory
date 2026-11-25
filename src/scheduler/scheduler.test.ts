@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
-import { clearRestartOnStart, restartWaitMs, setOverride, type OverrideKind } from "../store/overrides.ts";
+import { clearRestartOnStart, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
 import { FAILED_RECHECK_MS, tick, type CiMemo } from "./scheduler.ts";
@@ -396,6 +396,82 @@ describe("scheduler", dbTest, () => {
     assert.equal(backlog.filed.length, 0);
   });
 
+  // PBI 369: an item that failed its Definition of Done on main is re-checked every failed_recheck_hours hours. The
+  // scenarios cover the rest.
+  const HOUR = 3_600_000;
+  async function failedMerge(externalId: string, sha: string, parent: string, mergeRuns: CheckRun[], parentRuns: CheckRun[], failedAgo = 0, event = "dod_failed") {
+    const id = await redMerge(externalId, sha, parent, mergeRuns, parentRuns, failedAgo + HOUR);
+    await db.pool.query("update item set state = 'Failed' where id = $1", [id]);
+    await db.pool.query(
+      "insert into event (at, actor, actor_id, item_id, kind, payload) values ($1, 'system', 't', $2, 'transition', $3)",
+      [ago(failedAgo), id, JSON.stringify({ from: "Accepted", to: "Failed", event })],
+    );
+    repoHost.branches.set(`${REPO}@main`, [parent, sha]);
+    await db.pool.query("update wip_policy set current_wip = 0");
+    return id;
+  }
+  const rechecks = async (id: string) =>
+    (await db.pool.query<{ at: Date }>("select at from event where item_id = $1 and kind = 'recheck' order by at", [id])).rows.map((r) => r.at.toISOString());
+  const later = (ms: number) => new Date(NOW.getTime() + ms);
+
+  test("a Failed item is first re-checked 8 hours after it failed, and one on a main already red goes back to Accepted and waits on main (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")]);
+    const before = (await backlog.comments("1")).length;
+    await run(later(8 * HOUR - 60_000));
+    assert.deepEqual(await rechecks(id), []);
+    assert.equal((await state(id)).state, "Failed");
+    await run(later(8 * HOUR));
+    assert.deepEqual(await rechecks(id), [later(8 * HOUR).toISOString()]);
+    assert.equal((await state(id)).state, "Accepted");
+    const moves = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'rechecked'", [id])).rows;
+    assert.deepEqual(moves.map((m) => [m.payload.from, m.payload.to]), [["Failed", "Accepted"]]);
+    assert.equal((await db.pool.query("select waits_on_branch from run where item_id = $1", [id])).rows[0].waits_on_branch, "main");
+    const comments = (await backlog.comments("1")).slice(before);
+    assert.equal(comments.length, 1);
+    assert.match(comments[0], /re-check/i);
+    assert.match(comments[0], /m1/);
+    assert.match(comments[0], /p1/);
+    await run(later(16 * HOUR));
+    assert.equal((await backlog.comments("1")).length, before + 1);
+    assert.equal((await rechecks(id)).length, 1);
+  });
+
+  test("a merge that still broke main stays Failed with no comment, and is re-checked again failed_recheck_hours later (PBI 369)", async () => {
+    repoHost.files.set(`${REPO}@main:.factory/config.yml`, "failed_recheck_hours: 2\n");
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")]);
+    const before = (await backlog.comments("1")).length;
+    for (const h of [1, 2, 3, 4]) await run(later(h * HOUR));
+    assert.deepEqual(await rechecks(id), [later(2 * HOUR).toISOString(), later(4 * HOUR).toISOString()]);
+    assert.equal((await state(id)).state, "Failed");
+    assert.equal((await backlog.comments("1")).length, before);
+    assert.equal(backlog.filed.length, 0);
+  });
+
+  test("a merge commit whose CI now passes goes back to Accepted, and is Done on the next pass (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")], 8 * HOUR);
+    repoHost.runs.set(`${REPO}@m1`, [check("test", "success")]);
+    repoHost.checks.set(`${REPO}@m1`, "success");
+    await run();
+    assert.equal((await state(id)).state, "Accepted");
+    assert.match((await backlog.comments("1")).at(-1)!, /now passes/);
+    await run(later(60_000));
+    assert.equal((await state(id)).state, "Done");
+  });
+
+  test("an item that went to Failed for another reason is never re-checked (PBI 369)", async () => {
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "failure")], 8 * HOUR, "retries_exhausted");
+    await run(later(HOUR));
+    assert.deepEqual(await rechecks(id), []);
+    assert.equal((await state(id)).state, "Failed");
+  });
+
+  test("a config whose failed_recheck_hours is wrong re-checks every 8 hours (PBI 369)", async () => {
+    repoHost.files.set(`${REPO}@main:.factory/config.yml`, "failed_recheck_hours: nope\n");
+    const id = await failedMerge("1", "m1", "p1", [check("test", "failure")], [check("test", "success")], 8 * HOUR);
+    await run();
+    assert.equal((await rechecks(id)).length, 1);
+  });
+
   test("re-queueing an Abandoned item with its sign-off still open sends it back to SignOff with a fresh clock", async () => {
     const id = await item("1", "Abandoned", "held = true");
     await openRun(id, "next_stage = 'sign-off'");
@@ -405,6 +481,9 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(await state(id), { state: "SignOff", held: false });
     const q = (await db.pool.query("select asked_at, reminders_sent from question where item_id = $1", [id])).rows[0];
     assert.deepEqual(q, { asked_at: NOW, reminders_sent: 0 });
+    // The board comment quotes the question again, from the transition's payload (PBI 219).
+    const ev = (await db.pool.query("select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'reopened_signoff'", [id])).rows[0];
+    assert.equal(ev.payload.question, "q");
   });
 
   test("re-queueing an item withdrawn from NotReady sends it back to Eligible, not Queued (PBI 168)", async () => {
@@ -589,8 +668,8 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(kills, [{ cleared_by: operator }]);
   });
 
-  // PBI 140: Prepare restart. A restart override starts nothing, and once its wrap-up runs out it stops every cell still
-  // running, records each open attempt stopped and sends the item back to Queued at the stage it was in.
+  // PBI 140: Prepare restart. A restart override starts nothing. PBI 300: it never stops a cell either, however long the
+  // cell runs, so each cell wraps up in its own time and its attempt stays open until the cell reports it.
   const prepared = async (minutesAgo: number) => {
     await override("restart");
     await db.pool.query("update override set created_at = $1 where kind = 'restart'", [ago(minutesAgo * 60_000)]);
@@ -602,7 +681,7 @@ describe("scheduler", dbTest, () => {
     return { id, runId };
   };
 
-  test("a restart being prepared starts nothing and stops no cell before its wrap-up runs out", async () => {
+  test("a restart being prepared starts nothing and stops no cell", async () => {
     await item("1", "Queued");
     await running("2", "cell-2");
     await prepared(14);
@@ -611,46 +690,29 @@ describe("scheduler", dbTest, () => {
     assert.deepEqual(stopped, []);
   });
 
-  test("when the wrap-up runs out, each cell still running is stopped, its attempt recorded stopped and its item queued at its stage", async () => {
+  test("hours after a restart was prepared, a running cell isn't stopped and its attempt stays open", async () => {
     const a = await running("2", "cell-2");
-    await prepared(15);
+    await prepared(180);
     await run();
-    assert.deepEqual(stopped, ["cell-2"]);
-    assert.equal((await state(a.id)).state, "Queued");
+    assert.deepEqual(stopped, []);
+    assert.equal((await state(a.id)).state, "InProgress");
     const attempt = (await db.pool.query("select status, ended_at from stage_run where run_id = $1", [a.runId])).rows[0];
-    assert.equal(attempt.status, "stopped");
-    assert.ok(attempt.ended_at);
-    assert.equal((await db.pool.query("select next_stage from run where id = $1", [a.runId])).rows[0].next_stage, "green");
+    assert.deepEqual(attempt, { status: "started", ended_at: null });
     assert.deepEqual(started, [], "the factory still starts nothing until it restarts");
   });
 
-  test("FACTORY_RESTART_WAIT_MINUTES sets the wrap-up", async () => {
+  test("FACTORY_RESTART_WAIT_MINUTES stops nothing", async () => {
     const before = process.env.FACTORY_RESTART_WAIT_MINUTES;
-    process.env.FACTORY_RESTART_WAIT_MINUTES = "5";
+    process.env.FACTORY_RESTART_WAIT_MINUTES = "0";
     try {
       await running("2", "cell-2");
       await prepared(5);
       await run();
-      assert.deepEqual(stopped, ["cell-2"]);
+      assert.deepEqual(stopped, []);
     } finally {
       if (before === undefined) delete process.env.FACTORY_RESTART_WAIT_MINUTES;
       else process.env.FACTORY_RESTART_WAIT_MINUTES = before;
     }
-  });
-
-  test("a restart's stop that fails leaves that item running and still stops the others", async () => {
-    const a = await running("2", "cell-2");
-    const b = await running("3", "cell-3");
-    const real = launcher.stop;
-    launcher.stop = async (name: string) => {
-      if (name === "cell-2") throw new Error("no such container");
-      return real(name);
-    };
-    await prepared(15);
-    await run();
-    assert.deepEqual(stopped, ["cell-3"]);
-    assert.equal((await state(a.id)).state, "InProgress");
-    assert.equal((await state(b.id)).state, "Queued");
   });
 
   test("clearRestartOnStart clears only the restart override, and resume clears one too", async () => {
@@ -663,14 +725,6 @@ describe("scheduler", dbTest, () => {
     await override("resume");
     const restarts = (await db.pool.query("select cleared_by from override where kind = 'restart' order by created_at")).rows;
     assert.equal(restarts.at(-1).cleared_by, operator);
-  });
-
-  test("restartWaitMs reads FACTORY_RESTART_WAIT_MINUTES and falls back to 15 minutes", () => {
-    assert.equal(restartWaitMs({}), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "5" }), 5 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "soon" }), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "-1" }), 15 * 60_000);
-    assert.equal(restartWaitMs({ FACTORY_RESTART_WAIT_MINUTES: "0" }), 0);
   });
 
   test("an override with a blank reason is refused", async () => {

@@ -9,7 +9,7 @@ These steps are for the board's owner, `ricksu978`. To point the factory at your
 
 ### What you need
 
-- Windows with PowerShell 7 (`pwsh`). The start script is PowerShell.
+- Windows with PowerShell 7 (`pwsh`). The secrets script and the commands below are PowerShell.
 - Node 26.13.0 or later (`package.json`).
 - Docker Desktop. Cells, Postgres and the Azurite storage emulator all run in it.
 - The [Aspire CLI](https://aspire.dev), version 13.6.4 (`aspire.config.json`).
@@ -22,16 +22,17 @@ These steps are for the board's owner, `ricksu978`. To point the factory at your
 ```powershell
 git clone https://github.com/ricksu978/software-factory.git
 cd software-factory
-npm run factory
+aspire run
 ```
 
-`npm run factory` runs `scripts/factory.ps1`, which:
+`aspire run` is the one command. Before any resource starts, it:
 
-1. fast-forwards `main`, but only when you're on `main`;
-2. starts Docker Desktop if it isn't running, and waits up to 3 minutes for it;
-3. asks for any AppHost secret this checkout doesn't have yet;
-4. rebuilds the `factory-cell:local` image that cells run, so the egress proxy has an image to start from. When your working tree is clean, the image records HEAD's commit in its `org.opencontainers.image.revision` label. With uncommitted edits it gets no label, and Floor says the image's commit is not known until the worker builds it from `main`;
-5. runs `aspire run`.
+1. pulls `main` fast-forward-only, but only when you're on `main`. A pull that fails stops the start with git's own message. On any other branch it warns and runs your checkout as it is;
+2. starts Docker Desktop if it isn't running, and waits up to 3 minutes for it.
+
+A test run, with `FACTORY_FLOAT_PORTS=1` as the BDD suites start the AppHost, pulls nothing, so it never moves your checkout or waits on a git prompt.
+
+`aspire run` also rebuilds the `factory-cell:local` image that cells run, as a resource named `cell-image` in the Aspire dashboard, so the egress proxy has an image to start from. It builds from your checkout as it is once the pull is done, with the checkout's `cell/Dockerfile`, and the worker starts only once that build has finished. A build that fails shows `cell-image` as failed, with Docker's error in its console, and the worker never starts. When your working tree is clean, the image records HEAD's commit in its `org.opencontainers.image.revision` label. With uncommitted edits it gets no label, and Floor says the image's commit is not known until the worker builds it from `main`.
 
 Once running, the worker builds `factory-cell:local` again from `main`'s fetched commit and checks `main` on each poll. A merged change to cell-side files only (`sop/`, `policy/`, `cell/`, `src/cell/`, except `sop/default.yml` and `src/cell/sop-move.ts`, which the control plane and the worker load too) is rebuilt into the image without a restart, and the next cell runs it. A change to anything the control plane or the worker runs is not, and Floor says a restart is needed. The build never reads your checkout's working tree or local commits.
 
@@ -39,12 +40,14 @@ Run the same command each time you start the factory. Ctrl+C stops it. Postgres 
 
 ### The secrets it asks for
 
-Aspire keeps the AppHost's secrets per checkout, so each new clone or worktree asks for them once. Secret values are typed hidden and never echoed. After pasting a token copied with `Set-Clipboard`, clear it with `Set-Clipboard -Value $null`, and remove it from clipboard history (Win+V) if that's on. To change one later, run `pwsh scripts/set-local-secrets.ps1` and press Enter to keep the ones you don't change.
+Aspire keeps the AppHost's parameters per checkout, in that checkout's user secrets, so each new clone or worktree asks for them once. On a start with any missing, the Aspire dashboard shows **Unresolved parameters**. Select **Enter values**, fill in the form, and tick **Save to user secrets** so the next start asks nothing. The factory's resources wait until every value is in. The form hides secret values. After pasting a token copied with `Set-Clipboard`, clear it with `Set-Clipboard -Value $null`, and remove it from clipboard history (Win+V) if that's on. To change one later, run `pwsh scripts/set-local-secrets.ps1` and press Enter to keep the ones you don't change.
 
-| Prompt | What to enter |
+The factory reads the App's `.pem` from its path on every start, so keep the file where `github-app-key-path` points. A checkout set up before this took the key itself as `github-app-key`, which nothing reads now. Remove that copy of the key with `aspire secret delete Parameters:github-app-key`.
+
+| Parameter | What to enter |
 |---|---|
 | `claude-oauth-token` | The token `claude setup-token` printed |
-| `github-app-key` | The path to the App's `.pem` file. A quoted path from Explorer's "Copy as path" works |
+| `github-app-key-path` | The path to the App's `.pem` file. A quoted path from Explorer's "Copy as path" works. The form's fields are one line, so it takes the path, not the key |
 | `github-project-token` | Your `gh` token. `gh auth token \| Set-Clipboard`, then paste |
 | `cell-secret` | Any random value. `[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)) \| Set-Clipboard`, then paste |
 | `github-webhook-secret` | Any random value locally, made the same way, because GitHub sends no webhooks to your machine |

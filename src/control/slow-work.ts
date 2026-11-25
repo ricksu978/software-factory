@@ -4,31 +4,22 @@
 //   slow: the scheduler tick has run for 5 minutes, in step "expiring leases"
 //   slow: the poll of board <backlog_source.url> has run for 10 minutes, in step "listing new and changed items"
 //   slow: the cell API request POST /stage for run <run id> has been open for 60 seconds
+//   slow: the model gateway request POST /v1/messages for run <run id> has had no upstream answer for 60 seconds
 //
 // A tick or a poll warns at 5 minutes and every 5 minutes after, naming the step it is in at that moment. A cell API
-// request warns at 60 seconds. Every warning stops once the work ends, whether it ended well or with an error.
+// request warns at 60 seconds. A model gateway request warns once, at 60 seconds, if its upstream hasn't sent its
+// response headers by then (PBI 154). Every warning stops once the work ends, whether it ended well or with an error.
 //
 // The tick's steps: "applying overrides", "stopping every cell", "expiring leases", "chasing questions", "polling
 // merged CI" and "starting the next item". The poll's steps: "reading the board", "listing new and changed items",
 // "reading the PRs of items in review", "checking the items the factory holds", "checking readiness" and "saving the
 // cursor".
 
+import { realClock, type Clock } from "../clock.ts";
+
 export const SLOW_TICK_MS = 300_000;
 export const SLOW_POLL_MS = 300_000;
 export const SLOW_REQUEST_MS = 60_000;
-
-/** The clock a watch reads and the timers it sets. Tests pass a fake one to move time on by hand. */
-export type Clock = {
-  now(): number;
-  setTimeout(fn: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-};
-
-export const realClock: Clock = {
-  now: () => Date.now(),
-  setTimeout: (fn, ms) => setTimeout(fn, ms).unref(),
-  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
-};
 
 /** Where slow-work warnings go, console.warn by default, and the clock that times them, the real one by default. */
 export type Slow = { log?: (line: string) => void; clock?: Clock };
@@ -43,12 +34,12 @@ export type Watch = { step(name: string): void; end(): void };
 export function watch(firstMs: number, everyMs: number | null, say: (ms: number, step: string) => string, slow: Slow = {}): Watch {
   const clock = slow.clock ?? realClock;
   const log = slow.log ?? ((line: string) => console.warn(line));
-  const started = clock.now();
+  const started = clock.now().getTime();
   let step = "";
   let handle: unknown = null;
   const fire = () => {
     handle = everyMs === null ? null : clock.setTimeout(fire, everyMs);
-    log(say(clock.now() - started, step));
+    log(say(clock.now().getTime() - started, step));
   };
   handle = clock.setTimeout(fire, firstMs);
   return {

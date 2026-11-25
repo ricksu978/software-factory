@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
+import { fakeClock, type FakeClock } from "../clock.ts";
 import { cellModelEnv, GatewayUnavailable, handleModelRequest, startModelGateway, type WebTool } from "./model-gateway.ts";
 
 const port = (s: Server) => (s.address() as AddressInfo).port;
@@ -229,12 +230,13 @@ describe("model gateway request check", () => {
     await close(upstream);
   });
 
-  /** Sends a body as given, so a test can send bytes JSON.stringify would never produce. */
+  /** Sends a body as given, so a test can send bytes JSON.stringify would never produce. A fresh connection each time, so a
+   *  pooled keep-alive socket the server is closing can't reset a request under load. */
   function send(body: string | Buffer, headers: Record<string, string> = {}, chunked = false): Promise<number> {
     return new Promise((resolve, reject) => {
       const h: Record<string, string> = { authorization: "Bearer sk-ant-oat01-ok", "content-type": "application/json", ...headers };
       if (!chunked) h["content-length"] = String(Buffer.byteLength(body));
-      const req = request({ host: "127.0.0.1", port: port(gateway), method: "POST", path: "/v1/messages", headers: h }, (res) => {
+      const req = request({ host: "127.0.0.1", port: port(gateway), method: "POST", path: "/v1/messages", headers: h, agent: false }, (res) => {
         res.resume();
         res.on("end", () => resolve(res.statusCode ?? 0));
       });
@@ -298,5 +300,139 @@ describe("model gateway request check", () => {
     bodies.length = 0;
     assert.equal(await send(Buffer.alloc(33 * 1024 * 1024, 0x20)), 413);
     assert.equal(bodies.length, 0);
+  });
+});
+
+describe("model gateway slow line (PBI 154)", () => {
+  /** A clock whose timers fire only when the test says so. */
+  type Mode = "hang" | "answer" | "drop";
+  async function withGateway(mode: Mode, fn: (ctx: { clock: FakeClock; lines: string[]; gatewayPort: number; forwarded: () => Promise<void> }) => Promise<void>, ownerToken = "owner") {
+    let got = 0;
+    const up = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        got++;
+        if (mode === "answer") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: one\n\n");
+        } else if (mode === "drop") req.socket.destroy();
+      });
+    });
+    await listen(up);
+    const clock = fakeClock();
+    const lines: string[] = [];
+    const g = await startModelGateway({
+      port: 0,
+      upstream: `http://127.0.0.1:${port(up)}`,
+      ownerToken: () => ownerToken,
+      verify: (c) => (c === "ok" ? { webTools: [], runId: "11111111-2222-3333-4444-555555555555" } : null),
+      slow: { clock, log: (l) => lines.push(l) },
+    });
+    const forwarded = async () => {
+      for (let i = 0; i < 100 && got === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.equal(got, 1, "the gateway never forwarded the request");
+    };
+    try {
+      await fn({ clock, lines, gatewayPort: port(g), forwarded });
+    } finally {
+      g.closeAllConnections();
+      up.closeAllConnections();
+      await close(g);
+      await close(up);
+    }
+  }
+
+  /** The Authorization header a cell sends for a credential, built the way the cell's own env is. */
+  const bearer = (credential: string) => `Bearer ${cellModelEnv({ gatewayUrl: "http://gateway.test", credential }).CLAUDE_CODE_OAUTH_TOKEN}`;
+
+  function open(gatewayPort: number, path = "/v1/messages", auth = bearer("ok")) {
+    const events: string[] = [];
+    const req = request({ host: "127.0.0.1", port: gatewayPort, method: "POST", path, headers: { authorization: auth, "content-type": "application/json" } }, (res) => {
+      events.push(`status ${res.statusCode}`);
+      res.on("data", () => events.push("data"));
+      res.on("error", () => {});
+    });
+    req.on("error", () => events.push("error"));
+    req.end("{}");
+    return { req, events };
+  }
+
+  const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
+
+  test("a request with no upstream answer 60 seconds after it was forwarded logs one line naming its path and run", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req } = open(gatewayPort, "/v1/messages?beta=true");
+      await forwarded();
+      await clock.advance(59_999);
+      assert.deepEqual(lines, []);
+      await clock.advance(1);
+      assert.deepEqual(lines, ["slow: the model gateway request POST /v1/messages for run 11111111-2222-3333-4444-555555555555 has had no upstream answer for 60 seconds"]);
+      await clock.advance(600_000);
+      assert.equal(lines.length, 1);
+      req.destroy();
+    });
+  });
+
+  test("upstream headers before 60 seconds stop the warning, however long the stream runs", async () => {
+    await withGateway("answer", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req, events } = open(gatewayPort);
+      await forwarded();
+      for (let i = 0; i < 100 && !events.includes("data"); i++) await tick(10);
+      assert.equal(clock.pending(), 0);
+      await clock.advance(300_000);
+      assert.deepEqual(lines, []);
+      req.destroy();
+    });
+  });
+
+  test("an upstream error before 60 seconds stops the warning", async () => {
+    await withGateway("drop", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { events } = open(gatewayPort);
+      await forwarded();
+      for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+      assert.deepEqual(events, ["status 502"]);
+      assert.equal(clock.pending(), 0);
+      await clock.advance(300_000);
+      assert.deepEqual(lines, []);
+    });
+  });
+
+  test("a cell that disconnects before 60 seconds stops the warning", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort, forwarded }) => {
+      const { req } = open(gatewayPort);
+      await forwarded();
+      await clock.advance(20_000);
+      req.destroy();
+      for (let i = 0; i < 100 && clock.pending() > 0; i++) await tick(10);
+      assert.equal(clock.pending(), 0);
+      await clock.advance(300_000);
+      assert.deepEqual(lines, []);
+    });
+  });
+
+  test("a request http.request throws on, never forwarded, logs no slow line", async () => {
+    // An owner token ending in a newline makes http.request throw ERR_INVALID_CHAR before anything reaches the upstream.
+    await withGateway(
+      "hang",
+      async ({ clock, lines, gatewayPort }) => {
+        const { events } = open(gatewayPort);
+        for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+        assert.deepEqual(events, ["status 400"]);
+        assert.equal(clock.pending(), 0);
+        await clock.advance(300_000);
+        assert.deepEqual(lines, []);
+      },
+      "owner\n",
+    );
+  });
+
+  test("a refused request never starts a watch", async () => {
+    await withGateway("hang", async ({ clock, lines, gatewayPort }) => {
+      const { events } = open(gatewayPort, "/v1/messages", bearer("forged"));
+      for (let i = 0; i < 100 && events.length === 0; i++) await tick(10);
+      assert.deepEqual(events, ["status 401"]);
+      assert.equal(clock.pending(), 0);
+      assert.deepEqual(lines, []);
+    });
   });
 });

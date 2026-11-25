@@ -10,6 +10,9 @@
 // The addresser's scenarios set up the address stage's agent run through agentOptions, as the engine does, and read
 // what the run's factory-pr-addresser definition and the address stage's prompt tell it. The last rule reads this
 // repo's own .factory/dod.md through loadPolicy and its CI workflow.
+//
+// PBI 389's feature shares some of these steps' words, for any line number. In a @pbi-389 scenario the step hands over
+// to PBI 389's steps, which run the whole cell. Here only line 1 has a meaning.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +22,8 @@ import { parse } from "yaml";
 import { agentOptions, type AgentArgs } from "../../src/agent/run.ts";
 import { checkDefinitionOfDone, type CiCheck } from "../../src/cell/engine.ts";
 import { loadPolicy, parseCriteria, type Policy, type Verdict } from "../../src/policy/policy.ts";
+import { pbi389 } from "./pbi-389.steps.ts";
+import { pbi399 } from "./pbi-399.steps.ts";
 
 const repo = process.cwd();
 const long = { timeout: 60_000 };
@@ -76,7 +81,12 @@ function report(c: Ctx, sha: string, check: CiCheck) {
 
 // "a run for item {int} whose scenarios were signed off" is PBI 18's step, which sets up a run of its own. This
 // feature's checkout is set up here, with line 1's command passing until a scenario says otherwise.
-Given("the repo's Definition of Done line 1 is {string}", function (line: string) {
+// A regular expression, not {string}, since a Scenario Outline's example can put bare quotes inside the line.
+Given(/^the repo's Definition of Done line (\d+) is "(.*)"$/, function (num: string, quoted: string) {
+  const n = Number(num);
+  const line = quoted.replace(/\\"/g, '"');
+  if (pbi389.active(this)) return pbi389.setLine(this, n, line);
+  assert.equal(n, 1, "PBI 229's steps set only line 1");
   const c = mine(this);
   c.lineText = line;
   writeCommand(c);
@@ -89,7 +99,9 @@ Given("line 1's command fails in the checkout", function () {
   writeCommand(c);
 });
 
-Given("line 1's command fails in the checkout with exit code {int}", function (code: number) {
+Given("line {int}'s command fails in the checkout with exit code {int}", function (n: number, code: number) {
+  if (pbi389.active(this)) return pbi389.lineFails(this, n, code);
+  assert.equal(n, 1, "PBI 229's steps set only line 1");
   const c = mine(this);
   c.exitCode = code;
   writeCommand(c);
@@ -159,6 +171,7 @@ async function checkAt(c: Ctx, head: string) {
 }
 
 When("the cell checks the Definition of Done at {string}", long, async function (sha: string) {
+  if (pbi389.active(this)) return pbi389.checkAt(this, sha);
   await checkAt(mine(this), sha);
 });
 
@@ -181,7 +194,9 @@ function line1(c: Ctx): Verdict {
   return v;
 }
 
-Then("Definition of Done line 1 passes", function () {
+Then("Definition of Done line {int} passes", function (n: number) {
+  if (pbi389.active(this)) return pbi389.passes(this, n);
+  assert.equal(n, 1, "PBI 229's steps judge only line 1");
   const v = line1(mine(this));
   assert.equal(v.status, "passed", `line 1 ${v.status}: ${v.reason}`);
 });
@@ -191,13 +206,17 @@ Then("Definition of Done line 1 fails", function () {
   assert.equal(v.status, "failed", `line 1 ${v.status}: ${v.reason}`);
 });
 
-Then("Definition of Done line 1 passes with the reason {string}", function (reason: string) {
+Then("Definition of Done line {int} passes with the reason {string}", function (n: number, reason: string) {
+  if (pbi389.active(this)) return pbi389.passes(this, n, reason);
+  assert.equal(n, 1, "PBI 229's steps judge only line 1");
   const v = line1(mine(this));
   assert.equal(v.status, "passed", `line 1 ${v.status}: ${v.reason}`);
   assert.equal(v.reason, reason);
 });
 
-Then("Definition of Done line 1 fails with a reason that starts {string}", function (start: string) {
+Then("Definition of Done line {int} fails with a reason that starts {string}", function (n: number, start: string) {
+  if (pbi389.active(this)) return pbi389.failsWith(this, n, start);
+  assert.equal(n, 1, "PBI 229's steps judge only line 1");
   const v = line1(mine(this));
   assert.equal(v.status, "failed", `line 1 ${v.status}: ${v.reason}`);
   assert.ok(v.reason.startsWith(start), `line 1's reason doesn't start "${start}": ${v.reason}`);
@@ -220,7 +239,9 @@ Then("the cell ran line 1's command", function () {
   assert.ok(existsSync(join(checkout(c), MARK)), "line 1's command didn't run in the checkout");
 });
 
-Then("the cell didn't run line 1's command", function () {
+Then("the cell didn't run line {int}'s command", function (n: number) {
+  if (pbi389.active(this)) return pbi389.didntRun(this, n);
+  assert.equal(n, 1, "PBI 229's steps run only line 1");
   const c = mine(this);
   result(c);
   assert.ok(!existsSync(join(checkout(c), MARK)), "line 1's command ran in the checkout");
@@ -254,7 +275,9 @@ Then("the stage's findings don't say any check was missing", function () {
 
 // ---- Then: what's stored ----
 
-Then("the stored Definition of Done results for {string} show line 1 passed", function (sha: string) {
+Then("the stored Definition of Done results for {string} show line {int} passed", function (sha: string, n: number) {
+  if (pbi389.active(this)) return pbi389.storedPassed(this, sha, n);
+  assert.equal(n, 1, "PBI 229's steps store only line 1");
   const c = mine(this);
   result(c);
   const at = c.stored.filter((s) => s.checkedSha === sha);
@@ -302,6 +325,7 @@ Then("the addresser the run gets is told to leave the full test suite to CI and 
 // ---- This repo's Definition of Done ----
 
 When("the factory reads this repo's {string}", async function (path: string) {
+  if (pbi399.active(this)) return pbi399.readConfig(this, path);
   const c = mine(this);
   c.policy = await loadPolicy(async (p) => (p === path && existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : null), "dod");
   assert.ok(c.policy, `this repo has no ${path}`);

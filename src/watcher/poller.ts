@@ -1,7 +1,7 @@
 // The poller (plan Task 8): one pass over a backlog source and the PRs of the items it holds.
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { judgedFields, loginKey, type BacklogAdapter, type FactoryItem, type RepoHost } from "../adapters/types.ts";
+import { judgedFields, loginKey, type BacklogAdapter, type ChangeCause, type FactoryItem, type RepoHost } from "../adapters/types.ts";
 import { parseRepoConfig } from "../config/repo-config.ts";
 import { minutes, SLOW_POLL_MS, watch, watched, type Slow, type Watch } from "../control/slow-work.ts";
 import { CI_BACK_TO_GREEN, NO_REVIEW_TEXT, olderCiFailedQuestion } from "../core/questions.ts";
@@ -10,14 +10,18 @@ import { readinessLogic } from "../agent/run.ts";
 import { gate, type GateContext } from "../gate/readiness.ts";
 import { itemTextHash, splitUnanswered, type SplitDeps } from "../gate/split.ts";
 import { splitDoneComment, splitDoneKey } from "../gate/split-done.ts";
-import { doneChildren, filedChildren, keepSplit, keptSplit, keptSplits } from "../store/splits.ts";
-import { filedFromMarkers, type ChildIssue } from "../gate/file-split.ts";
+import { doneChildren, filedChildren, keepSplit, keepSplitChildren, keptSplit, keptSplits, splitChildren } from "../store/splits.ts";
+import { filedFromMarkers, type ChildIssue, type SplitBoard } from "../gate/file-split.ts";
 import { loadPolicy, PolicyError, readinessSha, type DefaultPolicies, type Policy, type PolicyName, type ReadinessLogic } from "../policy/policy.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent } from "../store/events.ts";
 import { logAttemptedMerge, mergeBlocker, mergedNote } from "./merge.ts";
-import { IllegalTransition, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
+import { headCiFailure, rerunLedger, sendBackForCi } from "./ci-head.ts";
+import type { CiFailure } from "../core/ci-findings.ts";
+import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdrawnBeforeQueue } from "../store/items.ts";
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
+import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
+import { approvedRulesHash, ruleChangesChecked } from "../store/rule-changes.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -44,7 +48,15 @@ export type PollDeps = {
    * directory beside the code.
    */
   defaults?: DefaultPolicies;
+  /**
+   * The factory's own repo, where its spec and policy files live (PBI 395). The readiness check reads each rule an item
+   * says it changes from `main` here, to hold its quoted Before to the rule's text word for word.
+   */
+  factoryRepo?: FactoryRepo;
 };
+
+/** Reads a file of the factory's own repo at `ref`, or null when the file isn't there (PBI 395). */
+export type FactoryRepo = { readFile(ref: string, path: string): Promise<string | null> };
 
 type Row = {
   id: string; external_id: string; state: ItemState; held: boolean; criteria_hash: string | null;
@@ -59,7 +71,7 @@ type Readiness = {
 };
 
 const system = { actor: "system", actorId: "poller" } as const;
-const ACTIVE: ItemState[] = ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"];
+const ACTIVE: ItemState[] = ["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"];
 /** States an item waits in before the readiness gate passes it. It holds no run, so leaving the backlog only withdraws it. */
 const GATING: ItemState[] = ["Eligible", "NotReady"];
 const POLICIES: PolicyName[] = ["dor", "scenarios", "pr-review", "risk", "dod"];
@@ -91,11 +103,22 @@ export function boardPriority(fields: Record<string, string>): number {
   return /^[1-5]$/.test(raw) ? Number(raw) : 3;
 }
 
+/** The board label that marks an item a bug (PBI 378). */
+export const BUG_LABEL = "bug";
+
+/**
+ * Whether an item carries the board's "bug" label (PBI 378), read on every poll beside its priority. GitHub matches
+ * label names without regard to case, so this does too.
+ */
+export function carriesBug(labels: string[]): boolean {
+  return labels.some((l) => l.toLowerCase() === BUG_LABEL);
+}
+
 const repoFromUrl = (url: string | null) => (url ? url.replace(/^https:\/\/github\.com\//, "") : null);
 
-async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: pg.PoolClient) => Promise<unknown>): Promise<void> {
+async function move(pool: pg.Pool, itemId: string, event: ItemEvent, also?: (c: pg.PoolClient) => Promise<unknown>, detail?: Record<string, unknown>): Promise<void> {
   await withTx(pool, async (c) => {
-    await transitionItem(c, itemId, event, system);
+    await transitionItem(c, itemId, event, system, detail);
     await also?.(c);
   });
 }
@@ -247,13 +270,30 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       fetched.set(ext, fi);
       if (fi) {
         await pool.query(
-          "update item set repo = $3, board_priority = $4 where source_id = $1 and external_id = $2 and (repo is distinct from $3 or board_priority is distinct from $4)",
-          [sourceId, ext, fi.repo, boardPriority(fi.fields)],
+          `update item set repo = $3, board_priority = $4, bug_label = $5 where source_id = $1 and external_id = $2
+             and (repo is distinct from $3 or board_priority is distinct from $4 or bug_label is distinct from $5)`,
+          [sourceId, ext, fi.repo, boardPriority(fi.fields), carriesBug(fi.labels)],
         );
       }
     }
     return fetched.get(ext)!;
   };
+
+  w.step("moving split parents out of Abandoned");
+  // 0. A parent split before PBI 225 lost its label once its split was filed, and a poll withdrew it from NotReady to
+  //    Abandoned. One whose kept split's children are all among its sub-issues, found by their split markers, moves to
+  //    Split, recording them, so step 5 closes it once they're Done (PBI 228). It goes first, so step 1 never returns
+  //    it to the gate when its label is back. One this step couldn't read stays put in step 1 too.
+  const unread = new Set<string>();
+  await each(await items(pool, sourceId, ["Abandoned"]), (row) => `moving split parent ${row.external_id}`, async (row) => {
+    try {
+      const children = await abandonedSplitChildren(pool, row, split?.file?.board);
+      if (children) await moveToSplit(pool, row.id, children);
+    } catch (e) {
+      unread.add(row.id);
+      throw e;
+    }
+  });
 
   w.step("listing new and changed items");
   // 1. New and changed items. If any of them fails to go in, the cursor stays put so the next poll lists it again.
@@ -262,8 +302,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   const unlisted = await each(listed.items, (fi) => `listing item ${fi.externalId}`, async (fi) => {
     fetched.set(fi.externalId, fi);
     const id = await upsertItem(pool, { sourceId, externalId: fi.externalId, title: fi.title, rank: fi.rank, repo: fi.repo, issueCreatedAt: fi.createdAt });
-    await pool.query("update item set board_priority = $2 where id = $1 and board_priority is distinct from $2", [id, boardPriority(fi.fields)]);
-    await returnWithdrawn(pool, id);
+    await pool.query(
+      "update item set board_priority = $2, bug_label = $3 where id = $1 and (board_priority is distinct from $2 or bug_label is distinct from $3)",
+      [id, boardPriority(fi.fields), carriesBug(fi.labels)],
+    );
+    if (!unread.has(id)) await returnWithdrawn(pool, id);
   });
 
   w.step("reading the PRs of items in review");
@@ -271,16 +314,19 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   //    merge just before the item closes still counts as a merge. A merge or a close while the item is InProgress,
   //    during address for example, is the fallback for a webhook that never came (PBI 142). So is one while the item
   //    waits in NeedsInput on a question asked after its PR opened (PBI 194). Only an InReview item goes back to
-  //    address on a review or a conflict, and only reviews by allowlisted users count (Run contract 10). A NeedsInput
-  //    item that waits on "no trusted review text to address" goes back too, once the factory answers it (PBI 305).
+  //    address on a review, a conflict or CI failing on its PR's head (PBI 235), and only reviews by allowlisted users
+  //    count (Run contract 10). A NeedsInput item that waits on "no trusted review text to address" goes back too, once
+  //    the factory answers it (PBI 305). An item waiting in FeatureChangeRequest has its PR's merge or close noticed too
+  //    (PBI 364).
   const trusted = (await pool.query<{ github_login: string }>(`select github_login from "user" where github_login is not null`)).rows.map((u) => u.github_login);
-  await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
+  await each(await items(pool, sourceId, ["InReview", "InProgress", "NeedsInput", "FeatureChangeRequest"]), (row) => `reading the PR of item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     const repo = fi?.repo ?? repoFromUrl(row.run_repo_url);
     if (!repo || !row.pr_number) return;
     // The factory's own review threads never send the item to address, whoever replies inside them (PBI 130).
     const bot = (await pool.query<{ trusted_bot: string | null }>("select trusted_bot from repo where lower(url) = lower($1)", [`https://github.com/${repo}`])).rows[0]?.trusted_bot ?? null;
     const pr = await repoHost.prState(repo, row.pr_number, trusted, bot);
+    let failed: CiFailure | null = null;
     if (pr.merged) {
       // A merge the factory asked for whose answer it never got is still logged as the factory's (PBI 181).
       await move(pool, row.id, "merged", async (c) => {
@@ -296,12 +342,21 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     } else if (pr.mergeable === false || newer(pr.lastChangesRequestedAt, row.reviews_seen_at)) {
       // A trusted review asking for changes, a comment in a still-open thread, or a conflict sends an InReview item
       // back to address. A NeedsInput item stays put on its question, and its PR isn't merged over the request (PBI 262),
-      // unless the question is the one PBI 305 answers above.
+      // unless the question is the one PBI 305 answers above. The move names its cause: the newest trusted review or
+      // comment in a thread unresolved as it was read, or else GitHub reporting the PR not mergeable (PBI 258).
       if (row.state === "InReview") {
-        await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]));
+        const cause: ChangeCause | null = newer(pr.lastChangesRequestedAt, row.reviews_seen_at) ? pr.lastChangesRequested ?? null : { kind: "not_mergeable" };
+        await move(pool, row.id, "changes_requested", (c) => c.query("update run set next_stage = 'address' where id = $1", [row.run_id]), cause ? { cause } : undefined);
       }
-    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))) {
-      // An item withdrawn from the board, or whose criteria changed, is left for step 3 to close its PR (PBI 181). A
+    } else if (row.state === "InReview" && (failed = await headCiFailure(repoHost, repo, row.pr_number, { head: pr.headSha }, row.run_id ? rerunLedger(pool, row.run_id) : undefined))) {
+      // CI failed on the PR's head, so the item goes back to address with the failure detail as its findings (PBI 235).
+      // A failure on an older commit of the PR never counts, so a person's push that CI hasn't judged yet waits.
+      // The failed checks are re-run once first, and only a check still red after its re-run sends the item back (PBI 233).
+      await sendBackForCi(pool, { itemId: row.id, runId: row.run_id! }, failed, system);
+    } else if ((row.state === "InReview" || row.state === "NeedsInput") && !row.held && eligible(fi) && (row.criteria_hash === null || row.criteria_hash === criteriaHash(fi!.acceptanceCriteria))
+      && !(await rulesEdited(pool, row.id, fi!))) {
+      // An item withdrawn from the board, or whose criteria or rules section changed, is left for step 3 to close its
+      // PR (PBI 181, PBI 395). A
       // NeedsInput item's PR merges under the same rules as an InReview one's (PBI 262).
       await mergeIfReady(pool, repoHost, repo, row.pr_number, row, trusted);
     }
@@ -328,6 +383,16 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       await restart(pool, row, fi, hash);
       return;
     }
+    // PBI 395: an item Queued or later whose "Changes the factory's rules" section no longer reads as the owner
+    // approved it, or that gained one since it was gated, meets the readiness check again in step 4, which leaves it
+    // waiting for the owner's approval. Its PR is closed and its run ended, so nothing built from the edit ships.
+    // Deleting an approved section is an edit to it too, so the judge checks the item again. An edit anywhere else in
+    // the item doesn't move it.
+    if (await rulesEdited(pool, row.id, fi)) {
+      await closeOpenPr(repoHost, fi.repo, row, "This item's \"Changes the factory's rules\" section changed since the owner approved it, so it waits for a new approval.");
+      await regateRules(pool, row);
+      return;
+    }
     // Every active item's dependencies are read, an InReview or InProgress one's included, since a final-stage item
     // lends its group and priority to the items it depends on (PBI 320).
     await pool.query("update item set blocked_by = $2 where id = $1", [row.id, await adapter.openDependencies(fi.externalId)]);
@@ -337,6 +402,11 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   // 3b. Items stopped by a red base (PBI 260). Once CI passes on a newer commit of the base branch, the factory answers
   //     the question itself and the scheduler claims the item again at its stage, merging the base as every claim does.
   await requeueAfterBasePassed(pool, repoHost, sourceId);
+
+  w.step("keeping queue moves in place");
+  // 3c. With the board's new order read, every Move up and Move down is held on its side of the item it passed, or
+  //     ended where the board itself now puts the two the other way round (PBI 311).
+  await withTx(pool, (c) => keepMovesInPlace(c));
 
   w.step("checking readiness");
   // 4. Readiness. A NotReady item is re-gated when the item itself changed, or when a readiness input changed. The factory's own board writes change neither. Then every Eligible item is gated.
@@ -349,6 +419,14 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     if (!byRepo.has(key)) byRepo.set(key, readiness(pool, repoHost, fi.repo, logic, defaults));
     return byRepo.get(key)!;
   };
+  // The factory's own spec and policy files on main, each read once per poll, that an item's rule changes are held to (PBI 395).
+  const factoryFiles = new Map<string, Promise<string | null>>();
+  // Only the spec and policy files are ever read: an item names the path, so nothing else of the repo is reachable.
+  const factoryRules = deps.factoryRepo && ((path: string) => {
+    if (!isRulesFile(path)) return Promise.resolve(null);
+    if (!factoryFiles.has(path)) factoryFiles.set(path, deps.factoryRepo!.readFile(RULES_REF, path));
+    return factoryFiles.get(path)!;
+  });
   // An item in an unknown repo fails the gate on that alone, and its host may have no dependencies to read.
   const depsOf = async (fi: FactoryItem) => ((await readinessOf(fi)).repoKnown ? adapter.openDependencies(fi.externalId) : []);
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
@@ -366,6 +444,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const out = await gate(fi, {
       readinessSha: r.sha, dor: r.dor, dodExists: r.dodExists, configValid: r.configValid, repoKnown: r.repoKnown, judge, adapter, policyErrors: r.policyErrors, split,
       missingPermissions: r.missingPermissions,
+      ...(factoryRules ? { factoryRules } : {}), ruleApproval: await approvedRulesHash(pool, row.id),
       // Every judge call's spend, a failed one's included, so the items the gate turns away count too (PBI 132).
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
@@ -377,7 +456,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     // A queued item goes in blocked by its open dependencies, so no claim takes it before step 3 reads them next poll.
     const blockedBy = out.ready ? await depsOf(fi) : [];
     await move(pool, row.id, out.ready ? "ready" : "readiness_failed", async (c) => {
-      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4 where id = $1", [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy]);
+      await c.query("update item set readiness_policy_sha = $2, readiness_item_hash = $3, blocked_by = $4, rule_changes = $5 where id = $1",
+        [row.id, r.sha, readinessItemHash(out.item ?? fi), blockedBy, JSON.stringify(out.ruleChanges ?? [])]);
       for (const v of out.results) {
         await c.query(
           `insert into policy_result (item_id, run_id, file, source, checked_sha, criterion_index, criterion, status, reason)
@@ -387,8 +467,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       }
       // A parent whose split the gate just filed, its last child filed and its label off, goes on from NotReady to
       // Split in the same commit, so no later poll finds it NotReady without its label and withdraws it (PBI 225).
-      // The move keeps the children filed, so step 5 knows which of the parent's sub-issues are the split's (PBI 226).
-      if (out.filed) await transitionItem(c, row.id, "split_filed", system, { children: out.children ?? [] });
+      // The move keeps the children filed, so step 5 knows which of the parent's sub-issues are the split's (PBI 226),
+      // and they're kept in that commit too, for its "Split into" on Floor and Run detail (PBI 227).
+      if (out.filed) {
+        await keepSplitChildren(c, row.id, out.children ?? []);
+        await transitionItem(c, row.id, "split_filed", system, { children: out.children ?? [] });
+      }
     });
   });
 
@@ -406,8 +490,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   // 5. A Split parent whose filed children are all Done moves to Done (PBI 226). A sub-issue added by hand isn't one
   //    of them. The comment, keyed on the parent, and the close as completed both go before the move, so the next
   //    poll retries a failed one, and the move is last, so a Done parent is never read again.
+  //    A Split parent with no "Split into" kept, one split before PBI 227 or moved to Split without filing, gets the
+  //    children found here kept for it, so Floor and Run detail show it too (PBI 227). Once kept, they're read first.
   await each(await items(pool, sourceId, ["Split"]), (row) => `closing split parent ${row.external_id}`, async (row) => {
-    const filed = (await filedChildren(pool, row.id)) ?? (await recoveredChildren(row));
+    const kept = (await splitChildren(pool, [row.id])).get(row.id)?.map(({ externalId, title, url }) => ({ externalId, title, url }));
+    const filed = kept ?? (await filedChildren(pool, row.id)) ?? (await recoveredChildren(row));
+    if (filed && !kept) await keepSplitChildren(pool, row.id, filed);
     const done = filed && (await doneChildren(pool, sourceId, filed));
     if (!done) return;
     await adapter.comment(row.external_id, splitDoneComment(done), splitDoneKey(row.external_id));
@@ -632,6 +720,32 @@ async function openQuestion(c: pg.ClientBase, itemId: string): Promise<{ id: str
 }
 
 /**
+ * The children an Abandoned parent's kept split filed, found by their split markers among its sub-issues, when its last
+ * move to Abandoned was a withdrawal from Eligible or NotReady (PBI 228). Null for any other Abandoned item: one with
+ * no split kept, one abandoned any other way, or one whose children aren't all filed. Without a board, null.
+ */
+async function abandonedSplitChildren(pool: pg.Pool, row: Row, board: Pick<SplitBoard, "subIssues"> | undefined): Promise<ChildIssue[] | null> {
+  if (!board) return null;
+  const kept = await keptSplits(pool, row.id);
+  if (kept.length === 0) return null;
+  if (!(await withdrawnBeforeQueue(pool, row.id))) return null;
+  return filedFromMarkers(row.external_id, kept.map((k) => ({ textHash: k.textHash, count: k.children.length })), board);
+}
+
+/**
+ * Moves an Abandoned parent to Split, recording its filed children, unless something moved it first (PBI 228). The
+ * children are kept in the same commit, for its "Split into" on Floor and Run detail (PBI 227).
+ */
+async function moveToSplit(pool: pg.Pool, itemId: string, children: ChildIssue[]): Promise<void> {
+  await withTx(pool, async (c) => {
+    const held = await c.query("select 1 from item where id = $1 and state = 'Abandoned' for update", [itemId]);
+    if (held.rowCount === 0 || !(await withdrawnBeforeQueue(c, itemId))) return;
+    await keepSplitChildren(c, itemId, children);
+    await transitionItem(c, itemId, "split_filed", system, { children });
+  });
+}
+
+/**
  * Sends an Abandoned item back to Eligible through `returned` when its last move to Abandoned was a withdrawal from
  * Eligible or NotReady, so it meets the readiness gate again (PBI 168). An item withdrawn from Queued or later, or
  * abandoned any other way, stays where it is.
@@ -655,6 +769,32 @@ function newer(review: string | null, seen: Date | null): boolean {
  * criteria_changed edge to itself, so IllegalTransition can't stop a second poll that read the old hash. The locked
  * re-read does.
  */
+/**
+ * True when the item's "Changes the factory's rules" section no longer reads as the owner last approved it: a section
+ * whose hash isn't the approved one, or none where the last readiness check read one (PBI 395).
+ */
+async function rulesEdited(pool: pg.Pool, itemId: string, fi: FactoryItem): Promise<boolean> {
+  const changes = parseRuleChanges(fi.body);
+  return changes.length > 0
+    ? ruleChangesHash(changes) !== (await approvedRulesHash(pool, itemId))
+    : !!(await ruleChangesChecked(pool, itemId))?.length;
+}
+
+/**
+ * Sends an item Queued or later back to Eligible through `rules_edited` (PBI 395). Its open run ends, so the next claim
+ * starts a new one from understand, and its open questions close. The transition bumps the lease generation, so a cell
+ * still running on the item loses it.
+ */
+async function regateRules(pool: pg.Pool, row: Row): Promise<void> {
+  await withTx(pool, async (c) => {
+    const cur = (await c.query<{ state: ItemState }>("select state from item where id = $1 for update", [row.id])).rows[0];
+    if (cur?.state !== row.state) return;
+    await transitionItem(c, row.id, "rules_edited", system);
+    await c.query("update run set ended_at = now(), outcome = 'rules_edited' where item_id = $1 and ended_at is null", [row.id]);
+    await c.query("update question set closed_at = now() where item_id = $1 and answer is null and closed_at is null", [row.id]);
+  });
+}
+
 async function restart(pool: pg.Pool, row: Row, fi: FactoryItem, hash: string): Promise<void> {
   await withTx(pool, async (c) => {
     const cur = (await c.query<{ criteria_hash: string | null }>("select criteria_hash from item where id = $1 for update", [row.id])).rows[0];

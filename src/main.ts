@@ -5,20 +5,18 @@
 // up where the last process stopped.
 import { App } from "@octokit/app";
 import { BlobServiceClient } from "@azure/storage-blob";
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import type pg from "pg";
+import { loadAppKey } from "./adapters/github/app-key.ts";
 import { githubBacklog, parseGitHubWebhook, splitFiling, type FieldMap } from "./adapters/github/backlog.ts";
 import { githubRepoHost } from "./adapters/github/repo-host.ts";
 import { TimedOctokit } from "./adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "./adapters/types.ts";
 import { loadSop } from "./config/sop.ts";
-import { mirrorBoard } from "./control/board.ts";
-import { logTransitions } from "./control/console-log.ts";
 import { blobUploadUrl } from "./control/cell-api.ts";
-import { applyComment } from "./control/decisions.ts";
+import { platformProbes } from "./control/probes.ts";
 import type { FileSplitDeps } from "./gate/file-split.ts";
 import { createAuth, devIdentityProblem, type Auth } from "./http/auth.ts";
 import { dashboardRoutes } from "./http/routes.ts";
@@ -85,29 +83,16 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
     }
     if (size > MAX_WEBHOOK) throw new BadRequest("the payload is over 25 MB", 413);
     const { status } = await handleWebhook({
-      pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook,
-      // applyComment ignores a comment on an item another source holds, so each source can be asked in turn.
-      onComment: async (e) => {
-        for (const s of d.sources) await applyComment({ pool: d.pool, adapter: s.adapter, sourceId: s.id }, e);
-      },
+      pool: d.pool, secret: d.webhookSecret, parse: parseGitHubWebhook, repoHost: d.repoHost,
     }, { headers: req.headers as Record<string, string | undefined>, rawBody: Buffer.concat(chunks) });
     json(res, status);
     return true;
   };
 
-  // PBI 2's platform probes, locally only: a cell's ping, an upload URL, the env's names and the migrate run count.
-  const probes: Handler = async (req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
-    if (!d.local) return false;
-    if (req.method === "POST" && path === "/internal/cells/ping") json(res, 204);
-    else if (req.method === "GET" && path === "/probe/sas") json(res, 200, { url: await d.uploadUrl(`probe/${randomUUID()}`) });
-    else if (req.method === "GET" && path === "/probe/env") json(res, 200, Object.keys(process.env).sort());
-    else if (req.method === "GET" && path === "/probe/runs") json(res, 200, { count: Number((await d.pool.query("select count(*) from probe_runs")).rows[0].count) });
-    else return false;
-    return true;
-  };
+  // PBI 2's platform probes, locally only. The cell API serves them too, and cells reach only it (redesign step 4b).
+  const probes: Handler = d.local ? platformProbes(d) : async () => false;
 
-  // ponytail: Phase 0 has one board, so the dashboard announces decisions on the first source. Route by item.source_id when a second board arrives.
+  // ponytail: Phase 0 has one board, so the dashboard reads items from the first source. Route by item.source_id when a second board arrives.
   const first = d.sources[0];
   const dashboard = dashboardRoutes({
     pool: d.pool, auth: d.auth, origin: d.origin, adapter: first?.adapter ?? missing<BacklogAdapter>("no backlog source is configured"),
@@ -117,7 +102,7 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
 }
 
 /** Reads a stored transcript or report from the blob account, or null when it isn't there. */
-function blobReader(connectionString: string): (path: string) => Promise<string | null> {
+export function blobReader(connectionString: string): (path: string) => Promise<string | null> {
   const service = BlobServiceClient.fromConnectionString(connectionString);
   return async (path) => {
     const [container, ...rest] = path.split("/");
@@ -147,19 +132,18 @@ export async function githubSources(pool: pg.Pool, app: App, projectToken: strin
 }
 
 /**
- * The control plane once its settings are read: its handlers on `port`, and board mirroring and the console log for
- * the transitions it commits. It runs no background job. Those are the worker's.
+ * The control plane once its settings are read: its handlers on `port`. It runs no background job, and leaves board
+ * mirroring, comment commands and decision announcements to the worker's outbox (PBI 219).
  */
 export async function serveControl(d: ControlDeps, port: number): Promise<{ server: Server; stop(): Promise<void> }> {
-  const backlogFor = (id: string) => d.sources.find((s) => s.id === id)?.adapter ?? missing<BacklogAdapter>(`no backlog source ${id}`);
+  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
+  await clearRestartOnStart(d.pool);
   const control = controlHandlers(d);
-  const hooks = [mirrorBoard({ pool: d.pool, backlogFor, repoHost: d.repoHost }), logTransitions({ pool: d.pool })];
   // Bound on every interface, as the spike was, so Aspire's proxy reaches it over IPv4 or IPv6.
   const server = await startServer(control.handlers, { port, host: "::" });
   return {
     server,
     async stop() {
-      for (const off of hooks) off();
       await control.close();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -168,6 +152,7 @@ export async function serveControl(d: ControlDeps, port: number): Promise<{ serv
 }
 
 export async function start(env: NodeJS.ProcessEnv): Promise<void> {
+  loadAppKey(env);
   const problem = devIdentityProblem(env);
   if (problem) throw new Error(`refusing to start: ${problem}`);
   if (env.FACTORY_ENV !== "local") {
@@ -191,8 +176,6 @@ export async function start(env: NodeJS.ProcessEnv): Promise<void> {
     ["FACTORY_DB_URI", "FACTORY_BLOB", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY"].map(need);
 
   const pool = createPool(dbUri);
-  // A restart prepared before this start has done its job, so the restarted factory runs again (PBI 140).
-  await clearRestartOnStart(pool);
   const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);

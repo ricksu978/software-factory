@@ -1,5 +1,6 @@
 // Step definitions for features/pbi-169-keycloak-local.feature. The untagged scenarios read the AppHost source and
-// the realm import it hands Keycloak through withRealmImport(). The @local scenarios talk to Keycloak on 7430.
+// the realm import it hands Keycloak through withRealmImport(). The @local scenarios talk to the AppHost's Keycloak on
+// its pinned port, 7430, as src/store/keycloak-owner.ts names it, and run alone (@serial), since the AppHost is one.
 // Given and When only record what they find. Every assertion is in a Then, so a missing Keycloak resource or realm
 // import shows as a failed Then, not as a crash.
 // "{string} is up" and "I stop {string} and start it again" are PBI 6's steps, which start the AppHost and stop it in
@@ -10,11 +11,12 @@ import { spawnSync } from "node:child_process";
 import { createPublicKey, verify } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { PINNED_KEYCLOAK } from "../../src/store/keycloak-owner.ts";
 
 const repo = process.cwd();
 const APPHOST_FILE = join(repo, "aspire-apphost", "apphost.mts");
 const APPHOST = "--apphost . --non-interactive --nologo";
-const KEYCLOAK = "http://localhost:7430";
+const KEYCLOAK = PINNED_KEYCLOAK;
 const long = { timeout: 600_000 };
 
 type Json = Record<string, any>;

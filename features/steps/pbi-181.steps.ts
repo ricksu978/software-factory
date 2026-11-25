@@ -34,7 +34,7 @@ Before({ tags: "@pbi-181", ...long }, async function () {
   if (d) await d.pool.query('truncate item, backlog_source, repo, "user" cascade');
 });
 
-function prOf(world: object, n: number) {
+export function prOf(world: object, n: number) {
   const found = pollCtx(world).host?.prs.find((p) => p.number === n);
   assert.ok(found, `the repo host has no PR ${n}`);
   return found;
@@ -50,7 +50,7 @@ function writeBody(world: object, n: number): void {
   prOf(world, n).body = `Builds the item.\n\nRefs #1\n\n${outside}## Definition of Done\n\nThe factory checked these lines at c1.\n\n${lines.join("\n")}\n\n## Shadow risk tier\n\n**Low**. Recorded only, so a person still approves this PR.\n`;
 }
 
-function editBody(world: object, n: number, change: (b: PrBody) => void): void {
+export function editBody(world: object, n: number, change: (b: PrBody) => void): void {
   change(ctx(world).bodies.get(n)!);
   writeBody(world, n);
 }
@@ -58,7 +58,7 @@ function editBody(world: object, n: number, change: (b: PrBody) => void): void {
 const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
 
 /** An item in `state` on the board and in the factory, whose open run has PR `n` in REPO, approved by `approvers`. */
-async function holdItem(world: object, c: PollCtx, state: string, n: number, approvers: string[]): Promise<string> {
+export async function holdItem(world: object, c: PollCtx, state: string, n: number, approvers: string[]): Promise<string> {
   const ext = await c.fake!.seed({ labels: ["factory"], repo: REPO });
   const branch = `factory/pbi-${ext}-r1`;
   const headSha = `h${n}`;

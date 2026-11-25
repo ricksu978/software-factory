@@ -211,7 +211,8 @@ function started(c: CellCtx, stage: string): number {
 
 function questions(c: CellCtx): string[] {
   settled(c);
-  return c.calls.filter((x) => x.route === "/transition" && x.body.question).map((x) => String(x.body.question.body ?? ""));
+  // Every claim of the run asks its own questions, so an earlier claim's count too (PBI 315).
+  return [...(c.earlierCalls ?? []), ...c.calls].filter((x) => x.route === "/transition" && x.body.question).map((x) => String(x.body.question.body ?? ""));
 }
 
 function theQuestion(c: CellCtx): string {

@@ -1,10 +1,12 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
+import type { FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent } from "../core/states.ts";
-import type { CiCheck, FailedCheck } from "../adapters/types.ts";
+import type { CiCheck, FailedCheck, RerunAnswer } from "../adapters/types.ts";
 import type { Verdict } from "../policy/policy.ts";
 import type { CellContext } from "./engine.ts";
 import { realSleep, Transient, withRetries } from "./retry.ts";
+import type { CiFailure } from "../core/ci-findings.ts";
 
 /** How long the cell waits for the cell API to answer one try before it counts as a timeout (PBI 259). */
 export const CALL_TIMEOUT_MS = 90_000;
@@ -33,23 +35,36 @@ export type StageReport = {
    * and each failed check, with its URL and the tests it names as failing. Floor and the item's page show it.
    */
   ciFailure?: CiFailure;
+  /**
+   * PBI 393: set on a failed attempt that ends the claim at the attempt boundary, under a drain or a restart being
+   * prepared: the tries its stage had spent and the attempt's findings, which the next claim's context hands back.
+   */
+  retryCarry?: { tried: number; findings: string[] };
 };
 /** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
-export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
+export type { CiFailure };
 export type TransitionBody = {
-  event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited">;
+  event: Extract<ItemEvent, "scenarios_written" | "blocked" | "pr_opened" | "retries_exhausted" | "usage_limited" | "feature_change_requested">;
   /** `baseFailure` marks a question that blames the base commit, with the tests that fail on it, for Floor (PBI 215), and the base branch it names, which PBI 260 re-queues on. */
   question?: { kind: "needs_input" | "sign_off"; body: string; baseFailure?: { sha: string; tests: string[]; base?: string } }; scenariosSha?: string; lockedFiles?: string[];
   prNumber?: number; prUrl?: string; resumeAt?: string; tier?: "Low" | "Medium" | "High"; tierReasons?: string[];
+  /** PBI 364: on `feature_change_requested`, each locked feature file the stage asks to change. */
+  featureChange?: FeatureChangeFile[];
 };
 export type PolicyResults = { file: "pr-review" | "dod"; source: "repo" | "default"; stageId: string; attempt: number; checkedSha: string; verdicts: Verdict[] };
+
+/**
+ * A lease renewal's answer. `stop` cuts the stage short now (PBI 140). `restarting` says a restart is being prepared, so
+ * the cell finishes the stage it's in, starts no further stage and ends its claim at that stage boundary (PBI 301).
+ */
+export type LeaseAnswer = { stop: boolean; restarting?: boolean };
 
 export type CellApi = {
   /**
    * Renews the lease. `once` tries it a single time, for the renewal loop, which keeps its own tolerance of 3 minutes
    * of failed renewals (PBI 259). Every other call is retried on a 5xx, a connection fault or a timeout.
    */
-  lease(opts?: { once?: boolean }): Promise<{ stop: boolean }>;
+  lease(opts?: { once?: boolean }): Promise<LeaseAnswer>;
   stage(b: StageReport): Promise<void>;
   transition(b: TransitionBody): Promise<void>;
   policyResults(b: PolicyResults): Promise<void>;
@@ -63,7 +78,16 @@ export type CellApi = {
    * the base branch instead, as PBI 292 does to tell a CI failure the base shares from the item's own.
    */
   ciChecks?(sha: string, on?: "base"): Promise<CiCheck[] | null>;
-  /** Ends the claim of a cell a restart stopped with no attempt open (PBI 140). Outside a restart it changes nothing. */
+  /**
+   * PBI 233: asks the repo host to re-run the named checks that failed on `sha`, one of the run's own commits. It
+   * rejects when the repo host re-ran none of them. When it re-ran some, it answers which, and which it refused and
+   * why; no answer means every named check was re-run. The checks' new results come from `checks` as before.
+   */
+  rerunFailedChecks?(sha: string, checks: string[]): Promise<RerunAnswer | void>;
+  /**
+   * Ends the claim of a cell a restart stopped with no attempt open (PBI 140), or of one that ended at a stage boundary
+   * while a restart was being prepared (PBI 301). Outside a restart it changes nothing.
+   */
   release(): Promise<void>;
   /** Gets a write-only URL from /upload-url and puts `body` there. */
   upload(b: { kind: "transcript" | "report"; stageId: string; attempt: number; body: string }): Promise<void>;
@@ -110,7 +134,10 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
   const call = (method: "GET" | "POST", path: string, body?: unknown, opts: { once?: boolean } = {}): Promise<any> =>
     opts.once ? once(method, path, body) : withRetries(`${method} ${path.split("?")[0]}`, () => once(method, path, body), { transient: (e) => e instanceof Transient, sleep });
   return {
-    lease: async (opts) => ({ stop: (await call("POST", "/lease", { generation: cfg.generation }, opts)).stop === true }),
+    lease: async (opts) => {
+      const a = await call("POST", "/lease", { generation: cfg.generation }, opts);
+      return { stop: a.stop === true, ...(a.restarting === true ? { restarting: true } : {}) };
+    },
     context: () => call("GET", "/context"),
     githubToken: async () => (await call("POST", "/github-token", {})).token,
     stage: async (b) => void (await call("POST", "/stage", b)),
@@ -124,6 +151,11 @@ export function httpCellApi(cfg: { controlUrl: string; runId: string; runToken: 
       return { status: a.status, failedChecks: Array.isArray(a.failedChecks) ? a.failedChecks : [] };
     },
     pendingChecks: async (sha) => (await call("GET", `/pending-checks?sha=${encodeURIComponent(sha)}`)).checks,
+    // Sent once: a retry could start a second re-run of the same checks, and a commit's checks are re-run once at most.
+    rerunFailedChecks: async (sha, checks) => {
+      const a = await call("POST", "/rerun-checks", { sha, checks }, { once: true });
+      return Array.isArray(a?.rerun) ? { rerun: a.rerun, refused: Array.isArray(a.refused) ? a.refused : [] } : undefined;
+    },
     ciChecks: async (sha, on) => (await call("GET", `/ci-checks?sha=${encodeURIComponent(sha)}${on ? `&on=${on}` : ""}`)).checks,
     async upload({ kind, stageId, attempt, body }) {
       const { url } = await call("POST", "/upload-url", { kind, stageId, attempt });

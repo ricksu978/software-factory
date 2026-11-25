@@ -1,8 +1,13 @@
 // Dashboard HTML (plan Task 15). Every value goes through escapeHtml, and colours are custom properties with a
 // dark-mode override.
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
+import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
+import type { ReadinessCheck } from "../store/readiness-checks.ts";
+import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
+import { lineDiff, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
 import { pauseActive } from "./configuration.ts";
+import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
 
 export function escapeHtml(value: unknown): string {
@@ -26,6 +31,9 @@ th, td { border-bottom: 1px solid var(--line); padding: .35rem .5rem; text-align
 .muted { color: var(--muted); }
 .badge { border: 1px solid var(--line); border-radius: 1rem; font-size: .8rem; padding: 0 .5rem; }
 .banner { background: var(--warn-bg); color: var(--warn-fg); padding: .5rem 1rem; }
+.sides { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+.sides blockquote { border-left: 3px solid var(--line); margin: 0; padding: 0 .75rem; }
+mark { background: var(--warn-bg); color: var(--warn-fg); }
 label { display: block; margin: .5rem 0 .25rem; }
 pre { overflow-x: auto; }
 pre.scope { font: inherit; white-space: pre-wrap; }
@@ -81,6 +89,22 @@ export function age(since: Date | null, now = Date.now()): string {
 const utc = (at: Date) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(at.toISOString().slice(0, 16).replace("T", " "))}</time>`;
 /** A time to the minute in the viewer's zone (PBI 189), with its full ISO form in the markup. */
 const local = (at: Date, zone: string) => `<time datetime="${escapeHtml(at.toISOString())}">${escapeHtml(localTime(at, zone))}</time>`;
+/**
+ * A readiness check's Verdict cell (PBI 348): what its judge call decided, with each failed dor.md line and the judge's
+ * reason and each flag, or why it has no verdict. A judge call on a proposed split child names the child. A split
+ * proposal's cell is empty.
+ */
+function checkVerdict(c: ReadinessCheck): string {
+  if (c.kind === "split") return "";
+  const v = c.verdict;
+  const said = !v ? "No verdict was recorded"
+    : v.outcome === "passed" ? "Passed"
+    : v.outcome === "unreadable" ? escapeHtml("No verdict: the judge's output was unreadable")
+    : v.outcome === "error" ? "The call failed with no verdict"
+    : `Failed<ul>${[...v.lines.map((l) => `${l.criterion}: ${l.reason}`), ...v.flags.map((f) => `Flag: ${f}`)].map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`;
+  return c.child === undefined ? said : `On the proposed child “${escapeHtml(c.child)}”: ${said}`;
+}
+
 /** A readiness judge call costs fractions of a cent, so its spend shows to four places. */
 const judgeUsd = (n: number) => `$${n.toFixed(4)}`;
 
@@ -93,7 +117,8 @@ const link = (id: string, title: string) => `<a href="/items/${escapeHtml(id)}">
 export function issueRef(externalId: string | null, repo: string | null): string {
   if (externalId === null) return "";
   const text = `#${escapeHtml(externalId)}`;
-  return repo && /^\d+$/.test(externalId) ? `<a href="https://github.com/${escapeHtml(repo)}/issues/${externalId}">${text}</a>` : text;
+  const url = issueUrl(repo, externalId);
+  return url ? `<a href="${escapeHtml(url)}">${text}</a>` : text;
 }
 
 /**
@@ -115,16 +140,21 @@ const named = (r: Issue & { id: string; title: string }) => `${issueRef(r.extern
 
 /**
  * Floor's note on an item's claim key (PBI 320): its priority, and whether it's final-stage, each naming the item that
- * depends on it where the priority or the group comes from that item.
+ * depends on it where the priority or the group comes from that item, after a "bug" badge for a bug item (PBI 378).
  */
 export function standing(k: ClaimKey | undefined): string {
   if (!k) return "";
   const from = k.priorityFrom ? `, from #${escapeHtml(k.priorityFrom.externalId)}` : "";
   const group = k.finalStage ? `, final-stage${k.finalStageFrom ? ` because of #${escapeHtml(k.finalStageFrom.externalId)}` : ""}` : "";
-  return ` <span class="muted">priority ${k.priority}${from}${group}</span>`;
+  // PBI 378: only the item's own "bug" label is marked, never one of an item it takes its priority or group from.
+  const bug = k.bug ? ` <span class="badge">bug</span>` : "";
+  return `${bug} <span class="muted">priority ${k.priority}${from}${group}</span>`;
 }
 
-/** The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page. */
+/**
+ * The item page's lines on its claim key (PBI 320). An item that isn't final-stage never has the word on its page, and
+ * one without the "bug" label never has that word (PBI 378).
+ */
 export function claimLines(k: ClaimKey): string {
   const priority = k.priorityFrom
     ? `Priority ${k.priority}, from #${escapeHtml(k.priorityFrom.externalId)}, which depends on it. Its own priority on the board is ${k.own}.`
@@ -132,7 +162,12 @@ export function claimLines(k: ClaimKey): string {
   const group = !k.finalStage ? ""
     : k.finalStageFrom ? ` Final-stage because #${escapeHtml(k.finalStageFrom.externalId)} depends on it, so it's claimed ahead of other work while that dependency stands.`
     : " Final-stage: its PR is open and it's in the review loop, so it's claimed ahead of other work.";
-  return `<p>${priority}${group}</p>`;
+  // PBI 378: the item's own "bug" label puts it first within its priority in the final-stage group, and at priority 1.
+  const bug = !k.bug ? ""
+    : k.finalStage ? ` Carries the bug label, so it's claimed before the items at priority ${k.priority} in the final-stage group that don't.`
+    : k.priority === 1 ? " Carries the bug label, so it's claimed before the priority-1 items outside the final-stage group that don't."
+    : " Carries the bug label, which puts it first only in the final-stage group or at priority 1.";
+  return `<p>${priority}${group}${bug}</p>`;
 }
 
 /** A form posting one override to /overrides. The reason is required, so the browser asks for it first. */
@@ -145,24 +180,33 @@ function overrideForm(kinds: [kind: string, label: string][], itemId: string | n
 
 const factoryState: Record<string, string> = { pause: "Paused", drain: "Draining", kill: "Killed" };
 
-/** A restart being prepared (PBI 140): the minutes left in its wrap-up and how many cells still run. */
-export type Restart = { minutesLeft: number; running: number; reason?: string };
+/** A restart being prepared (PBI 140): how many cells still run. The factory stops none of them (PBI 300). */
+export type Restart = { running: number; reason?: string };
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * Floor's line for a restart being prepared (PBI 140, PBI 302): how many cells still run and the minutes left in the
- * wrap-up, or that it has run out while a cell whose stop failed still runs. Once none runs, that it's safe to restart.
+ * Floor's line for a restart being prepared (PBI 140, PBI 302): how many cells still run, with no deadline, since the
+ * factory stops none of them (PBI 300). Once none runs, that it's safe to restart.
  */
 function restartStatus(r: Restart): string {
   const why = r.reason ? ` Reason: ${escapeHtml(r.reason)}.` : "";
-  const left = r.minutesLeft > 0
-    ? `${plural(r.minutesLeft, "minute", "minutes")} left in the wrap-up.`
-    : `The wrap-up has run out, and the factory keeps trying to stop ${r.running === 1 ? "it" : "them"}.`;
   const text = r.running > 0
-    ? `Preparing to restart: ${plural(r.running, "cell", "cells")} still running. ${left}`
+    ? `Preparing to restart: ${plural(r.running, "cell", "cells")} still running. The factory won't stop ${r.running === 1 ? "it" : "them"}.`
     : "Ready to restart. No cell is running, so it's safe to restart the factory or stop Docker.";
   return `<p class="banner" role="status">${escapeHtml(text)}${why}</p>`;
+}
+
+/**
+ * Floor's line for a drain (PBI 316): how many cells still run, counted as Prepare restart counts them, then, once none
+ * runs, that the drain is done and it's safe to restart. Without a count, the drain shows its reason alone.
+ */
+function drainStatus(reason: string, running: number | undefined): string {
+  if (running === undefined) return `<p class="banner" role="status">Draining: ${escapeHtml(reason)}</p>`;
+  const text = running > 0
+    ? `Draining: ${plural(running, "cell", "cells")} still running.`
+    : "Drain done. No cell is running, so it's safe to restart the factory or stop Docker.";
+  return `<p class="banner" role="status">${escapeHtml(text)} Reason: ${escapeHtml(reason)}.</p>`;
 }
 
 /**
@@ -187,6 +231,20 @@ function cellImageStatus(c: CellImage): string {
     ? `<p class="banner" role="status">A restart is needed to pick up main's commit <code>${shortSha(c.restart)}</code>. It changes code the control plane or the worker runs, so the cell image isn't rebuilt until the factory restarts.</p>`
     : "";
   return built + restart;
+}
+
+/** A Split parent on Floor (PBI 227): the item, and the children its split filed, in order. */
+export type SplitRow = Issue & { id: string; title: string; children: SplitChildView[] };
+
+/**
+ * A Split parent's children (PBI 227), in the order of the split: each child's "#N" linking to its issue, its title, and
+ * the state the factory holds it in, or "Not in the factory" while it holds none: no poll has listed the child yet,
+ * or the child is without the opt-in label, because the owner took it off or a split of a factory-filed item filed it
+ * unlabelled (PBI 237). A URL that isn't a web address makes no link.
+ */
+function splitInto(children: SplitChildView[]): string {
+  const ref = (k: SplitChildView) => (/^https?:\/\//.test(k.url) ? `<a href="${escapeHtml(k.url)}">#${escapeHtml(k.externalId)}</a>` : `#${escapeHtml(k.externalId)}`);
+  return `<ol class="split-into">${children.map((k) => `<li>${ref(k)} ${escapeHtml(k.title)} <span class="muted">${escapeHtml(k.state ?? "Not in the factory")}</span></li>`).join("")}</ol>`;
 }
 
 /**
@@ -242,14 +300,50 @@ function mainRedNotice(rows: MainBreakRow[]): string {
  */
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
-export function floorPage(f: { active: ActiveRow[]; waiting: WaitingRow[]; waitingCount: number; capacity: number; next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[]; blocked?: BlockedRow[]; factory: { kind: string; reason: string }[]; canOperate: boolean; restart?: Restart | null; cellImage?: CellImage | null; baseFails?: BaseFailRow[]; mainBreaks?: MainBreakRow[];
-  /** PBI 320: every item's claim key by id, and every final-stage item, in claim order. */
-  keys?: Map<string, ClaimKey>; finalStage?: (Issue & { id: string; title: string; state: string })[] }, banner: string | null): string {
+/** PBI 369: an item that failed its Definition of Done on main, on Floor, and when it was last re-checked, or null. */
+export type FailedRow = Issue & { id: string; title: string; rechecked: Date | null };
+
+/** When the factory last re-checked a Failed item (PBI 369), or that it hasn't yet. */
+function recheckLine(at: Date | null, zone: string, sentence: boolean): string {
+  const said = at ? `last re-checked at ${local(at, zone)}` : "not yet re-checked";
+  if (!sentence) return `Failed, ${said}`;
+  return at
+    ? `Last re-checked at ${local(at, zone)}. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.`
+    : "It hasn't been re-checked yet. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.";
+}
+
+export function floorPage(f: {
+  active: ActiveRow[];
+  waiting: WaitingRow[];
+  waitingCount: number;
+  capacity: number;
+  next: (Issue & { id: string; title: string })[];
+  notReady: NotReadyRow[];
+  blocked?: BlockedRow[];
+  factory: { kind: string; reason: string }[];
+  canOperate: boolean;
+  restart?: Restart | null;
+  /** PBI 316: the cells still running, InProgress with a live lease, as Prepare restart counts them. */
+  running?: number;
+  cellImage?: CellImage | null;
+  baseFails?: BaseFailRow[];
+  mainBreaks?: MainBreakRow[];
+  split?: SplitRow[];
+  /** PBI 320: every item's claim key by id. */
+  keys?: Map<string, ClaimKey>;
+  /** PBI 320: every final-stage item, in claim order. */
+  finalStage?: (Issue & { id: string; title: string; state: string })[];
+  /** PBI 369: each item that went to Failed with dod_failed, and when it was last re-checked since, or null. */
+  failed?: FailedRow[];
+  /** The viewer's IANA time zone, from their browser's `tz` cookie. Defaults to UTC. */
+  zone?: string;
+}, banner: string | null): string {
   const st = (id: string) => standing(f.keys?.get(id));
   const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
-    + f.factory.filter((o) => factoryState[o.kind]).map((o) => `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
+    + f.factory.filter((o) => factoryState[o.kind]).map((o) => o.kind === "drain"
+      ? drainStatus(o.reason, f.running)
+      : `<p class="banner" role="status">${factoryState[o.kind]}: ${escapeHtml(o.reason)}</p>`).join("")
     + (f.restart ? restartStatus(f.restart) : "") + (f.cellImage ? cellImageStatus(f.cellImage) : "")
     + (f.baseFails?.length ? baseFailsNotice(f.baseFails) : "");
   const controls = f.canOperate
@@ -267,6 +361,10 @@ ${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${es
 ${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
 <h2>Blocked</h2>
 ${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
+<h2>Split</h2>
+${list((f.split ?? []).map((p) => `<li>${named(p)} <span class="muted">Split into</span>${splitInto(p.children)}</li>`), "No item is split into children that are still open.")}
+<h2>Failed on main</h2>
+${list((f.failed ?? []).map((n) => `<li>${named(n)} <span class="muted">${recheckLine(n.rechecked, f.zone ?? "UTC", false)}</span></li>`), "No item failed its Definition of Done on main.")}
 <h2>In flight</h2>
 ${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
 ${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
@@ -298,7 +396,7 @@ export type RunDetail = {
     /** What the attempt's cell, or the factory closing it, said about it, such as that the cell's lease ran out (PBI 239). */
     message?: string | null }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
-  readiness: { kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date }[];
+  readiness: ReadinessCheck[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The issue's body as written on GitHub, shown at sign-off, or null when it's blank or no form shows. */
@@ -317,6 +415,8 @@ export type RunDetail = {
   controls: { held: boolean; stoppable: boolean; requeueable: boolean; startable?: boolean; movable?: boolean } | null;
   /** The item's active Start now override (PBI 265), with its reason and who set it, or null when it has none. */
   startNow?: { reason: string; by: string | null } | null;
+  /** PBI 311: the item's latest Move up or Move down, when a change to the board's order ended it, or null. */
+  moveEnded?: { control: "Move up" | "Move down"; at: Date } | null;
   /** The item's claim key (PBI 320): its priority and whether it's final-stage, and the items they come from. */
   claim?: ClaimKey | null;
   /** The viewer's IANA time zone, from their browser's `tz` cookie (PBI 189). Defaults to UTC. */
@@ -325,7 +425,76 @@ export type RunDetail = {
   now?: Date;
   /** Where the item's time went (PBI 187). Without it, the Time section is left out. */
   durations?: ItemDurations;
+  /** The children a Split parent's split filed, in order (PBI 227). Without any, no "Split into" shows. */
+  splitInto?: SplitChildView[];
+  /** PBI 369: for an item that failed its Definition of Done on main, when it was last re-checked, or null. */
+  recheck?: { last: Date | null } | null;
+  /**
+   * PBI 395: the rule changes the item's last readiness check read, whether it waits for the owner's approval of them,
+   * whether this viewer may give it, and the owner's approval of them as they read now. Null when it read none.
+   */
+  ruleChanges?: { changes: RuleChangeRead[]; waiting: boolean; canApprove: boolean; approval: { by: string; at: Date } | null } | null;
+  /** PBI 364: the feature change request the item waits on in FeatureChangeRequest. Without one, no such section shows. */
+  featureChange?: FeatureChangeFile[] | null;
+  /** PBI 365: true when the viewer is a product owner, who alone gets Approve the change and Ask for changes. */
+  canDecideFeatureChange?: boolean;
+  /** PBI 365: the latest decision on a feature change request of the item, shown once no request is open. */
+  featureChangeDecision?: { kind: "approve" | "changes"; by: string; at: Date } | null;
 };
+
+const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${escapeHtml(w.text)}</mark>` : escapeHtml(w.text))).join(" ");
+
+/**
+ * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
+ * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
+ */
+function featureChangeSection(files: FeatureChangeFile[], id: string, canDecide: boolean): string {
+  const line = (l: DiffLine | null) => l === null
+    ? `<span class="muted">…</span>`
+    : l.side === "before" ? `<del data-side="before">${escapeHtml(l.text)}</del>`
+      : l.side === "after" ? `<ins data-side="after">${escapeHtml(l.text)}</ins>`
+        : `<span data-side="same">${escapeHtml(l.text)}</span>`;
+  const entries = files.map((f) => `<h3>${escapeHtml(f.path)}</h3><p data-reason>${escapeHtml(f.reason)}</p><pre class="diff">${lineDiff(f.before, f.after).map(line).join("\n")}</pre>`);
+  return `<h2>Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}${canDecide ? featureChangeForm(id) : ""}`;
+}
+
+/**
+ * PBI 365: the Product Owner's decision on a feature change request, after the changes it would make, as at sign-off.
+ * Approve commits the proposed files and locks them there, and Ask for changes keeps the lock and sends the note to
+ * the stage that asked.
+ */
+function featureChangeForm(id: string): string {
+  return `<form method="post" action="/items/${escapeHtml(id)}/feature-change"><label for="feature-change-note">Note for the factory</label><textarea id="feature-change-note" name="note"></textarea>
+<p><button name="decision" value="approve">Approve the change</button> <button name="decision" value="changes">Ask for changes</button></p></form>`;
+}
+
+/** PBI 365: who approved or turned down the item's last feature change request, and when. */
+function featureChangeDecisionLine(d: NonNullable<RunDetail["featureChangeDecision"]>, zone: string): string {
+  return `<p id="feature-change-decision">${escapeHtml(d.by)} ${d.kind === "approve" ? "approved" : "turned down"} the feature change request at ${local(d.at, zone)}.</p>`;
+}
+
+/** The item page's Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked. */
+function ruleChangesSection(id: string, r: NonNullable<RunDetail["ruleChanges"]>, zone: string): string {
+  const entries = r.changes.map((c) => {
+    const diff = c.before !== null && c.after !== null ? wordDiff(c.before, c.after) : null;
+    const side = (which: "before" | "after", label: string, text: string | null, words: DiffWord[] | undefined) => text === null
+      ? `<div><h4>${label}</h4><p class="muted">No ${label} given.</p></div>`
+      : `<div><h4>${label}</h4><blockquote data-side="${which}">${words ? marked(words) : escapeHtml(text)}</blockquote></div>`;
+    return `<div class="rule" data-rule="${escapeHtml(placeKey(c.place))}"><h3>${c.place.kind === "spec" ? `Spec ${escapeHtml(c.place.section)}` : escapeHtml(c.place.path)}</h3>
+${c.problem ? `<p class="banner">${escapeHtml(c.problem)}</p>` : ""}<div class="sides">${side("before", "Before", c.before, diff?.before)}${side("after", "After", c.after, diff?.after)}</div></div>`;
+  }).join("\n");
+  const all = r.changes.map((c) => placeName(c.place));
+  const list = all.length <= 1 ? all.join("") : `${all.slice(0, -1).join(", ")} and ${all.at(-1)}`;
+  const status = r.approval
+    ? `<p>${escapeHtml(r.approval.by)} approved the rule change at ${local(r.approval.at, zone)}.</p>`
+    : r.waiting
+      ? `<p>This item waits for the owner to approve its rule changes: ${escapeHtml(list)}.</p>`
+      : "";
+  const form = r.canApprove
+    ? `<form method="post" action="/items/${escapeHtml(id)}/rule-approval"><input type="hidden" name="ruleChangesHash" value="${escapeHtml(ruleChangesHash(r.changes))}"><p><button>Approve rule change</button></p></form>`
+    : "";
+  return `<h2>Rule changes</h2>${status}\n${entries}\n${form}`;
+}
 
 /**
  * Sets the `tz` cookie to the browser's time zone, so the server shows times in it, and reloads once when the page
@@ -392,8 +561,8 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
-    ? `<table><thead><tr><th scope="col">Ran</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>${d.readiness
-        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td></tr>`)
+    ? `<table><thead><tr><th scope="col">Ran</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Verdict</th></tr></thead><tbody>${d.readiness
+        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td><td>${checkVerdict(c)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No readiness check has run yet.</p>`;
   const criteria = d.criteria
@@ -428,10 +597,11 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
 <p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
-${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
+${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n` : ""}${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
+${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
+${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange, d.item.id, d.canDecideFeatureChange === true) : d.featureChangeDecision ? featureChangeDecisionLine(d.featureChangeDecision, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
 }
@@ -464,7 +634,7 @@ export type ActivityRow = { at: Date; external_id: string | null; repo: string |
 
 // Only a move between states shows where the item came from and went. Another kind's from and to stay off the page.
 // An SOP move (PBI 173) shows its old and new versions where a transition shows its states.
-const MOVES = new Set(["transition", "override", "sop_moved"]);
+export const MOVES = new Set(["transition", "override", "sop_moved"]);
 
 /** The factory's newest events, newest first, with the time in UTC (PBI 105). */
 export function activityPage(rows: ActivityRow[], banner: string | null): string {

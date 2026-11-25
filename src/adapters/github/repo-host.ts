@@ -3,7 +3,7 @@
 import { TimedOctokit } from "./timed.ts";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
-import { factoryThread, LOGGED_CHECKS, logTail, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type Review, type ReviewComment } from "../types.ts";
+import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type RerunAnswer, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -160,20 +160,23 @@ function prMethods(client: () => Promise<GitHubClient>): PrMethods {
       // A comment counts once it has stood for THREAD_SETTLE_MS.
       const res = trusted.size && pr.state === "open" ? await gh.graphql<any>(THREADS, { owner: r.owner, repo: r.repo, number: prNumber }) : null;
       const settled = Date.now() - THREAD_SETTLE_MS;
-      const threads = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { isResolved: boolean; comments: { nodes: { author: Author; pullRequestReview: { databaseId: number | null; submittedAt: string | null } | null }[] } }[])
+      const threads = ((res?.repository.pullRequest.reviewThreads.nodes ?? []) as { id: string; isResolved: boolean; comments: { nodes: { author: Author; body: string; pullRequestReview: { databaseId: number | null; submittedAt: string | null } | null }[] } }[])
         .filter((t) => !factoryThread(t.comments.nodes[0] && authorLogin(t.comments.nodes[0].author), trustedBot));
-      // A review that requests changes counts only when it has a summary or a comment outside the factory's threads. One
-      // whose only text is a reply inside the factory's thread would hand the address run nothing to read (PBI 130).
-      const withText = new Set(threads.flatMap((t) => t.comments.nodes.map((c) => c.pullRequestReview?.databaseId)));
+      // A review that requests changes counts only when it has a summary or a comment in a person's thread that is still
+      // unresolved. One whose only text is a reply inside the factory's thread would hand the address run nothing to read
+      // (PBI 130), and so would one whose only text sits in a thread resolved since (PBI 258).
+      const unresolved = threads.filter((t) => !t.isResolved);
+      const withText = new Set(unresolved.flatMap((t) => t.comments.nodes.map((c) => c.pullRequestReview?.databaseId)));
       const requested = reviews.filter((v) => v.state === "CHANGES_REQUESTED" && v.submitted_at && trusted.has(String(v.user?.login).toLowerCase())
-        && ((v.body ?? "").trim() !== "" || withText.has(v.id))).map((v) => v.submitted_at as string);
-      const open = threads.filter((t) => !t.isResolved).flatMap((t) => t.comments.nodes)
-        .filter((c) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
-        .map((c) => c.pullRequestReview!.submittedAt!);
-      const times = [...requested, ...open].sort();
+        && ((v.body ?? "").trim() !== "" || withText.has(v.id)))
+        .map((v) => ({ kind: "review" as const, author: String(v.user?.login), body: v.body ?? "", submittedAt: v.submitted_at as string }));
+      const open = unresolved.flatMap((t) => t.comments.nodes.map((c) => ({ t, c })))
+        .filter(({ c }) => c.pullRequestReview?.submittedAt && Date.parse(c.pullRequestReview.submittedAt) <= settled && trusted.has(authorLogin(c.author).toLowerCase()))
+        .map(({ t, c }) => ({ kind: "thread_comment" as const, threadId: t.id, author: authorLogin(c.author), body: c.body, submittedAt: c.pullRequestReview!.submittedAt! }));
+      const cause = newestCause<Exclude<ChangeCause, { kind: "not_mergeable" | "ci_failed" }>>([...requested, ...open]);
       return {
         merged: Boolean(pr.merged), mergeSha: pr.merged ? pr.merge_commit_sha : null, open: pr.state === "open",
-        mergeable: pr.mergeable ?? null, lastChangesRequestedAt: times.at(-1) ?? null,
+        mergeable: pr.mergeable ?? null, headSha: pr.head?.sha ?? null, lastChangesRequestedAt: cause?.submittedAt ?? null, lastChangesRequested: cause,
       };
     },
 
@@ -323,11 +326,12 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
-    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; app?: { slug?: string } | null }[];
+    { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; completed_at?: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
   return Promise.all(runs.map(async (c) => {
     const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
     const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
+    if (conclusion !== "pending" && c.completed_at) check.completedAt = c.completed_at;
     if (conclusion === "failure" && c.app?.slug === "github-actions") {
       const tests = await failingTestsOfJob(gh, r, c.id);
       if (tests.length) check.failingTests = tests;
@@ -351,6 +355,53 @@ async function failingTestsOfJob(gh: GitHubClient, r: { owner: string; repo: str
     console.error(`reading the log of job ${jobId} failed${why}, so its check names no failing test:`, e);
     return [];
   }
+}
+
+/**
+ * PBI 233: re-runs each named check that failed on `sha`. A named check that didn't fail on `sha` is refused before any
+ * re-run starts. A GitHub Actions check run's id is its job's id. Re-running one job starts a new attempt of its whole
+ * workflow run, and GitHub won't re-run another job of that run while the attempt runs, so the failed jobs are grouped
+ * by their workflow run and each run gets one `rerun-failed-jobs`, which needs the App's `actions: write`. That re-runs
+ * every failed job of the run, which are the checks the cell names, since it names each check that failed. A check from
+ * another app is re-requested from that app. Each re-run is asked for apart, so one refused leaves the others started;
+ * the answer says which checks were re-run and which were refused, and it rejects only when none was re-run.
+ */
+async function rerunChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string, names: string[]): Promise<RerunAnswer> {
+  // ponytail: one page of 100 check runs, as checksOn reads.
+  const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
+    (GhCheckRun & { app?: { slug?: string } | null })[];
+  const failed = runs.filter(failedRun);
+  const missing = names.filter((n) => !failed.some((c) => c.name === n));
+  if (missing.length) throw new Error(`no failed check named ${missing.join(", ")} on ${sha}`);
+  const rerun = new Set<string>();
+  const refused = new Map<string, string>();
+  const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0].trim();
+  const byWorkflowRun = new Map<number, string[]>();
+  for (const c of failed.filter((x) => names.includes(x.name))) {
+    try {
+      if (c.app?.slug === "github-actions") {
+        const runId = (await gh.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}", { ...r, job_id: c.id })).data.run_id as number;
+        byWorkflowRun.set(runId, [...(byWorkflowRun.get(runId) ?? []), c.name]);
+      } else {
+        await gh.request("POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", { ...r, check_run_id: c.id });
+        rerun.add(c.name);
+      }
+    } catch (e) {
+      refused.set(c.name, why(e));
+    }
+  }
+  for (const [runId, checks] of byWorkflowRun) {
+    try {
+      await gh.request("POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", { ...r, run_id: runId });
+      for (const x of checks) rerun.add(x);
+    } catch (e) {
+      for (const x of checks) refused.set(x, why(e));
+    }
+  }
+  // A name two check runs share counts as re-run when either was.
+  for (const x of rerun) refused.delete(x);
+  if (!rerun.size) throw new Error([...refused].map(([check, reason]) => `${check}: ${reason}`).join("; ") || `nothing to re-run on ${sha}`);
+  return { rerun: [...rerun], refused: [...refused].map(([check, reason]) => ({ check, reason })) };
 }
 
 const THREADS = `query($owner: String!, $repo: String!, $number: Int!) {
@@ -408,6 +459,10 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return namedChecksOn(await client(), split(repo), sha);
     },
 
+    async rerunChecksOnSha(repo, sha, checks) {
+      return rerunChecksOn(await client(), split(repo), sha, checks);
+    },
+
     async checksOnHead(repo, prNumber) {
       const gh = await client();
       const pr = (await gh.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { ...split(repo), pull_number: prNumber })).data;
@@ -458,6 +513,21 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
 
     async readFile(repo, ref, path) {
       return readText(await client(), split(repo), ref, path);
+    },
+
+    // PBI 365: through the Git data API, one tree on the head's with every file replaced, and one commit on the head.
+    // The ref moves without force, so a push that moved the branch meanwhile fails the call instead of being lost.
+    async commitFiles({ repo, branch, message, files }) {
+      const gh = await client();
+      const r = split(repo);
+      const head = (await gh.request("GET /repos/{owner}/{repo}/git/ref/{ref}", { ...r, ref: `heads/${branch}` })).data.object.sha as string;
+      const baseTree = (await gh.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { ...r, commit_sha: head })).data.tree.sha as string;
+      const tree = (await gh.request("POST /repos/{owner}/{repo}/git/trees", {
+        ...r, base_tree: baseTree, tree: files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.text })),
+      })).data.sha as string;
+      const sha = (await gh.request("POST /repos/{owner}/{repo}/git/commits", { ...r, message, tree, parents: [head] })).data.sha as string;
+      await gh.request("PATCH /repos/{owner}/{repo}/git/refs/{ref}", { ...r, ref: `heads/${branch}`, sha, force: false });
+      return sha;
     },
 
     async defaultBranchSha(repo) {

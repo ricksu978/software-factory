@@ -44,7 +44,7 @@ Feature: GitHub adapters and webhook intake
       | pull_requests | write  |
       | issues        | write  |
 
-  @ac-4 @local
+  @ac-4 @local @serial
   Scenario: The GitHub backlog adapter passes every case in the shared contract suite
     Given a sandbox Project on the owner's personal account
     When I run the shared contract suite against the GitHub backlog adapter

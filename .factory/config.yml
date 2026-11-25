@@ -8,3 +8,5 @@ commands:
   setup: npm ci
   test: npm test
   lint: node scripts/prose-lint.mjs $(git ls-files '*.md' '*.html')
+# PBI 399: the minutes a cell gives each command it runs before it stops it. The full suite outgrew the 15 by default.
+command_timeout_minutes: 40

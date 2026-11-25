@@ -7,18 +7,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { sh } from "./engine.ts";
+import { sh, type ShResult } from "./engine.ts";
 import { failingTests } from "../core/failing-tests.ts";
+import { sharedWithBase } from "../core/ci-findings.ts";
 
-export { failingTests };
+export { failingTests, sharedWithBase };
 
 const run = promisify(execFile);
 
-/** Whether the base is at fault: every test that failed on the item's branch fails on the base too, and some did. */
-export function sharedWithBase(onBranch: string[], onBase: string[]): boolean {
-  const base = new Set(onBase);
-  return onBranch.length > 0 && onBranch.every((t) => base.has(t));
-}
 
 /**
  * A Definition of Done line, or a CI check that failed on the item's commit (PBI 292), with the tests it fails that the
@@ -46,7 +42,8 @@ export function baseQuestion(base: string, sha: string, lines: BaseLine[], pushe
  * Runs `command` at `origin/<base>` in a temporary worktree, after the repo's setup command when it has one, as a
  * fresh checkout needs, then removes the worktree. The item's checkout, its branch and its files are left as they were.
  */
-export async function runOnBase(dir: string, base: string, command: string, setup?: string): Promise<{ sha: string; code: number; out: string }> {
+export async function runOnBase(dir: string, base: string, command: string, setup?: string,
+  exec: (command: string, cwd: string) => Promise<ShResult> = sh): Promise<{ sha: string; code: number; out: string }> {
   const git = async (...args: string[]) => (await run("git", args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout.trim();
   const sha = await git("rev-parse", `origin/${base}^{commit}`);
   const parent = await mkdtemp(join(tmpdir(), "factory-base-"));
@@ -54,10 +51,10 @@ export async function runOnBase(dir: string, base: string, command: string, setu
   try {
     await git("worktree", "add", "-q", "--detach", tree, sha);
     if (setup) {
-      const s = await sh(setup, tree);
+      const s = await exec(setup, tree);
       if (s.code !== 0) return { sha, code: s.code, out: `commands.setup exited ${s.code} on the base commit: ${s.all}` };
     }
-    const r = await sh(command, tree);
+    const r = await exec(command, tree);
     return { sha, code: r.code, out: r.all };
   } finally {
     await git("worktree", "remove", "--force", tree).catch(() => {});

@@ -74,7 +74,7 @@ Feature: The AppHost pulls main and starts Docker Desktop before any resource st
       And the checkout still has its uncommitted edit to "sop/sop.yml"
       And no resource has started
 
-    @ac-1 @local
+    @ac-1 @local @serial
     Scenario: On the owner's machine, aspire run on main runs the code just merged to main
       Given the owner's checkout is on branch "main", one merged commit behind the remote's "main"
       When the owner starts "aspire run"
@@ -160,7 +160,7 @@ Feature: The AppHost pulls main and starts Docker Desktop before any resource st
       And the start did not launch Docker Desktop
       And no resource has started
 
-    @ac-3 @local
+    @ac-3 @local @serial
     Scenario: On the owner's machine, aspire run with Docker Desktop quit starts it and brings the factory up
       Given the owner has quit Docker Desktop
       When the owner starts "aspire run"

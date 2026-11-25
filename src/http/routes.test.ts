@@ -6,6 +6,7 @@ import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
 import { fakeLauncher } from "../scheduler/launcher.ts";
 import { tick } from "../scheduler/scheduler.ts";
 import { LEASE_RAN_OUT } from "../store/items.ts";
+import { keepSplitChildren } from "../store/splits.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { createAuth } from "./auth.ts";
 import { dashboardRoutes, tokenBanner } from "./routes.ts";
@@ -130,6 +131,38 @@ describe("dashboard routes", dbTest, () => {
     assert.ok(!view.includes("engine rule"), view);
   });
 
+  // PBI 227: a Split parent shows its filed children, each with the state the factory holds it in.
+  const splitParent = async (title: string, kids: { ext: string; title: string; state?: string }[]) => {
+    const parent = await item("Split", title);
+    for (const k of kids) {
+      if (k.state) await db.pool.query("insert into item (source_id, external_id, title, state) values ($1, $2, $3, $4)", [sourceId, k.ext, k.title, k.state]);
+    }
+    await keepSplitChildren(db.pool, parent.id, kids.map((k) => ({ externalId: k.ext, title: k.title, url: `https://github.com/o/r/issues/${k.ext}` })));
+    return parent;
+  };
+
+  test("Floor shows a Split parent with its children and their states while any child is still open (PBI 227)", async () => {
+    await person("octo", "viewer");
+    await splitParent("Checkout redesign", [{ ext: "141", title: "Card payments", state: "InReview" }, { ext: "142", title: "Bank transfers" }]);
+    await splitParent("Search revamp", [{ ext: "151", title: "Search filters", state: "Done" }, { ext: "152", title: "Search ranking", state: "Abandoned" }]);
+    const { html } = await get("/", "octo");
+    const view = html.slice(html.indexOf("<h2>Split</h2>"), html.indexOf("<h2", html.indexOf("<h2>Split</h2>") + 1));
+    assert.match(view, /Checkout redesign<\/a> <span class="muted">Split into<\/span>/);
+    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/141">#141</a> Card payments <span class="muted">InReview</span>`), view);
+    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/142">#142</a> Bank transfers <span class="muted">Not in the factory</span>`), view);
+    // A parent whose children have all finished has nothing left to follow on Floor. Its Run detail still shows them.
+    assert.doesNotMatch(view, /Search revamp/);
+  });
+
+  test("Run detail shows a Split parent's children under \"Split into\", and an item with none shows no \"Split into\" (PBI 227)", async () => {
+    await person("octo", "viewer");
+    const done = await splitParent("Search revamp", [{ ext: "151", title: "Search filters", state: "Done" }, { ext: "152", title: "Search ranking" }]);
+    const { html } = await get(`/items/${done.id}`, "octo");
+    assert.match(html, /<h2>Split into<\/h2><ol class="split-into"><li><a href="https:\/\/github.com\/o\/r\/issues\/151">#151<\/a> Search filters <span class="muted">Done<\/span><\/li><li>[^<]*<a[^>]*>#152<\/a> Search ranking <span class="muted">Not in the factory/);
+    const plain = await item("Queued", "plain");
+    assert.doesNotMatch((await get(`/items/${plain.id}`, "octo")).html, /Split into/);
+  });
+
   test("Blocked lists a Queued item with open dependencies and names them, and Next up leaves it out (PBI 237)", async () => {
     await person("octo", "viewer");
     const { id } = await item("Queued", "second child");
@@ -238,16 +271,17 @@ describe("dashboard routes", dbTest, () => {
     assert.equal((await db.pool.query("select decision from question where item_id = $1", [id])).rows[0].decision, null);
   });
 
-  test("a product owner's sign-off answers the question, comments the decision on the PBI and logs a human event", async () => {
+  test("a product owner's sign-off answers the question, leaves its announcement to the worker and logs a human event", async () => {
     const userId = (await person("po", "operator", true)).rows[0].id;
     const { ext, id } = await item("SignOff");
     await db.pool.query("insert into run (item_id, run_number, next_stage, scenarios_sha) values ($1, 1, 'sign-off', 'abc')", [id]);
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'q')", [id]);
     const r = await post(`/items/${id}/signoff`, "po", "decision=approve&note=Looks+right");
     assert.equal(r.status, 303);
-    assert.match((await fake.comments(ext))[0], /signed off[\s\S]*Looks right/);
-    const ev = (await db.pool.query("select actor, actor_id from event where item_id = $1 and kind = 'decision'", [id])).rows[0];
-    assert.deepEqual(ev, { actor: "human", actor_id: userId });
+    // The worker posts the announcement from the decision's outbox row (PBI 219), so the dashboard posts none.
+    assert.deepEqual(await fake.comments(ext), []);
+    const ev = (await db.pool.query("select actor, actor_id, o.consumer from event e join outbox o on o.event_id = e.id where e.item_id = $1 and e.kind = 'decision'", [id])).rows[0];
+    assert.deepEqual(ev, { actor: "human", actor_id: userId, consumer: "decision_announcement" });
   });
 
   test("a path with dot segments never signs in or reaches a dashboard route", async () => {
@@ -453,8 +487,9 @@ describe("dashboard routes", dbTest, () => {
     assert.match(html, /<form method="post" action="\/overrides">/);
   });
 
-  // PBI 140: Prepare restart is a factory override, logged like any, and Floor counts down its wrap-up until no cell runs.
-  test("an operator prepares a restart with a reason, and Floor counts its wrap-up down until no cell runs", async (t) => {
+  // PBI 140: Prepare restart is a factory override, logged like any, and Floor says how many cells still wrap up until
+  // none does. PBI 300: the factory stops none of them, so Floor names no deadline.
+  test("an operator prepares a restart with a reason, and Floor shows the cells still wrapping up until none runs", async (t) => {
     await person("op", "operator");
     const logged = t.mock.method(console, "log", () => {});
     assert.equal((await post("/overrides", "op", "kind=restart&reason=")).status, 400);
@@ -464,11 +499,30 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("update override set created_at = now() - interval '6 minutes' where kind = 'restart'");
     const busy = await item("InProgress", "busy");
     await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
-    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. 9 minutes left in the wrap-up/);
+    assert.match((await get("/", "op")).html, /Preparing to restart: 1 cell still running\. The factory won&#39;t stop it\./);
     await db.pool.query("update item set state = 'Queued', lease_expires = null where id = $1", [busy.id]);
     const ready = (await get("/", "op")).html;
     assert.match(ready, /Ready to restart\. No cell is running/);
     assert.doesNotMatch(ready, /Preparing to restart/);
+  });
+
+  // PBI 316: while the factory drains, Floor counts the cells still running as Prepare restart does, an InProgress item
+  // with a live lease, and says the drain is done once none runs.
+  test("Floor counts the cells still running while the factory drains, and says when none is", async () => {
+    await person("op", "operator");
+    assert.equal((await post("/overrides", "op", "kind=drain&reason=upgrading+Docker")).status, 303);
+    const busy = await item("InProgress", "busy");
+    const stale = await item("InProgress", "stale");
+    await item("InReview", "review");
+    await db.pool.query("update item set lease_expires = now() + interval '4 minutes' where id = $1", [busy.id]);
+    await db.pool.query("update item set lease_expires = now() - interval '1 minute' where id = $1", [stale.id]);
+    const draining = (await get("/", "op")).html;
+    assert.match(draining, /Draining: 1 cell still running\. Reason: upgrading Docker\./);
+    assert.doesNotMatch(draining, /Drain done/);
+    await db.pool.query("update item set state = 'InReview', lease_expires = null where id = $1", [busy.id]);
+    const done = (await get("/", "op")).html;
+    assert.match(done, /Drain done\. No cell is running, so it&#39;s safe to restart the factory or stop Docker\./);
+    assert.doesNotMatch(done, /still running/);
   });
 
   test("Floor shows an in-flight item's newest agent message", async () => {

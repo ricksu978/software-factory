@@ -93,10 +93,14 @@ describe("githubRepoHost", () => {
       { id: 3, state: "CHANGES_REQUESTED", body: "Split it", submitted_at: "2026-11-06T04:00:00Z", user: { login: "stranger" } },
     ];
     const { host } = stubGitHub({
-      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: "tmp", state: "open", mergeable: true, head: { sha: "h1" } }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => reviews,
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: [] }, reviews: { nodes: [] } } } }));
-    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: false, mergeSha: null, open: true, mergeable: true, lastChangesRequestedAt: "2026-11-06T01:00:00Z" });
+    // The head comes back too, so the poller reads CI on it with no second read of the PR (PBI 235).
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), {
+      merged: false, mergeSha: null, open: true, mergeable: true, headSha: "h1", lastChangesRequestedAt: "2026-11-06T01:00:00Z",
+      lastChangesRequested: { kind: "review", author: "Owner", body: "Split it", submittedAt: "2026-11-06T01:00:00Z" },
+    });
     assert.equal((await host.prState("o/r", 3, [])).lastChangesRequestedAt, null);
   });
 
@@ -139,8 +143,26 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [{ id: 2, state: "CHANGES_REQUESTED", body: null, submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } }],
     }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
     assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, null, "its only text is a reply in the factory's thread");
-    threads.push({ id: "pt", isResolved: true, path: "b.ts", line: 2, comments: { nodes: [comment("User", "owner", 2)] } });
+    threads.push({ id: "pt", isResolved: false, path: "b.ts", line: 2, comments: { nodes: [comment("User", "owner", 2)] } });
     assert.equal((await host.prState("o/r", 3, ["owner"], "factory[bot]")).lastChangesRequestedAt, "2026-11-06T03:00:00Z", "it also opened a thread of its own");
+  });
+
+  test("prState doesn't count a changes-requested review whose only text sits in a resolved thread (PBI 258)", async () => {
+    const comment = (login: string, databaseId: number, submittedAt: string, body: string) => ({ author: { __typename: "User", login }, body, pullRequestReview: { databaseId, submittedAt } });
+    const threads = [
+      { id: "done", isResolved: true, path: "a.ts", line: 1, comments: { nodes: [comment("owner", 1, "2026-11-06T01:00:00Z", "Use the table."), comment("owner", 2, "2026-11-06T03:00:00Z", "Verified, fixed.")] } },
+    ];
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: false, merge_commit_sha: null, state: "open", mergeable: true }),
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [{ id: 2, state: "CHANGES_REQUESTED", body: "", submitted_at: "2026-11-06T03:00:00Z", user: { login: "owner" } }],
+    }, () => ({ repository: { pullRequest: { reviewThreads: { nodes: threads }, reviews: { nodes: [] } } } }));
+    const resolved = await host.prState("o/r", 3, ["owner"]);
+    assert.equal(resolved.lastChangesRequestedAt, null);
+    assert.equal(resolved.lastChangesRequested, null);
+    threads[0].isResolved = false;
+    assert.deepEqual((await host.prState("o/r", 3, ["owner"])).lastChangesRequested,
+      { kind: "thread_comment", threadId: "done", author: "owner", body: "Verified, fixed.", submittedAt: "2026-11-06T03:00:00Z" },
+      "unresolved, the reply is the cause, whatever it says");
   });
 
   test("prState reports a merge without reading threads, so a failing GraphQL call can't hide it", async () => {
@@ -148,7 +170,7 @@ describe("githubRepoHost", () => {
       "GET /repos/{owner}/{repo}/pulls/{pull_number}": () => ({ merged: true, merge_commit_sha: "m1", state: "closed", mergeable: null }),
       "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews": () => [],
     }, () => { throw new Error("502 Bad Gateway"); });
-    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, lastChangesRequestedAt: null });
+    assert.deepEqual(await host.prState("o/r", 3, ["owner"]), { merged: true, mergeSha: "m1", open: false, mergeable: null, headSha: null, lastChangesRequestedAt: null, lastChangesRequested: null });
   });
 
   test("openReviewComments returns every comment in unresolved threads and none from resolved ones", async () => {
@@ -332,6 +354,26 @@ describe("githubRepoHost", () => {
     assert.deepEqual((await fake.openReviewComments("o/r", number)).map((c) => [c.author, c.body, c.path]), [["lead", "Name the retry limit", null]]);
   });
 
+  test("commitFiles makes one commit of every file on the branch's head and moves the branch without force (PBI 365)", async () => {
+    const { calls, host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/git/ref/{ref}": () => ({ object: { sha: "head1" } }),
+      "GET /repos/{owner}/{repo}/git/commits/{commit_sha}": () => ({ tree: { sha: "tree1" } }),
+      "POST /repos/{owner}/{repo}/git/trees": () => ({ sha: "tree2" }),
+      "POST /repos/{owner}/{repo}/git/commits": () => ({ sha: "new1" }),
+      "PATCH /repos/{owner}/{repo}/git/refs/{ref}": () => ({}),
+    });
+    const sha = await host.commitFiles({ repo: "o/r", branch: "factory/x-r1", message: "m", files: [{ path: "a.feature", text: "A" }, { path: "b.feature", text: "B" }] });
+    assert.equal(sha, "new1");
+    const by = (route: string) => calls.find((c) => c.route === route)!.params;
+    assert.equal(by("GET /repos/{owner}/{repo}/git/ref/{ref}").ref, "heads/factory/x-r1");
+    assert.equal(by("GET /repos/{owner}/{repo}/git/commits/{commit_sha}").commit_sha, "head1");
+    assert.deepEqual(by("POST /repos/{owner}/{repo}/git/trees").base_tree, "tree1");
+    assert.deepEqual(by("POST /repos/{owner}/{repo}/git/trees").tree, [
+      { path: "a.feature", mode: "100644", type: "blob", content: "A" }, { path: "b.feature", mode: "100644", type: "blob", content: "B" }]);
+    assert.deepEqual([by("POST /repos/{owner}/{repo}/git/commits").tree, by("POST /repos/{owner}/{repo}/git/commits").parents], ["tree2", ["head1"]]);
+    assert.deepEqual(by("PATCH /repos/{owner}/{repo}/git/refs/{ref}"), { owner: "o", repo: "r", ref: "heads/factory/x-r1", sha: "new1", force: false });
+  });
+
   test("readFile decodes a file and gives null for a missing one", async () => {
     const { host } = stubGitHub({ "GET /repos/{owner}/{repo}/contents/{path}": (p) => (p.path === "a.txt" ? { type: "file", content: b64("hi") } : (() => { throw Object.assign(new Error("404"), { status: 404 }); })()) });
     assert.equal(await host.readFile("o/r", "main", "a.txt"), "hi");
@@ -452,6 +494,61 @@ describe("githubRepoHost", () => {
       { name: "other", conclusion: "failure", url: "https://github.com/o/r/runs/4" },
     ]);
     assert.deepEqual(calls.filter((c) => c.route.endsWith("/logs")).map((c) => c.params.job_id), [2, 3]);
+  });
+
+  test("rerunChecksOnSha re-runs the failed jobs of each workflow run once, re-requests another app's check, and leaves the rest (PBI 233)", async () => {
+    const run = (id: number, name: string, conclusion: string, slug = "github-actions") => ({ id, name, status: "completed", conclusion, app: { slug } });
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        run(1, "lint", "success"), run(2, "ci", "failure"), run(3, "e2e", "failure"), run(4, "other", "failure", "circleci"),
+      ] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}": () => ({ run_id: 77 }),
+      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs": () => ({}),
+      "POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest": () => ({}),
+    });
+    assert.deepEqual(await host.rerunChecksOnSha!("o/r", "abc", ["ci", "e2e", "other"]), { rerun: ["other", "ci", "e2e"], refused: [] });
+    // "ci" and "e2e" share workflow run 77: one re-run of its failed jobs, not a job re-run each that GitHub would refuse.
+    assert.deepEqual(calls.filter((c) => c.route.startsWith("POST")).map((c) => [c.route, c.params.run_id ?? c.params.check_run_id]), [
+      ["POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest", 4],
+      ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs", 77],
+    ]);
+    assert.ok(!calls.some((c) => c.route.endsWith("/jobs/{job_id}/rerun")));
+  });
+
+  test("rerunChecksOnSha answers a partial re-run with the checks refused, and rejects only when none was re-run (PBI 233)", async () => {
+    const run = (id: number, name: string, slug = "github-actions") => ({ id, name, status: "completed", conclusion: "failure", app: { slug } });
+    const { host } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [run(2, "ci"), run(3, "e2e"), run(4, "other", "circleci")] }),
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}": (p) => ({ run_id: p.job_id === 2 ? 77 : 78 }),
+      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs": (p) => {
+        if (p.run_id === 78) throw Object.assign(new Error("This workflow run is not retryable"), { status: 403 });
+        return {};
+      },
+      "POST /repos/{owner}/{repo}/check-runs/{check_run_id}/rerequest": () => { throw new Error("Not Found"); },
+    });
+    assert.deepEqual(await host.rerunChecksOnSha!("o/r", "abc", ["ci", "e2e", "other"]), {
+      rerun: ["ci"],
+      refused: [{ check: "other", reason: "Not Found" }, { check: "e2e", reason: "This workflow run is not retryable" }],
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["e2e", "other"]), /e2e: This workflow run is not retryable/);
+  });
+
+  test("rerunChecksOnSha refuses a check that didn't fail on the sha, and re-runs nothing (PBI 233)", async () => {
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { id: 1, name: "lint", status: "completed", conclusion: "success" }, { id: 2, name: "ci", status: "completed", conclusion: "failure" },
+      ] }),
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["ci", "lint"]), /no failed check named lint/);
+    assert.ok(!calls.some((c) => c.route.startsWith("POST")));
+  });
+
+  test("fakeRepoHost re-runs only checks that failed on the sha, and records each re-run", async () => {
+    const fake = fakeRepoHost();
+    fake.ciChecks.set("o/r@abc", [{ name: "ci", conclusion: "failure", url: "u" }, { name: "lint", conclusion: "success", url: "v" }]);
+    assert.deepEqual(await fake.rerunChecksOnSha!("o/r", "abc", ["ci"]), { rerun: ["ci"], refused: [] });
+    await assert.rejects(fake.rerunChecksOnSha!("o/r", "abc", ["lint"]));
+    assert.deepEqual(fake.reruns, [{ key: "o/r@abc", checks: ["ci"] }]);
   });
 
   test("fakeRepoHost gives the checks set on a sha, and null for a sha with none", async () => {

@@ -32,6 +32,11 @@ export type Ctx = {
   dodRows?: Record<string, string>[]; trusted: { author: string; body: string }[]; stranger: { author: string; body: string }[];
   ciOldOnly: boolean; secrets: Record<string, string | undefined> | null;
   calls: Call[]; agentCalls: AgentCall[]; stage: string; prBodies: string[]; result: string | null; error: unknown;
+  /**
+   * The calls earlier claims of the same run made, oldest first, as PBI 315's next claim keeps them. `calls` holds only
+   * this claim's. Thens about the whole run, such as PBI 292's attempts and PBI 215's questions, read both.
+   */
+  earlierCalls?: Call[];
   /** Replaces the default repo host, as PBI 142's steps do to hold a merged PR or to fail a call. */
   repoHost?: Record<string, unknown>;
   /** Replaces the cell API's answer about CI, as PBI 142's steps do to fail it. */
@@ -49,6 +54,8 @@ export type Ctx = {
   apiExtra?: Record<string, unknown>;
   /** Changes the SOP the cell runs with, after it's loaded, as PBI 212's steps do to set a stage's retries. */
   editSop?: (sop: any) => void;
+  /** Changes the repo's config the cell runs with, as PBI 389's steps do to give it its own gate commands. */
+  editConfig?: (config: any) => void;
   /**
    * PBI 259: the cell's own HTTP client against a fake cell API and its git's command runner, which wait on `now` and
    * `sleep` above. `prelude` runs first, as src/cell/main.ts asks for its context and its git asks for a token before
@@ -57,6 +64,8 @@ export type Ctx = {
   api?: object;
   gitDeps?: object;
   prelude?: () => Promise<void>;
+  /** Extra engine dependencies, as PBI 399's steps add to run the repo's commands on a fake clock. */
+  deps?: Record<string, unknown>;
 };
 
 function ctx(world: object): Ctx {
@@ -333,12 +342,13 @@ export async function runTheCell(world: object): Promise<void> {
         async prState() { return { open: true, merged: false, mergeSha: null, mergeable: true, lastChangesRequestedAt: null }; },
       },
       sop: ((sop) => { c.editSop?.(sop); return sop; })(loadSop(readFileSync(sopFile, "utf8"))),
-      config: { sensitivePaths: [], reviewers: ["owner"], webTools: [],
-        bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } },
+      config: ((config) => { c.editConfig?.(config); return config; })({ sensitivePaths: [], reviewers: ["owner"], webTools: [],
+        bdd: { parse: run("parse.ndjson"), run: dryOrRun("run.ndjson"), report: "reports/bdd.ndjson" }, commands: { test: "true", lint: "true" } }),
       policies: { scenarios: policy("scenarios", "Write in business language.\n"), prReview: policy("pr-review", "- [ ] Code is readable.\n"),
         risk: policy("risk", "Low by default.\n"), dod: policy("dod", c.dod) },
       now: c.now ?? (() => new Date()),
       sleep: c.sleep ?? (async () => {}),
+      ...c.deps,
     });
   } catch (e) {
     c.error = e;

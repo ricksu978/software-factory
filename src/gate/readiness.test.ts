@@ -8,6 +8,8 @@ import { loadPolicy, type Policy } from "../policy/policy.ts";
 import { childBody, type SplitBoard } from "./file-split.ts";
 import { gate, type GateContext } from "./readiness.ts";
 import type { SplitChild, SplitDeps } from "./split.ts";
+import { parseRuleChanges, ruleChangesHash, SPEC_PATH } from "./rule-changes.ts";
+import { APPROVAL_CRITERION } from "../store/rule-changes.ts";
 
 async function setup(dorText: string, item: Partial<FactoryItem> = {}) {
   const fake = fakeBacklog();
@@ -177,8 +179,8 @@ describe("gate: an oversized item (PBI 143)", () => {
     const out = await gate(s.item, s.ctx(judged(true, "failed"), { split: { ...split(true, valid), file } }));
     assert.equal(out.ready, false);
     assert.equal(out.filed, true);
-    // The filed children, in order, which the poller keeps on the parent (PBI 226).
-    assert.deepEqual(out.children?.map((c) => c.externalId), ["100", "101"]);
+    // The filed children, in order, which the poller keeps on the parent (PBI 226) and shows under "Split into" (PBI 227).
+    assert.deepEqual(out.children?.map((c) => [c.externalId, c.url]), [["100", "u0"], ["101", "u1"]]);
     const all = await s.fake.comments(s.id);
     assert.equal(all.filter((b) => b.startsWith("The factory can't start")).length, 0);
     assert.match(all.find((b) => b.startsWith("The factory proposes splitting"))!, /files each child as a sub-issue/);
@@ -312,10 +314,10 @@ describe("gate's readiness checks (PBI 132)", () => {
   }
 
   test("records the judge call's spend and start time against the item, whatever its verdict", async () => {
-    for (const reply of [passAll(1), "I am not sure"]) {
+    for (const [reply, outcome] of [[passAll(1), "passed"], ["I am not sure", "unreadable"]] as const) {
       const { s, checks, run } = await recorded(async (_i, _d, spent) => { spent?.(spend); return reply; });
       await run;
-      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, kind: "judge", ranAt: at }]);
+      assert.deepEqual(checks, [{ id: s.item.externalId, ...spend, kind: "judge", ranAt: at, verdict: { outcome } }]);
     }
   });
 
@@ -347,7 +349,7 @@ describe("gate's readiness checks (PBI 132)", () => {
         recordCheck: async (_i, c) => { checks.push(c); } });
       await gate(s.item, ctx);
       assert.deepEqual(checks, [
-        { ...spend, kind: "judge", ranAt: at },
+        { ...spend, kind: "judge", ranAt: at, verdict: { outcome: "passed" } },
         { model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, kind: "split", ranAt: at },
       ], String(ok));
       checks.length = 0;
@@ -469,5 +471,152 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     assert.equal(out.ready, false);
     assert.deepEqual(s.judged, []);
     assert.match((await s.fake.comments(s.id))[0], /The owner has to grant the factory's App the "issues: write" permission/);
+  });
+});
+
+describe("gate's check verdicts (PBI 348)", () => {
+  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const dorText = "- [ ] Has a title\n- [ ] Names its spec section\n";
+
+  async function checksOf(reply: string | Error) {
+    const s = await setup(dorText);
+    const checks: ReadinessCheck[] = [];
+    const run = gate(s.item, s.ctx("", {
+      judge: async (_i, _d, spent) => { spent?.(spend); if (reply instanceof Error) throw reply; return reply; },
+      recordCheck: async (_i, c) => { checks.push(c); },
+    }));
+    return { checks, run };
+  }
+
+  test("a call that passed every line and raised no flag records Passed", async () => {
+    const { checks, run } = await checksOf(passAll(2));
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{ outcome: "passed" }]);
+  });
+
+  test("a call that failed a line records each failed line with the judge's reason, and each flag", async () => {
+    const reply = [
+      JSON.stringify({ index: 1, status: "passed", reason: "ok" }),
+      JSON.stringify({ index: 2, status: "failed", reason: "No spec section named." }),
+      JSON.stringify({ flags: ["changes the CI workflow"] }),
+    ].join("\n");
+    const { checks, run } = await checksOf(reply);
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{
+      outcome: "failed", lines: [{ criterion: "Names its spec section", reason: "No spec section named." }], flags: ["changes the CI workflow"],
+    }]);
+  });
+
+  test("a call that passed every line but raised a flag records Failed with the flag", async () => {
+    const { checks, run } = await checksOf(passAll(2, ["asks for a password"]));
+    await run;
+    assert.deepEqual(checks.map((c) => c.verdict), [{ outcome: "failed", lines: [], flags: ["asks for a password"] }]);
+  });
+
+  test("a reply the gate couldn't read records unreadable, and a call that threw records an error", async () => {
+    const unreadable = await checksOf("I can't say.");
+    await unreadable.run;
+    assert.deepEqual(unreadable.checks.map((c) => c.verdict), [{ outcome: "unreadable" }]);
+    const threw = await checksOf(new Error("API Error: 529"));
+    await assert.rejects(threw.run, /529/);
+    assert.deepEqual(threw.checks.map((c) => c.verdict), [{ outcome: "error" }]);
+  });
+
+  test("a judge call on a proposed child names the child; the parent's own call and the split proposal don't", async () => {
+    const s = await setup(dorText, { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    const checks: ReadinessCheck[] = [];
+    const oversized = [JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ index: 2, status: "passed", reason: "ok" }),
+      JSON.stringify({ flags: [], oversized: true })].join("\n");
+    const children = JSON.stringify({ children: [{ title: "A", body: "a", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
+    const agent = async (a: AgentArgs): Promise<AgentResult> =>
+      ({ ok: true, text: children, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" });
+    const b: SplitBoard = {
+      subIssues: async () => [], findIssues: async () => [],
+      createIssue: async (_r, title) => ({ externalId: title, title, url: "u" }),
+      addSubIssue: async () => {}, boardStatus: async () => null, addToBoard: async () => {}, blockedBy: async () => [], addBlockedBy: async () => {},
+      removeLabel: async () => {},
+    };
+    await gate(s.item, s.ctx(oversized, {
+      judge: async (i, d, spent) => { spent?.(spend); return i.externalId === s.item.externalId ? oversized : passAll(d.criteria.length); },
+      split: { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board: b, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } },
+      recordCheck: async (_i, c) => { checks.push(c); },
+    }));
+    assert.deepEqual(checks.map((c) => [c.kind, c.child, c.verdict?.outcome]), [
+      ["judge", undefined, "passed"], ["split", undefined, undefined], ["judge", "A", "passed"], ["judge", "B", "passed"],
+    ]);
+  });
+});
+
+describe("gate on an item's rule changes (PBI 395)", () => {
+  const DOR = "- [ ] Has a title\n- [ ] An item that changes the factory's own rules names the spec section it changes\n";
+  const SPEC = `<section id="sop">\n<h2><span class="n">06</span>SOP</h2>\n<p>A lease lasts ten minutes.</p>\n</section>`;
+  const files: Record<string, string> = { [SPEC_PATH]: SPEC };
+  const factoryRules = async (path: string) => files[path] ?? null;
+  const body = (before: string, after = "A lease lasts five minutes.") =>
+    `Lead.\n\n## Changes the factory's rules\n\n### Spec §6\n**Before**\n> ${before}\n\n**After**\n> ${after}\n`;
+  const reply = (rules: string[], fail?: { index: number; reason: string }) => [
+    ...[1, 2].map((index) => JSON.stringify(fail?.index === index ? { index, status: "failed", reason: fail.reason } : { index, status: "passed", reason: "ok" })),
+    JSON.stringify({ flags: [], rules }),
+  ].join("\n");
+
+  test("a section that covers what the judge finds, its Before matching main, waits for the owner's approval", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts ten minutes.") });
+    const out = await gate(s.item, s.ctx(reply(["§6"]), { factoryRules }));
+    assert.equal(out.ready, false);
+    assert.equal(out.results.find((r) => r.index === 2)?.status, "passed");
+    const waiting = out.results.find((r) => r.criterion === APPROVAL_CRITERION);
+    assert.match(waiting?.reason ?? "", /waits for the owner to approve its change to spec section §6/);
+    assert.deepEqual(out.ruleChanges?.map((c) => c.problem ?? null), [null]);
+    const [comment] = await s.fake.comments(s.id);
+    assert.match(comment, /can't start this item/);
+    assert.match(comment, /spec section §6/);
+  });
+
+  test("the owner's approval of the same section lets it through, and its comment key says so", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts ten minutes.") });
+    const hash = ruleChangesHash(parseRuleChanges(s.item.body));
+    assert.equal((await gate(s.item, s.ctx(reply(["§6"]), { factoryRules, ruleApproval: hash }))).ready, true);
+    const edited = { ...s.item, body: body("A lease lasts ten minutes.", "A lease lasts three minutes.") };
+    assert.equal((await gate(edited, s.ctx(reply(["§6"]), { factoryRules, ruleApproval: hash }))).ready, false);
+    const out = await gate(s.item, s.ctx(reply(["§6"], { index: 1, reason: "No title." }), { factoryRules, ruleApproval: hash }));
+    assert.equal(out.ready, false);
+    assert.ok(!out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+    // The waiting comment and this one share the item's updatedAt and the readiness sha, and the approval keeps them apart.
+    assert.ok((await s.fake.comments(s.id)).some((c) => c.includes("No title.")));
+  });
+
+  test("a Before that's off fails the item, names its section and asks for no approval", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts eight minutes.") });
+    const out = await gate(s.item, s.ctx(reply(["§6"]), { factoryRules }));
+    assert.equal(out.ready, false);
+    assert.ok(out.results.some((r) => r.status === "failed" && /Before quoted for spec section §6 doesn't match main/.test(r.reason)));
+    assert.ok(!out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+  });
+
+  test("a rule the judge finds that the section misses fails the rules line, naming the section to cover", async () => {
+    for (const b of ["Lead.\n", body("A lease lasts ten minutes.")]) {
+      const s = await setup(DOR, { body: b });
+      const out = await gate(s.item, s.ctx(reply(["§5", "§6"], { index: 2, reason: "It changes the rules." }), { factoryRules }));
+      const line = out.results.find((r) => r.index === 2)!;
+      assert.equal(line.status, "failed");
+      assert.match(line.reason, /^It changes the rules\. .*spec section §5/);
+      assert.ok(!out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+    }
+  });
+
+  test("an uncovered rule fails even when the judge passed the rules line, and with no rules line in dor.md it's its own verdict", async () => {
+    const s = await setup(DOR, { body: "Lead.\n" });
+    const out = await gate(s.item, s.ctx(reply(["§6"]), { factoryRules }));
+    assert.equal(out.results.find((r) => r.index === 2)?.status, "failed");
+    const t = await setup("- [ ] Has a title\n", { body: "Lead.\n" });
+    const other = await gate(t.item, t.ctx([JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ flags: [], rules: ["§6"] })].join("\n"), { factoryRules }));
+    assert.ok(other.results.some((r) => r.index === 0 && r.status === "failed" && r.reason.includes("spec section §6")));
+  });
+
+  test("an item that changes no rule and has no section is gated as before", async () => {
+    const s = await setup(DOR, { body: "Lead.\n" });
+    const out = await gate(s.item, s.ctx(reply([]), { factoryRules }));
+    assert.equal(out.ready, true);
+    assert.deepEqual(out.ruleChanges, []);
   });
 });
