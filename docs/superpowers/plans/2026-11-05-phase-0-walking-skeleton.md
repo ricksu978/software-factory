@@ -6843,6 +6843,8 @@ from spec §6 rows 1 to 7:
       the SSR page and the SPA alike,
       and a null effort as `(medium)`,
       the default those rows ran at.
+      A stage attempt with a null model shows "model not recorded" in its Model cell,
+      in the SSR page and the SPA alike, in place of a blank cell.
       The activity log shows that event under the user's GitHub login,
       as "octo changed review capacity from 3 to 5 because Two more reviewers are in.".
       A change that's taken answers 303 to `/configuration?changed=<key>`.
