@@ -81,9 +81,9 @@ const itemModule = () => load<Pages["item"]>("/src/pages/RunDetail.tsx");
 
 type Req = { method: string; path: string; body: unknown };
 type Answer = { status: number; body: unknown };
-type PageName = "floor" | "item" | "phase0" | "activity";
+export type PageName = "floor" | "item" | "phase0" | "activity";
 
-type Ctx = {
+export type Ctx = {
   now: Date;
   roles: { operator: boolean; owner: boolean };
   named: Map<string, Named>;
@@ -112,11 +112,23 @@ type Ctx = {
   lastRow?: El;
   /** The stage attempt the last step set up, for "that attempt". */
   lastStage?: ItemData["stages"][number];
+  /** Where the shell sent the browser. */
+  navigations: string[];
+  /** PBI 280's: the SPA's clock, which the page's now reads when it's set. */
+  clock?: () => Date;
+  /** PBI 280's: what the factory reports for the floor, made from what it would otherwise report. */
+  serveFloor?: (f: FloorData) => FloorData;
+  /** PBI 280's: answers a request before this file's stub does, when it answers at all. */
+  fetchHook?: (method: string, path: string, init?: RequestInit) => Response | undefined;
+  /** PBI 280's: told each time a page opens, after it renders. */
+  opened?: (page: PageName) => Promise<void>;
+  /** PBI 280's: told each time a page renders. */
+  rendered?: () => void;
 };
 
 type Named = { id: string; external_id: string; repo: string | null; title: string };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi279?: Ctx };
   w.pbi279 ??= {
     now: new Date(),
@@ -130,6 +142,7 @@ function ctx(world: object): Ctx {
     accepted: false,
     shown: [],
     html: "",
+    navigations: [],
   };
   return w.pbi279;
 }
@@ -145,7 +158,7 @@ Before({ tags: "@pbi-279" }, function () {
 /** The viewer's IANA zone, which PBI 189's step keeps in PBI 131's context. */
 const zoneOf = (world: object) => (world as { pbi131?: { viewerZone?: string } }).pbi131?.viewerZone ?? "UTC";
 
-function emptyFloor(): FloorData {
+export function emptyFloor(): FloorData {
   return {
     active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], blocked: [], factory: [], keys: {},
     finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
@@ -154,7 +167,7 @@ function emptyFloor(): FloorData {
 }
 
 /** "#41 Add search" as the factory names the item, the same id each time it's named. */
-function named(c: Ctx, label: string, repo: string | null = REPO): Named {
+export function named(c: Ctx, label: string, repo: string | null = REPO): Named {
   const m = /^#(\d+)\s+(.+)$/.exec(label) ?? /^#(\d+)$/.exec(label);
   assert.ok(m, `"${label}" isn't "#N title"`);
   const known = c.named.get(m[1]);
@@ -183,7 +196,7 @@ function json(status: number, body: unknown): Response {
 
 function servedFloor(c: Ctx): FloorData {
   const f = c.accepted && c.floorAfter ? c.floorAfter(c) : c.floor;
-  return { ...f, canOperate: c.roles.operator };
+  return { ...(c.serveFloor ? c.serveFloor(clone(f)) : f), canOperate: c.roles.operator };
 }
 
 function servedItem(c: Ctx, d: ItemData): ItemData {
@@ -203,6 +216,8 @@ async function stubFetch(c: Ctx, input: RequestInfo | URL, init?: RequestInit): 
     }
   }
   c.requests.push({ method, path, body });
+  const hooked = c.fetchHook?.(method, path, init);
+  if (hooked) return hooked;
   if (method === "GET" && path === "/auth/session") return json(200, { issuer: "https://login.test", subject: "octo" });
   if (method === "GET" && path === "/bff/v1/floor") return json(200, servedFloor(c));
   if (method === "GET" && path === "/bff/v1/phase0") return json(200, c.phase0);
@@ -233,7 +248,7 @@ async function shell(c: Ctx): Promise<Call> {
     fetch: ((input: RequestInfo | URL, init?: RequestInit) => stubFetch(c, input, init)) as typeof fetch,
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     root,
-    navigate: () => {},
+    navigate: (url) => c.navigations.push(url),
     show: (p) => c.shown.push(p),
   });
   c.call = s.call;
@@ -244,7 +259,7 @@ async function shell(c: Ctx): Promise<Call> {
 
 const message = (e: unknown) => (e instanceof Error ? e.stack ?? e.message : String(e));
 
-async function open(world: object, page: PageName): Promise<void> {
+export async function open(world: object, page: PageName): Promise<void> {
   const c = ctx(world);
   const call = await shell(c);
   c.page = page;
@@ -262,12 +277,14 @@ async function open(world: object, page: PageName): Promise<void> {
     c.error = `the page's read failed: ${message(e)}`;
   }
   await render(world);
+  await c.opened?.(page);
 }
 
-async function render(world: object): Promise<void> {
+export async function render(world: object): Promise<void> {
   const c = ctx(world);
   c.html = "";
   c.tree = undefined;
+  if (c.clock) c.now = c.clock();
   if (c.data !== undefined && !c.error) {
     try {
       const zone = zoneOf(world);
@@ -287,6 +304,7 @@ async function render(world: object): Promise<void> {
   if (c.page === "floor") w.pbi89 = { ...(w.pbi89 ?? {}), status, html: c.tree ? text(c.tree) : page };
   w.pbi146 = { ...(w.pbi146 ?? {}), status, page } as { page?: string; status?: number };
   w.pbi19 = { ...(w.pbi19 ?? {}), status, page };
+  c.rendered?.();
 }
 
 const PAGE_NAMES: Record<PageName, string> = { floor: "Floor", item: "Run detail", phase0: "The Phase 0 report", activity: "Activity" };
@@ -301,7 +319,7 @@ function opened(c: Ctx, page?: PageName): El {
 
 // ---- reading the rendered page ----
 
-type El = { tag: string; attrs: Record<string, string>; children: (El | string)[]; parent: El | null };
+export type El = { tag: string; attrs: Record<string, string>; children: (El | string)[]; parent: El | null };
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 const INLINE = new Set(["a", "abbr", "b", "code", "em", "i", "kbd", "label", "mark", "s", "small", "span", "strong", "sub", "sup", "time", "u"]);
 
@@ -347,11 +365,11 @@ function rawText(n: El | string): string {
   return INLINE.has(n.tag) || n.tag === "#root" || n.tag === "#section" ? inner : ` ${inner} `;
 }
 /** An element's text as a reader sees it, with its whitespace collapsed. */
-const text = (n: El | string) => rawText(n).replace(/\s+/g, " ").trim();
+export const text = (n: El | string) => rawText(n).replace(/\s+/g, " ").trim();
 /** An element's own text, leaving out the lists inside it. */
 const ownText = (e: El) => text({ ...e, children: e.children.filter((k) => typeof k === "string" || (k.tag !== "ul" && k.tag !== "ol")) });
 
-function all(e: El): El[] {
+export function all(e: El): El[] {
   const out: El[] = [];
   const walk = (n: El) => n.children.forEach((k) => {
     if (typeof k !== "string") {
@@ -382,7 +400,7 @@ function sectionOf(root: El, name: string): El | null {
   return { tag: "#section", attrs: {}, children: out, parent: null };
 }
 
-function section(root: El, name: string): El {
+export function section(root: El, name: string): El {
   const s = sectionOf(root, name);
   assert.ok(s, `the page has no "${name}" heading: its headings are ${JSON.stringify(all(root).filter((e) => level(e) > 0).map(text))}`);
   return s;
@@ -399,12 +417,12 @@ function rowOf(scope: El, what: string): El {
 const links = (scope: El) => all(scope).filter((e) => e.tag === "a").map((e) => ({ href: e.attrs.href ?? "", text: text(e) }));
 const isBadge = (e: El) => e.attrs["data-slot"] === "badge" || /\bbadge\b/.test(e.attrs.class ?? "");
 const badges = (scope: El) => all(scope).filter(isBadge).map(text);
-const banners = (root: El) => all(root).filter((e) => e.attrs.role === "status" || e.attrs.role === "alert");
+export const banners = (root: El) => all(root).filter((e) => e.attrs.role === "status" || e.attrs.role === "alert");
 const buttons = (scope: El) => all(scope).filter((e) => e.tag === "button" || (e.tag === "input" && /^(submit|button)$/i.test(e.attrs.type ?? "")));
 const buttonText = (e: El) => (e.tag === "input" ? e.attrs.value ?? "" : text(e));
 const fields = (scope: El) => all(scope).filter((e) => (e.tag === "input" && !/^(hidden|submit|button)$/i.test(e.attrs.type ?? "")) || e.tag === "textarea" || e.tag === "select");
 
-function includes(scope: El, want: string, where: string): void {
+export function includes(scope: El, want: string, where: string): void {
   const got = text(scope);
   assert.ok(got.includes(want), `${where} doesn't show "${want}": ${JSON.stringify(got.slice(0, 1500))}`);
 }
@@ -445,26 +463,26 @@ function tableOf(t: El): Table {
   return { columns, rows };
 }
 
-function table(scope: El, what: string): Table {
+export function table(scope: El, what: string): Table {
   const t = all(scope).find((e) => e.tag === "table");
   assert.ok(t, `${what} has no table`);
   return tableOf(t);
 }
 
-function cell(t: Table, row: El[], column: string): El {
+export function cell(t: Table, row: El[], column: string): El {
   const i = t.columns.indexOf(column);
   assert.ok(i >= 0, `the table has no "${column}" column: ${JSON.stringify(t.columns)}`);
   assert.ok(row[i], `the row has no cell under "${column}"`);
   return row[i];
 }
 
-function rowFor(t: Table, what: string): El[] {
+export function rowFor(t: Table, what: string): El[] {
   const row = t.rows.find((r) => text(r[0] ?? "").includes(what)) ?? t.rows.find((r) => r.some((x) => text(x).includes(what)));
   assert.ok(row, `the table has no row for "${what}": ${JSON.stringify(t.rows.map((r) => r.map(text)))}`);
   return row;
 }
 
-function showsCells(row: El[], want: string[]): void {
+export function showsCells(row: El[], want: string[]): void {
   const got = row.map(text);
   for (const w of want) assert.ok(got.includes(w), `the row doesn't show "${w}": ${JSON.stringify(got)}`);
 }
@@ -501,7 +519,7 @@ const before = (root: El, a: El, b: El) => {
 
 const sectionNames = ["Waiting on you", "Next up", "Final stage", "Not ready", "Blocked", "Split", "Failed on main", "In flight"];
 
-function addActive(c: Ctx, n: Named, extra: Partial<FloorData["active"][number]>): FloorData["active"][number] {
+export function addActive(c: Ctx, n: Named, extra: Partial<FloorData["active"][number]>): FloorData["active"][number] {
   const row = { ...n, state: "InProgress", stage: "green", since: ago(c, 5 * MIN), cost: "0", badges: [], message: null, pr_number: null, pr_url: null, ci_failure: null, ...extra };
   c.floor.active.push(row);
   return row;
@@ -631,7 +649,7 @@ Given("the factory's floor has {int} items waiting on a person against a limit o
   c.floor.capacity = limit;
 });
 
-function override(c: Ctx, f: FloorData, kind: string, reason: string): void {
+export function override(c: Ctx, f: FloorData, kind: string, reason: string): void {
   f.factory.push({ kind, reason });
   if (kind === "restart") f.restart = { running: f.running ?? 0, reason };
 }
@@ -1045,7 +1063,7 @@ Given("item {string} is InProgress with no open question", function (label: stri
 
 // ---- the viewer ----
 
-const role = (world: object, r: Partial<Ctx["roles"]>) => Object.assign(ctx(world).roles, r);
+export const role = (world: object, r: Partial<Ctx["roles"]>) => Object.assign(ctx(world).roles, r);
 
 Given("I am an operator", function () {
   role(this, { operator: true });
@@ -1339,7 +1357,7 @@ Given("I submitted the {string} form with {string} and {string} left empty, and 
 
 // ---- Then: Floor ----
 
-function floorRoot(world: object): El {
+export function floorRoot(world: object): El {
   return opened(ctx(world), "floor");
 }
 

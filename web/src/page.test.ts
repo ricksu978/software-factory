@@ -48,3 +48,20 @@ test("App shows the page its address names, before its one read comes back", () 
   assert.match(renderToString(pageFor({ kind: "app" }, call, "/activity")), /Reading the activity log/);
   assert.match(renderToString(pageFor({ kind: "app" }, call, "/configuration")), /No such page/);
 });
+
+test("Floor ages the worker's heartbeat against the API's time, not the viewer's clock", async () => {
+  const { Floor } = await vite.ssrLoadModule("/src/pages/Floor.tsx");
+  const { createElement } = await import("react");
+  const at = new Date("2026-11-20T12:00:00Z");
+  const data = {
+    active: [], waiting: [], waitingCount: 0, capacity: 1, next: [], notReady: [], blocked: [], factory: [], keys: {},
+    finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
+    claudeToken: null, workerHeartbeat: new Date(at.getTime() - 5_000).toISOString(), outboxSetAside: 0, at: at.toISOString(),
+  };
+  const render = (now: Date, d: object = data) => renderToString(createElement(Floor, { data: d, zone: "UTC", now }));
+  const fast = render(new Date(at.getTime() + 90_000));
+  assert.doesNotMatch(fast, /Scheduler not ticking/, "a viewer whose clock runs 90 s fast sees no banner");
+  assert.match(fast, /last ticked under a minute ago/);
+  const slow = { ...data, workerHeartbeat: new Date(at.getTime() - 61_000).toISOString() };
+  assert.match(render(new Date(at.getTime() - 90_000), slow), /Scheduler not ticking/, "nor does one running 90 s slow hide it");
+});

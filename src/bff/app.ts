@@ -10,7 +10,8 @@
 //                        or gets 403.
 //   *    /bff/v1/*       needs a live session, or gets 401. The BFF refreshes an access token that expires within 60
 //                        seconds, then forwards the call one for one to the API's /v1/*, with the session's access token
-//                        as a bearer token and none of the browser's cookies or credentials.
+//                        as a bearer token and none of the browser's cookies or credentials. A call gets 30 seconds,
+//                        except that an event stream (text/event-stream) runs on until the API ends it (PBI 280).
 // And step 7c (§03 and §05):
 //   POST /webhooks/github  GitHub's deliveries, which reach the API's /webhooks/github with their bytes and headers as
 //                        GitHub sent them, and the API's answer goes back to GitHub. No session and no Origin are
@@ -77,6 +78,8 @@ export type BffConfig = {
   fetch?: typeof fetch;
   /** Where `npm run build` writes the SPA, web/dist. Without it the BFF serves no SPA. */
   spaDir?: string;
+  /** The signal that ends a forwarded call after `ms`. AbortSignal.timeout unless a test gives its own clock's. */
+  timeout?: (ms: number) => AbortSignal;
 };
 
 type SignIn = SignInChecks;
@@ -105,20 +108,24 @@ export function createBff(cfg: BffConfig): Hono {
    * or the browser leaves, which closes it at the API. Null when the API doesn't answer.
    */
   const toApi = async (c: Context, to: string, init: RequestInit): Promise<Response | null> => {
+    const limit = cfg.timeout ? cfg.timeout(apiTimeoutMs) : AbortSignal.timeout(apiTimeoutMs);
     const timer = new AbortController();
-    const t = setTimeout(() => timer.abort(new Error(`the API didn't answer within ${apiTimeoutMs} ms`)), apiTimeoutMs);
+    const onLimit = () => timer.abort(limit.reason);
+    if (limit.aborted) onLimit();
+    else limit.addEventListener("abort", onLimit, { once: true });
+    const clearLimit = () => limit.removeEventListener("abort", onLimit);
     let r: Response;
     try {
       r = await doFetch(to, { ...init, redirect: "manual", signal: AbortSignal.any([timer.signal, c.req.raw.signal]) });
     } catch (e) {
-      clearTimeout(t);
+      clearLimit();
       console.error(`the BFF couldn't reach the API for ${init.method} ${new URL(to).pathname}:`, (e as Error).message);
       return null;
     }
     const streaming = r.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "text/event-stream";
     let body = r.body;
-    if (streaming || !body) clearTimeout(t);
-    else body = body.pipeThrough(new TransformStream({ flush: () => clearTimeout(t) }));
+    if (streaming || !body) clearLimit();
+    else body = body.pipeThrough(new TransformStream({ flush: clearLimit }));
     const back = new Headers();
     r.headers.forEach((v, k) => {
       if (!DROPPED_RESPONSE_HEADERS.has(k)) back.set(k, v);

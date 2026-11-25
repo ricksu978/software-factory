@@ -402,6 +402,50 @@ test("an event stream to the API closes when the browser leaves", async () => {
   assert.equal(api.streams[0].closedBy, "caller");
 });
 
+/** A BFF whose API is `apiFetch`, and whose 30 seconds for a call end when the test calls `expire`. */
+function withApi(apiFetch: typeof fetch) {
+  const limits: AbortController[] = [];
+  const bff = createBff({
+    issuer: provider.issuer, clientId: "dashboard", clientSecret: "s", scopes: "openid", origin: ORIGIN, key: Buffer.from(KEY, "base64"),
+    sessions: store, apiUrl: "http://api.test", fetch: apiFetch,
+    timeout: () => {
+      const a = new AbortController();
+      limits.push(a);
+      return a.signal;
+    },
+  });
+  return { bff, expire: () => limits.forEach((a) => a.abort(new DOMException("timed out", "TimeoutError"))) };
+}
+
+test("an event stream outlasts the BFF's 30 seconds for a call, and ends when the API ends it", async () => {
+  const { jar } = await signedIn();
+  let api!: ReadableStreamDefaultController<Uint8Array>;
+  let signal: AbortSignal | undefined;
+  const { bff, expire } = withApi((async (_input: RequestInfo | URL, init?: RequestInit) => {
+    signal = init?.signal ?? undefined;
+    const body = new ReadableStream<Uint8Array>({ start: (c) => void (api = c) });
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+  }) as typeof fetch);
+  const r = await bff.request(new URL("/bff/v1/events", ORIGIN).href, { headers: { cookie: cookieHeader(jar), accept: "text/event-stream" } });
+  assert.equal(r.status, 200);
+  expire();
+  assert.equal(signal?.aborted, false, "the call to the API was ended at 30 seconds");
+  api.enqueue(new TextEncoder().encode("data: {}\n\n"));
+  api.close();
+  assert.equal(await r.text(), "data: {}\n\n");
+});
+
+test("any other call is still ended at 30 seconds", async () => {
+  const { jar } = await signedIn();
+  const { bff, expire } = withApi((async (_input: RequestInfo | URL, init?: RequestInit) => {
+    expire();
+    if (init?.signal?.aborted) throw init.signal.reason;
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch);
+  const r = await bff.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } });
+  assert.equal(r.status, 502);
+});
+
 test("with spaDir, every other GET gets the SPA, and the BFF's own addresses keep their answers", async () => {
   const dist = mkdtempSync(join(tmpdir(), "bff-spa-"));
   try {
