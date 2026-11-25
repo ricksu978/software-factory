@@ -6511,6 +6511,9 @@ from spec §6 rows 1 to 7:
   `Cookie` and `Authorization`.
   The BFF adds no bearer token and doesn't check `X-Hub-Signature-256`,
   because only the API holds the webhook secret.
+  A body over 25 MiB (`MAX_WEBHOOK`,
+  the API's own cap) gets 413 before the BFF reads it,
+  and never reaches the API.
   The API's status and body go back to GitHub,
   and an API that doesn't answer gives 502,
   so GitHub can redeliver.

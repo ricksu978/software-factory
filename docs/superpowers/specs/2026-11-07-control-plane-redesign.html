@@ -297,7 +297,7 @@ flowchart LR
       <tr><td><code>POST /items/{id}/signoff</code>, <code>/answer</code></td><td><code>POST /v1/items/{id}/decisions</code></td><td>Today's rules in <code>src/control/decisions.ts</code></td></tr>
       <tr><td><code>POST /overrides</code></td><td><code>POST /v1/overrides</code></td><td>Operator</td></tr>
       <tr><td><code>POST /users</code></td><td><code>POST /v1/users</code></td><td>Owner</td></tr>
-      <tr><td><code>POST /webhooks/github</code></td><td>Same path. The BFF passes the bytes and headers through untouched.</td><td>A valid HMAC signature</td></tr>
+      <tr><td><code>POST /webhooks/github</code></td><td>Same path. The BFF passes the bytes and headers through untouched. A body over 25 MiB, the API's own cap, gets 413 at the BFF before it's read.</td><td>A valid HMAC signature</td></tr>
       <tr><td><code>GET /dev-login</code></td><td>Removed</td><td></td></tr>
     </tbody>
   </table></div>
