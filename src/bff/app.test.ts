@@ -446,6 +446,25 @@ test("any other call is still ended at 30 seconds", async () => {
   assert.equal(r.status, 502);
 });
 
+test("an ordinary answer that hasn't arrived whole by 30 seconds is cut off", async () => {
+  const { jar } = await signedIn();
+  const { bff, expire } = withApi((async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"cells":['));
+        init?.signal?.addEventListener("abort", () => c.error(init.signal!.reason));
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch);
+  const r = await bff.request(new URL("/bff/v1/floor", ORIGIN).href, { headers: { cookie: cookieHeader(jar) } });
+  assert.equal(r.status, 200);
+  const read = r.text();
+  expire();
+  const stillOpen = new Promise<string>((resolve) => setTimeout(() => resolve("still open after 2 s"), 2_000).unref());
+  await assert.rejects(Promise.race([read, stillOpen]).then((v) => { throw new Error(v); }), { name: "TimeoutError" });
+});
+
 test("with spaDir, every other GET gets the SPA, and the BFF's own addresses keep their answers", async () => {
   const dist = mkdtempSync(join(tmpdir(), "bff-spa-"));
   try {
