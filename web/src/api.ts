@@ -64,6 +64,8 @@ export type FloorData = {
   canOperate: boolean;
   claudeToken: { createdAt: string; ageDays: number; banner: string | null } | null;
   workerHeartbeat?: string | null;
+  /** How many outbox rows the worker set aside after their tenth failed attempt (PBI 221, PBI 280). */
+  outboxSetAside?: number;
 };
 
 export type Stage = {

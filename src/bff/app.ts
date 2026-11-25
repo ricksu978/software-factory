@@ -56,6 +56,8 @@ export type BffConfig = {
   fetch?: typeof fetch;
   /** Where `npm run build` writes the SPA, web/dist. Without it the BFF serves no SPA. */
   spaDir?: string;
+  /** The signal that ends a forwarded call after `ms`. AbortSignal.timeout unless a test gives its own clock's. */
+  timeout?: (ms: number) => AbortSignal;
 };
 
 type SignIn = SignInChecks;
@@ -151,7 +153,7 @@ export function createBff(cfg: BffConfig): Hono {
     const body = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
     let r: Response;
     try {
-      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: cfg.timeout ? cfg.timeout(API_TIMEOUT_MS) : AbortSignal.timeout(API_TIMEOUT_MS) });
     } catch (e) {
       console.error(`the BFF couldn't reach the API for ${method} ${from.pathname}:`, (e as Error).message);
       return c.json({ error: "the API didn't answer" }, 502);
