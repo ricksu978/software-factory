@@ -260,6 +260,11 @@ export interface RepoHost {
   }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
+  /**
+   * PBI 365: commits `files` to `branch` in one commit on top of the branch's head, each file's text its whole new
+   * content, and answers the new commit's sha. The control plane writes an approved feature change request this way.
+   */
+  commitFiles(p: { repo: string; branch: string; message: string; files: { path: string; text: string }[] }): Promise<string>;
   defaultBranchSha(repo: string): Promise<string>;
   /** Every comment in the PR's unresolved review threads, then the review summaries that still stand. */
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>;

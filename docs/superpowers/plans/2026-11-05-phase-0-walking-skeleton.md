@@ -472,6 +472,15 @@ A task that touches one of them follows this section and does not restate it.
      The cell then spends only the tries left at that stage,
      and its first attempt's brief carries `findings` under "Your last attempt failed",
      as a retry within one claim does.
+     At open-pr,
+     pr-review or address,
+     where no attempt at `nextStage` failed with a carry,
+     `retry` is the run's last attempt's carry,
+     the base merge aside,
+     when that attempt failed at green or at pr-review:
+     green's goes to the pass back to green,
+     and pr-review's to pr-review,
+     which runs while the run is still at open-pr or address (PBI 365).
 6. **CI status.**
    Only the control plane reads checks,
    with the App's own `RepoHost`.
@@ -1793,7 +1802,7 @@ Azure comes in Task 19.
 **Interfaces:**
 - Produces:
   - `type ItemState = "Eligible" | "NotReady" | "Queued" | "InProgress" | "SignOff" | "NeedsInput" | "InReview" | "Accepted" | "Done" | "Failed" | "Abandoned" | "Split" | "FeatureChangeRequest"`
-  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited" | "feature_change_requested"`.
+  - `type ItemEvent = "readiness_failed" | "item_edited" | "ready" | "claimed" | "scenarios_written" | "blocked" | "pr_opened" | "changes_requested" | "merged" | "approvals_met" | "dod_verified" | "dod_failed" | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed" | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn" | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited" | "feature_change_requested" | "feature_change_decided"`.
     `approvals_met` is reserved for Phase 1.
     In Phase 0 a merge is `merged`,
     whether a person made it or the factory did once a person approved (PBI 181).
@@ -1808,6 +1817,9 @@ Azure comes in Task 19.
     as an InProgress item does (PBI 364).
     It takes `timed_out` to Abandoned,
     as a SignOff item does (PBI 366).
+    `feature_change_decided` moves a FeatureChangeRequest item to Queued once the Product Owner approves or turns down its request,
+    and the run resumes at the stage that asked,
+    or for pr-review at the open-pr or address stage it ran under (PBI 365).
   - `function next(from: ItemState, event: ItemEvent): ItemState | null`,
     which returns null for an edge the diagram doesn't draw.
   - `function overrideTo(from: ItemState, to: ItemState): ItemState`,
@@ -1840,6 +1852,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["NotReady", "split_filed", "Split"], ["Split", "children_done", "Done"], ["Abandoned", "split_filed", "Split"],
   ["Failed", "rechecked", "Accepted"],
   ["InProgress", "feature_change_requested", "FeatureChangeRequest"], ["FeatureChangeRequest", "merged", "Accepted"],
+  ["FeatureChangeRequest", "feature_change_decided", "Queued"],
   ["NotReady", "rule_change_approved", "Eligible"],
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).map((s) => [s, "rules_edited", "Eligible"]),
 ];
@@ -2242,10 +2255,14 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     `{ tried, findings }` on a failed attempt whose cell ended its claim at that attempt boundary,
     under a drain or a restart being prepared,
     and null on every other.
+    A feature change request the Product Owner turns down sets it on the run's last attempt too,
+    as `{ tried: 0, findings }` with the note in one finding (PBI 365).
     `POST /stage` takes it as `retryCarry` on a `failed` report only,
     keeping at most 50 findings of 4,000 characters each,
     and gives 400 for one of another shape.
-    `/context` reads it off the next stage's last attempt for `retry`.
+    `/context` reads it off the next stage's last attempt for `retry`,
+    or at open-pr,
+    pr-review or address off the run's last attempt when that one is green's or pr-review's (PBI 365).
   - `ci_rerun(run_id, sha, checks text[], requested_at)`,
     primary key `(run_id, sha)`,
     added by `db/migrations/018_ci_rerun.sql` (PBI 233).
@@ -2498,6 +2515,7 @@ export interface RepoHost {
   prState(repo: string, prNumber: number, trustedLogins: string[]): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; lastChangesRequestedAt: string | null }>;
   closePr(repo: string, prNumber: number, comment: string): Promise<void>;
   readFile(repo: string, ref: string, path: string): Promise<string | null>;
+  commitFiles(p: { repo: string; branch: string; message: string; files: { path: string; text: string }[] }): Promise<string>; // one commit of every file on the branch's head, the ref moved without force, answering the new sha (PBI 365)
   defaultBranchSha(repo: string): Promise<string>;
   openReviewComments(repo: string, prNumber: number): Promise<ReviewComment[]>; // every comment in the PR's unresolved review threads, then the standing review summaries (Run contract 10)
   prReviews(repo: string, prNumber: number): Promise<Review[]>; // the PR's submitted reviews, oldest first, so the PR review finds the last round the factory posted (PBI 318)
@@ -5206,6 +5224,11 @@ export function haikuJudge(sop: Sop): (item: FactoryItem, dor: Policy, spent?: (
     when green's failed attempt is the run's last one, the base merge aside,
     and the next claim goes back to green and spends it there,
     through `failedCiHeads`, or on the carry itself when the pass came from stale `dod.md` verdicts or a moved head.
+    Pr-review runs while the run is still at open-pr or address too,
+    so when pr-review's failed attempt with a carry is the run's last one,
+    as after the Product Owner turns down a feature change request its addresser raised,
+    `/context` hands pr-review's carry instead,
+    and the engine keeps it past open-pr and address for pr-review (PBI 365).
     Under pause the reply has `stop: true`,
     under a drain as well.
     While the factory drains,
@@ -5711,6 +5734,11 @@ function runCell(deps: { api: CellApi; ctx: CellContext; agent: typeof runAgent;
   and the retry's brief carries it.
   Self-review and open-pr carry on with the restored files:
   self-review gives the note to the reviewer's and the fix pass's later briefs.
+  Pr-review runs while the run stays at open-pr or address,
+  so the engine keeps a claim's carry from pr-review's attempt past those stages,
+  and pr-review's addresser gets its findings in its brief (PBI 365).
+  An address with no trusted review comment runs no agent,
+  so when it carries findings from the last attempt its passed attempt's message lists them as unread.
   No stage asks the owner about a changed locked file,
   since no answer would change it.
   Understand and specify skip it,
@@ -6891,6 +6919,35 @@ from spec §6 rows 1 to 7:
       as when a retried row runs after the item was asked again,
       the command is ignored,
       since its author never saw that question (PBI 219).
+    - While the item waits in FeatureChangeRequest,
+      `/approve` and `/changes` go through `decideFeatureChange(deps, d)` instead of `decide` (PBI 365).
+      Only a product owner's applies,
+      and anyone else's gets one reply saying only a product owner can approve or turn down the request.
+      It locks the item's row,
+      so the same command handled twice applies once.
+      Approve commits each file's proposed version to the run's branch with `RepoHost.commitFiles`,
+      in one commit on top of the branch's head,
+      and moves `features_lock_sha` to it.
+      Changes keeps the lock,
+      and sets `retry_carry` on the run's last attempt,
+      other than a merge pass,
+      to `{ tried: 0, findings: [turnedDownFinding(note)] }`,
+      so `/context` hands the note to the stage that asked as its `retry`.
+      Either way the item moves through `feature_change_decided` to Queued,
+      and `next_stage` is left as it was:
+      the stage that asked,
+      or for a request pr-review's addresser raised,
+      the open-pr or address stage the run was at while pr-review ran.
+      The next claim's pr-review then gives the note to its addresser's brief under "Your last attempt failed".
+      and a `decision` event with `about: "feature_change"` writes its announcement outbox row.
+      A command posted before the request was asked is ignored.
+      Run detail gives a product owner Approve the change and Ask for changes,
+      with a note box,
+      after the request's files,
+      posting to `POST /items/:id/feature-change`,
+      which answers 403 to anyone else.
+      Once no request is open,
+      the page says who approved or turned down the last one and when.
     - `handleWebhook` writes one comment command outbox row per item a new `comment` event names,
       and the worker runs `applyComment` from each (PBI 219).
     - `nextUp(c, limit, { resumeOnly })` in `src/store/items.ts` returns the items `claimNext` would pick,

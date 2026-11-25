@@ -515,6 +515,21 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       return readText(await client(), split(repo), ref, path);
     },
 
+    // PBI 365: through the Git data API, one tree on the head's with every file replaced, and one commit on the head.
+    // The ref moves without force, so a push that moved the branch meanwhile fails the call instead of being lost.
+    async commitFiles({ repo, branch, message, files }) {
+      const gh = await client();
+      const r = split(repo);
+      const head = (await gh.request("GET /repos/{owner}/{repo}/git/ref/{ref}", { ...r, ref: `heads/${branch}` })).data.object.sha as string;
+      const baseTree = (await gh.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { ...r, commit_sha: head })).data.tree.sha as string;
+      const tree = (await gh.request("POST /repos/{owner}/{repo}/git/trees", {
+        ...r, base_tree: baseTree, tree: files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.text })),
+      })).data.sha as string;
+      const sha = (await gh.request("POST /repos/{owner}/{repo}/git/commits", { ...r, message, tree, parents: [head] })).data.sha as string;
+      await gh.request("PATCH /repos/{owner}/{repo}/git/refs/{ref}", { ...r, ref: `heads/${branch}`, sha, force: false });
+      return sha;
+    },
+
     async defaultBranchSha(repo) {
       const gh = await client();
       const r = split(repo);

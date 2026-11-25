@@ -300,6 +300,16 @@ export function fakeRepoHost(): RepoHost & {
     async readFile(repo, ref, path) {
       return files.get(`${repo}@${ref}:${path}`) ?? null;
     },
+    async commitFiles({ repo, branch, files: changed }) {
+      // A branch's line in `branches`, oldest first: the new commit goes on its head, holding the files given.
+      const line = branches.get(`${repo}@${branch}`);
+      if (!line?.length) throw new Error(`no branch ${branch} in ${repo}`);
+      const sha = `commit-${branch}-${line.length + 1}`;
+      parents.set(`${repo}@${sha}`, line.at(-1)!);
+      for (const f of changed) files.set(`${repo}@${sha}:${f.path}`, f.text);
+      line.push(sha);
+      return sha;
+    },
     async defaultBranchSha(repo) {
       const head = heads.get(repo);
       if (!head) throw new Error(`no default branch head for ${repo}`);

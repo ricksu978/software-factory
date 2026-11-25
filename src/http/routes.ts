@@ -7,7 +7,7 @@ import { classify, REGRESSION_TAG } from "../bdd/messages.ts";
 import { itemDurations, type Move, type QuestionSpan, type StageSpan } from "../core/durations.ts";
 import type { ItemState } from "../core/states.ts";
 import type { CiFailure } from "../cell/api-client.ts";
-import { decide, revivable, type DecisionKind } from "../control/decisions.ts";
+import { decide, decideFeatureChange, FEATURE_CHANGE, revivable, type DecisionKind } from "../control/decisions.ts";
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
@@ -325,7 +325,7 @@ export async function ruleChangesOf(pool: pg.Pool, id: string, isOwner: boolean)
   };
 }
 
-async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, isOwner = false): Promise<RunDetail | null> {
+async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, isOwner = false, productOwner = false): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
   if (!item) return null;
@@ -357,8 +357,20 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, i
     durations: await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))()),
     ruleChanges: await ruleChangesOf(pool, id, isOwner),
     featureChange: await featureChangeRequest(pool, id),
+    // PBI 365: only the Product Owner decides on a feature change request, as at sign-off.
+    canDecideFeatureChange: productOwner,
+    featureChangeDecision: await featureChangeDecision(pool, id),
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
+}
+
+/** PBI 365: the latest decision on a feature change request of the item, with who made it and when, or null. */
+async function featureChangeDecision(pool: pg.Pool, id: string): Promise<{ kind: "approve" | "changes"; by: string; at: Date } | null> {
+  return (await pool.query<{ kind: "approve" | "changes"; by: string; at: Date }>(
+    `select e.payload->>'kind' as kind, coalesce(u.github_login, u.email, u.subject) as by, e.at from event e
+     left join "user" u on u.id::text = e.actor_id
+     where e.item_id = $1 and e.kind = 'decision' and e.payload->>'about' = $2 order by e.at desc limit 1`, [id, FEATURE_CHANGE],
+  )).rows[0] ?? null;
 }
 
 /**
@@ -611,9 +623,9 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       await streams.open(req, res);
       return true;
     }
-    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer|rule-approval))?$/.exec(path);
+    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer|rule-approval|feature-change))?$/.exec(path);
     if (itemPath && req.method === "GET" && !itemPath[2]) {
-      const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"), requireRole(user, "owner"));
+      const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"), requireRole(user, "owner"), user.product_owner);
       if (!detail) send(res, 404, "No such item.");
       // Times show in the zone the viewer's browser sent, and a running attempt's time so far runs to now (PBI 189).
       else send(res, 200, runDetailPage({ ...detail, zone: zoneFrom(req.headers.cookie), now: deps.now?.() ?? new Date() }, banner));
@@ -636,6 +648,29 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         console.log(`rule change: ${identity.subject} approved the rule changes of item ${itemPath[1]}`);
         send(res, 303, "", { location: `/items/${itemPath[1]}` });
       }
+      return true;
+    }
+    // PBI 365: the Product Owner approves or turns down a feature change request, with the same effect as the comment.
+    if (itemPath && req.method === "POST" && itemPath[2] === "feature-change") {
+      const body = await form(req);
+      const kind = body.decision === "approve" || body.decision === "changes" ? body.decision : null;
+      if (!kind) {
+        send(res, 400, "Pick approve or changes.");
+        return true;
+      }
+      if (!user.product_owner) {
+        send(res, 403, "Only a product owner can approve or turn down a feature change request.");
+        return true;
+      }
+      const known = (await deps.pool.query("select 1 from item where id = $1", [itemPath[1]])).rowCount;
+      if (!known) {
+        send(res, 404, "No such item.");
+        return true;
+      }
+      const outcome = await decideFeatureChange(deps, { itemId: itemPath[1], userId: user.id, kind, text: body.note ?? "", via: "dashboard" });
+      if (outcome === "forbidden") send(res, 403, "Only a product owner can approve or turn down a feature change request.");
+      else if (outcome === "ignored") send(res, 409, "That item isn't waiting on a feature change request.");
+      else send(res, 303, "", { location: `/items/${itemPath[1]}` });
       return true;
     }
     if (itemPath && req.method === "POST" && itemPath[2]) {

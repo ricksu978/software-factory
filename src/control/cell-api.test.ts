@@ -637,6 +637,17 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.retry, null);
   });
 
+  test("context hands a claim at open-pr pr-review's carry when pr-review's turned-down feature change was the run's last attempt (PBI 365)", async () => {
+    const cell = await claimed("open-pr");
+    const carry = { tried: 0, findings: ["The Product Owner turned down your feature change request."] };
+    await db.pool.query(
+      `insert into stage_run (run_id, stage_id, attempt, status, retry_carry, started_at) values
+         ($1, 'open-pr', 1, 'passed', null, now() - interval '2 minutes'), ($1, 'pr-review', 1, 'failed', $2, now() - interval '1 minute')`,
+      [cell.runId, JSON.stringify(carry)],
+    );
+    assert.deepEqual((await send(cell.runId, cell.token, "GET", "/context")).body.retry, { stageId: "pr-review", ...carry });
+  });
+
   test("context hands a claim at red no green carry, since no pass back to green runs before red (PBI 393)", async () => {
     const cell = await claimed("red");
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, retry_carry) values ($1, 'green', 1, 'failed', $2)",

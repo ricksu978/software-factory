@@ -437,6 +437,10 @@ export type RunDetail = {
   ruleChanges?: { changes: RuleChangeRead[]; waiting: boolean; canApprove: boolean; approval: { by: string; at: Date } | null } | null;
   /** PBI 364: the feature change request the item waits on in FeatureChangeRequest. Without one, no such section shows. */
   featureChange?: FeatureChangeFile[] | null;
+  /** PBI 365: true when the viewer is a product owner, who alone gets Approve the change and Ask for changes. */
+  canDecideFeatureChange?: boolean;
+  /** PBI 365: the latest decision on a feature change request of the item, shown once no request is open. */
+  featureChangeDecision?: { kind: "approve" | "changes"; by: string; at: Date } | null;
 };
 
 /** The id of Run detail's Feature change request section, which Floor and the state line link to (PBI 366). */
@@ -448,14 +452,29 @@ const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${esc
  * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
  * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
  */
-function featureChangeSection(files: FeatureChangeFile[]): string {
+function featureChangeSection(files: FeatureChangeFile[], id: string, canDecide: boolean): string {
   const line = (l: DiffLine | null) => l === null
     ? `<span class="muted">…</span>`
     : l.side === "before" ? `<del data-side="before">${escapeHtml(l.text)}</del>`
       : l.side === "after" ? `<ins data-side="after">${escapeHtml(l.text)}</ins>`
         : `<span data-side="same">${escapeHtml(l.text)}</span>`;
   const entries = files.map((f) => `<h3>${escapeHtml(f.path)}</h3><p data-reason>${escapeHtml(f.reason)}</p><pre class="diff">${lineDiff(f.before, f.after).map(line).join("\n")}</pre>`);
-  return `<h2 id="${FEATURE_CHANGE_ID}">Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}`;
+  return `<h2 id="${FEATURE_CHANGE_ID}">Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}${canDecide ? featureChangeForm(id) : ""}`;
+}
+
+/**
+ * PBI 365: the Product Owner's decision on a feature change request, after the changes it would make, as at sign-off.
+ * Approve commits the proposed files and locks them there, and Ask for changes keeps the lock and sends the note to
+ * the stage that asked.
+ */
+function featureChangeForm(id: string): string {
+  return `<form method="post" action="/items/${escapeHtml(id)}/feature-change"><label for="feature-change-note">Note for the factory</label><textarea id="feature-change-note" name="note"></textarea>
+<p><button name="decision" value="approve">Approve the change</button> <button name="decision" value="changes">Ask for changes</button></p></form>`;
+}
+
+/** PBI 365: who approved or turned down the item's last feature change request, and when. */
+function featureChangeDecisionLine(d: NonNullable<RunDetail["featureChangeDecision"]>, zone: string): string {
+  return `<p id="feature-change-decision">${escapeHtml(d.by)} ${d.kind === "approve" ? "approved" : "turned down"} the feature change request at ${local(d.at, zone)}.</p>`;
 }
 
 /** The item page's Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked. */
@@ -586,7 +605,7 @@ ${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n`
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
+${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange, d.item.id, d.canDecideFeatureChange === true) : d.featureChangeDecision ? featureChangeDecisionLine(d.featureChangeDecision, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
 }

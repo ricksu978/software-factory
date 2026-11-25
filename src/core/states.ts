@@ -12,7 +12,7 @@ export type ItemEvent =
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
   | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"
-  | "feature_change_requested";
+  | "feature_change_requested" | "feature_change_decided";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -32,6 +32,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["InProgress", "merged", "Accepted"],
   // A person may merge the PR while the item waits on the owner about a feature change (PBI 364).
   ["FeatureChangeRequest", "merged", "Accepted"],
+  // The Product Owner approves or turns down the request, and the run resumes at the stage that asked (PBI 365).
+  ["FeatureChangeRequest", "feature_change_decided", "Queued"],
   // A person may merge the PR while the item waits on a question asked after the PR opened (PBI 194).
   ["NeedsInput", "merged", "Accepted"],
   ["InReview", "approvals_met", "Accepted"], // Phase 1. In Phase 0 a merge is `merged`, a person's or the factory's (PBI 181).
