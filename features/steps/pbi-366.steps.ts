@@ -171,22 +171,34 @@ async function waited(world: object, ext: string): Promise<number> {
 // ---- the scheduler ----
 
 When("the scheduler ticks three times", long, async function () {
-  for (let i = 0; i < 3; i++) await tick(p17(this));
+  for (let i = 0; i < 3; i++) {
+    await tick(p17(this));
+    assert.ok(p17(this).ticked, "src/scheduler/scheduler.ts didn't tick");
+  }
 });
 
 When("the scheduler ticks and a viewer opens Floor", long, async function () {
   await tick(p17(this));
-  await open(this, "/");
+  assert.ok(p17(this).ticked, "src/scheduler/scheduler.ts didn't tick");
+  await opened(this, "/");
 });
 
 When("a viewer opens item {string}'s Run detail", long, async function (ext: string) {
-  await open(this, `/items/${p17(this).items[ext]}`);
+  await opened(this, `/items/${p17(this).items[ext]}`);
 });
 
 When("the scheduler ticks and a viewer opens item {string}'s Run detail", long, async function (ext: string) {
   await tick(p17(this));
-  await open(this, `/items/${p17(this).items[ext]}`);
+  assert.ok(p17(this).ticked, "src/scheduler/scheduler.ts didn't tick");
+  await opened(this, `/items/${p17(this).items[ext]}`);
 });
+
+/** Opens `path` on PBI 131's dashboard as a viewer, and checks the page came back. */
+async function opened(world: object, path: string): Promise<void> {
+  await open(world, path);
+  const c = issueCtx(world);
+  assert.equal(c.status, 200, `${path} answered ${c.status}: ${(c.page ?? "").slice(0, 300)}`);
+}
 
 // ---- the reminders on the board ----
 
