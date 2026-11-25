@@ -531,6 +531,16 @@ export async function upsertItem(c: pg.Pool | pg.PoolClient, item: NewItem): Pro
  * True when an Abandoned item's last move to Abandoned was a withdrawal from Eligible or NotReady, so it never passed
  * the readiness gate. Such an item comes back only through `returned`, to Eligible, never to Queued (PBI 168).
  */
+/** The state an Abandoned item left on its latest move to Abandoned, by transition or override (PBI 366). */
+export async function abandonedFrom(c: pg.Pool | pg.PoolClient, itemId: string): Promise<string | null> {
+  const last = (await c.query<{ from: string | null }>(
+    `select payload->>'from' as from from event
+     where item_id = $1 and kind in ('transition', 'override') and payload->>'to' = 'Abandoned' order by at desc limit 1`,
+    [itemId],
+  )).rows[0];
+  return last?.from ?? null;
+}
+
 export async function withdrawnBeforeQueue(c: pg.Pool | pg.PoolClient, itemId: string): Promise<boolean> {
   const last = (await c.query<{ from: string; event: string | null }>(
     `select payload->>'from' as from, payload->>'event' as event from event

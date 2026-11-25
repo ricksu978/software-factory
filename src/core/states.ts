@@ -12,7 +12,7 @@ export type ItemEvent =
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
   | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"
-  | "feature_change_requested" | "feature_change_decided";
+  | "feature_change_requested" | "feature_change_decided" | "reopened_feature_change";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -50,6 +50,9 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Abandoned", "requeued", "Queued"],
   ["Abandoned", "reopened_signoff", "SignOff"],
   ["Abandoned", "reopened_question", "NeedsInput"],
+  // An item abandoned while it waited on a feature change request goes back to waiting on it when re-queued, since
+  // the Product Owner hasn't decided and the request is still open (PBI 366).
+  ["Abandoned", "reopened_feature_change", "FeatureChangeRequest"],
   // Backlog changes (spec §5) reach every state that holds or awaits a run.
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as const).flatMap(
     (s): [ItemState, ItemEvent, ItemState][] => [[s, "withdrawn", "Abandoned"], [s, "criteria_changed", "Queued"]],

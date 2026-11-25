@@ -820,6 +820,7 @@ stateDiagram-v2
   Abandoned --> Queued: re-queued, or a late answer
   Abandoned --> SignOff: re-queued, sign-off still open
   Abandoned --> NeedsInput: re-queued, question still open, PR not closed
+  Abandoned --> FeatureChangeRequest: re-queued, request still open, PR not closed
   Done --> [*]
 </pre>
 
@@ -946,6 +947,12 @@ stateDiagram-v2
     not at any sign-off or question before it,
 
     and a new request on the same run starts the reminders again.
+
+    An item abandoned while it waited on the request, and re-queued with its PR not closed,
+
+    goes back to FeatureChangeRequest through <code>reopened_feature_change</code>, the request still open,
+
+    with the clock and reminders starting again.
 
     Floor's "Waiting on you" lists the item as waiting on the Product Owner,
 

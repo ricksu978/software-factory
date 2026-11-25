@@ -12,7 +12,7 @@ import type { ItemEvent } from "../core/states.ts";
 import { withTx } from "../store/db.ts";
 import { appendEvent, type Actor } from "../store/events.ts";
 import { FAILED_ON_MAIN, LAST_RECHECK } from "../store/rechecks.ts";
-import { claimNext, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue } from "../store/items.ts";
+import { claimNext, expireLeases, overrideItem, transitionItem, withdrawnBeforeQueue, abandonedFrom } from "../store/items.ts";
 import { activeOverrides, clearItemOverrides } from "../store/overrides.ts";
 import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
@@ -221,6 +221,14 @@ async function requeue(d: TickDeps, itemId: string) {
       // asked again (PBI 219).
       await transitionItem(c, itemId, event, system, { question: open.rows[0].body });
       await c.query("update question set asked_at = $2, reminders_sent = 0 where id = $1", [open.rows[0].id, d.now]);
+      return;
+    }
+    // An item abandoned while it waited on a feature change request goes back to waiting on it: the Product Owner never
+    // decided, so rerunning the stage would only ask again. Its latest move to Abandoned says so, since run.feature_change
+    // stays set after a decision. The clock restarts at this move to FeatureChangeRequest, and the reminders with it (PBI 366).
+    if (row.state === "Abandoned" && !prClosed && row.run_id && (await abandonedFrom(c, itemId)) === "FeatureChangeRequest") {
+      await transitionItem(c, itemId, "reopened_feature_change", system);
+      await c.query("update run set feature_change_reminders = 0 where id = $1", [row.run_id]);
       return;
     }
     // An item withdrawn before it was Queued never passed the readiness gate, so it goes back to Eligible to meet it

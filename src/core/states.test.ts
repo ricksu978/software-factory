@@ -42,6 +42,8 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["FeatureChangeRequest", "timed_out", "Abandoned"],
   // PBI 365: the Product Owner's decision on the request queues the item to resume at the stage that asked.
   ["FeatureChangeRequest", "feature_change_decided", "Queued"],
+  // PBI 366: an item abandoned while it waited on a feature change request goes back to waiting on it when re-queued.
+  ["Abandoned", "reopened_feature_change", "FeatureChangeRequest"],
 ];
 
 for (const [from, ev, to] of edges) test(`${from} --${ev}--> ${to}`, () => assert.equal(next(from, ev), to));
@@ -64,6 +66,9 @@ test("rechecked moves only a Failed item", () => {
 test("only a NotReady item takes a rule change approval, and only a Queued or later one a rules edit", () => {
   for (const s of ["Eligible", "Queued", "InProgress", "Abandoned"] as ItemState[]) assert.equal(next(s, "rule_change_approved"), null);
   for (const s of ["NotReady", "Eligible", "Accepted", "Done", "Abandoned"] as ItemState[]) assert.equal(next(s, "rules_edited"), null);
+});
+test("reopened_feature_change moves only an Abandoned item", () => {
+  for (const s of ["Failed", "Queued", "InProgress", "FeatureChangeRequest"] as ItemState[]) assert.equal(next(s, "reopened_feature_change"), null);
 });
 test("feature_change_requested moves only an InProgress item", () => {
   for (const s of ["Queued", "SignOff", "NeedsInput", "InReview", "FeatureChangeRequest"] as ItemState[]) assert.equal(next(s, "feature_change_requested"), null);

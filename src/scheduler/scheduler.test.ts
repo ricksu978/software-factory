@@ -5,6 +5,7 @@ import type { CheckRun } from "../adapters/types.ts";
 import { runToken } from "../control/cell-api.ts";
 import { withTx } from "../store/db.ts";
 import { requestFeatureChange } from "../store/feature-change.ts";
+import { transitionItem } from "../store/items.ts";
 import { clearRestartOnStart, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeLauncher } from "./launcher.ts";
@@ -703,6 +704,44 @@ describe("scheduler", dbTest, () => {
     await db.pool.query("update event set at = $2 where item_id = $1 and payload->>'to' = 'FeatureChangeRequest' and at > $2", [id, NOW]);
     await run(new Date(NOW.getTime() + 2 * DAY + 1));
     assert.equal((await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length, 2);
+  });
+
+  test("re-queued after it timed out, an item goes back to waiting on its feature change request, its clock reset (PBI 366)", async () => {
+    const id = await waitsOnFeatureChange("1", 5 * DAY + 1);
+    await run();
+    assert.equal((await state(id)).state, "Abandoned");
+    const reminders = async () => (await backlog.comments("1")).filter((b) => b.startsWith("Reminder")).length;
+    const before = await reminders();
+    await override("requeue", id);
+    const later = new Date(NOW.getTime() + 60_000);
+    await run(later);
+    assert.equal((await state(id)).state, "FeatureChangeRequest");
+    assert.deepEqual(started, [], "the stage that asked doesn't run again");
+    const r = (await db.pool.query("select next_stage, feature_change_reminders from run where item_id = $1", [id])).rows[0];
+    assert.deepEqual(r, { next_stage: "green", feature_change_reminders: 0 });
+    // The event log stamps the move with the database's clock, so it's set to the tick's, as the helper above does.
+    await db.pool.query("update event set at = $2 where item_id = $1 and payload->>'event' = 'reopened_feature_change'", [id, later]);
+    // The clock starts at the re-queue: nothing is due a day on, a reminder 2 days on, and no timeout until 5.
+    await run(new Date(later.getTime() + DAY));
+    assert.equal(await reminders(), before);
+    await run(new Date(later.getTime() + 2 * DAY + 1));
+    assert.equal(await reminders(), before + 1);
+    assert.equal((await state(id)).state, "FeatureChangeRequest");
+  });
+
+  test("re-queued after a decision, an item abandoned from elsewhere goes to Queued, though its run still holds a request (PBI 366)", async () => {
+    const id = await waitsOnFeatureChange("1", 3_600_000);
+    const t = { actor: "system", actorId: "t" } as const;
+    await withTx(db.pool, async (c) => {
+      await transitionItem(c, id, "feature_change_decided", t);
+      await transitionItem(c, id, "withdrawn", t);
+    });
+    await db.pool.query("update wip_policy set current_wip = 0");
+    await override("requeue", id);
+    await run();
+    const moves = (await db.pool.query("select payload->>'event' as event from event where item_id = $1 and kind = 'transition' order by at", [id])).rows;
+    assert.ok(moves.some((m) => m.event === "requeued"));
+    assert.ok(!moves.some((m) => m.event === "reopened_feature_change"));
   });
 
   test("resume records who lifted the pause, and why", async () => {

@@ -147,6 +147,18 @@ Feature: A FeatureChangeRequest item waits without a WIP slot, gets reminders, i
       Then item "482" is "Abandoned"
       And a cell starts for item "B"
 
+  Rule: An item abandoned while it waited goes back to waiting on its request when re-queued, its PR not closed
+
+    @ac-1 @db
+    Scenario: Re-queued after it timed out, the item waits on its feature change request again and no cell starts
+      Given a factory with WIP 1 and a review capacity of 3
+      And item "482" moved to FeatureChangeRequest 6 days ago
+      And the scheduler ticks
+      And item "482" is "Abandoned"
+      When an operator re-queues item "482" and the scheduler ticks
+      Then item "482" is "FeatureChangeRequest"
+      And no cell starts
+
   Rule: Floor's "Waiting on you" shows an item in FeatureChangeRequest as waiting on the Product Owner, with a link to the request
 
     @ac-2 @db
