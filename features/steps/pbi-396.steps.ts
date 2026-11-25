@@ -55,8 +55,8 @@ const SUITE = { timeout: 60 * 60_000 };
 type Conn = { queries: string[]; requests: number; ready: number; closed: boolean };
 type W = Worker157 & { tag: string; conns: Conn[]; clock?: FakeClock; boardId?: string; firstTickAt?: number };
 
-type Case = { name: string; uri: string; statuses: string[]; stepMs: number };
-type Suite = { code: number | null; out: string; cases: Case[]; pickles: number; timers?: string[] };
+export type Case = { name: string; uri: string; statuses: string[]; stepMs: number; pickleId: string; steps: string[] };
+export type Suite = { code: number | null; out: string; cases: Case[]; pickles: number; timers?: string[] };
 
 type Ctx = {
   workers: W[];
@@ -641,12 +641,12 @@ Then("the second worker's log records that another worker holds the lock and it 
 // ---- @ac-5: PBI 157's, PBI 158's and PBI 376's own scenarios ----
 
 /** The SHA-256 of each feature file as it was on main before this item, at c753db6, with LF line ends. */
-const ON_MAIN: Record<number, { file: string; sha256: string }> = {
+export const ON_MAIN: Record<number, { file: string; sha256: string }> = {
   157: { file: "features/pbi-157-worker-lock.feature", sha256: "9c1996012e238cdb3c0c65851678689abdc2b7c05989617f2ef8fe4ddf72cd48" },
   158: { file: "features/pbi-158-worker-heartbeat.feature", sha256: "e293b437d35182eb9dab71e8ebd1e6b89a94aa85957c996eb5b1178895c8c158" },
 };
 
-function featureFiles(pbi: number): string[] {
+export function featureFiles(pbi: number): string[] {
   const files = readdirSync("features").filter((f) => f.startsWith(`pbi-${pbi}-`) && f.endsWith(".feature")).map((f) => join("features", f));
   assert.ok(files.length, `PBI ${pbi} has no feature file`);
   return files;
@@ -655,7 +655,7 @@ function featureFiles(pbi: number): string[] {
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Runs cucumber-js as `npm run bdd` does, but with its message report in a temp file, and reads that report. */
-async function runSuite(world: object, files: string[], extra: string[], recordTimers: boolean): Promise<void> {
+export async function runSuite(world: object, files: string[], extra: string[], recordTimers: boolean): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "pbi396-suite-"));
   const report = join(dir, "report.ndjson");
   const timers = join(dir, "timers.ndjson");
@@ -668,12 +668,12 @@ async function runSuite(world: object, files: string[], extra: string[], recordT
   const code = await new Promise<number | null>((resolve) => child.on("close", (c) => resolve(c)));
   const suite: Suite = { code, out, cases: [], pickles: 0 };
   if (existsSync(report)) {
-    const pickles = new Map<string, { name: string; uri: string; steps: Set<string> }>();
+    const pickles = new Map<string, { name: string; uri: string; steps: Set<string>; texts: string[] }>();
     const cases = new Map<string, { pickleId: string; stepIds: Set<string> }>();
     const started = new Map<string, Case & { stepIds: Set<string> }>();
     for (const line of readFileSync(report, "utf8").split("\n").filter(Boolean)) {
       const m = JSON.parse(line);
-      if (m.pickle) pickles.set(m.pickle.id, { name: m.pickle.name, uri: m.pickle.uri, steps: new Set(m.pickle.steps.map((s: { id: string }) => s.id)) });
+      if (m.pickle) pickles.set(m.pickle.id, { name: m.pickle.name, uri: m.pickle.uri, steps: new Set(m.pickle.steps.map((s: { id: string }) => s.id)), texts: m.pickle.steps.map((s: { text: string }) => s.text) });
       if (m.testCase) {
         cases.set(m.testCase.id, {
           pickleId: m.testCase.pickleId,
@@ -683,7 +683,7 @@ async function runSuite(world: object, files: string[], extra: string[], recordT
       if (m.testCaseStarted) {
         const tc = cases.get(m.testCaseStarted.testCaseId)!;
         const p = pickles.get(tc.pickleId)!;
-        started.set(m.testCaseStarted.id, { name: p.name, uri: p.uri, statuses: [], stepMs: 0, stepIds: tc.stepIds });
+        started.set(m.testCaseStarted.id, { name: p.name, uri: p.uri, statuses: [], stepMs: 0, stepIds: tc.stepIds, pickleId: tc.pickleId, steps: p.texts });
       }
       if (m.testStepFinished) {
         const k = started.get(m.testStepFinished.testCaseStartedId);
@@ -696,7 +696,7 @@ async function runSuite(world: object, files: string[], extra: string[], recordT
       }
       if (m.testCaseFinished?.willBeRetried === false) {
         const k = started.get(m.testCaseFinished.testCaseStartedId);
-        if (k) suite.cases.push({ name: k.name, uri: k.uri, statuses: k.statuses, stepMs: k.stepMs });
+        if (k) suite.cases.push({ name: k.name, uri: k.uri, statuses: k.statuses, stepMs: k.stepMs, pickleId: k.pickleId, steps: k.steps });
       }
     }
     // cucumber-js reports a pickle for every scenario in the files it reads, and a test case only for each one its
@@ -711,7 +711,7 @@ async function runSuite(world: object, files: string[], extra: string[], recordT
 const failed = (k: Case) => k.statuses.some((s) => s !== "PASSED");
 const tail = (s: Suite) => s.out.slice(-4_000);
 
-function suiteOf(world: object): Suite {
+export function suiteOf(world: object): Suite {
   const s = ctx(world).suite;
   assert.ok(s, "no scenario was run");
   return s;
@@ -735,8 +735,12 @@ When("the owner runs every scenario of PBI {int}", SUITE, async function (pbi: n
 
 Then("the scenario passes", function () {
   const s = suiteOf(this);
-  assert.equal(s.cases.length, 1, `${s.cases.length} scenarios ran, not one: ${tail(s)}`);
-  assert.ok(!failed(s.cases[0]), `the scenario ended ${JSON.stringify(s.cases[0].statuses)}: ${tail(s)}`);
+  // A Scenario Outline runs once for each of its examples, all under the scenario's one name (PBI 283).
+  assert.ok(s.cases.length > 0, `no scenario ran: ${tail(s)}`);
+  const named = new Set(s.cases.map((k) => k.name));
+  assert.equal(named.size, 1, `${named.size} scenarios ran, not one: ${JSON.stringify([...named])}`);
+  const bad = s.cases.filter(failed).map((k) => JSON.stringify(k.statuses));
+  assert.deepEqual(bad, [], `the scenario didn't pass: ${tail(s)}`);
 });
 
 Then("its steps took less than {int} real seconds in all", function (n: number) {
