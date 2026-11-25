@@ -6594,6 +6594,37 @@ from spec §6 rows 1 to 7:
   `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
   and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
   Today's dashboard keeps serving these pages on 7400 until step 9.
+- Since step 8c (2026-11-07 design,
+  §05 and §07,
+  PBI 280),
+  the SPA's Floor is live.
+  `startLiveFloor` in `web/src/live.ts`,
+  which `FloorPage` in `web/src/App.tsx` starts once Floor has drawn,
+  follows `GET /bff/v1/events` through the shell's `call`
+  and reads the floor again once a burst of events has settled,
+  250 ms after the last event and at most a second after the first.
+  When a stream ends it reads `/auth/session`,
+  so a session that ended goes to sign-in at once,
+  then opens a new stream a second later,
+  doubling the wait up to 15 seconds after each failed attempt or short-lived stream,
+  and reads the floor again once the new stream is open.
+  It also reads the floor every 30 seconds with no event.
+  While the Controls' Reason field has focus or holds text it reads nothing,
+  and it catches up once the field is empty and has lost focus.
+  Once the factory accepts the Controls form,
+  the page draws the form afresh with the field empty and tells Floor so (`emptiedOnAccept` in `web/src/live.ts`),
+  since the reason has been sent.
+  Leaving Floor stops it.
+  The BFF (`src/bff/app.ts`) lifts its 30-second limit from a forwarded call once the API answers `text/event-stream`.
+  `GET /v1/floor` carries `outboxSetAside`,
+  the count of outbox rows with `failed_at` set,
+  and Floor shows "Outbox rows set aside: N" beside when the worker last ticked,
+  with a "Scheduler not ticking" banner from `schedulerBanner` in `web/src/lines.ts`
+  when the heartbeat is more than a minute old or missing.
+  `web/src/live.test.ts`,
+  `web/src/lines.test.ts`,
+  `src/bff/app.test.ts` and `src/api/main.test.ts` cover it,
+  and `features/pbi-280-live-floor-events-heartbeat-outbox.feature` drives Floor on a fake clock against a stubbed event stream.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,
