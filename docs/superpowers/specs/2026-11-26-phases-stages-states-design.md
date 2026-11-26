@@ -264,6 +264,7 @@ The first rollout step shows the model while the engine still stores today's sta
 A row that reads Queued reads Waiting with "Waits on #N" when the item has an open dependency, at the same stage.
 No row reads Merge. Until the model is stored, an approved PR reads Human Review up to the moment it merges.
 From rollout step 5 on, an item whose label is off reads Parked with "Factory label removed", at the stage its row gives.
+Only the poller sees whether an issue is open, so it marks the first kind of `Abandoned` row on its first reading after that step ships.
 
 Stage ids map as `open-pr` to Submit and `sign-off` to Sign Off, and the rest keep their names.
 Until the PR review stage is removed, an item running `pr-review` shows as "PR Review" under Deliver.

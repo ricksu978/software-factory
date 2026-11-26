@@ -213,7 +213,7 @@ export function position(i: PositionInput): Position;
 - Create: a migration for `item.parked_since`
 
 **Interfaces:**
-- Produces: `State` gains `"Parked"`. The item row gains `parked_since`, a time or null, set when the label is removed and cleared when it comes back. `PositionInput` gains `parkedSince: Date | null`, and `position` gives Parked with "Factory label removed" at the stage it would otherwise give whenever it is set. `ItemState` gains nothing, so what was stored before the park is untouched.
+- Produces: `State` gains `"Parked"`. The item row gains `parked_since`, a time or null, set when the label is removed and cleared when it comes back. `PositionInput` gains `parkedSince: Date | null`, and `position` gives Parked with "Factory label removed" at the stage it would otherwise give whenever it is set. `ItemState` gains nothing, so what was stored before the park is untouched. For an `Abandoned` row, `position` gives Readiness underneath when `parkedSince` is set and Not Done when it is null, so no other field is needed for the rows the factory withdrew for a missing label. The poller sets `parked_since` on those rows on its first reading after this ships: each `Abandoned` row that `withdrawnBeforeQueue` in `src/store/items.ts` names and whose issue it reads as open, with the time of that withdrawal.
 
 **Acceptance criteria:**
 - [ ] Closing the issue on GitHub closes the PBI as Not Done from any stage before its PR merges.
@@ -240,7 +240,8 @@ export function position(i: PositionInput): Position;
 - [ ] Answering "not done" closes the PBI as Not Done.
 - [ ] The factory closes no PBI by itself. No move ends at Not Done without a person's action.
 - [ ] An item stored as `Abandoned` when this ships reads as Not Done, reopens the same way, and doesn't restart by itself on the first poll after this ships.
-- [ ] One stored as `Abandoned` that was withdrawn before it was queued, and whose issue is still open, reads as Parked at Readiness. Putting its label back sends it through Readiness, as `returned` does today.
+- [ ] One stored as `Abandoned` that was withdrawn before it was queued, and whose issue the poller reads as open, gets `parked_since` set on the first poll after this ships and reads as Parked at Readiness. Putting its label back sends it through Readiness, as `returned` does today.
+- [ ] One stored as `Abandoned` whose issue is closed, or that was withdrawn after it was queued, gets no mark and reads as Not Done.
 
 ## Task 7: Split
 
@@ -333,9 +334,9 @@ export function position(i: PositionInput): Position;
 
 **Acceptance criteria:**
 - [ ] Every item row holds a stage, and a state unless it is Closed.
-- [ ] The backfill gives each existing row the position Task 1's function gives it with `parkedSince` null.
+- [ ] The backfill gives each existing row the position Task 1's function gives it with `parkedSince` null, and leaves `parked_since` as it is. A legacy `Abandoned` row that Task 6 marked is stored as Readiness underneath, with its mark still set.
 - [ ] A Parked item's stored state and reason are the ones it had before the park, and it comes back to them when its label returns after this ships.
-- [ ] After any move of an item, or of its run to another stage, the stored position equals what Task 1's function gives for the row.
+- [ ] After any move of an item, or of its run to another stage, the stored position equals what Task 1's function gives for the row with `parkedSince` null.
 - [ ] The same holds after a write that moves neither: a question answered, the item's dependencies refreshed, a rule approval asked for or given, and an operator's stop.
 - [ ] A write that fails rolls the stored position back with it.
 
