@@ -463,7 +463,10 @@ Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kil
   assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
 });
 
-Then("Floor shows {string}", function (text: string) {
+Then("Floor shows {string}", long, async function (text: string) {
+  // PBI 366's scenarios read Floor straight after a tick, from the dashboard as it stands, through `floorShows`.
+  const own = (this as { floorShows?: (text: string) => Promise<void> }).floorShows;
+  if (own) return own(text);
   assert.ok(unescape(floorHtml(this)).includes(text), `Floor doesn't show "${text}"`);
 });
 

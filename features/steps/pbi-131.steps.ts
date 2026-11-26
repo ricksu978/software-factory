@@ -319,6 +319,8 @@ export function render(html: string): Rendered {
   let skip = 0;
   for (const m of html.matchAll(/<[^>]*>|&[#\w]+;|[^<&]+|[<&]/g)) {
     const t = m[0];
+    // A comment reads as nothing: react-dom/server puts one between adjacent text, as in the SPA's "#<!-- -->482".
+    if (t.startsWith("<!--")) continue;
     if (t.startsWith("<") && t.length > 1) {
       if (/^<(script|style|title)\b/i.test(t)) skip++;
       else if (/^<\/(script|style|title)>/i.test(t)) skip = Math.max(0, skip - 1);
