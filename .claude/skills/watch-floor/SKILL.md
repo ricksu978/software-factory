@@ -32,7 +32,7 @@ Done when the first digest line arrives.
 
 A `FeatureChangeRequest` item shows on no part of the Floor yet. When an `InProgress` item leaves `in flight`, run `aspire logs cell-api --search "FeatureChangeRequest"`. A line `item N: InProgress -> FeatureChangeRequest (feature_change_requested)` means its stage asked to change a locked feature file. Report it with the request the factory posted as a comment on issue #N.
 
-**Approving a sign-off.** The token is the last `dev-login?token=` that `aspire logs control --search "dev-login"` prints. Then:
+**Approving a sign-off.** The token is the last `dev-login?token=` that `aspire logs control --apphost <main checkout>/aspire-apphost --search "dev-login"` prints. The main checkout is the parent of `git rev-parse --path-format=absolute --git-common-dir`; from a worktree, `aspire` without `--apphost` finds no running AppHost. Then:
 
 ```
 curl -s -o /dev/null -w "%{http_code}\n" -b "factory_dev=<token>" -H "Origin: http://localhost:7400" -d decision=approve -d note= http://localhost:7400/items/<id>/signoff
