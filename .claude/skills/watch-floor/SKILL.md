@@ -20,6 +20,8 @@ banners: Drain done. Reason: r. | waiting: #319 InReview pr=#415 item=<uuid>; #2
 
 Done when the first digest line arrives.
 
+**Every `aspire` command names the AppHost.** The running AppHost belongs to the main checkout, the parent of `git rev-parse --path-format=absolute --git-common-dir`. From a worktree, `aspire` without `--apphost` finds none and fails on a selection prompt it can't show, so write each `aspire logs` below as `aspire logs <resource> --apphost <main checkout>/aspire-apphost`. The script does this for itself.
+
 ## 2. Act on each line
 
 | The line shows | You do |
@@ -32,7 +34,7 @@ Done when the first digest line arrives.
 
 A `FeatureChangeRequest` item shows on no part of the Floor yet. When an `InProgress` item leaves `in flight`, run `aspire logs cell-api --search "FeatureChangeRequest"`. A line `item N: InProgress -> FeatureChangeRequest (feature_change_requested)` means its stage asked to change a locked feature file. Report it with the request the factory posted as a comment on issue #N.
 
-**Approving a sign-off.** The token is the last `dev-login?token=` that `aspire logs control --apphost <main checkout>/aspire-apphost --search "dev-login"` prints. The main checkout is the parent of `git rev-parse --path-format=absolute --git-common-dir`; from a worktree, `aspire` without `--apphost` finds no running AppHost. Then:
+**Approving a sign-off.** The token is the last `dev-login?token=` that `aspire logs control --search "dev-login"` prints. Then:
 
 ```
 curl -s -o /dev/null -w "%{http_code}\n" -b "factory_dev=<token>" -H "Origin: http://localhost:7400" -d decision=approve -d note= http://localhost:7400/items/<id>/signoff
