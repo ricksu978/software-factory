@@ -296,7 +296,7 @@ The owner picked **new words first, new behaviour after**.
 ## Rollout
 
 Each step is one PBI or a few, and each fits a Sprint.
-Steps 3 to 9 change §5 or §6, so each carries a `## Changes the factory's rules` section and waits for the owner's approval.
+Steps 3 to 8, and the last PBI of step 9, change §5 or §6, so each of those carries a `## Changes the factory's rules` section and waits for the owner's approval.
 
 1. **Before anything.** #414 ships, so a rule-change PBI can reach its approval. The dashboard cut-over, #281 to #283, ships, so the pages are built once.
 2. **Show the model.** A pure function works out stage, state, reason and since from what is stored today. Floor, the item page, the API and the GitHub board show them. Waiting on You becomes the Needs Human list, oldest first.
