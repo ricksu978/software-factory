@@ -6,7 +6,7 @@ import type { ClaimKey } from "../store/items.ts";
 import type { StoredReadinessCheck } from "../store/readiness-checks.ts";
 import { withEffort } from "../store/effort.ts";
 import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
-import { lineDiff, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
+import { FEATURE_CHANGE_ANCHOR, lineDiff, WAITS_ON_OWNER, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
@@ -65,7 +65,9 @@ export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: str
   ci_failure?: CiFailure | null };
 /** PBI 292: a CI failure on a commit one of the run's stages pushed, as the cell reported it for Green to fix. */
 export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
-export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null };
+export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null;
+  /** PBI 366: true for an item in FeatureChangeRequest, which waits on the Product Owner's decision on its request. */
+  feature_change?: boolean };
 export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
 /** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
 export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
@@ -353,7 +355,7 @@ export function floorPage(f: {
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a> <a href="/configuration">Configuration</a></p>
 <h2>Waiting on you</h2>
-${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span>${st(w.id)}</li>`), "Nothing waits on you.")}
+${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span>${w.feature_change ? ` ${waitsOnOwner(`/items/${escapeHtml(w.id)}`)}` : ""}${st(w.id)}</li>`), "Nothing waits on you.")}
 <h2>Next up</h2>
 ${list(f.next.map((n) => `<li>${named(n)}${st(n.id)}</li>`), "Nothing is ready to start.")}
 <h2>Final stage</h2>
@@ -451,6 +453,11 @@ const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${esc
  * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
  * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
  */
+/** PBI 366: an item in FeatureChangeRequest waits on the Product Owner, with a link to the request on Run detail at `path`. */
+function waitsOnOwner(path: string): string {
+  return `${WAITS_ON_OWNER} <a href="${path}#${FEATURE_CHANGE_ANCHOR}">Feature change request</a>.`;
+}
+
 function featureChangeSection(files: FeatureChangeFile[], id: string, canDecide: boolean): string {
   const line = (l: DiffLine | null) => l === null
     ? `<span class="muted">…</span>`
@@ -458,7 +465,7 @@ function featureChangeSection(files: FeatureChangeFile[], id: string, canDecide:
       : l.side === "after" ? `<ins data-side="after">${escapeHtml(l.text)}</ins>`
         : `<span data-side="same">${escapeHtml(l.text)}</span>`;
   const entries = files.map((f) => `<h3>${escapeHtml(f.path)}</h3><p data-reason>${escapeHtml(f.reason)}</p><pre class="diff">${lineDiff(f.before, f.after).map(line).join("\n")}</pre>`);
-  return `<h2>Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}${canDecide ? featureChangeForm(id) : ""}`;
+  return `<h2 id="${FEATURE_CHANGE_ANCHOR}">Feature change request</h2><p>A stage after sign-off asks to change ${files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps ${files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the owner.</p>${entries.join("")}${canDecide ? featureChangeForm(id) : ""}`;
 }
 
 /**
@@ -599,7 +606,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
       ] as [string, string][], d.item.id)}`
     : "";
   return page(d.item.title, `<h1>${issueRef(d.item.external_id, d.item.repo)} ${escapeHtml(d.item.title)}</h1>
-<p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}</p>
+<p>${escapeHtml(d.item.state)}${r?.open ? withPr({ ...r, state: d.item.state }) : ""}${r?.next_stage ? `, resumes at ${escapeHtml(r.next_stage)}` : ""}${d.item.state === "FeatureChangeRequest" && d.featureChange?.length ? `. ${waitsOnOwner("")}` : ""}</p>
 ${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n` : ""}${d.splitInto?.length ? `<h2>Split into</h2>${splitInto(d.splitInto)}` : ""}
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>

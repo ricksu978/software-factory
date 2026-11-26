@@ -1,5 +1,6 @@
 // The pieces Floor, Run detail, Phase 0 and Activity share (redesign step 8b): an item's issue number and title, its
 // PR, a banner, a cost cell and a time, each as today's pages in src/http/views.ts draw it.
+import { FEATURE_CHANGE_ANCHOR, WAITS_ON_OWNER } from "../../../src/core/feature-change.ts";
 import type { FormEvent, ReactNode } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -92,8 +93,8 @@ export function SplitInto({ children }: { children: { externalId: string; title:
 }
 
 /** A section heading as Floor and Run detail head their parts. */
-export function H2({ children }: { children: ReactNode }) {
-  return <h2 className="mt-6 mb-2 text-lg font-semibold">{children}</h2>;
+export function H2({ children, id }: { children: ReactNode; id?: string }) {
+  return <h2 id={id} className="mt-6 mb-2 text-lg font-semibold">{children}</h2>;
 }
 
 /**
@@ -115,6 +116,11 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 /** A link inside a page's text. */
+/** PBI 366: an item in FeatureChangeRequest waits on the Product Owner, with a link to the request on Run detail at `path`. */
+export function WaitsOnOwner({ path }: { path: string }) {
+  return <> {WAITS_ON_OWNER} <A href={`${path}#${FEATURE_CHANGE_ANCHOR}`}>Feature change request</A>.</>;
+}
+
 export function A({ href, children }: { href: string; children: ReactNode }) {
   return <a className="text-primary underline-offset-4 hover:underline" href={href}>{children}</a>;
 }

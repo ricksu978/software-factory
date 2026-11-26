@@ -7,6 +7,7 @@
 import type pg from "pg";
 import { revivable } from "../control/decisions.ts";
 import { criteriaWithScenarios, fixingCi, itemStanding, itemTime, verdicts } from "../http/routes.ts";
+import { featureChangeRequest } from "../store/feature-change.ts";
 import { issueRepos } from "../store/issues.ts";
 import { readinessChecks } from "../store/readiness-checks.ts";
 
@@ -52,6 +53,8 @@ export async function itemDetail(pool: pg.Pool, id: string, canOperate: boolean,
     // The API serves every stored transcript at /v1/blobs/{ref}, so each one is a link.
     linkBlobs: true,
     fixingCi: fixingCi(item.state, run, stages),
+    // PBI 366: the request the item waits on in FeatureChangeRequest, or null.
+    featureChange: await featureChangeRequest(pool, id),
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
 }

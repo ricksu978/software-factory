@@ -9,11 +9,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
 import { withEffort } from "../../../src/store/effort.ts";
+import { FEATURE_CHANGE_ANCHOR } from "../../../src/core/feature-change.ts";
 import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
 import { CheckLink } from "./Floor.tsx";
-import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time } from "./parts.tsx";
+import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time, WaitsOnOwner } from "./parts.tsx";
 
 export { submitAnswer, submitItemControls, submitSignOff } from "../forms.ts";
 
@@ -107,6 +108,26 @@ function TimeSection({ t }: { t: ItemDurations }) {
   );
 }
 
+/**
+ * PBI 366: the feature change request the item waits on, each file under its path with the stage's reason and the
+ * version it proposes. The dashboard's item page also marks the lines changed from the lock commit.
+ */
+function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]> }) {
+  return (
+    <>
+      <H2 id={FEATURE_CHANGE_ANCHOR}>Feature change request</H2>
+      <p>A stage after sign-off asks to change {files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps {files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the Product Owner.</p>
+      {files.map((f) => (
+        <div key={f.path}>
+          <h3 className="mt-3 font-mono text-sm font-semibold">{f.path}</h3>
+          <p data-reason>{f.reason}</p>
+          <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{f.after}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Feature files, each under its path with its text as written. */
 function Files({ files }: { files: { path: string; text: string }[] }) {
   return files.map((f) => (
@@ -164,7 +185,8 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
     <div>
       <h1 className="mb-2 text-2xl font-semibold"><IssueRef external_id={d.item.external_id} repo={d.item.repo} /> {d.item.title}</h1>
       <Message text={message} />
-      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}</p>
+      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}{d.item.state === "FeatureChangeRequest" && d.featureChange?.length ? <>.<WaitsOnOwner path="" /></> : null}</p>
+      {d.featureChange?.length ? <FeatureChange files={d.featureChange} /> : null}
       {d.recheck && <p>{recheckLine(d.recheck.last, zone, true)}</p>}
       {d.splitInto?.length ? <><H2>Split into</H2><SplitInto children={d.splitInto} /></> : null}
       {d.claim && <p>{claimLines(d.claim)}</p>}
