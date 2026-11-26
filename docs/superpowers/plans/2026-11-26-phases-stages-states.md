@@ -264,7 +264,7 @@ export function position(i: PositionInput): Position;
 - [ ] It stays in Waiting while any child is open.
 - [ ] A split that can't be filed leaves the item at Split in Needs Human with "Split blocked", naming the child and the lines it failed.
 - [ ] A child reopened after its parent closed reopens the parent to Split in Waiting. The factory reopens the parent's issue, and the parent closes again by the same rules.
-- [ ] A child the factory doesn't hold counts by its issue: closed as completed counts as Done, and closed as not planned or as a duplicate counts as Not Done.
+- [ ] A child that isn't Done in the factory counts by its issue, whether the factory holds it in another state or not at all: closed as completed counts as Done, and closed as not planned or as a duplicate counts as Not Done. #426 builds the Done half before this task.
 - [ ] A child whose issue no longer exists counts as Not Done, so the parent never waits on it. (Review focus 4.)
 - [ ] The factory's own reopen of a parent's issue is never read as a person's reopen, so the parent goes to Split and never to Readiness.
 - [ ] A parent that is itself a filed child, whose own children got no label, sits at Split in Needs Human with "Split blocked", naming the children that wait for a label.
