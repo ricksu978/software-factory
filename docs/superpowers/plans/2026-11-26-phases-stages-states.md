@@ -16,7 +16,9 @@
 
 - Stage names, exactly: Readiness, Split, Rule Change, Understand, Specify, Sign Off, Red, Green, Self Review, Submit, Human Review, Address, Merge, Verify.
 - Final stage names, exactly: Done, Not Done, Partially Done.
-- State names, exactly: Queued, In Progress, Needs Human, Waiting.
+- State names, exactly: Queued, In Progress, Needs Human, Waiting, Parked.
+- Parked has one reason, exactly: Factory label removed.
+- The factory removes its opt-in label from no item.
 - Needs Human reasons, exactly: Item not ready, Split blocked, Rule change approval, Scenario sign-off, Question from the agent, Feature change decision, CI broken, Human review, PR closed, Stopped by an operator, Stage failed, Verify failed on `main`.
 - Waiting reasons, exactly: "Waiting for split children to complete" and "Waits on #N", with every open dependency named.
 - No task converts an in-flight item by hand. An item in any of today's states keeps moving after each task ships.
@@ -193,14 +195,14 @@ export function position(i: PositionInput): Position;
 - [ ] A merge that turns `main` red leaves the item at Verify in Needs Human with "Verify failed on `main`", and the factory files its bug PBI as today.
 - [ ] The re-check of that item's merge runs on the schedule it has today. When its rules no longer say the merge broke `main`, the item goes back to Verify in In Progress and on to Done without a person. Otherwise it stays as it is and nothing is commented.
 - [ ] An operator's stop leaves the item held at the stage it was stopped at, in Needs Human with "Stopped by an operator", and a re-queue carries on from the kept branch as today.
-- [ ] A person can re-queue an item in either reason, and it runs again at that stage.
-- [ ] A person can close an item in either reason. Until Task 6 it is withdrawn as today.
+- [ ] A person can re-queue an item in any of the three reasons, "Stage failed", "Verify failed on `main`" and "Stopped by an operator", and it runs again at that stage.
+- [ ] A person can close an item in any of the three. Until Task 6 it is withdrawn as today.
 - [ ] A stage that gives up by asking a question still asks it, with "Question from the agent" or "CI broken".
 - [ ] An item stored as `Failed` when this ships reads with the right reason and can be re-queued, with no edit to its row by hand.
 
 ## Task 6: Not Done, reopening and a closed PR
 
-**PBI title.** The Product Owner closes a PBI as Not Done, a reopened one starts over at Readiness, and a closed PR asks why
+**PBI title.** A closed issue closes a PBI as Not Done, a removed label parks it, a reopened one starts over at Readiness, and a closed PR asks why
 
 **Depends on.** Tasks 4 and 5.
 
@@ -209,16 +211,23 @@ export function position(i: PositionInput): Position;
 **Files:**
 - Modify: `src/core/states.ts`, `src/core/position.ts`, `src/watcher/poller.ts`, `src/watcher/webhook.ts`, `src/control/board.ts`, `src/scheduler/scheduler.ts`, `src/api/main.ts`, `web/src/pages/RunDetail.tsx`
 
+**Interfaces:**
+- Produces: `State` gains `"Parked"`, and `ItemState` gains a stored `Parked` until Task 12.
+
 **Acceptance criteria:**
-- [ ] Closing the issue on GitHub, or removing the factory's label, closes the PBI as Not Done from any stage before its PR merges.
-- [ ] A split parent, whose label the factory took off itself, is not closed for its missing label.
+- [ ] Closing the issue on GitHub closes the PBI as Not Done from any stage before its PR merges.
 - [ ] Closing the issue of an item whose PR has merged changes nothing, and the item goes on through Verify to Done.
-- [ ] The issue going from closed to open, the label coming back after it was removed, or the Reopen control on Run detail starts a Not Done PBI again at Readiness as a new run.
-- [ ] A Not Done item whose issue is open and labelled stays Not Done from poll to poll, and reopens only through the Reopen control.
+- [ ] Removing the factory's label parks the item: it keeps its stage, its state is Parked with "Factory label removed", and a cell running for it is stopped.
+- [ ] A Parked item is listed in Waiting on You, and holds no WIP slot and no review capacity.
+- [ ] Putting the label back queues the item at the stage it was parked at, on the same run and branch.
+- [ ] Closing the issue of a Parked item closes it as Not Done.
+- [ ] A split parent the factory took the label from before Task 7 ships is not parked, and neither is an item whose PR has merged.
+- [ ] The issue going from closed to open, or the Reopen control on Run detail, starts a Not Done PBI again at Readiness as a new run.
+- [ ] A Not Done item whose issue is open stays Not Done from poll to poll, and reopens only through the Reopen control.
 - [ ] The new run takes a new branch and pushes nothing to the first run's branch. Its PR, if one is still open, is closed with a note naming the reopen. (Review focus 3.)
 - [ ] A PR a person closes without merging moves the item to Human Review in Needs Human with "PR closed", from whatever stage it was at, and the factory asks why it was closed.
 - [ ] A cell still running for that item is stopped and its claim ends.
-- [ ] A PR the factory closes itself, for changed acceptance criteria or a changed rules section, asks nothing, whether the poller or the webhook sees the close first.
+- [ ] Any PR the factory closes itself asks nothing, whether the poller or the webhook sees the close first. That covers changed acceptance criteria, a changed rules section, a reopen and a close as Not Done.
 - [ ] Answering "new PR" queues the item at the stage that opens the PR, which opens a new PR from the same branch.
 - [ ] Answering "re-spec" starts a new run at Specify from `main`, with the scenario lock lifted.
 - [ ] Answering "not done" closes the PBI as Not Done.
@@ -237,6 +246,7 @@ export function position(i: PositionInput): Position;
 - Modify: `src/core/states.ts`, `src/core/position.ts`, `src/watcher/poller.ts` (closing split parents), `src/gate/readiness.ts`, `src/gate/file-split.ts`
 
 **Acceptance criteria:**
+- [ ] Filing a split leaves the parent's opt-in label on, and no code path removes that label from any item.
 - [ ] A parent whose children are filed sits at Split in Waiting with "Waiting for split children to complete".
 - [ ] It closes as Done when every child closed as Done.
 - [ ] It closes as Not Done when every child closed as Not Done.
@@ -244,7 +254,9 @@ export function position(i: PositionInput): Position;
 - [ ] It stays in Waiting while any child is open.
 - [ ] A split that can't be filed leaves the item at Split in Needs Human with "Split blocked", naming the child and the lines it failed.
 - [ ] A child reopened after its parent closed reopens the parent to Split in Waiting. The factory reopens the parent's issue, and the parent closes again by the same rules.
-- [ ] A child whose issue is closed or no longer exists, and that the factory doesn't hold, counts as Not Done, so the parent never waits on it. (Review focus 4.)
+- [ ] A child the factory doesn't hold counts by its issue: closed as completed counts as Done, and closed as not planned counts as Not Done.
+- [ ] A child whose issue no longer exists counts as Not Done, so the parent never waits on it. (Review focus 4.)
+- [ ] The factory's own reopen of a parent's issue is never read as a person's reopen, so the parent goes to Split and never to Readiness.
 - [ ] A parent that is itself a filed child, whose own children got no label, sits at Split in Needs Human with "Split blocked", naming the children that wait for a label.
 - [ ] Once the owner labels those children, that parent goes to Waiting, and it closes by the same rules.
 - [ ] A parent stored as `Split` with a `Failed` or `Abandoned` child when this ships, as #172 is, closes by these rules with no edit by hand.
@@ -305,17 +317,18 @@ export function position(i: PositionInput): Position;
 **Changes rules.** none. It adds columns and changes no behaviour.
 
 **Files:**
-- Modify: `src/store/items.ts`, `src/control/cell-api.ts`, `src/core/position.ts`
+- Modify: `src/store/items.ts`, `src/control/cell-api.ts`, `src/control/decisions.ts`, `src/watcher/poller.ts`, `src/scheduler/scheduler.ts`, `src/core/position.ts`
 - Create: a migration for the new columns and their backfill
 
 **Interfaces:**
-- Produces: the columns `item.position_stage`, `item.position_state`, `item.position_reason` and `item.position_since`. Every write that moves an item or its run's stage also writes them, in the same transaction.
+- Produces: the columns `item.position_stage`, `item.position_state`, `item.position_reason` and `item.position_since`. Every write that changes any field of `PositionInput` also writes them, in the same transaction.
 
 **Acceptance criteria:**
 - [ ] Every item row holds a stage, and a state unless it is Closed.
 - [ ] The backfill gives each existing row the position Task 1's function gives it.
 - [ ] After any move of an item, or of its run to another stage, the stored position equals what Task 1's function gives for the row.
-- [ ] A move that fails rolls the stored position back with it.
+- [ ] The same holds after a write that moves neither: a question answered, the item's dependencies refreshed, a rule approval asked for or given, and an operator's stop.
+- [ ] A write that fails rolls the stored position back with it.
 
 ## Task 11: Read the stored position
 
@@ -335,7 +348,6 @@ export function position(i: PositionInput): Position;
 - [ ] WIP slots and review capacity count as the spec's Slots table says, with the same numbers as before for the same items.
 - [ ] The claim order is what it was for the same set of items.
 - [ ] Floor, Run detail and the board show the same position for each item as before this ships.
-- [ ] An approved, clean PR reads as Merge, In Progress until the merge lands.
 - [ ] No reader outside `src/core` and `src/store` names one of today's thirteen states.
 
 ## Task 12: Delete today's states
@@ -347,7 +359,7 @@ export function position(i: PositionInput): Position;
 **Changes rules.** §5 whole, rewritten around stages and states. §6, the stage table, with Readiness, Split, Rule Change, Human Review, Merge and Verify as stages.
 
 **Files:**
-- Modify: `src/core/states.ts`, `src/core/position.ts`, `src/store/items.ts`, `src/adapters/github/backlog.ts`, and every scenario that names a state
+- Modify: `src/core/states.ts`, `src/core/position.ts`, `src/store/items.ts`, `src/watcher/poller.ts` (`mergeIfReady`), `src/scheduler/scheduler.ts`, `src/adapters/github/backlog.ts`, and every scenario that names a state
 - Create: a migration that drops `item.state`
 
 **Interfaces:**
@@ -355,6 +367,8 @@ export function position(i: PositionInput): Position;
 
 **Acceptance criteria:**
 - [ ] The item table has no `state` column, and every move is a move between stages or states of the model.
+- [ ] An approved, clean PR moves from Human Review to Merge in In Progress, and to Verify once the merge lands. A merge GitHub refuses leaves it at Merge, and the next poll tries again.
+- [ ] An item at Merge counts toward neither a WIP slot nor review capacity. This is the one count that differs from today, as the spec's Slots rule says.
 - [ ] No code, scenario or page names one of today's thirteen states.
 - [ ] The events an item logged under the old names still show on Activity and Run detail.
 - [ ] §5 and §6 of the main spec read as the design spec does.

@@ -20,6 +20,7 @@ The owner wants to read an item's position at a glance:
 
 - One list of stages that covers an item's whole life, grouped into four phases.
 - One small state beside the stage that says whose turn it is.
+- The factory never removes its own label from a PBI.
 - A reason on every state that stops the item.
 - The factory never closes a PBI by itself.
 - One review by the factory before a person looks, in place of two.
@@ -95,6 +96,7 @@ A Closed item has no state. *My call.*
 | In Progress | The factory is working on the stage. | none |
 | Needs Human | The factory has stopped until a person acts. | always |
 | Waiting | The factory has stopped until another item moves. | always |
+| Parked | The factory has stopped because the item's opt-in label is gone. | always "Factory label removed" |
 
 Each stopped state also holds the time it turned on.
 
@@ -133,25 +135,36 @@ The reminder comments stay. *My call.*
 
 **Not Done.**
 The Product Owner closes a PBI as Not Done.
-They do it by closing the issue on GitHub or removing the factory's label, as both withdraw an item today. *My call.*
+They do it by closing the issue on GitHub. *My call.*
+Once an item's PR has merged, closing its issue changes nothing, and the item goes on through Verify to Done. *My call.*
+
+**Parked.**
+Removing the factory's label doesn't close a PBI.
+The item stays at the stage it was at, in the state Parked, with the reason "Factory label removed".
+A cell still running for it is stopped and its claim ends, as a withdrawal does today. *My call.*
+Putting the label back resumes it at that stage, as a queued run. *My call.*
+Closing the issue of a Parked item closes it as Not Done.
+The factory never removes the label itself, so a missing label always means a person removed it.
+Today it takes the label off a split parent, and that stops.
 Two cases are exempt. *My call.*
 
-- **A split parent.** The factory takes its label off itself, so a missing label never closes an item at Split.
-- **Merged work.** Once an item's PR has merged, closing its issue changes nothing, and the item goes on through Verify to Done.
+- **A split parent from before.** A parent the factory already took the label from is never parked for it.
+- **Merged work.** Once an item's PR has merged, a missing label changes nothing.
 
 **Reopening.**
 A Not Done PBI that is reopened starts over at Readiness as a new run.
 It doesn't resume where it stopped, because the code may have changed since.
 A reopen is always a person's action, never a state the factory finds. *My call.*
-It is one of three: the issue going from closed to open, the label coming back after it was removed, or the Reopen control on the item page.
-A Not Done item whose issue is still open and labelled reopens only through the control.
+It is one of two: the issue going from closed to open, or the Reopen control on the item page.
+A Not Done item whose issue is still open reopens only through the control.
+An issue the factory reopens itself, as it does for a split parent, is never read as a person's reopen.
 An item that was `Abandoned` before this design ships reads as Not Done and reopens the same way, so none of them restarts by itself.
 
 **A closed PR.**
 A PR that a person closes without merging doesn't close the PBI.
 Whatever stage the item was at, it moves to Human Review in Needs Human with "PR closed", and the factory asks why it was closed.
 A cell still running for the item is stopped and its claim ends, as a withdrawal does today. *My call.*
-A PR the factory closes itself, as it does when acceptance criteria or a rules section change, never asks.
+Any PR the factory closes itself never asks, whatever its reason for closing it.
 The person then picks one of three:
 
 - **A new PR.** The item is Queued at Submit, which opens a new PR from the same branch.
@@ -169,14 +182,15 @@ It still re-checks the merge on the schedule it has today, and an item the re-ch
 An operator who stops a run leaves the item at the stage it was stopped at, held, in Needs Human with "Stopped by an operator". *My call.*
 
 **Split.**
-A split parent sits at Split in Waiting until every child is Closed.
+A split parent keeps its label and sits at Split in Waiting until every child is Closed.
 It then closes as Done, Not Done or Partially Done by the table above.
 A child that is itself a Partially Done parent counts as a mix. *My call.*
 A split that can't be filed turns on Needs Human with "Split blocked".
 Each child starts at Readiness like any other item.
 The children of a parent that is itself a filed child are the exception, as today: they get no label and wait for the owner.
 That parent sits at Split in Needs Human with "Split blocked" until the owner labels its children or closes them. *My call.*
-A child the factory doesn't hold counts by its issue: open keeps the parent waiting, and closed or deleted counts as Not Done. *My call.*
+A child the factory doesn't hold counts by its issue. *My call.*
+Open keeps the parent waiting, closed as completed counts as Done, and closed as not planned or deleted counts as Not Done.
 When a child is reopened after its parent closed, the parent reopens too, and the factory reopens the parent's issue.
 It goes back to Split in Waiting and closes again by the same table.
 
@@ -190,17 +204,19 @@ The factory's findings no longer appear as review threads on GitHub.
 A person's part in Deliver is the approval.
 
 **Waiting on You.**
-The list is every item in Needs Human, with its reason, oldest first.
-The order uses the time Needs Human last turned on for the item. *My call.*
+The list is every item in Needs Human or Parked, with its reason, oldest first.
+The order uses the time that state last turned on for the item. *My call.*
 
 **Slots.**
-The counts stay as they are today, read through the mapping below.
+The counts stay as they are today, read through the mapping below, with one change.
+Today an approved PR that waits for its merge still counts toward review capacity.
+Once the model is stored it sits at Merge, which is the factory's turn, and counts toward neither.
 
 | What | Counts |
 |---|---|
 | A WIP slot | An item In Progress at a stage a cell runs: Understand, Specify, Red, Green, Self Review, Submit or Address. |
 | Review capacity | An item in Needs Human for "Scenario sign-off", "Question from the agent", "CI broken" or "Human review". |
-| Neither | In Progress at Readiness, Merge or Verify. Needs Human for any other reason. Queued. Waiting. |
+| Neither | In Progress at Readiness, Merge or Verify. Needs Human for any other reason. Queued. Waiting. Parked. |
 
 **Record.**
 The owner folded the spec's "Record Increment" stage into Verify.
@@ -233,6 +249,7 @@ The first rollout step shows the model while the engine still stores today's sta
 | `Done` | Done | none | |
 
 A row that reads Queued reads Waiting with "Waits on #N" when the item has an open dependency, at the same stage.
+No row reads Merge. Until the model is stored, an approved PR reads Human Review up to the moment it merges.
 
 Stage ids map as `open-pr` to Submit and `sign-off` to Sign Off, and the rest keep their names.
 Until the PR review stage is removed, an item running `pr-review` shows as "PR Review" under Deliver.
@@ -269,8 +286,8 @@ Steps 3 to 9 change §5 or §6, so each carries a `## Changes the factory's rule
 2. **Show the model.** A pure function works out stage, state, reason and since from what is stored today. Floor, the item page, the API and the GitHub board show them. Waiting on You becomes the Needs Human list, oldest first.
 3. **No timeouts.** Remove the two automatic moves to `Abandoned`. #366 is trimmed first, so it never adds a third.
 4. **Failure becomes Needs Human.** Replace `Failed` with "Stage failed" and "Verify failed on `main`".
-5. **Not Done and reopening.** Replace `Abandoned` and its ways back with Not Done and a fresh start at Readiness. A closed PR asks "PR closed" in place of withdrawing the item.
-6. **Split.** Close a parent by its children, add Partially Done and "Split blocked", and reopen a parent when a child reopens.
+5. **Not Done, Parked and reopening.** Replace `Abandoned` and its ways back with Not Done for a closed issue, Parked for a removed label, and a fresh start at Readiness for a reopen. A closed PR asks "PR closed" in place of withdrawing the item.
+6. **Split.** Close a parent by its children, add Partially Done and "Split blocked", reopen a parent when a child reopens, and stop taking the label off a parent.
 7. **One review.** Remove `pr-review`, and route Address through Self Review and Submit. #413 is trimmed first, since its criteria about the PR review's findings no longer apply.
 8. **Rename.** `open-pr` becomes `submit` in `sop/default.yml` and everywhere a stage id is stored or shown.
 9. **Store the model.** Three PBIs. The item row gains stage, state, reason and since beside today's state. Every reader switches to them. Then the old state names and the mapping from step 2 are deleted, and §5 and §6 of the spec are rewritten around this document.
