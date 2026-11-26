@@ -218,6 +218,7 @@ export function position(i: PositionInput): Position;
 **Acceptance criteria:**
 - [ ] Closing the issue on GitHub closes the PBI as Not Done from any stage before its PR merges.
 - [ ] Closing the issue of an item whose PR has merged changes nothing, and the item goes on through Verify to Done.
+- [ ] However an item closes as Not Done, a Parked one included, the factory closes its open PR with a note.
 - [ ] Removing the factory's label parks the item: it keeps its stage, its state is Parked with "Factory label removed", and a cell running for it is stopped.
 - [ ] A Parked item is listed in Waiting on You, and holds no WIP slot and no review capacity.
 - [ ] While an item is Parked the factory claims nothing for it, runs no readiness check on it, merges nothing for it and sends it no reminder.

@@ -136,6 +136,7 @@ The reminder comments stay. *My call.*
 **Not Done.**
 The Product Owner closes a PBI as Not Done.
 They do it by closing the issue on GitHub. *My call.*
+However an item closes as Not Done, the factory closes its open PR with a note, as it closes a withdrawn item's PR today. *My call.*
 Once an item's PR has merged, closing its issue changes nothing, and the item goes on through Verify to Done. *My call.*
 
 **Parked.**
