@@ -292,7 +292,7 @@ async function chaseFeatureChanges(d: TickDeps) {
 /** The text of the `n`th reminder on an item waiting in FeatureChangeRequest. */
 export function featureChangeReminder(n: number): string {
   const days = REMIND_AT_MS[n - 1] / DAY_MS;
-  return `Reminder: this item has waited ${days} days on the Product Owner's decision on its feature change request. It waits until the Product Owner approves the change or asks for changes on the item's Run detail.`;
+  return `Reminder: this item has waited ${days} days on the Product Owner's decision on its feature change request. It waits until the Product Owner approves the change or asks for changes, on the item's Run detail or by replying \`/approve\` or \`/changes <note>\` here.`;
 }
 
 /** The newest commits of a branch that a green one is looked for in, so a long red stretch costs a bounded number of reads. */
