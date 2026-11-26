@@ -202,7 +202,7 @@ Each child starts at Readiness like any other item.
 The children of a parent that is itself a filed child are the exception, as today: they get no label and wait for the owner.
 That parent sits at Split in Needs Human with "Split blocked" until the owner labels its children or closes them. *My call.*
 A child the factory doesn't hold counts by its issue. *My call.*
-Open keeps the parent waiting, closed as completed counts as Done, and closed as not planned or deleted counts as Not Done.
+Open keeps the parent waiting, closed as completed counts as Done, and closed as not planned, closed as a duplicate or deleted counts as Not Done.
 When a child is reopened after its parent closed, the parent reopens too, and the factory reopens the parent's issue.
 It goes back to Split in Waiting and closes again by the same table.
 
