@@ -1,43 +1,53 @@
 // Polls the factory's Floor and prints one digest line whenever it changes. Signs in with the dev-login token from
 // `aspire logs control`, and reads it again when the dashboard answers 401, since a restart rotates it.
-// Run: node watch-floor.mjs            (watch)
-//      node watch-floor.mjs --selftest (check the parser)
+// Run from the repo root: node .claude/skills/watch-floor/watch-floor.mjs            (watch)
+//                         node .claude/skills/watch-floor/watch-floor.mjs --selftest (check the parser)
 import { execSync } from "node:child_process";
 
 const BASE = process.env.FLOOR_URL ?? "http://localhost:7400";
 const POLL_MS = 30_000;
 
-const strip = (s) => s.replace(/<[^>]*>/g, " ").replace(/&#39;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+const strip = (s) => s.replace(/<[^>]*>/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
 const between = (html, from, to) => {
   const i = html.indexOf(from);
   if (i < 0) return "";
   const j = html.indexOf(to, i + from.length);
   return html.slice(i + from.length, j < 0 ? undefined : j);
 };
+// An item's number is the leading `#N` of its row, linked or not (issueRef in src/http/views.ts).
+const issue = (html) => strip(html).match(/^#(\d+)/)?.[1] ?? "?";
+// A Floor list's top-level rows. A Not ready row nests its failed checks as <li>s, so split where an item starts.
+const rows = (section) => section.split(/<li>(?=(?:<a [^>]*>)?#\d)/).slice(1);
 
-/** The Floor reduced to what the watch acts on. Markup: src/http/views.ts, floorPage. */
-export function digest(floor, config = "") {
-  const status = strip(between(floor, "<h1>Floor</h1>", " waiting. <a")).replace(/\d+ of \d+$/, "").trim();
-  const waiting = [...between(floor, "<h2>Waiting on you</h2>", "<h2>").matchAll(/<li>([\s\S]*?)<\/li>/g)].map(([, li]) => {
-    const n = li.match(/issues\/(\d+)/)?.[1];
+/** The Floor reduced to what the watch acts on. Markup: floorPage in src/http/views.ts. */
+export function digest(floor, config = "", now = Date.now()) {
+  const banners = [...floor.matchAll(/<(p|section)\b[^>]*role="(?:status|alert)"[^>]*>([\s\S]*?)<\/\1>/g)].map((m) => strip(m[2]));
+  const waiting = rows(between(floor, "<h2>Waiting on you</h2>", "<h2>")).map((li) => {
     const item = li.match(/\/items\/([0-9a-f-]{36})/)?.[1];
     const pr = li.match(/pull\/(\d+)/)?.[1];
     const state = li.match(/<span class="muted">(\w+), waiting/)?.[1];
-    return `#${n} ${state}${pr ? ` pr=#${pr}` : ""} item=${item}`;
+    return `#${issue(li)} ${state}${pr ? ` pr=#${pr}` : ""} item=${item}`;
   });
-  const running = [...between(floor, "<h2>In flight</h2>", "</table>").matchAll(/<tr><td>[\s\S]*?issues\/(\d+)[\s\S]*?<\/td><td>(\w+)<\/td><td>([\s\S]*?)<\/td>/g)]
-    .map(([, n, state, stage]) => `#${n} ${state}/${strip(stage)}`);
+  const next = rows(between(floor, "<h2>Next up</h2>", "<h2>")).map((li) => `#${issue(li)}`);
+  const rules = rows(between(floor, "<h2>Not ready</h2>", "<h2>")).filter((li) => li.includes("waits for the owner to approve")).map((li) => `#${issue(li)}`);
+  const inFlight = [...between(floor, "<h2>In flight</h2>", "</table>").matchAll(/<tr><td>([\s\S]*?)<\/tr>/g)].map(([, row]) => {
+    const [item, state, stage] = row.split(/<\/td>\s*<td[^>]*>/);
+    return `#${issue(item)} ${strip(state ?? "")}/${strip(stage ?? "")}`;
+  });
   const pause = strip(config).match(/usage pause (\S+)/)?.[1];
+  const paused = pause && Date.parse(pause) > now; // the column keeps a past pause, which holds nothing (pauseActive)
   return [
-    status && `status: ${status}`,
+    banners.length && `banners: ${banners.join(" / ")}`,
     `waiting: ${waiting.join("; ") || "none"}`,
-    `running: ${running.join("; ") || "none"}`,
-    pause && pause !== "not" && `usage pause until ${pause}`,
+    `in flight: ${inFlight.join("; ") || "none"}`,
+    `next up: ${next.join(" ") || "none"}`,
+    rules.length && `rule approval: ${rules.join(" ")}`,
+    paused && `usage pause until ${pause}`,
   ].filter(Boolean).join(" | ");
 }
 
 function token() {
-  const log = execSync("aspire logs control -n 400", { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
+  const log = execSync('aspire logs control --search "dev-login"', { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
   const all = [...log.matchAll(/dev-login\?token=([0-9a-f]+)/g)];
   if (!all.length) throw new Error("no dev-login token in `aspire logs control`");
   return all.at(-1)[1];
@@ -66,20 +76,29 @@ async function watch() {
 }
 
 function selftest() {
-  const floor = `<h1>Floor</h1><p class="banner" role="status">Drain done. Reason: r</p>
+  const now = Date.parse("2026-11-26T12:00:00Z");
+  const check = (name, got, want) => { if (got !== want) { console.error(`selftest failed: ${name}\n got: ${got}\nwant: ${want}`); process.exit(1); } };
+  const floor = `<!doctype html><p class="banner" role="status">Your Claude token expires in 2 days.</p><main><h1>Floor</h1>
+<p class="banner" role="status">Drain done. Reason: r.</p><p class="muted">The cell image was built from commit <code>fdd3692</code>.</p>
 <p>2 of 4 waiting. <a href="/activity">Activity</a></p>
 <h2>Waiting on you</h2>
-<ol><li><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a> <a href="https://github.com/o/r/pull/415">PR #415</a> <span class="muted">InReview, waiting 3 min</span></li><li><a href="https://github.com/o/r/issues/283">#283</a> <a href="/items/0c8e162a-ad76-457b-ac4b-4b6b08ddb767">Keycloak</a> <span class="muted">SignOff, waiting 0 min</span></li></ol>
-<h2>Next up</h2><p class="muted">Nothing is ready to start.</p>
-<h2>In flight</h2><table><thead><tr><th>Item</th></tr></thead><tbody>
-<tr><td><a href="https://github.com/o/r/issues/280">#280</a> <a href="/items/d9b532d1-bd18-4664-81ba-533d19ce3d13">Live</a></td><td>InProgress</td><td>red</td><td>4 min</td><td>$1</td><td class="muted"></td></tr>
-</tbody></table>`;
-  const got = digest(floor, "<td>usage pause</td><td>2026-11-26T23:00:00Z</td>");
-  const want = "status: Drain done. Reason: r | waiting: #319 InReview pr=#415 item=5de6c0b0-64bc-4496-9504-21ee32a2c907; "
-    + "#283 SignOff item=0c8e162a-ad76-457b-ac4b-4b6b08ddb767 | running: #280 InProgress/red | usage pause until 2026-11-26T23:00:00Z";
-  if (got !== want) { console.error(`selftest failed\n got: ${got}\nwant: ${want}`); process.exit(1); }
-  const quiet = digest(`<h1>Floor</h1><p>0 of 4 waiting. <a>x</a></p><h2>Waiting on you</h2><p class="muted">Nothing waits on you.</p><h2>Next up</h2><h2>In flight</h2><p class="muted">No item is in flight.</p>`, "usage pause not set");
-  if (quiet !== "waiting: none | running: none") { console.error(`selftest failed on a quiet Floor: ${quiet}`); process.exit(1); }
+<ol><li><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a> <a href="https://github.com/o/r/pull/415">PR #415</a> <span class="muted">InReview, waiting 3 min</span></li><li>#283 <a href="/items/0c8e162a-ad76-457b-ac4b-4b6b08ddb767">Keycloak</a> <span class="muted">SignOff, waiting 0 min</span></li></ol>
+<h2>Next up</h2><ol><li><a href="https://github.com/o/r/issues/418">#418</a> <a href="/items/x">A</a></li><li>#419 <a href="/items/y">B</a></li></ol>
+<h2>Final stage</h2><p class="muted">No item is in the review loop.</p>
+<h2>Not ready</h2><ol><li><a href="https://github.com/o/r/issues/414">#414</a> <a href="/items/z">C</a><ul><li>The item waits for the owner to approve its change to spec section §6.</li></ul></li><li>#412 <a href="/items/w">D</a><ul><li>An item that changes the rules says so.</li></ul></li></ol>
+<h2>Blocked</h2><p class="muted">No ready item waits on another.</p>
+<h2>In flight</h2><table><thead><tr><th scope="col">Item</th></tr></thead><tbody>
+<tr><td>#280 <a href="/items/d9b532d1-bd18-4664-81ba-533d19ce3d13">Live</a></td><td>InProgress</td><td>red</td><td>4 min</td><td title="$1">$1</td><td class="muted"></td></tr>
+<tr><td><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a></td><td>InReview</td><td>open-pr</td><td>3 min</td><td>$2</td><td class="muted"></td></tr>
+</tbody></table></main>`;
+  const pauseRow = (at) => `<tr><th scope="row">usage pause</th><td>${at}</td><td>Set by the factory</td></tr>`;
+  check("busy Floor", digest(floor, pauseRow("2026-11-26T23:00:00Z"), now),
+    "banners: Your Claude token expires in 2 days. / Drain done. Reason: r. | "
+    + "waiting: #319 InReview pr=#415 item=5de6c0b0-64bc-4496-9504-21ee32a2c907; #283 SignOff item=0c8e162a-ad76-457b-ac4b-4b6b08ddb767 | "
+    + "in flight: #280 InProgress/red; #319 InReview/open-pr | next up: #418 #419 | rule approval: #414 | usage pause until 2026-11-26T23:00:00Z");
+  const quiet = `<main><h1>Floor</h1><p>0 of 4 waiting. <a>x</a></p><h2>Waiting on you</h2><p class="muted">Nothing waits on you.</p><h2>Next up</h2><p class="muted">Nothing is ready to start.</p><h2>Not ready</h2><p class="muted">Every item that entered is ready.</p><h2>In flight</h2><p class="muted">No item is in flight.</p></main>`;
+  check("past pause", digest(quiet, pauseRow("2026-11-26T01:00:00Z"), now), "waiting: none | in flight: none | next up: none");
+  check("no pause", digest(quiet, pauseRow("not set"), now), "waiting: none | in flight: none | next up: none");
   console.log("selftest passed");
 }
 
