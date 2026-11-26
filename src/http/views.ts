@@ -449,15 +449,15 @@ export type RunDetail = {
 
 const marked = (words: DiffWord[]) => words.map((w) => (w.changed ? `<mark>${escapeHtml(w.text)}</mark>` : escapeHtml(w.text))).join(" ");
 
-/**
- * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
- * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
- */
 /** PBI 366: an item in FeatureChangeRequest waits on the Product Owner, with a link to the request on Run detail at `path`. */
 function waitsOnOwner(path: string): string {
   return `${WAITS_ON_OWNER} <a href="${path}#${FEATURE_CHANGE_ANCHOR}">Feature change request</a>.`;
 }
 
+/**
+ * The item page's Feature change request section (PBI 364), as sign-off shows scenarios: each file under its path, the
+ * stage's reason, then its change from the lock commit, each line taken out and put in marked by its side.
+ */
 function featureChangeSection(files: FeatureChangeFile[], id: string, canDecide: boolean): string {
   const line = (l: DiffLine | null) => l === null
     ? `<span class="muted">…</span>`

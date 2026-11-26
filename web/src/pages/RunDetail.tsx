@@ -1,7 +1,7 @@
 // Run detail in the SPA (redesign step 8b): the item, where it stands and what its run is pinned to, its stages, time,
 // policies, readiness checks and scenario verdicts, the Sign off and Answer forms, and an operator's Controls, as
 // today's Run detail in src/http/views.ts shows them.
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -181,6 +181,13 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
   const r = d.run;
   const c = d.controls;
   const q = d.question;
+  const hasRequest = Boolean(d.featureChange?.length);
+  // PBI 366: the browser jumps to the address's anchor on load, before the read draws the Feature change request
+  // section, so once it is drawn this scrolls to it when the address names it, as Floor's link does.
+  useEffect(() => {
+    if (!hasRequest || window.location.hash !== `#${FEATURE_CHANGE_ANCHOR}`) return;
+    document.getElementById(FEATURE_CHANGE_ANCHOR)?.scrollIntoView();
+  }, [hasRequest]);
   return (
     <div>
       <h1 className="mb-2 text-2xl font-semibold"><IssueRef external_id={d.item.external_id} repo={d.item.repo} /> {d.item.title}</h1>

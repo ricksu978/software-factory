@@ -115,12 +115,12 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="text-muted-foreground">{children}</p>;
 }
 
-/** A link inside a page's text. */
 /** PBI 366: an item in FeatureChangeRequest waits on the Product Owner, with a link to the request on Run detail at `path`. */
 export function WaitsOnOwner({ path }: { path: string }) {
   return <> {WAITS_ON_OWNER} <A href={`${path}#${FEATURE_CHANGE_ANCHOR}`}>Feature change request</A>.</>;
 }
 
+/** A link inside a page's text. */
 export function A({ href, children }: { href: string; children: ReactNode }) {
   return <a className="text-primary underline-offset-4 hover:underline" href={href}>{children}</a>;
 }
