@@ -1,0 +1,240 @@
+# Phases, stages and states
+
+A redesign of how the factory says where a PBI is.
+It replaces the state machine in §5 and the stage table in §6 of `2026-11-05-software-factory-design.html`.
+The owner decided each point below in conversation on 2026-11-26, except where a line says "My call".
+
+## Intent
+
+Today an item has a state and, while a cell runs it, a stage.
+The two lists overlap, and the states mix three different facts.
+`InProgress` says where the item is, `NeedsInput` says who holds it, and `Failed` says how it ended.
+
+The owner wants to read an item's position at a glance:
+
+- which of four phases it is in,
+- which stage of that phase,
+- and whether it is the factory's turn, a person's turn, or waiting on another item.
+
+## Goals
+
+- One list of stages that covers an item's whole life, grouped into four phases.
+- One small state beside the stage that says whose turn it is.
+- A reason on every state that stops the item.
+- The factory never closes a PBI by itself.
+- One review by the factory before a person looks, in place of two.
+
+## Non-goals
+
+- What each agent stage does inside itself. The prompts, exit checks, retries and timeouts of `sop/default.yml` stay as they are, apart from the PR review stage this design removes.
+- WIP limits, review capacity, the usage pause, priority, Hold and Start now.
+- Risk tiers and how many approvals a tier needs.
+- The policy files and their format.
+
+## Anti-goals
+
+- An item whose position can't be told from its stage and state alone.
+- An item the factory closes while a person could still act on it.
+- A cut-over that needs any in-flight item converted by hand.
+
+## Today
+
+- **States.** Fourteen, in `src/core/states.ts:3-5`, with their moves at `:17-60`.
+- **Stages.** Nine, in `sop/default.yml:11-75`: `understand`, `specify`, `sign-off`, `red`, `green`, `self-review`, `open-pr`, `pr-review`, `address`.
+- **Slots.** Only an `InProgress` item holds a WIP slot. An item in `InReview`, or in `SignOff` or `NeedsInput` with an open question, counts toward review capacity (`src/scheduler/scheduler.ts:629-641`).
+- **Timeouts.** A sign-off or a question nobody answers moves the item to `Abandoned` (`src/core/states.ts:43-44`, the two `timed_out` moves). #366, still open, would add a third, for a feature change request after 5 days.
+- **Failure.** Only Green ends an item as `Failed` when its retries run out (`src/cell/engine.ts:1417`). Every other stage that gives up asks a question and goes to `NeedsInput`.
+- **Verify.** An `Accepted` item is `Done` once CI passes on `main` at a commit that contains its merge (`src/scheduler/scheduler.ts:588-615`). The "Record Increment" stage in §6 of the spec isn't built.
+- **A closed PR.** A PR a person closes without merging withdraws its item to `Abandoned` (`src/watcher/poller.ts:336-337`).
+- **Reviews.** `self-review` runs before the PR opens and `pr-review` after. Both judge the same rubric with the same model and tools (`src/cell/engine.ts:1424-1431`, `sop/default.yml:48-69`).
+- **Merge.** The factory squash-merges an approved, clean PR itself (`src/watcher/poller.ts:659-713`, PBI 181).
+
+## The model
+
+An item has a **stage**, and while it is open a **state**.
+The **phase** is the group its stage belongs to and is never stored on its own.
+
+### Phases and stages
+
+| # | Phase | Stage | Who works | What happens |
+|---|---|---|---|---|
+| 1 | Triage | Readiness | Factory | The engine's rules, then the judge on each `dor.md` line. |
+| 2 | Triage | Split | Factory | An oversized item gets children filed, then waits for them. |
+| 3 | Triage | Rule Change | Owner | Approval of an item that changes the factory's own rules. |
+| 4 | Plan | Understand | Agent | Reads the item and the code. Changes no file. |
+| 5 | Plan | Specify | Agent | Writes the feature file, a scenario or more per criterion. |
+| 6 | Plan | Sign Off | Product Owner | Approves the scenarios, which locks them, or sends them back to Specify. |
+| 7 | Build | Red | Agent | Writes step definitions. Every scenario fails on an assertion. |
+| 8 | Build | Green | Agent | Builds until scenarios, tests and lint pass, then the Definition of Done check. |
+| 9 | Build | Self Review | Agent | The self-reviewer loops with the builder until it approves. |
+| 10 | Deliver | Submit | Agent and factory | Writes the PR summary, re-checks the Definition of Done, pushes, sets the risk tier, opens or updates the PR, waits for CI. |
+| 11 | Deliver | Human Review | Person | A trusted person approves the PR and ticks any Definition of Done line left for a person. |
+| 12 | Deliver | Address | Agent | Answers a change request, a conflict or red CI on the PR. |
+| 13 | Deliver | Merge | Factory | Squash-merges once the PR is approved, clean and ticked. |
+| 14 | Deliver | Verify | Factory | CI green on `main` at a commit that contains the merge, as today. |
+
+### Final stages
+
+| Final stage | Applies to |
+|---|---|
+| Done | A PBI whose work merged and verified. A split parent whose children all closed as Done. |
+| Not Done | A PBI the Product Owner closed without an implementation or a fix. A split parent whose children all closed as Not Done. |
+| Partially Done | A split parent only, when its children closed as a mix of Done and Not Done. |
+
+**Closed** means a PBI reached a final stage.
+A Closed item has no state. *My call.*
+
+### States
+
+| State | Meaning | Reason |
+|---|---|---|
+| Queued | The stage is ready to run and waits for a slot. | none |
+| In Progress | The factory is working on the stage. | none |
+| Needs Human | The factory has stopped until a person acts. | always |
+| Waiting | The factory has stopped until another item moves. | always |
+
+Each stopped state also holds the time it turned on.
+
+### Needs Human reasons
+
+| Reason | Stage | What the person does |
+|---|---|---|
+| Item not ready | Readiness | Edits the item so the failed lines pass. |
+| Split blocked | Split | Fixes what kept the split from being filed. |
+| Rule change approval | Rule Change | Approves the rule change on the item page. |
+| Scenario sign-off | Sign Off | Approves the scenarios or asks for changes. |
+| Question from the agent | Any agent stage | Answers the question. |
+| Feature change decision | Red and later | Approves or turns down a change to a locked feature file. |
+| CI broken | Submit, Address | Answers what to do about CI the factory couldn't fix. |
+| Human review | Human Review | Reviews and approves the PR. |
+| Stage failed | A stage that gives up with no question to ask, which today is Green | Re-queues the stage, or closes the item as Not Done. |
+| Verify failed on `main` | Verify | Re-queues the check, or closes the item as Not Done. |
+
+### Waiting reasons
+
+| Reason | Stage |
+|---|---|
+| Waiting for split children to complete | Split |
+| Waits on #N, a dependency that is still open | The stage about to start |
+
+## Rules
+
+**No closing by the factory.**
+Every Needs Human reason waits for as long as it takes.
+The timeout that moves an unanswered sign-off to `Abandoned` is removed, and a feature change request never gets one.
+#366's criterion that abandons a feature change request after 5 days is dropped before it ships.
+The timeout on an agent's question is removed too. *My call.*
+The reminder comments stay. *My call.*
+
+**Not Done.**
+The Product Owner closes a PBI as Not Done.
+They do it by closing the issue on GitHub or removing the factory's label, as both withdraw an item today. *My call.*
+
+**Reopening.**
+A Not Done PBI that is reopened starts over at Readiness as a new run.
+It doesn't resume where it stopped, because the code may have changed since.
+A person reopens it by reopening the issue, putting the label back, or using a Reopen control on the item page. *My call.*
+An item that was `Abandoned` before this design ships reads as Not Done and reopens the same way.
+
+**Failure.**
+There is no failed ending.
+Each stage keeps the `on_fail` it has today.
+A stage that gives up by asking a question stays in Needs Human with "Question from the agent" or "CI broken", and the person answers it. *My call.*
+A stage that gives up with no question, which today is Green out of retries, leaves the item at that stage in Needs Human with "Stage failed".
+A merge that breaks `main` leaves the item at Verify in Needs Human with "Verify failed on `main`".
+The factory still files its bug PBI for a red `main` and still re-checks, as today.
+
+**Split.**
+A split parent sits at Split in Waiting until every child is Closed.
+It then closes as Done, Not Done or Partially Done by the table above.
+A child that is itself a Partially Done parent counts as a mix. *My call.*
+A split that can't be filed turns on Needs Human with "Split blocked".
+Each child starts at Readiness like any other item.
+
+**One review by the factory.**
+The PR review stage is removed.
+A change request from a person runs Human Review, Address, Self Review, Submit and back to Human Review.
+Red CI at Submit sends the item back to Green, as red CI at `open-pr` does today.
+The factory's findings no longer appear as review threads on GitHub.
+
+**The merge is the factory's.**
+A person's part in Deliver is the approval.
+
+**Waiting on You.**
+The list is every item in Needs Human, with its reason, oldest first.
+The order uses the time Needs Human last turned on for the item. *My call.*
+
+**Slots.**
+The counts stay as they are today, read through the mapping below.
+
+| What | Counts |
+|---|---|
+| A WIP slot | An item In Progress at a stage a cell runs: Understand, Specify, Red, Green, Self Review, Submit or Address. |
+| Review capacity | An item in Needs Human for "Scenario sign-off", "Question from the agent", "CI broken" or "Human review". |
+| Neither | In Progress at Readiness, Merge or Verify. Needs Human for any other reason. Queued. Waiting. |
+
+**Record.**
+The owner folded the spec's "Record Increment" stage into Verify.
+That stage isn't built, so Verify does what it does today, and building the record is outside this design. *My call.*
+
+## How today's states read in the model
+
+The first rollout step shows the model while the engine still stores today's states, so it needs this mapping.
+
+| Today | Stage | State | Reason |
+|---|---|---|---|
+| `Eligible` | Readiness | In Progress | |
+| `NotReady`, a line failed | Readiness | Needs Human | Item not ready |
+| `NotReady`, waiting for approval | Rule Change | Needs Human | Rule change approval |
+| `Split` | Split | Waiting | Waiting for split children to complete |
+| `Queued`, no run yet | Understand | Queued | |
+| `Queued`, with an open dependency | Understand | Waiting | Waits on #N |
+| `Queued`, a run waiting to resume | The run's next stage | Queued | |
+| `InProgress` | The running stage | In Progress | |
+| `SignOff` | Sign Off | Needs Human | Scenario sign-off |
+| `NeedsInput` | The stage that asked | Needs Human | Question from the agent, or CI broken when the question names only CI failures |
+| `FeatureChangeRequest` | The stage that asked | Needs Human | Feature change decision |
+| `InReview` | Human Review | Needs Human | Human review |
+| `Accepted` | Verify | In Progress | |
+| `Failed`, retries ran out | The stage that failed | Needs Human | Stage failed |
+| `Failed`, after the merge | Verify | Needs Human | Verify failed on `main` |
+| `Abandoned` | Not Done | none | |
+| `Done` | Done | none | |
+
+Stage ids map as `open-pr` to Submit and `sign-off` to Sign Off, and the rest keep their names.
+Until the PR review stage is removed, an item running `pr-review` shows as "PR Review" under Deliver.
+
+## Approaches
+
+I weighed three ways to roll this out.
+
+- **One switch.** Replace the state machine, the stages, the stored values, the pages and the scenarios together. A clean cut, and too big for the factory to build as one item. Every PBI in flight would need converting by hand.
+- **New words first, new behaviour after.** Show the model through a mapping, change behaviour one PBI at a time, then store the model and delete the old names. Small PBIs, and the owner sees the structure from the first one. The engine thinks in old states underneath for a while, and the mapping is thrown away at the end.
+- **Engine first, pages last.** Change the stored model first behind a reverse mapping for the pages. The real model arrives early, with the riskiest work first and nothing visible to check it against.
+
+The owner picked **new words first, new behaviour after**.
+
+## Rollout
+
+Each step is one PBI or a few, and each fits a Sprint.
+Steps 3 to 9 change §5 or §6, so each carries a `## Changes the factory's rules` section and waits for the owner's approval.
+
+1. **Before anything.** #414 ships, so a rule-change PBI can reach its approval. The dashboard cut-over, #281 to #283, ships, so the pages are built once.
+2. **Show the model.** A pure function works out stage, state, reason and since from what is stored today. Floor, the item page, the API and the GitHub board show them. Waiting on You becomes the Needs Human list, oldest first.
+3. **No timeouts.** Remove the two automatic moves to `Abandoned`. #366 is trimmed first, so it never adds a third.
+4. **Failure becomes Needs Human.** Replace `Failed` with "Stage failed" and "Verify failed on `main`".
+5. **Not Done and reopening.** Replace `Abandoned` and its ways back with Not Done and a fresh start at Readiness.
+6. **Split.** Close a parent by its children, add Partially Done and "Split blocked".
+7. **One review.** Remove `pr-review`, and route Address through Self Review and Submit. #413 is trimmed first, since its criteria about the PR review's findings no longer apply.
+8. **Rename.** `open-pr` becomes `submit` in `sop/default.yml` and everywhere a stage id is stored or shown.
+9. **Store the model.** The item row holds stage, state, reason and since. The old state names and the mapping from step 2 are deleted, and §5 and §6 of the spec are rewritten around this document.
+
+## Left to the builder
+
+- The names of columns, types and functions.
+- How Floor lays out its sections, as long as Waiting on You is the Needs Human list, oldest first.
+- How the GitHub board's Status options are renamed. Status shows the phase while the item is open and the final stage once it is Closed. *My call.*
+- How stage attempts recorded under `open-pr` and `pr-review` show after the rename and the removal. Old rows keep their ids and show under the new names, with `pr-review` shown as "PR Review". *My call.*
+- What happens to review threads the factory opened on a PR that is in flight when step 7 ships. The factory resolves them with a note. *My call.*
+- Which existing scenarios each step has to change. Each PBI updates the scenarios its change makes false, in the same PR.
+- How step 9 is split if it is too big for one Sprint.
