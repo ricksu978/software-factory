@@ -6,6 +6,7 @@ import type { BacklogAdapter, FactoryItem, RepoHost } from "../../src/adapters/t
 import type { SplitDeps } from "../../src/gate/split.ts";
 import type { Judge as GateJudge } from "./pbi-13.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
+import { resumesFrom as cellResumesFrom } from "./pbi-18.steps.ts";
 
 // Shares PBI 4's database. Each scenario starts with empty item, source, repo and user tables, a fake board, a fake
 // repo host holding one repo with valid readiness files, and a judge whose answer the steps set. The poller loads
@@ -312,6 +313,9 @@ Then("both items are in state {string}", long, async function (state: string) {
 });
 
 Then("the item's run resumes from {string}", long, async function (stage: string) {
+  // PBI 423: a scenario that ran a cell and no poller reads where the cell left the run instead.
+  const w = this as { pbi12?: Ctx; pbi18?: unknown };
+  if (!w.pbi12 && w.pbi18) return assert.equal(cellResumesFrom(this), stage);
   const c = ctx(this);
   polled(c);
   const r = await need().pool.query(

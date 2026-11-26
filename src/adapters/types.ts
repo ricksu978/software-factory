@@ -176,10 +176,11 @@ export type DiffRange = { path: string; from: number; to: number };
 
 /**
  * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
- * has reported nothing yet.
+ * has reported nothing yet. `cancelled` is a run that ended cancelled, as when a later push to the branch cancelled it,
+ * which neither failed nor passed (PBI 423).
  */
 export type CiCheck = {
-  name: string; conclusion: "success" | "failure" | "pending"; url: string;
+  name: string; conclusion: "success" | "failure" | "pending" | "cancelled"; url: string;
   /** PBI 292: the tests a failed check names as failing, when its run reports them. Empty or absent when it names none. */
   failingTests?: string[];
   /**

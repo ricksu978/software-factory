@@ -12,6 +12,7 @@ import { next, type ItemEvent } from "../../src/core/states.ts";
 import { runMeteredCell } from "./pbi-132.steps.ts";
 import { isPbi319 } from "./pbi-319.steps.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../../src/policy/policy.ts";
+import { loadSop, stageAfter } from "../../src/config/sop.ts";
 
 const repo = process.cwd();
 const BRANCH = "factory/pbi-482-r1";
@@ -387,9 +388,35 @@ Then("the item's scenarios are posted on item {int} for sign-off", function (_it
   assert.deepEqual(t.lockedFiles, [FEATURE]);
 });
 
+/**
+ * PBI 423: the state the cell's claim left the item in. A claim that ends on a release, or on an attempt reported
+ * `stopped`, after its last transition sends the item back to Queued at the stage the run records, as the cell API
+ * ends such a claim. Otherwise the last transition moves the item on from InProgress.
+ */
+export function endState(c: Ctx): string {
+  assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);
+  const ends = c.calls.filter((x) => x.route === "/transition" || x.route === "/release" || (x.route === "/stage" && x.body.status === "stopped"));
+  const last = ends.at(-1);
+  assert.ok(last, "the cell sent no transition");
+  return last.route === "/transition" ? String(next("InProgress", last.body.event as ItemEvent)) : "Queued";
+}
+
 Then("the item moves to {word}", function (state: string) {
-  assert.equal(next("InProgress", lastTransition(ctx(this)).event as ItemEvent), state);
+  assert.equal(endState(ctx(this)), state);
 });
+
+/**
+ * PBI 423: the stage the run resumes from once this claim ends: the stage the claim started at, moved on past each
+ * stage the claim reported passed, as the cell API moves it (stageAfter).
+ */
+export function resumesFrom(world: object): string {
+  const c = ctx(world);
+  assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);
+  const sop = loadSop(readFileSync(join(repo, "sop/default.yml"), "utf8"));
+  let at = c.nextStage;
+  for (const x of c.calls) if (x.route === "/stage" && x.body.status === "passed") at = stageAfter(sop, String(x.body.stageId)) ?? at;
+  return at;
+}
 
 Then("the item moves to {word}, with a question that names {string}", function (state: string, text: string) {
   const t = lastTransition(ctx(this));
