@@ -221,7 +221,7 @@ export function position(i: PositionInput): Position;
 - [ ] Removing the factory's label parks the item: it keeps its stage, its state is Parked with "Factory label removed", and a cell running for it is stopped.
 - [ ] A Parked item is listed in Waiting on You, and holds no WIP slot and no review capacity.
 - [ ] While an item is Parked the factory claims nothing for it, runs no readiness check on it, merges nothing for it and sends it no reminder.
-- [ ] A Parked item's PR stays open. A person who merges it moves the item on to Verify.
+- [ ] A Parked item's PR stays open. A person who merges it clears `parked_since`, and the item reads Verify in In Progress and goes on to Done.
 - [ ] Putting the label back on an item parked while Queued or In Progress queues it at that stage, on the same run and branch.
 - [ ] Putting it back on an item parked in Needs Human or Waiting returns it to that state with the reason it had, as "Scenario sign-off", "Human review" or "Stopped by an operator" with its hold.
 - [ ] Putting it back on an item parked at Readiness or Rule Change sends it through Readiness again.
@@ -240,6 +240,7 @@ export function position(i: PositionInput): Position;
 - [ ] Answering "not done" closes the PBI as Not Done.
 - [ ] The factory closes no PBI by itself. No move ends at Not Done without a person's action.
 - [ ] An item stored as `Abandoned` when this ships reads as Not Done, reopens the same way, and doesn't restart by itself on the first poll after this ships.
+- [ ] One stored as `Abandoned` that was withdrawn before it was queued, and whose issue is still open, reads as Parked at Readiness. Putting its label back sends it through Readiness, as `returned` does today.
 
 ## Task 7: Split
 
@@ -328,11 +329,12 @@ export function position(i: PositionInput): Position;
 - Create: a migration for the new columns and their backfill
 
 **Interfaces:**
-- Produces: the columns `item.position_stage`, `item.position_state`, `item.position_reason` and `item.position_since`. Every write that changes any field of `PositionInput` also writes them, in the same transaction.
+- Produces: the columns `item.position_stage`, `item.position_state`, `item.position_reason` and `item.position_since`. Every write that changes any field of `PositionInput` also writes them, in the same transaction. They hold the position underneath a park, which is what `position` gives with `parkedSince` null. `item.parked_since` stays its own column, and a reader applies Parked on top when it is set.
 
 **Acceptance criteria:**
 - [ ] Every item row holds a stage, and a state unless it is Closed.
-- [ ] The backfill gives each existing row the position Task 1's function gives it.
+- [ ] The backfill gives each existing row the position Task 1's function gives it with `parkedSince` null.
+- [ ] A Parked item's stored state and reason are the ones it had before the park, and it comes back to them when its label returns after this ships.
 - [ ] After any move of an item, or of its run to another stage, the stored position equals what Task 1's function gives for the row.
 - [ ] The same holds after a write that moves neither: a question answered, the item's dependencies refreshed, a rule approval asked for or given, and an operator's stop.
 - [ ] A write that fails rolls the stored position back with it.
@@ -377,5 +379,6 @@ export function position(i: PositionInput): Position;
 - [ ] An approved, clean PR moves from Human Review to Merge in In Progress, and to Verify once the merge lands. A merge GitHub refuses leaves it at Merge, and the next poll tries again.
 - [ ] An item at Merge counts toward neither a WIP slot nor review capacity. This is the one count that differs from today, as the spec's Slots rule says.
 - [ ] No code, scenario or page names one of today's thirteen states.
+- [ ] `item.parked_since` stays. An item parked before this ships comes back to the state and reason it had when its label returns after it.
 - [ ] The events an item logged under the old names still show on Activity and Run detail.
 - [ ] §5 and §6 of the main spec read as the design spec does.

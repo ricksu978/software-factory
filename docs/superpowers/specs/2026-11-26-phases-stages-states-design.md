@@ -144,7 +144,8 @@ The item stays at the stage it was at, in the state Parked, with the reason "Fac
 Parking is a mark on the item, beside what is stored for it, so the state and reason it had are kept. *My call.*
 While it is Parked the factory does nothing for it: no claim, no readiness check, no merge and no reminder.
 A cell still running for it is stopped and its claim ends, so underneath it is Queued at that stage. *My call.*
-Its PR stays open, and the factory doesn't close it. A person who merges it moves the item on to Verify, as merged work.
+Its PR stays open, and the factory doesn't close it. A person who merges it takes the mark off, so the item reads Verify in In Progress and goes on to Done, as merged work.
+The mark stays a mark once the model is stored: the stored stage, state and reason are the ones underneath, and Parked is read on top of them.
 Putting the label back takes the mark off, and the item is what it was underneath. *My call.*
 
 - Parked while Queued or In Progress, it is Queued at that stage, on the same run and branch.
@@ -168,6 +169,8 @@ It is one of two: the issue going from closed to open, or the Reopen control on 
 A Not Done item whose issue is still open reopens only through the control.
 An issue the factory reopens itself, as it does for a split parent, is never read as a person's reopen.
 An item that was `Abandoned` before this design ships reads as Not Done and reopens the same way, so none of them restarts by itself.
+One kind is the exception: an item withdrawn before it was ever queued, whose issue is still open, lost its label and nothing else.
+It reads as Parked at Readiness, so putting the label back sends it through Readiness, as it does today (PBI 168).
 
 **A closed PR.**
 A PR that a person closes without merging doesn't close the PBI.
@@ -254,7 +257,8 @@ The first rollout step shows the model while the engine still stores today's sta
 | `Failed`, retries ran out | The stage that failed | Needs Human | Stage failed |
 | `Failed`, an operator stopped the run | The stage it was stopped at | Needs Human | Stopped by an operator |
 | `Failed`, after the merge | Verify | Needs Human | Verify failed on `main` |
-| `Abandoned` | Not Done | none | |
+| `Abandoned`, withdrawn before it was queued, issue still open | Readiness | Parked | Factory label removed |
+| `Abandoned`, any other | Not Done | none | |
 | `Done` | Done | none | |
 
 A row that reads Queued reads Waiting with "Waits on #N" when the item has an open dependency, at the same stage.
