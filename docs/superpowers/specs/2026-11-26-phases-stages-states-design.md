@@ -141,9 +141,18 @@ Once an item's PR has merged, closing its issue changes nothing, and the item go
 **Parked.**
 Removing the factory's label doesn't close a PBI.
 The item stays at the stage it was at, in the state Parked, with the reason "Factory label removed".
-A cell still running for it is stopped and its claim ends, as a withdrawal does today. *My call.*
-Putting the label back resumes it at that stage, as a queued run. *My call.*
+Parking is a mark on the item, beside what is stored for it, so the state and reason it had are kept. *My call.*
+While it is Parked the factory does nothing for it: no claim, no readiness check, no merge and no reminder.
+A cell still running for it is stopped and its claim ends, so underneath it is Queued at that stage. *My call.*
+Its PR stays open, and the factory doesn't close it. A person who merges it moves the item on to Verify, as merged work.
+Putting the label back takes the mark off, and the item is what it was underneath. *My call.*
+
+- Parked while Queued or In Progress, it is Queued at that stage, on the same run and branch.
+- Parked while in Needs Human or Waiting, it is back in that state with the reason it had.
+- Parked at Readiness or Rule Change, it goes through Readiness again.
+
 Closing the issue of a Parked item closes it as Not Done.
+A split parent that is Parked doesn't close while it is Parked. Its children still count, and it closes by them once its label is back.
 The factory never removes the label itself, so a missing label always means a person removed it.
 Today it takes the label off a split parent, and that stops.
 Two cases are exempt. *My call.*
@@ -250,6 +259,7 @@ The first rollout step shows the model while the engine still stores today's sta
 
 A row that reads Queued reads Waiting with "Waits on #N" when the item has an open dependency, at the same stage.
 No row reads Merge. Until the model is stored, an approved PR reads Human Review up to the moment it merges.
+From rollout step 5 on, an item whose label is off reads Parked with "Factory label removed", at the stage its row gives.
 
 Stage ids map as `open-pr` to Submit and `sign-off` to Sign Off, and the rest keep their names.
 Until the PR review stage is removed, an item running `pr-review` shows as "PR Review" under Deliver.
@@ -295,7 +305,7 @@ Steps 3 to 9 change §5 or §6, so each carries a `## Changes the factory's rule
 ## Left to the builder
 
 - The names of columns, types and functions.
-- How Floor lays out its sections, as long as Waiting on You is the Needs Human list, oldest first.
+- How Floor lays out its sections, as long as Waiting on You is the list of Needs Human and Parked items, oldest first.
 - How the GitHub board's Status options are renamed. Status shows the phase while the item is open and the final stage once it is Closed. *My call.*
 - How stage attempts recorded under `open-pr` and `pr-review` show after the rename and the removal. Old rows keep their ids and show under the new names, with `pr-review` shown as "PR Review". *My call.*
 - What happens to review threads the factory opened on a PR that is in flight when step 7 ships. The factory resolves them with a note. *My call.*

@@ -209,18 +209,25 @@ export function position(i: PositionInput): Position;
 **Changes rules.** §5, every move into and out of `Abandoned`, and "FeatureChangeRequest --> Abandoned: label removed, item closed, or PR closed unmerged".
 
 **Files:**
-- Modify: `src/core/states.ts`, `src/core/position.ts`, `src/watcher/poller.ts`, `src/watcher/webhook.ts`, `src/control/board.ts`, `src/scheduler/scheduler.ts`, `src/api/main.ts`, `web/src/pages/RunDetail.tsx`
+- Modify: `src/core/states.ts`, `src/core/position.ts`, `src/store/items.ts`, `src/watcher/poller.ts`, `src/watcher/webhook.ts`, `src/control/board.ts`, `src/scheduler/scheduler.ts`, `src/gate/file-split.ts`, `src/api/main.ts`, `web/src/pages/RunDetail.tsx`
+- Create: a migration for `item.parked_since`
 
 **Interfaces:**
-- Produces: `State` gains `"Parked"`, and `ItemState` gains a stored `Parked` until Task 12.
+- Produces: `State` gains `"Parked"`. The item row gains `parked_since`, a time or null, set when the label is removed and cleared when it comes back. `PositionInput` gains `parkedSince: Date | null`, and `position` gives Parked with "Factory label removed" at the stage it would otherwise give whenever it is set. `ItemState` gains nothing, so what was stored before the park is untouched.
 
 **Acceptance criteria:**
 - [ ] Closing the issue on GitHub closes the PBI as Not Done from any stage before its PR merges.
 - [ ] Closing the issue of an item whose PR has merged changes nothing, and the item goes on through Verify to Done.
 - [ ] Removing the factory's label parks the item: it keeps its stage, its state is Parked with "Factory label removed", and a cell running for it is stopped.
 - [ ] A Parked item is listed in Waiting on You, and holds no WIP slot and no review capacity.
-- [ ] Putting the label back queues the item at the stage it was parked at, on the same run and branch.
+- [ ] While an item is Parked the factory claims nothing for it, runs no readiness check on it, merges nothing for it and sends it no reminder.
+- [ ] A Parked item's PR stays open. A person who merges it moves the item on to Verify.
+- [ ] Putting the label back on an item parked while Queued or In Progress queues it at that stage, on the same run and branch.
+- [ ] Putting it back on an item parked in Needs Human or Waiting returns it to that state with the reason it had, as "Scenario sign-off", "Human review" or "Stopped by an operator" with its hold.
+- [ ] Putting it back on an item parked at Readiness or Rule Change sends it through Readiness again.
 - [ ] Closing the issue of a Parked item closes it as Not Done.
+- [ ] A Parked split parent doesn't close while it is Parked, and closes by its children once its label is back.
+- [ ] The comment the factory leaves on a split parent says removing the label from a child parks that child.
 - [ ] A split parent the factory took the label from before Task 7 ships is not parked, and neither is an item whose PR has merged.
 - [ ] The issue going from closed to open, or the Reopen control on Run detail, starts a Not Done PBI again at Readiness as a new run.
 - [ ] A Not Done item whose issue is open stays Not Done from poll to poll, and reopens only through the Reopen control.
