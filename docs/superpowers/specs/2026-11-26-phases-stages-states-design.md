@@ -107,6 +107,7 @@ Each stopped state also holds the time it turned on.
 | Feature change decision | Red and later | Approves or turns down a change to a locked feature file. |
 | CI broken | Submit, Address | Answers what to do about CI the factory couldn't fix. |
 | Human review | Human Review | Reviews and approves the PR. |
+| PR closed | Human Review | Says why the PR was closed, then picks what happens next. |
 | Stage failed | A stage that gives up with no question to ask, which today is Green | Re-queues the stage, or closes the item as Not Done. |
 | Verify failed on `main` | Verify | Re-queues the check, or closes the item as Not Done. |
 
@@ -136,6 +137,15 @@ It doesn't resume where it stopped, because the code may have changed since.
 A person reopens it by reopening the issue, putting the label back, or using a Reopen control on the item page. *My call.*
 An item that was `Abandoned` before this design ships reads as Not Done and reopens the same way.
 
+**A closed PR.**
+A PR that a person closes without merging doesn't close the PBI.
+The item stays at Human Review in Needs Human with "PR closed", and the factory asks why it was closed.
+The person then picks one of three:
+
+- **A new PR.** The item is Queued at Submit, which opens a new PR from the same branch.
+- **Re-spec.** The item goes back to Specify as a new run from `main`, with the scenario lock lifted, and the old branch is left behind. *My call on the new run and the branch.*
+- **Not Done.** The PBI closes as Not Done.
+
 **Failure.**
 There is no failed ending.
 Each stage keeps the `on_fail` it has today.
@@ -150,6 +160,8 @@ It then closes as Done, Not Done or Partially Done by the table above.
 A child that is itself a Partially Done parent counts as a mix. *My call.*
 A split that can't be filed turns on Needs Human with "Split blocked".
 Each child starts at Readiness like any other item.
+When a child is reopened after its parent closed, the parent reopens too.
+It goes back to Split in Waiting and closes again by the same table.
 
 **One review by the factory.**
 The PR review stage is removed.
@@ -223,8 +235,8 @@ Steps 3 to 9 change §5 or §6, so each carries a `## Changes the factory's rule
 2. **Show the model.** A pure function works out stage, state, reason and since from what is stored today. Floor, the item page, the API and the GitHub board show them. Waiting on You becomes the Needs Human list, oldest first.
 3. **No timeouts.** Remove the two automatic moves to `Abandoned`. #366 is trimmed first, so it never adds a third.
 4. **Failure becomes Needs Human.** Replace `Failed` with "Stage failed" and "Verify failed on `main`".
-5. **Not Done and reopening.** Replace `Abandoned` and its ways back with Not Done and a fresh start at Readiness.
-6. **Split.** Close a parent by its children, add Partially Done and "Split blocked".
+5. **Not Done and reopening.** Replace `Abandoned` and its ways back with Not Done and a fresh start at Readiness. A closed PR asks "PR closed" in place of withdrawing the item.
+6. **Split.** Close a parent by its children, add Partially Done and "Split blocked", and reopen a parent when a child reopens.
 7. **One review.** Remove `pr-review`, and route Address through Self Review and Submit. #413 is trimmed first, since its criteria about the PR review's findings no longer apply.
 8. **Rename.** `open-pr` becomes `submit` in `sop/default.yml` and everywhere a stage id is stored or shown.
 9. **Store the model.** The item row holds stage, state, reason and since. The old state names and the mapping from step 2 are deleted, and §5 and §6 of the spec are rewritten around this document.
