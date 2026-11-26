@@ -157,11 +157,15 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
       banner: tokenBanner(d.env, at.getTime()),
     };
     const beat = (await d.pool.query<{ ticked_at: Date }>("select ticked_at from worker_heartbeat limit 1")).rows[0];
+    // The outbox rows the worker set aside after their tenth failed attempt (PBI 221), counted beside the heartbeat.
+    const setAside = (await d.pool.query<{ n: number }>("select count(*)::int as n from outbox where failed_at is not null")).rows[0].n;
     // The claim keys are a Map in the dashboard's floor, which JSON can't carry, so they go as an object by item id.
     const f = await floor(d.pool);
     return c.json({
       ...f, keys: Object.fromEntries(f.keys), canOperate: requireRole(c.get("user"), "operator"),
-      claudeToken, workerHeartbeat: beat ? beat.ticked_at.toISOString() : null,
+      claudeToken, workerHeartbeat: beat ? beat.ticked_at.toISOString() : null, outboxSetAside: setAside,
+      // The API's own time, so Floor measures the heartbeat's age against a server clock and not the viewer's.
+      at: at.toISOString(),
     });
   });
 

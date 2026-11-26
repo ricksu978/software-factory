@@ -10,10 +10,19 @@
 //                        or gets 403.
 //   *    /bff/v1/*       needs a live session, or gets 401. The BFF refreshes an access token that expires within 60
 //                        seconds, then forwards the call one for one to the API's /v1/*, with the session's access token
-//                        as a bearer token and none of the browser's cookies or credentials.
+//                        as a bearer token and none of the browser's cookies or credentials. A call gets 30 seconds,
+//                        except that an event stream (text/event-stream) runs on until the API ends it (PBI 280).
+// And step 7c (§03 and §05):
+//   POST /webhooks/github  GitHub's deliveries, which reach the API's /webhooks/github with their bytes and headers as
+//                        GitHub sent them, and the API's answer goes back to GitHub. No session and no Origin are
+//                        needed, and the BFF doesn't check the signature: only the API holds the webhook secret. A body
+//                        over GitHub's 25 MB cap gets 413 before the BFF holds it all.
+//   GET  /bff/v1/events  goes through /bff/v1/* like any call, but an answer of server-sent events streams to the
+//                        browser for as long as the API keeps it open, and closes at the API when the browser leaves.
 // And step 8a (§04 and §10):
 //   GET  everything else the SPA's built files from spaDir, or its page for a deep link (src/bff/spa.ts).
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ResponseBodyError } from "openid-client";
 import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, type SignedIn, type SignInChecks } from "./oidc.ts";
@@ -24,7 +33,10 @@ import {
 
 /** An access token with this long or less left is refreshed before a call goes to the API. */
 export const REFRESH_WITHIN_MS = 60_000;
+/** How long the API has to answer an ordinary call. A stream of server-sent events only has this long to start. */
 const API_TIMEOUT_MS = 30_000;
+/** GitHub caps a delivery at 25 MB, so a bigger body, which needs no session to send, gets 413 before it's buffered. */
+export const MAX_WEBHOOK = 25 * 1024 * 1024;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 /** The browser's request headers that go on to the API. Cookies, Authorization and Origin never do. */
 const FORWARDED_REQUEST_HEADERS = [
@@ -34,6 +46,14 @@ const FORWARDED_REQUEST_HEADERS = [
 const DROPPED_RESPONSE_HEADERS = new Set([
   "connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length", "set-cookie", "upgrade",
   "proxy-authenticate", "trailer", "te",
+]);
+/**
+ * A webhook delivery's headers that don't go on to the API: hop-by-hop ones and those fetch sets for itself, and the
+ * cookie and credentials a browser might add, which GitHub never sends. Every other header goes as GitHub sent it.
+ */
+const DROPPED_WEBHOOK_HEADERS = new Set([
+  "host", "connection", "keep-alive", "transfer-encoding", "content-length", "upgrade", "expect", "te", "trailer",
+  "proxy-authorization", "proxy-connection", "cookie", "authorization",
 ]);
 
 /** The sign-in cookie: state, nonce and PKCE verifier, sealed under the session key, for the provider's round trip. */
@@ -53,9 +73,13 @@ export type BffConfig = {
   sessions: SessionStore;
   /** The API's base address, with no path. Without it /bff/v1/* answers 502. */
   apiUrl?: string;
+  /** How long the API has to answer an ordinary call, 30 seconds unless set. */
+  apiTimeoutMs?: number;
   fetch?: typeof fetch;
   /** Where `npm run build` writes the SPA, web/dist. Without it the BFF serves no SPA. */
   spaDir?: string;
+  /** The signal that ends a forwarded call after `ms`. AbortSignal.timeout unless a test gives its own clock's. */
+  timeout?: (ms: number) => AbortSignal;
 };
 
 type SignIn = SignInChecks;
@@ -76,6 +100,38 @@ export function createBff(cfg: BffConfig): Hono {
   };
 
   const doFetch = cfg.fetch ?? fetch;
+  const apiTimeoutMs = cfg.apiTimeoutMs ?? API_TIMEOUT_MS;
+
+  /**
+   * Sends a call to the API and hands its answer back. The API has apiTimeoutMs to answer, and an ordinary answer has
+   * that long to arrive whole. An answer of server-sent events has no end set by the BFF: it lasts until the API ends it
+   * or the browser leaves, which closes it at the API. Null when the API doesn't answer.
+   */
+  const toApi = async (c: Context, to: string, init: RequestInit): Promise<Response | null> => {
+    const limit = cfg.timeout ? cfg.timeout(apiTimeoutMs) : AbortSignal.timeout(apiTimeoutMs);
+    const timer = new AbortController();
+    const onLimit = () => timer.abort(limit.reason);
+    if (limit.aborted) onLimit();
+    else limit.addEventListener("abort", onLimit, { once: true });
+    const clearLimit = () => limit.removeEventListener("abort", onLimit);
+    let r: Response;
+    try {
+      r = await doFetch(to, { ...init, redirect: "manual", signal: AbortSignal.any([timer.signal, c.req.raw.signal]) });
+    } catch (e) {
+      clearLimit();
+      console.error(`the BFF couldn't reach the API for ${init.method} ${new URL(to).pathname}:`, (e as Error).message);
+      return null;
+    }
+    const streaming = r.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "text/event-stream";
+    let body = r.body;
+    if (streaming || !body) clearLimit();
+    else body = body.pipeThrough(new TransformStream({ flush: clearLimit }));
+    const back = new Headers();
+    r.headers.forEach((v, k) => {
+      if (!DROPPED_RESPONSE_HEADERS.has(k)) back.set(k, v);
+    });
+    return new Response(body, { status: r.status, statusText: r.statusText, headers: back });
+  };
   /** Refreshes in flight, by cookie hash, so calls that arrive together spend the refresh token once. */
   const refreshing = new Map<string, Promise<Session | null>>();
 
@@ -149,18 +205,20 @@ export function createBff(cfg: BffConfig): Hono {
     }
     const method = c.req.method;
     const body = method === "GET" || method === "HEAD" ? undefined : await c.req.arrayBuffer();
-    let r: Response;
-    try {
-      r = await doFetch(to, { method, headers, body, redirect: "manual", signal: AbortSignal.timeout(API_TIMEOUT_MS) });
-    } catch (e) {
-      console.error(`the BFF couldn't reach the API for ${method} ${from.pathname}:`, (e as Error).message);
-      return c.json({ error: "the API didn't answer" }, 502);
-    }
-    const back = new Headers();
-    r.headers.forEach((v, k) => {
-      if (!DROPPED_RESPONSE_HEADERS.has(k)) back.set(k, v);
+    return (await toApi(c, to, { method, headers, body })) ?? c.json({ error: "the API didn't answer" }, 502);
+  });
+
+  const webhookLimit = bodyLimit({
+    maxSize: MAX_WEBHOOK, onError: (c) => c.json({ error: "the payload is over 25 MB" }, 413),
+  });
+  app.post("/webhooks/github", webhookLimit, async (c) => {
+    if (!cfg.apiUrl) return c.json({ error: "the BFF has no API to forward to" }, 502);
+    const headers = new Headers();
+    c.req.raw.headers.forEach((v, k) => {
+      if (!DROPPED_WEBHOOK_HEADERS.has(k)) headers.set(k, v);
     });
-    return new Response(r.body, { status: r.status, statusText: r.statusText, headers: back });
+    const body = await c.req.arrayBuffer();
+    return (await toApi(c, `${cfg.apiUrl}/webhooks/github`, { method: "POST", headers, body })) ?? c.json({ error: "the API didn't answer" }, 502);
   });
 
   app.get("/auth/login", async (c) => {

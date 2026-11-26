@@ -1260,6 +1260,8 @@ Tests sit next to their code as `*.test.ts` and run with `node --test "src/**/*.
   No step starts a server on, or connects to, a port fixed in its code.
   `src/bdd/ports.ts` gives a step a free port,
   and stands each port a scenario names for a free port of that scenario's own.
+  It picks a free port at random between 20000 and 32767, below the range the OS takes outgoing connections' ports from,
+  so no connection holds the port when the step listens on it.
   `findFixedPorts` in `src/bdd/fixed-ports.ts` names each step file and line that listens on or connects to a fixed port,
   and PBI 390's scenarios run it over `features/steps`.
   Imports use explicit `.ts` extensions.
@@ -6529,6 +6531,32 @@ from spec §6 rows 1 to 7:
   because the API's `/v1` routes come in a later step.
   The `@db` scenarios in `features/pbi-289-bff-guards-and-forwards.feature` forward to the stand-in API in `features/fixtures/pbi-289-api.ts`,
   and `src/bff/session.db.test.ts` checks `pgSessions` against Postgres.
+- Since step 7c (2026-11-07 design,
+  §03 and §05,
+  PBI 290),
+  `createBff` passes GitHub's webhooks and the live event stream through.
+  `POST /webhooks/github` needs no session and no `Origin`,
+  sits outside the `/bff/*` guard,
+  and goes to `API_URL` + `/webhooks/github` with its body byte for byte and every header GitHub sent,
+  less hop-by-hop headers,
+  `Host`,
+  `Content-Length`,
+  `Cookie` and `Authorization`.
+  The BFF adds no bearer token and doesn't check `X-Hub-Signature-256`,
+  because only the API holds the webhook secret.
+  A body over 25 MiB (`MAX_WEBHOOK`,
+  the API's own cap) gets 413 before the BFF reads it,
+  and never reaches the API.
+  The API's status and body go back to GitHub,
+  and an API that doesn't answer gives 502,
+  so GitHub can redeliver.
+  `/bff/v1/events` goes through `/bff/v1/*` like any call.
+  The API has 30 seconds (`apiTimeoutMs` in `BffConfig`) to answer any call,
+  and an ordinary answer has that long to arrive whole.
+  An answer of `text/event-stream` streams to the browser for as long as the API keeps it open,
+  and the browser leaving cancels the call to the API.
+  The `@db` scenarios in `features/pbi-290-bff-webhooks-and-events.feature` use the same stand-in API,
+  which can now hold a stream open.
 - Since step 8a (2026-11-07 design,
   §04,
   §09 and §10,
@@ -6627,6 +6655,37 @@ from spec §6 rows 1 to 7:
   `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
   and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
   Today's dashboard keeps serving these pages on 7400 until step 9.
+- Since step 8c (2026-11-07 design,
+  §05 and §07,
+  PBI 280),
+  the SPA's Floor is live.
+  `startLiveFloor` in `web/src/live.ts`,
+  which `FloorPage` in `web/src/App.tsx` starts once Floor has drawn,
+  follows `GET /bff/v1/events` through the shell's `call`
+  and reads the floor again once a burst of events has settled,
+  250 ms after the last event and at most a second after the first.
+  When a stream ends it reads `/auth/session`,
+  so a session that ended goes to sign-in at once,
+  then opens a new stream a second later,
+  doubling the wait up to 15 seconds after each failed attempt or short-lived stream,
+  and reads the floor again once the new stream is open.
+  It also reads the floor every 30 seconds with no event.
+  While the Controls' Reason field has focus or holds text it reads nothing,
+  and it catches up once the field is empty and has lost focus.
+  Once the factory accepts the Controls form,
+  the page draws the form afresh with the field empty and tells Floor so (`emptiedOnAccept` in `web/src/live.ts`),
+  since the reason has been sent.
+  Leaving Floor stops it.
+  The BFF (`src/bff/app.ts`) lifts its 30-second limit from a forwarded call once the API answers `text/event-stream`.
+  `GET /v1/floor` carries `outboxSetAside`,
+  the count of outbox rows with `failed_at` set,
+  and Floor shows "Outbox rows set aside: N" beside when the worker last ticked,
+  with a "Scheduler not ticking" banner from `schedulerBanner` in `web/src/lines.ts`
+  when the heartbeat is more than a minute old or missing.
+  `web/src/live.test.ts`,
+  `web/src/lines.test.ts`,
+  `src/bff/app.test.ts` and `src/api/main.test.ts` cover it,
+  and `features/pbi-280-live-floor-events-heartbeat-outbox.feature` drives Floor on a fake clock against a stubbed event stream.
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,

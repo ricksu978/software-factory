@@ -5,16 +5,32 @@
 // to it reaches the same server, and never another worker's or a program that really holds the named port.
 import { createServer } from "node:net";
 
-/** A port nothing on this machine listens on now, as the OS hands one out. */
-export async function freePort(): Promise<number> {
-  const s = createServer();
-  await new Promise<void>((resolve, reject) => {
-    s.once("error", reject);
-    s.listen(0, "127.0.0.1", () => resolve());
+/** The lowest port freePort hands out. Ports below 32768 lie under the range Linux (32768-60999), macOS and Windows
+ * (49152-65535) take outgoing connections' ports from, so no connection to Postgres or a fetch can be holding one when
+ * a step starts its server on it, as one held port 41617 in the gap between being picked and being listened on. */
+export const LOWEST = 20_000;
+/** One above the highest port freePort hands out. */
+export const ABOVE = 32_768;
+
+const randomPort = (): number => LOWEST + Math.floor(Math.random() * (ABOVE - LOWEST));
+
+/** Whether a server can listen on `port` on `host`, or on every address when `host` is undefined. */
+function listenable(port: number, host?: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = createServer();
+    s.once("error", () => resolve(false));
+    s.listen({ port, host, exclusive: true }, () => s.close(() => resolve(true)));
   });
-  const port = (s.address() as { port: number }).port;
-  await new Promise((resolve) => s.close(resolve));
-  return port;
+}
+
+/** A port nothing on this machine listens on now, on any address, picked at random below the OS's ephemeral range so
+ * that parallel workers seldom pick the same one and no outgoing connection holds it. */
+export async function freePort(pick: () => number = randomPort): Promise<number> {
+  for (let i = 0; i < 200; i++) {
+    const port = pick();
+    if ((await listenable(port, "127.0.0.1")) && (await listenable(port))) return port;
+  }
+  throw new Error(`no free port between ${LOWEST} and ${ABOVE - 1} after 200 tries`);
 }
 
 /** The free ports one scenario's named ports stand for. */

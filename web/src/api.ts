@@ -64,6 +64,10 @@ export type FloorData = {
   canOperate: boolean;
   claudeToken: { createdAt: string; ageDays: number; banner: string | null } | null;
   workerHeartbeat?: string | null;
+  /** The API's time when it read the floor. Floor ages workerHeartbeat against it, so the viewer's clock skew doesn't count. */
+  at?: string;
+  /** How many outbox rows the worker set aside after their tenth failed attempt (PBI 221, PBI 280). */
+  outboxSetAside?: number;
 };
 
 export type Stage = {
@@ -156,7 +160,13 @@ export type Submitted<T> =
  * when react-dom/server renders the page, a submit does nothing. */
 export type FormName = "Controls" | "Sign off" | "Answer";
 export type OnSubmit = (form: FormName, button: string, value: string) => void;
-export type FloorProps = { data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
+export type FloorProps = {
+  data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit;
+  /** Told what the Controls' Reason field holds and whether it has focus, each time either changes (PBI 280). */
+  onReasonField?: (field: { value: string; focused: boolean }) => void;
+  /** Changes each time the factory accepts the Controls form, which draws the form afresh with its Reason field empty. */
+  controlsKey?: number;
+};
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
 export type ActivityProps = { data: ActivityData };

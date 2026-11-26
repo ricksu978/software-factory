@@ -30,6 +30,7 @@ import { withTx } from "../../src/store/db.ts";
 import { claimNext } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { isPbi280, pass as pass280 } from "./pbi-280.steps.ts";
 import { isPbi286, pass as pass286 } from "./pbi-286.steps.ts";
 
 const NOW = new Date("2026-11-06T10:00:00Z");
@@ -431,6 +432,8 @@ When(/^(\d+) (?:more )?(minutes?|seconds?) pass$/, long, async function (n: stri
   const ms = Number(n) * (unit.startsWith("minute") ? 60_000 : 1000);
   // PBI 286's event streams wait on the API's own timer, which its steps hold on their clock.
   if (isPbi286(this)) return pass286(this, ms);
+  // PBI 280's live Floor sets its timers on the SPA's clock, which its steps hold.
+  if (isPbi280(this)) return pass280(this, ms);
   const clock = ctx(this).clock;
   const before = clock.now().getTime();
   await clock.advance(ms);
