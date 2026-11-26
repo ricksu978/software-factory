@@ -202,8 +202,9 @@ A split that can't be filed turns on Needs Human with "Split blocked".
 Each child starts at Readiness like any other item.
 The children of a parent that is itself a filed child are the exception, as today: they get no label and wait for the owner.
 That parent sits at Split in Needs Human with "Split blocked" until the owner labels its children or closes them. *My call.*
-A child that isn't Done in the factory counts by its issue, whether the factory holds it in another state or not at all, so a child a person finished by hand counts (#426). *My call.*
-Open keeps the parent waiting, closed as completed counts as Done, and closed as not planned, closed as a duplicate or deleted counts as Not Done.
+A child that is neither Done nor Partially Done in the factory counts by its issue once that issue is closed, whether the factory holds it in another state or not at all, so a child a person finished by hand counts (#426). *My call.*
+Closed as completed counts as Done, and closed as not planned, closed as a duplicate or deleted counts as Not Done.
+A child the factory doesn't hold whose issue is open keeps the parent waiting.
 When a child is reopened after its parent closed, the parent reopens too, and the factory reopens the parent's issue.
 It goes back to Split in Waiting and closes again by the same table.
 
