@@ -30,7 +30,7 @@ Done when the first digest line arrives.
 | `banners:`, `usage pause until`, or `next up` holds items while no `in flight` item is `InProgress` | Report what holds the factory. Drain, Prepare restart, Pause, the kill switch and the usage pause are the owner's controls. |
 | One item `InProgress` in the same stage for over an hour | Check its cell: `docker ps --filter ancestor=factory-cell:local`, then `docker exec <cell> ps -eo etime,args`. A long BDD run is normal; report only a cell with no live work. |
 
-A `FeatureChangeRequest` item shows on no part of the Floor yet. The factory posts the request as a comment on the item's issue, and the item drops out of `in flight`; report it when that happens.
+A `FeatureChangeRequest` item shows on no part of the Floor yet. When an `InProgress` item leaves `in flight`, run `aspire logs cell-api --search "FeatureChangeRequest"`. A line `item N: InProgress -> FeatureChangeRequest (feature_change_requested)` means its stage asked to change a locked feature file. Report it with the request the factory posted as a comment on issue #N.
 
 **Approving a sign-off.** The token is the last `dev-login?token=` that `aspire logs control --search "dev-login"` prints. Then:
 
