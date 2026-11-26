@@ -259,7 +259,7 @@ function startCall(world: object): Call {
   const s = stream();
   cell.next = s;
   const call: Call = { stream: s, ended: false, done: undefined as never };
-  call.done = cell.meter.ask({ prompt: `the ${a.stage} stage`, model: MODEL, cwd: tmpdir(), mode: "cell", signal: cell.abort.signal });
+  call.done = cell.meter.ask({ prompt: `the ${a.stage} stage`, model: MODEL, effort: "medium", cwd: tmpdir(), mode: "cell", signal: cell.abort.signal });
   call.done.catch((e) => (call.error = e));
   a.calls.push(call);
   return call;
@@ -320,7 +320,7 @@ async function startAttempt(world: object, stage: string, attempt: number): Prom
   c.open = a;
   c.used = { tokensIn: 0, tokensOut: 0, costUsd: 0 };
   c.cell!.meter.open(stage, attempt);
-  await c.cell!.api.stage({ stageId: stage, attempt, status: "started", model: MODEL, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  await c.cell!.api.stage({ stageId: stage, attempt, status: "started", model: MODEL, effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 });
   return a;
 }
 
@@ -345,7 +345,7 @@ async function endAttempt(world: object, status: "passed" | "failed" | "stopped"
   await cell.meter.settled();
   a.complete = m.transcript;
   a.status = status;
-  const report = { stageId: a.stage, attempt: a.attempt, status, model: MODEL, tokensIn: m.tokensIn, tokensOut: m.tokensOut, costUsd: m.costUsd };
+  const report = { stageId: a.stage, attempt: a.attempt, status, model: MODEL, effort: "medium" as const, tokensIn: m.tokensIn, tokensOut: m.tokensOut, costUsd: m.costUsd };
   const upload = () => cell.api.upload({ kind: "transcript", stageId: a.stage, attempt: a.attempt, body: m.transcript });
   if (status === "stopped") {
     if (m.transcript) await upload().catch((e) => console.error(`stopped attempt ${a.stage}-${a.attempt}: transcript upload failed`, e));

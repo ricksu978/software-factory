@@ -17,6 +17,7 @@ import { requestFeatureChange } from "../store/feature-change.ts";
 import { closeStartedAttempts, LEASE_RAN_OUT, renewLease, transitionItem } from "../store/items.ts";
 import { readSnapshot, SnapshotMissing, storeSnapshot } from "../store/run-snapshot.ts";
 import { repoName, runBranch } from "../store/runs.ts";
+import { currentEffort, EFFORTS, isEffort } from "../store/effort.ts";
 import { seconds, SLOW_REQUEST_MS, watch, watched, type Slow } from "./slow-work.ts";
 import { GatewayUnavailable, handleModelRequest, type Grant, type WebTool } from "./model-gateway.ts";
 
@@ -391,6 +392,9 @@ const routes: Record<string, Route> = {
       trustedBot: run.trusted_bot,
       stageAttempts: Object.fromEntries(attempts.rows.map((r) => [r.stage_id, r.attempt])),
       failedCiHeads,
+      // PBI 319: the effort setting as it is now. The cell asks for its context once, as it starts, and passes this
+      // effort on every agent call until it ends, so a later change reaches only cells that start after it.
+      effort: await currentEffort(c),
       resume,
       retry,
     };
@@ -511,20 +515,25 @@ const routes: Record<string, Route> = {
     const ciFailure = body.ciFailure === undefined ? null : JSON.stringify(ciFailureOf(body.ciFailure, run.repo_url));
     // PBI 393: a failed attempt that ends its claim at the attempt boundary hands the next claim its tries and findings.
     const retryCarry = body.retryCarry === undefined || status !== "failed" ? null : JSON.stringify(retryCarryOf(body.retryCarry));
-    const values = [run.run_id, stageId, attempt, status, text(body.model), num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
-      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure, retryCarry];
+    // PBI 319: every attempt names the model and the effort its calls ran at, so a report without either is turned down.
+    const model = text(body.model);
+    if (model === null || model.trim() === "") throw new BadRequest("model must name the attempt's model");
+    if (!isEffort(body.effort)) throw new BadRequest(`effort must be one of ${EFFORTS.join(", ")}`);
+    const values = [run.run_id, stageId, attempt, status, model, num(body.tokensIn), num(body.tokensOut), num(body.costUsd),
+      text(body.transcriptRef), text(body.reportRef), status === "started" ? null : now, cut(text(body.message)), restates, ciFailure, retryCarry,
+      body.effort];
     const updated = await c.query(
       `update stage_run set status = $4, model = coalesce($5, model), tokens_in = coalesce($6, tokens_in), tokens_out = coalesce($7, tokens_out),
          cost_usd = coalesce($8, cost_usd), transcript_ref = coalesce($9, transcript_ref), report_ref = coalesce($10, report_ref), ended_at = $11,
          message = coalesce($12, message), restates = coalesce($13::jsonb, restates), ci_failure = coalesce($14::jsonb, ci_failure),
-         retry_carry = coalesce($15::jsonb, retry_carry)
+         retry_carry = coalesce($15::jsonb, retry_carry), effort = $16
        where run_id = $1 and stage_id = $2 and attempt = $3`,
       values,
     );
     if (updated.rowCount === 0) {
       await c.query(
-        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure, retry_carry)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb, $15::jsonb)`,
+        `insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref, report_ref, ended_at, message, restates, ci_failure, retry_carry, effort)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '[]'), $14::jsonb, $15::jsonb, $16)`,
         values,
       );
     }

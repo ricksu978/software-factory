@@ -391,7 +391,7 @@ Given("item {int}'s PR review stage, attempt {int}, recorded that the PR reviewe
       });
       assert.equal(r.status, 200, `the cell API answered ${r.status}: ${await r.text()}`);
     };
-    const report = { stageId: "pr-review", attempt, model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 };
+    const report = { stageId: "pr-review", attempt, model: "claude-opus-5-5", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 };
     await post({ ...report, status: "started" });
     await post({ ...report, status: "passed", tokensIn: 5000, tokensOut: 900, costUsd: 0.42,
       restates: [{ round, reason: `its last line is neither APPROVED nor OPEN: <n>: ${line}` }] });

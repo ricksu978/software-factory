@@ -182,7 +182,7 @@ When("a cell run that names {string} sets up its agent run in that checkout", fu
   const c = ctx(this);
   const dir = pbi96(this)?.dir ?? c.dir;
   assert.ok(dir, "no checkout was set up");
-  const args: AgentArgs = { prompt: "# PR review brief", model: "claude-sonnet-4-5", cwd: dir, agent: name, mode: "cell",
+  const args: AgentArgs = { prompt: "# PR review brief", model: "claude-sonnet-4-5", effort: "medium", cwd: dir, agent: name, mode: "cell",
     webTools: [], signal: new AbortController().signal };
   c.got = resolve(agentOptions(args) as Record<string, unknown>, dir);
 });

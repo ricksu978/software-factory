@@ -186,7 +186,7 @@ async function realPoll(world: object, b: Board): Promise<void> {
   const out = await pollOnce({
     pool: pool(), adapter, repoHost: k.host, judge, sourceId: b.sourceId,
     split: {
-      sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen,
+      sop: { models: { coding: "coding-model" } }, agent: agent(c), seen: c.seen, effort: async () => "medium",
       file: { board: unlabelledBoard(c), optInLabel: c.label, backlogStatus: c.backlogStatus, criteriaHeading: HEADING },
     },
   });

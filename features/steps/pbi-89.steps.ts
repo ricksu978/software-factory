@@ -401,7 +401,7 @@ Given("an item in flight whose cell sends a 600-character message as its stage p
   const r = await fetch(`${c.origin}/internal/cells/${run}/stage`, {
     method: "POST",
     headers: { authorization: `Bearer ${runToken(CELL_SECRET, run, generation)}`, "content-type": "application/json" },
-    body: JSON.stringify({ stageId: "green", attempt: 1, status: "passed", message: "m".repeat(500) + "n".repeat(100) }),
+    body: JSON.stringify({ stageId: "green", attempt: 1, status: "passed", model: "claude-opus-5-5", effort: "medium", message: "m".repeat(500) + "n".repeat(100) }),
   });
   assert.equal(r.status, 200);
 });

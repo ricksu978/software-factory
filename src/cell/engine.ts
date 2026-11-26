@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { factoryThread, FAILED_LOG_CHARS, LOGGED_CHECKS, type CiCheck, type DiffRange, type FailedCheck, type LineComment, type OpenedThread, type Review, type ReviewComment, type RepoHost } from "../adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
+import { assertNamed, type Effort } from "../store/effort.ts";
 import { matchesLock, restoreLock } from "../bdd/lock.ts";
 import { classify, finishedFindings, greenGate, notDryRun, redGate, traceability, unfinishedFinding, unfinishedRun } from "../bdd/messages.ts";
 import { DEFAULT_COMMAND_TIMEOUT_MINUTES, parseRepoConfig, type RepoConfig } from "../config/repo-config.ts";
@@ -31,6 +32,11 @@ export type CellContext = {
   decision: { kind: "approve" | "changes" | "answer"; text: string } | null; lockSha: string | null;
   lockedFiles: string[]; prNumber: number | null; repo: string; base: string; branch: string;
   configSha: string; sopVersion: string; dodVerdicts: Verdict[]; dodCheckedSha: string | null;
+  /**
+   * PBI 319: the effort setting as the control plane read it when the cell asked for its context, as it starts. The
+   * cell passes it on every agent call it makes, for every stage, until it ends.
+   */
+  effort?: Effort;
   /** The last passed self-review's scenario notes, for a PR body written in a later claim (PBI 152). */
   scenarioNotes?: string[];
   trustedComments: ReviewComment[];
@@ -817,9 +823,15 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const modelOf = (id: Recorded) => sop.models[stageOf(id === "merge" ? "green" : id).model ?? "coding"];
   const promptOf = async (id: StageId) => readFile(join(SOP_DIR, String(stageOf(id).prompt ?? `sop/prompts/${id}.md`)), "utf8");
 
+  // PBI 319: the effort the cell read with its context, as it started. Every call it makes, for every stage, runs at
+  // it until the cell ends, whatever the setting says meanwhile. A context without one is a cell that can't name its
+  // effort, so each call fails before it reaches the model, and the attempt with it. Its reports name none either,
+  // and the cell API turns those down: nothing records an effort the cell never ran at.
+  const effort = ctx.effort as Effort;
   // Every agent call goes through the meter, which charges it to the open stage attempt (PBI 132).
-  // PBI 209: the meter uploads a running attempt's transcript so far to the attempt's usual path.
-  const meter = stageMeter(d.agent, api);
+  // PBI 209: the meter uploads a running attempt's transcript so far to the attempt's usual path. No call reaches
+  // the agent without its model and its effort (PBI 319).
+  const meter = stageMeter((a) => { assertNamed(a); return d.agent(a); }, api);
   // The stage attempt in flight: its report and its message. The meter holds what its agent calls cost.
   let current: {
     stageId: Recorded; attempt: number; report: string | null; message?: string; scenarioNotes?: string[];
@@ -884,7 +896,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     lastAttempt.set(stageId, attempt);
     current = { stageId, attempt, report: null };
     meter.open(stageId, attempt);
-    await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), tokensIn: 0, tokensOut: 0, costUsd: 0,
+    await api.stage({ stageId, attempt, status: "started", model: modelOf(stageId), effort, tokensIn: 0, tokensOut: 0, costUsd: 0,
       ...(stageId === "green" && fixing ? { ciFailure: fixing } : {}) });
     return attempt;
   };
@@ -914,7 +926,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       if (c.report !== null) await upload("report", c.report);
     };
     if (status === "stopped") await uploads();
-    await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), tokensIn: m.tokensIn, tokensOut: m.tokensOut,
+    await api.stage({ stageId: c.stageId, attempt: c.attempt, status, model: modelOf(c.stageId), effort, tokensIn: m.tokensIn, tokensOut: m.tokensOut,
       costUsd: m.costUsd, ...(c.message === undefined && !c.notes?.length ? {} : { message: [...(c.notes ?? []), c.message].filter(Boolean).join("\n\n") }),
       ...(status === "passed" && c.scenarioNotes ? { scenarioNotes: c.scenarioNotes } : {}),
       ...(c.restates?.length ? { restates: c.restates } : {}),
@@ -927,7 +939,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
 
   // `resume` carries on an earlier call's session, as the PR review's restate does (PBI 190).
   const ask = async (stageId: Recorded, prompt: string, agent?: string, resume?: string): Promise<AgentResult> =>
-    settle(await meter.ask({ prompt, model: modelOf(stageId), cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal,
+    settle(await meter.ask({ prompt, model: modelOf(stageId), effort, cwd: dir, agent, mode: "cell", webTools: config.webTools, signal: abort.signal,
       ...(resume ? { resume } : {}) }));
   // A stage's own prompted call, or the merge pass's. Its text is the stage's message on Floor, so a judge's or the
   // risk classifier's output, which go through ask or settle alone, never shows there.
@@ -1485,7 +1497,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       const files = await changedFiles(dir, range);
       const diff = (await run("git", ["diff", "--no-renames", range], { cwd: dir, maxBuffer: 64 * 1024 * 1024 })).stdout;
       return await classifyRisk(diff, files, {
-        sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal,
+        sop, config, risk: policies.risk, dodVerdicts, signal: abort.signal, effort,
         agent: async (a) => settle(await meter.ask(a)),
       });
     } catch (e) {

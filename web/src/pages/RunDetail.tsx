@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
+import { withEffort } from "../../../src/store/effort.ts";
 import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
@@ -141,7 +142,7 @@ function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
             <TableCell>{s.stage_id}</TableCell>
             <TableCell>{s.attempt}</TableCell>
             <TableCell>{status(s)}</TableCell>
-            <TableCell>{s.model ?? ""}</TableCell>
+            <TableCell>{s.model ? withEffort(s.model, s.effort) : "model not recorded"}</TableCell>
             <TableCell>{s.started_at ? <Time at={s.started_at} zone={zone} /> : ""}</TableCell>
             <TableCell>{took(s)}</TableCell>
             <TokensCell tokensIn={s.tokens_in} tokensOut={s.tokens_out} />
@@ -277,7 +278,7 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
               <TableRow key={i}>
                 <TableCell><Time at={k.ranAt} zone={zone} /></TableCell>
                 <TableCell>{k.kind === "split" ? "Split proposal" : "Judge"}</TableCell>
-                <TableCell>{k.model}</TableCell>
+                <TableCell>{withEffort(k.model, k.effort)}</TableCell>
                 <TokensCell tokensIn={k.tokensIn} tokensOut={k.tokensOut} />
                 <CostCell usd={k.costUsd} />
                 <TableCell className="whitespace-normal"><Verdict c={k} /></TableCell>

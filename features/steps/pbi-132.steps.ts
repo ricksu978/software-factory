@@ -109,7 +109,7 @@ function judge(s: Script): Judge {
     return { ...spend, ok: true, text, limit: null, usage: null, transcript: "" };
   };
   // PBI 13 types the policy by the fields its steps read; the gate hands the judge the whole loaded policy.
-  return haikuJudge({ models: { triage: s.model ?? MODEL } }, run) as unknown as Judge;
+  return haikuJudge({ models: { triage: s.model ?? MODEL } }, run, async () => "medium") as unknown as Judge;
 }
 
 Given("an item {string} in that repo", async function (title: string) {
@@ -255,7 +255,7 @@ async function dbItem(c: Ctx, title: string, state = "Eligible"): Promise<DbItem
 }
 
 async function check(itemId: string, cost: number, ranAt = new Date(), model = MODEL, tokensIn = 1000, tokensOut = 50): Promise<void> {
-  await recordReadinessCheck(pool(), itemId, { model, tokensIn, tokensOut, costUsd: cost, ranAt });
+  await recordReadinessCheck(pool(), itemId, { model, effort: "medium", tokensIn, tokensOut, costUsd: cost, ranAt });
 }
 
 /** A merged run whose stages cost `stages` in all, merged an hour ago. */
@@ -493,7 +493,7 @@ export async function runMeteredCell(world: object): Promise<boolean> {
     cell.asked.push(a.prompt);
     return { ok: true, text: "done", costUsd: 0.01, tokensIn: 10, tokensOut: 5, model: a.model, limit: null, usage: null, transcript: "{}\n" };
   };
-  const args = (prompt: string): AgentArgs => ({ prompt, model: "claude-opus-5-5", cwd: process.cwd(), mode: "cell", signal: new AbortController().signal });
+  const args = (prompt: string): AgentArgs => ({ prompt, model: "claude-opus-5-5", effort: "medium", cwd: process.cwd(), mode: "cell", signal: new AbortController().signal });
   try {
     const meter = stageMeter(model);
     if (cell.script === "between") {

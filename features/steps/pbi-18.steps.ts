@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { next, type ItemEvent } from "../../src/core/states.ts";
 import { runMeteredCell } from "./pbi-132.steps.ts";
+import { isPbi319 } from "./pbi-319.steps.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../../src/policy/policy.ts";
 
 const repo = process.cwd();
@@ -329,6 +330,9 @@ export async function runTheCell(world: object): Promise<void> {
         // The control plane's filter (Run contract 10): only trusted authors reach the cell's context.
         trustedComments: comments.filter((x) => x.author === "owner"),
         stageAttempts: {},
+        // The effort the cell started with, as the cell API hands every cell one (PBI 319). A PBI 319 scenario names
+        // its own in the context, or leaves it out to show a cell with none.
+        ...(isPbi319(world) ? {} : { effort: "medium" }),
         ...c.context,
       },
       agent: ((base) => c.agent ? (a: any) => c.agent!(a, base) : base)(c.wrapAgent ? c.wrapAgent(agent(c)) : agent(c)),

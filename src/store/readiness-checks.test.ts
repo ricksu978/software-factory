@@ -19,8 +19,8 @@ describe("readiness checks", dbTest, () => {
 
   test("an item's checks read back oldest first, with what each spent and when it ran", async () => {
     const id = await item("NotReady");
-    const later = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031, ranAt: new Date("2026-11-09T10:15:00Z") };
-    const earlier = { model: "claude-haiku-4-5", tokensIn: 1100, tokensOut: 70, costUsd: 0.0025, ranAt: new Date("2026-11-08T09:00:00Z") };
+    const later = { model: "claude-haiku-4-5", effort: "medium" as const, tokensIn: 1200, tokensOut: 80, costUsd: 0.0031, ranAt: new Date("2026-11-09T10:15:00Z") };
+    const earlier = { model: "claude-haiku-4-5", effort: "high" as const, tokensIn: 1100, tokensOut: 70, costUsd: 0.0025, ranAt: new Date("2026-11-08T09:00:00Z") };
     await recordReadinessCheck(db.pool, id, later);
     await recordReadinessCheck(db.pool, id, earlier);
     assert.deepEqual(await readinessChecks(db.pool, id), [{ kind: "judge", ...earlier }, { kind: "judge", ...later }]);
@@ -30,7 +30,7 @@ describe("readiness checks", dbTest, () => {
   test("a split proposal's check reads back as a split, and counts toward readiness spend", async () => {
     await db.pool.query("truncate readiness_check");
     const id = await item("NotReady");
-    const split = { kind: "split" as const, model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, ranAt: new Date("2026-11-09T10:16:00Z") };
+    const split = { kind: "split" as const, model: "claude-opus-5-5", effort: "max" as const, tokensIn: 4000, tokensOut: 600, costUsd: 0.21, ranAt: new Date("2026-11-09T10:16:00Z") };
     await recordReadinessCheck(db.pool, id, split);
     assert.deepEqual(await readinessChecks(db.pool, id), [split]);
     assert.ok(Math.abs((await readinessSpend(db.pool)) - 0.21) < 1e-12);
@@ -39,7 +39,7 @@ describe("readiness checks", dbTest, () => {
   test("a judge call's verdict and the child it judged read back as recorded; a check with neither has no such key (PBI 348)", async () => {
     await db.pool.query("truncate readiness_check");
     const id = await item("NotReady");
-    const base = { kind: "judge" as const, model: "claude-haiku-4-5", tokensIn: 1, tokensOut: 1, costUsd: 0.001 };
+    const base = { kind: "judge" as const, model: "claude-haiku-4-5", effort: "low" as const, tokensIn: 1, tokensOut: 1, costUsd: 0.001 };
     const failed = { ...base, ranAt: new Date("2026-11-09T10:00:00Z"),
       verdict: { outcome: "failed" as const, lines: [{ criterion: "Names its spec section", reason: "None <b>named</b>." }], flags: ["changes CI"] } };
     const child = { ...base, ranAt: new Date("2026-11-09T10:01:00Z"), verdict: { outcome: "passed" as const }, child: "Export as CSV" };
@@ -48,10 +48,30 @@ describe("readiness checks", dbTest, () => {
     assert.deepEqual(await readinessChecks(db.pool, id), [failed, child, legacy]);
   });
 
+  test("a check missing its model or its effort, or naming either blank, is turned down and nothing is stored (PBI 319)", async () => {
+    await db.pool.query("truncate readiness_check");
+    const id = await item("Eligible");
+    const full = { kind: "split" as const, model: "claude-opus-5-5", effort: "max" as const, tokensIn: 1, tokensOut: 1, costUsd: 0.01, ranAt: new Date() };
+    for (const [missing, check] of [
+      ["model", { ...full, model: undefined }], ["model", { ...full, model: "" }],
+      ["effort", { ...full, effort: undefined }], ["effort", { ...full, effort: "" }], ["effort", { ...full, effort: "lots" }],
+    ] as const) {
+      await assert.rejects(recordReadinessCheck(db.pool, id, check as never), new RegExp(missing), missing);
+    }
+    assert.deepEqual(await readinessChecks(db.pool, id), []);
+  });
+
+  test("a check from before PBI 319 reads back with no effort", async () => {
+    await db.pool.query("truncate readiness_check");
+    const id = await item("NotReady");
+    await db.pool.query("insert into readiness_check (item_id, kind, model, tokens_in, tokens_out, cost_usd, ran_at) values ($1, 'judge', 'claude-haiku-4-5', 1, 1, 0.001, now())", [id]);
+    assert.equal((await readinessChecks(db.pool, id))[0].effort, null);
+  });
+
   test("readiness spend sums every item's checks, a turned-away item's included", async () => {
     await db.pool.query("truncate readiness_check");
     assert.equal(await readinessSpend(db.pool), 0);
-    const check = { model: "m", tokensIn: 1, tokensOut: 0, ranAt: new Date() };
+    const check = { model: "m", effort: "medium" as const, tokensIn: 1, tokensOut: 0, ranAt: new Date() };
     await recordReadinessCheck(db.pool, await item("NotReady"), { ...check, costUsd: 0.002 });
     await recordReadinessCheck(db.pool, await item("Done"), { ...check, costUsd: 0.003 });
     assert.ok(Math.abs((await readinessSpend(db.pool)) - 0.005) < 1e-12);
@@ -63,7 +83,7 @@ describe("readiness checks", dbTest, () => {
     try {
       await c.query("begin");
       await c.query("set local role factory_app");
-      await recordReadinessCheck(c, id, { model: "m", tokensIn: 0, tokensOut: 0, costUsd: 0, ranAt: new Date() });
+      await recordReadinessCheck(c, id, { model: "m", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0, ranAt: new Date() });
     } finally {
       await c.query("rollback");
       c.release();

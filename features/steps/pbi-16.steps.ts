@@ -103,7 +103,7 @@ function transitionBody(event: string, extra: Record<string, unknown> = {}): Rec
 }
 
 export const stageBody = (stageId: string, attempt: number, status: string) => ({
-  stageId, attempt, status, model: "claude-opus-5-5", tokensIn: 10, tokensOut: 20, costUsd: 0.01,
+  stageId, attempt, status, model: "claude-opus-5-5", effort: "medium", tokensIn: 10, tokensOut: 20, costUsd: 0.01,
 });
 
 // One request per route, each with a body that would be accepted from the current generation.

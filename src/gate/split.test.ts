@@ -19,6 +19,8 @@ const reason = (r: string) => {
   return out.proposed ? "" : out.reason;
 };
 
+const effort = async () => "medium" as const;
+
 test("a split giving every criterion to one child, needing only earlier children, is valid", () => {
   const out = checkSplit(`Here it is:\n${reply(valid)}`, 3);
   assert.ok(out.proposed);
@@ -50,12 +52,30 @@ test("the split is asked of the SOP's coding model, with no tool, and a failed r
     return { ok, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
   const sop = { models: { coding: "model-c" } };
-  assert.ok((await proposeSplit(item, { sop, agent: run(true, reply(valid)) })).proposed);
+  assert.ok((await proposeSplit(item, { sop, effort, agent: run(true, reply(valid)) })).proposed);
   assert.equal(asked[0].model, "model-c");
+  assert.equal(asked[0].effort, "medium");
   assert.equal(asked[0].mode, "judge");
-  assert.deepEqual(await proposeSplit(item, { sop, agent: run(false, "API error") }), { proposed: false, reason: "the coding model gave no answer" });
-  const thrown = await proposeSplit(item, { sop, agent: async () => { throw new Error("boom"); } });
+  assert.deepEqual(await proposeSplit(item, { sop, effort, agent: run(false, "API error") }), { proposed: false, reason: "the coding model gave no answer" });
+  const thrown = await proposeSplit(item, { sop, effort, agent: async () => { throw new Error("boom"); } });
   assert.deepEqual(thrown, { proposed: false, reason: "the coding model gave no answer" });
+});
+
+test("each split call reads the effort as it is when it runs, and one that can't be read is no answer (PBI 319)", async () => {
+  const asked: AgentArgs[] = [];
+  const agent = async (a: AgentArgs): Promise<AgentResult> => {
+    asked.push(a);
+    return { ok: true, text: reply(valid), costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
+  };
+  const sop = { models: { coding: "model-c" } };
+  let now: "low" | "max" = "low";
+  await proposeSplit(item, { sop, agent, effort: async () => now });
+  now = "max";
+  await proposeSplit({ ...item, body: "other" }, { sop, agent, effort: async () => now });
+  assert.deepEqual(asked.map((a) => a.effort), ["low", "max"]);
+  const unread = await proposeSplit({ ...item, body: "third" }, { sop, agent, effort: async () => { throw new Error("no database"); } });
+  assert.deepEqual(unread, { proposed: false, reason: "the coding model gave no answer" });
+  assert.equal(asked.length, 2);
 });
 
 test("a title's newlines collapse, so it can't break out of its heading", () => {
@@ -73,12 +93,12 @@ test("the same item text is split once; no answer is asked again", async () => {
     calls++;
     return { ok, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" };
   };
-  assert.equal((await proposeSplit(item, { sop, agent: agent(false, ""), seen })).proposed, false);
-  assert.equal((await proposeSplit(item, { sop, agent: agent(true, reply(valid)), seen })).proposed, true);
-  assert.equal((await proposeSplit({ ...item, updatedAt: "later" }, { sop, agent: agent(true, reply(valid)), seen })).proposed, true);
+  assert.equal((await proposeSplit(item, { sop, effort, agent: agent(false, ""), seen })).proposed, false);
+  assert.equal((await proposeSplit(item, { sop, effort, agent: agent(true, reply(valid)), seen })).proposed, true);
+  assert.equal((await proposeSplit({ ...item, updatedAt: "later" }, { sop, effort, agent: agent(true, reply(valid)), seen })).proposed, true);
   assert.equal(calls, 2);
-  await proposeSplit({ ...item, body: "changed" }, { sop, agent: agent(true, "no JSON"), seen });
-  await proposeSplit({ ...item, body: "changed" }, { sop, agent: agent(true, "no JSON"), seen });
+  await proposeSplit({ ...item, body: "changed" }, { sop, effort, agent: agent(true, "no JSON"), seen });
+  await proposeSplit({ ...item, body: "changed" }, { sop, effort, agent: agent(true, "no JSON"), seen });
   assert.equal(calls, 3);
 });
 
@@ -110,9 +130,9 @@ test("a given prompt is what the coding model gets, and the split key and cache 
   const sop = { models: { coding: "model-c" } };
   const seen = new Map<string, SplitOutcome>();
   const other = (i: FactoryItem) => `${splitPrompt(i)} Briefly.`;
-  await proposeSplit(item, { sop, agent, seen });
-  await proposeSplit(item, { sop, agent, seen, prompt: other });
-  await proposeSplit(item, { sop, agent, seen, prompt: other });
+  await proposeSplit(item, { sop, effort, agent, seen });
+  await proposeSplit(item, { sop, effort, agent, seen, prompt: other });
+  await proposeSplit(item, { sop, effort, agent, seen, prompt: other });
   assert.deepEqual(asked, [splitPrompt(item), other(item)]);
   assert.equal(splitKey(item, {}), splitKey(item, { prompt: splitPrompt }));
   assert.notEqual(splitKey(item, {}), splitKey(item, { prompt: other }));
@@ -160,7 +180,7 @@ test("the coding model gets the dor.md given to proposeSplit, but the split key 
   };
   const sop = { models: { coding: "model-c" } };
   const seen = new Map<string, SplitOutcome>();
-  await proposeSplit(item, { sop, agent, seen }, dor);
-  await proposeSplit(item, { sop, agent, seen }, { ...dor, text: "changed", criteria: [{ index: 1, text: "Links the mock-up" }] });
+  await proposeSplit(item, { sop, effort, agent, seen }, dor);
+  await proposeSplit(item, { sop, effort, agent, seen }, { ...dor, text: "changed", criteria: [{ index: 1, text: "Links the mock-up" }] });
   assert.deepEqual(asked, [splitPrompt(item, dor)]);
 });

@@ -7,6 +7,7 @@ import { judgedFields, type FactoryItem } from "../adapters/types.ts";
 import { fenced } from "../core/fence.ts";
 import { splitPrompt, TEMPLATE_DOR } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
+import { assertNamed, type Effort } from "../store/effort.ts";
 
 export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
@@ -18,6 +19,11 @@ export type AgentResult = {
 
 export type AgentArgs = {
   prompt: string; model: string; cwd: string; agent?: string;
+  /**
+   * PBI 319: the effort the call runs at. Every call names one, as it names its model: a call without either fails
+   * before any request goes to the model, instead of falling back to a default.
+   */
+  effort: Effort;
   maxTurns?: number; mode: "cell" | "judge"; webTools?: ("WebSearch" | "WebFetch")[]; signal: AbortSignal;
   /** A session to carry on, by the sessionId an earlier call returned, as when the PR reviewer restates (PBI 190). */
   resume?: string;
@@ -68,7 +74,7 @@ export function agentOptions(a: AgentArgs): Options {
   if (a.signal.aborted) abortController.abort(a.signal.reason);
   else a.signal.addEventListener("abort", () => abortController.abort(a.signal.reason), { once: true });
 
-  const common: Options = { model: a.model, cwd: a.cwd, abortController, maxTurns: a.maxTurns, agent: a.agent, ...(a.resume ? { resume: a.resume } : {}) };
+  const common: Options = { model: a.model, effort: a.effort, cwd: a.cwd, abortController, maxTurns: a.maxTurns, agent: a.agent, ...(a.resume ? { resume: a.resume } : {}) };
   if (a.mode === "judge") {
     // The judge reads untrusted item text in the control plane, which holds the App key and the database.
     // Nothing on disk loads, no built-in tool exists, no MCP server from any config starts, and every tool is denied.
@@ -119,8 +125,12 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>, onMessage?: 
   return r;
 }
 
-export async function runAgent(a: AgentArgs): Promise<AgentResult> {
-  return { ...(await foldMessages(query({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
+/** The SDK's `query`, which sends the call to the model. Tests pass one that records each request instead (PBI 319). */
+export type Send = (q: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
+
+export async function runAgent(a: AgentArgs, send: Send = query): Promise<AgentResult> {
+  assertNamed(a);
+  return { ...(await foldMessages(send({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
 }
 
 // Typed by the fields the judge reads, so Task 9's Sop and Policy fit without importing them.
@@ -172,21 +182,29 @@ export function readinessLogic(): ReadinessLogic {
 const JUDGE_TIMEOUT_MS = 120_000;
 
 /** What one readiness judge call spent, reported whether the call answered or failed (PBI 132). */
-export type JudgeSpend = { model: string; tokensIn: number; tokensOut: number; costUsd: number };
+export type JudgeSpend = {
+  model: string; tokensIn: number; tokensOut: number; costUsd: number;
+  /** The effort the call ran at (PBI 319). */
+  effort: Effort;
+};
 
-export function haikuJudge(sop: JudgeSop, run: (a: AgentArgs) => Promise<AgentResult> = runAgent) {
+/** `effort` reads the effort setting as it is now, each time the judge runs, so each call runs at the current one (PBI 319). */
+export function haikuJudge(sop: JudgeSop, run: ((a: AgentArgs) => Promise<AgentResult>) | undefined, effort: () => Promise<Effort>) {
+  const send = run ?? runAgent;
   return async (item: FactoryItem, dor: JudgePolicy, spent?: (s: JudgeSpend) => void): Promise<string> => {
     const model = sop.models.triage;
+    // Read before the call: a setting that can't be read sends nothing, and spends nothing.
+    const at = await effort();
     let r: AgentResult;
     try {
-      r = await run({ prompt: judgePrompt(item, dor), model, cwd: tmpdir(), maxTurns: 1, mode: "judge", signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS) });
+      r = await send({ prompt: judgePrompt(item, dor), model, effort: at, cwd: tmpdir(), maxTurns: 1, mode: "judge", signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS) });
     } catch (e) {
       // runAgent folds its own failures, so a throw here means the run never started. It spent nothing, and says so.
-      spent?.({ model, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+      spent?.({ model, effort: at, tokensIn: 0, tokensOut: 0, costUsd: 0 });
       throw e;
     }
     // What the call spent is reported before its outcome is read, so a failed call is counted too (PBI 132).
-    spent?.({ model: r.model, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
+    spent?.({ model: r.model, effort: at, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd: r.costUsd });
     // A failed run isn't a reply, so the gate never reads a usage limit as the item failing. The poller retries next poll.
     if (!r.ok) throw new Error(`readiness judge failed: ${r.limit ? `usage limit until ${r.limit.resetsAt}` : r.text}`);
     return r.text;

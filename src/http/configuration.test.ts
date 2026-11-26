@@ -3,13 +3,23 @@ import { describe, test } from "node:test";
 import { checkChange, envSettings, type RuntimeValues } from "./configuration.ts";
 
 const policy: RuntimeValues = {
-  mode: "fixed", wip_min: "1", wip_max: "3", current_wip: "1", review_capacity: "3", usage_reserve: "0.7", daily_budget: "25", usage_pause: null,
+  mode: "fixed", wip_min: "1", wip_max: "3", current_wip: "1", review_capacity: "3", usage_reserve: "0.7", daily_budget: "25", usage_pause: null, effort: "medium",
 };
 
 const why = "Two more reviewers are in.";
 const at = new Date("2026-11-13T12:00:00Z");
 
 describe("checkChange", () => {
+  test("takes each of the five efforts with a reason, and turns down any other value, an empty one included (PBI 319)", () => {
+    for (const e of ["low", "medium", "high", "xhigh", "max"]) {
+      assert.deepEqual(checkChange(policy, "effort", e, why), { ok: true, reason: why, updates: [{ key: "effort", column: "effort", value: e }] });
+    }
+    for (const e of ["", "  ", "HIGH", "minimal", "none", "3"]) {
+      assert.deepEqual(checkChange(policy, "effort", e, why), { ok: false, status: 400, message: "Effort must be one of low, medium, high, xhigh or max." });
+    }
+    assert.deepEqual(checkChange(policy, "effort", "high", " "), { ok: false, status: 400, message: "Give a reason for the change." });
+  });
+
   test("takes a change that keeps every rule, with its reason trimmed", () => {
     assert.deepEqual(checkChange(policy, "review_capacity", "5", ` ${why} `), { ok: true, reason: why, updates: [{ key: "review_capacity", column: "review_capacity", value: 5 }] });
     assert.deepEqual(checkChange(policy, "usage_reserve", "0.8", why), { ok: true, reason: why, updates: [{ key: "usage_reserve", column: "usage_reserve_at", value: 0.8 }] });

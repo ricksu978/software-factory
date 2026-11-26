@@ -3,7 +3,8 @@
 import { formatDuration, type ItemDurations } from "../core/durations.ts";
 import type { SplitChildView } from "../store/splits.ts";
 import type { ClaimKey } from "../store/items.ts";
-import type { ReadinessCheck } from "../store/readiness-checks.ts";
+import type { StoredReadinessCheck } from "../store/readiness-checks.ts";
+import { withEffort } from "../store/effort.ts";
 import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
 import { lineDiff, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
 import { pauseActive } from "./configuration.ts";
@@ -94,7 +95,7 @@ const local = (at: Date, zone: string) => `<time datetime="${escapeHtml(at.toISO
  * reason and each flag, or why it has no verdict. A judge call on a proposed split child names the child. A split
  * proposal's cell is empty.
  */
-function checkVerdict(c: ReadinessCheck): string {
+function checkVerdict(c: RunDetail["readiness"][number]): string {
   if (c.kind === "split") return "";
   const v = c.verdict;
   const said = !v ? "No verdict was recorded"
@@ -388,7 +389,9 @@ export type RunDetail = {
     /** The run's PR, and whether the run is still open: only an open run's PR shows (PBI 145). */
     pr_number?: number | null; pr_url?: string | null; open?: boolean } | null;
   policies: { file: string; source: string; criterion: string; status: string; reason: string | null }[];
-  stages: { stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null;
+  stages: { stage_id: string; attempt: number; model: string | null;
+    /** The effort the attempt ran at, null on a row from before PBI 319, which ran at medium. */
+    effort?: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null; status: string; transcript_ref: string | null;
     /** When the attempt started and ended, null while it still runs (PBI 189). */
     started_at?: Date; ended_at?: Date | null;
     /** PBI 190: the PR reviewer's restates in the attempt. */
@@ -396,7 +399,7 @@ export type RunDetail = {
     /** What the attempt's cell, or the factory closing it, said about it, such as that the cell's lease ran out (PBI 239). */
     message?: string | null }[];
   /** Every readiness judge and split call on the item, oldest first, a failed one's included (PBI 132). */
-  readiness: ReadinessCheck[];
+  readiness: (Omit<StoredReadinessCheck, "effort"> & { effort?: string | null })[];
   question: { kind: string; body: string } | null;
   criteria: { criterion: string; scenarios: Scenario[] }[] | null;
   /** The issue's body as written on GitHub, shown at sign-off, or null when it's blank or no form shows. */
@@ -557,12 +560,12 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ?? "")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${costCell(s.cost_usd)}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ? withEffort(s.model, s.effort) : "model not recorded")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${costCell(s.cost_usd)}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
     ? `<table><thead><tr><th scope="col">Ran</th><th scope="col">Call</th><th scope="col">Model</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Verdict</th></tr></thead><tbody>${d.readiness
-        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(c.model)}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td><td>${checkVerdict(c)}</td></tr>`)
+        .map((c) => `<tr><td>${local(c.ranAt, zone)}</td><td>${c.kind === "split" ? "Split proposal" : "Judge"}</td><td>${escapeHtml(withEffort(c.model, c.effort))}</td>${exactTokens(c.tokensIn, c.tokensOut)}${escapeHtml(tokens(c.tokensIn))} in, ${escapeHtml(tokens(c.tokensOut))} out</td>${costCell(c.costUsd)}</td><td>${checkVerdict(c)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No readiness check has run yet.</p>`;
   const criteria = d.criteria
