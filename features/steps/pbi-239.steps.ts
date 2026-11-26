@@ -331,7 +331,7 @@ When("cell {string} reports {word}'s attempt {int} as stopped", long, async func
   const c = ctx(this);
   c.reportAt = p17(this).now ?? c.clock;
   const a = await call(this, { runId: r.rows[0].run_id, generation: r.rows[0].generation }, "POST", "stage",
-    { stageId: stage, attempt: n, status: "stopped", model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 });
+    { stageId: stage, attempt: n, status: "stopped", model: "claude-opus-5-5", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 });
   assert.equal(a.status, 200, `the cell API answered ${JSON.stringify(a)}`);
 });
 
@@ -432,7 +432,7 @@ async function tickAndRun(world: object, name: string, mode: Engine["mode"]): Pr
         externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds", "Criterion 3 holds"],
         nextStage: ctxBody.nextStage, decision: null, lockSha: c.lockSha, lockedFiles: c.lockedFiles, prNumber: null,
         repo: "acme/app", base: "main", branch: "factory/pbi-482-r1", configSha: "c0ffee", sopVersion: "0.1.0",
-        dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: ctxBody.stageAttempts, resume: ctxBody.resume ?? null,
+        dodVerdicts: [], dodCheckedSha: null, effort: ctxBody.effort, trustedComments: [], stageAttempts: ctxBody.stageAttempts, resume: ctxBody.resume ?? null,
       },
       agent: agent as never,
       git: shellGit(c.dir, "factory/pbi-482-r1"),

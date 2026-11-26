@@ -231,7 +231,7 @@ async function runCell(c: Ctx, nextStage: "red" | "specify", decision: { kind: s
         externalId: String(c.item), title: `Item ${c.item}`, acceptanceCriteria: Array.from({ length: criteria }, (_, i) => `Criterion ${i + 1} holds`),
         nextStage, decision, lockSha, lockedFiles: lockSha ? [featurePath(c.item)] : [], prNumber: null,
         repo: "acme/app", base: "main", branch: branchOf(c.item), configSha: "c0ffee", sopVersion: "0.1.0",
-        dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: {},
+        dodVerdicts: [], dodCheckedSha: null, effort: "medium", trustedComments: [], stageAttempts: {},
       },
       agent,
       git: shellGit(dir, branchOf(c.item)),

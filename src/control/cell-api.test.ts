@@ -94,6 +94,9 @@ describe("cell API", dbTest, () => {
   }
 
   async function send(runId: string, token: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+    // Every stage report names its model and effort (PBI 319). A test that leaves either out of its body gets one; a
+    // test that names the key, even as undefined, sends what it names.
+    if (path === "/stage" && body && typeof body === "object") body = { ...("model" in body ? {} : { model: "m" }), ...("effort" in body ? {} : { effort: "medium" }), ...body };
     const port = (server.address() as AddressInfo).port;
     const r = await fetch(`http://127.0.0.1:${port}/internal/cells/${runId}${path}`, {
       method, headers: { authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body),
@@ -384,6 +387,7 @@ describe("cell API", dbTest, () => {
       trustedBot: "factory[bot]",
       stageAttempts: { specify: 2 },
       failedCiHeads: [],
+      effort: "medium",
       resume: null,
       retry: null,
     });
@@ -916,6 +920,28 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/policy-results", results("dod", "person"))).status, 200);
     const rows = await db.pool.query("select file, status, checked_sha from policy_result where run_id = $1", [cell.runId]);
     assert.deepEqual(rows.rows, [{ file: "dod", status: "person", checked_sha: "abc1234" }]);
+  });
+
+  test("a stage report missing its model or its effort, or naming either blank, is turned down and stores nothing (PBI 319)", async () => {
+    const cell = await claimed();
+    for (const missing of [{ model: undefined }, { model: " " }, { effort: undefined }, { effort: "" }, { effort: "HIGH" }]) {
+      const r = await send(cell.runId, cell.token, "POST", "/stage", { stageId: "red", attempt: 1, status: "started", ...missing });
+      assert.equal(r.status, 400, JSON.stringify(missing));
+    }
+    assert.equal((await db.pool.query("select 1 from stage_run where run_id = $1", [cell.runId])).rowCount, 0);
+    await send(cell.runId, cell.token, "POST", "/stage", { stageId: "red", attempt: 1, status: "started", model: "claude-opus-5-5", effort: "high" });
+    const row = await db.pool.query("select model, effort from stage_run where run_id = $1", [cell.runId]);
+    assert.deepEqual(row.rows, [{ model: "claude-opus-5-5", effort: "high" }]);
+  });
+
+  test("a cell's context carries the effort as it's set when the cell asks (PBI 319)", async () => {
+    const cell = await claimed();
+    await db.pool.query("update wip_policy set effort = 'max'");
+    try {
+      assert.equal((await send(cell.runId, cell.token, "GET", "/context")).body.effort, "max");
+    } finally {
+      await db.pool.query("update wip_policy set effort = default");
+    }
   });
 
   test("a stage's message is kept, cut to 500 characters", async () => {

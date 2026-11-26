@@ -58,6 +58,8 @@ const RUNTIME: Record<string, { column: string; key: string; kind: "text" | "num
   "usage reserve": { column: "usage_reserve_at", key: "usage_reserve", kind: "number" },
   "daily budget": { column: "daily_budget", key: "daily_budget", kind: "number" },
   "usage pause": { column: "usage_paused_until", key: "usage_pause", kind: "time" },
+  // PBI 319: the effort every agent call names.
+  effort: { column: "effort", key: "effort", kind: "text" },
 };
 
 function runtime(name: string) {
@@ -76,12 +78,13 @@ export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).repl
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
 export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-284 or @pbi-287" }, function ({ pickleStep }) {
+BeforeStep({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-284 or @pbi-287 or @pbi-319" }, function ({ pickleStep }) {
   ctx(this).stepType = pickleStep.type;
 });
 
-// PBI 176 and PBI 178 build on this page, so their scenarios share these hooks and steps.
-Before({ tags: "(@pbi-175 or @pbi-176 or @pbi-178) and @db", ...long }, async function () {
+// PBI 176, PBI 178 and PBI 319 build on this page, so their scenarios share these hooks and steps. Every PBI 319
+// scenario signs people in, its one without @db included, so each gets the database.
+Before({ tags: "((@pbi-175 or @pbi-176 or @pbi-178) and @db) or @pbi-319", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
@@ -91,7 +94,7 @@ Before({ tags: "(@pbi-175 or @pbi-176 or @pbi-178) and @db", ...long }, async fu
   );
 });
 
-After({ tags: "@pbi-175 or @pbi-176 or @pbi-178", ...long }, async function () {
+After({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-319", ...long }, async function () {
   const c = ctx(this);
   await c.close?.();
   if (c.server) {
@@ -358,9 +361,24 @@ Then("the page shows no setting", long, async function () {
 
 // ---- runtime settings ----
 
-Then("the runtime settings list {string} with the value {string}", function (name: string, value: string) {
+Then("the runtime settings list {string} with the value {string}", long, async function (name: string, value: string) {
+  // PBI 319: after a change that was turned down or refused, the response on hand isn't the page, so the setting is
+  // read from the Configuration page as an operator opens it now.
+  if ((this as { pbi319?: unknown }).pbi319 && !settingsPage(ctx(this))) await reopen(this);
   listsWith(ctx(this), "runtime", name, value);
 });
+
+/** True when the response on hand is the Configuration page, answered 200. */
+function settingsPage(c: Ctx): boolean {
+  return c.status === 200 && /<h2\b[^>]*>\s*Runtime settings/i.test(c.page ?? "");
+}
+
+/** Opens the Configuration page as the first operator or owner, as they'd see it now. */
+async function reopen(world: object): Promise<void> {
+  const login = (await pool().query<{ subject: string }>(`select subject from "user" where role in ('operator', 'owner') order by subject limit 1`)).rows[0]?.subject;
+  assert.ok(login, "no operator to open the Configuration page");
+  await get(world, "/configuration", login);
+}
 
 Then("the runtime settings list {string} as {string}", function (name: string, value: string) {
   listsWith(ctx(this), "runtime", name, value);

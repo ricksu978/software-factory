@@ -1,6 +1,7 @@
 // The shadow-mode risk classifier (spec §6, plan Task 16). It records a tier and reasons on every factory PR. A
 // person still approves every PR in this phase, so a wrong tier costs nothing yet, but the floors below are the
 // engine's: no risk.md and no classifier answer can take a change under them.
+import type { Effort } from "../store/effort.ts";
 import { fenced } from "../core/fence.ts";
 import { matchesPath } from "../core/glob.ts";
 import type { AgentArgs, AgentResult } from "../agent/run.ts";
@@ -31,6 +32,8 @@ export type RiskContext = {
   risk: Policy;
   dodVerdicts: Verdict[];
   agent: (a: AgentArgs) => Promise<AgentResult>;
+  /** The effort each pass runs at: the one the cell started with (PBI 319). */
+  effort: Effort;
   signal?: AbortSignal;
 };
 
@@ -91,7 +94,7 @@ export async function classifyRisk(diff: string, files: string[], ctx: RiskConte
     // Bounded either way: a caller's signal can cancel sooner, and a missing one never leaves a pass running forever.
     const timeout = AbortSignal.timeout(PASS_TIMEOUT_MS);
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
-    const r = await ctx.agent({ prompt, model: ctx.sop.models.coding, cwd: process.cwd(), mode: "judge", maxTurns: 1, signal });
+    const r = await ctx.agent({ prompt, model: ctx.sop.models.coding, effort: ctx.effort, cwd: process.cwd(), mode: "judge", maxTurns: 1, signal });
     // A failed run isn't an answer, so a usage limit or an API error never gets recorded as an unreadable tier.
     if (!r.ok) throw new Error(`classifier run failed: ${r.limit ? `usage limit until ${r.limit.resetsAt}` : r.text}`);
     return jsonLines(r.text);

@@ -245,7 +245,7 @@ export async function poll(c: Ctx): Promise<void> {
       const out = await gate(fi, {
         readinessSha: "policy-1", dor, dodExists: true, configValid: true, repoKnown: true,
         judge: c.judgeOverride ?? judge(c), adapter,
-        split: { sop: { models: { coding: "coding-model" } }, agent: c.agentOverride ?? agent(c), seen: c.seen, file },
+        split: { sop: { models: { coding: "coding-model" } }, agent: c.agentOverride ?? agent(c), seen: c.seen, file, effort: async () => "medium" },
         ...(c.kept ? { splits: keptStore(c.kept) } : {}),
         ...c.gateExtras,
       });

@@ -18,6 +18,7 @@ import { httpCellApi } from "../../src/cell/api-client.ts";
 import type { CellContext } from "../../src/cell/engine.ts";
 import { resumeOnImageSop, SOP_MOVED, type SopMoveApi } from "../../src/cell/sop-move.ts";
 import { loadSop, stageAfter, type Sop } from "../../src/config/sop.ts";
+import { isPbi319, runsTheStage } from "./pbi-319.steps.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { decide } from "../../src/control/decisions.ts";
 import { createAuth } from "../../src/http/auth.ts";
@@ -130,7 +131,7 @@ function memorySide(): Side {
       const ctx = {
         externalId: EXT, title: `item ${EXT}`, acceptanceCriteria: ["it works"], nextStage: m.nextStage, decision: null, lockSha: null,
         lockedFiles: [], prNumber: null, repo: REPO, base: "main", branch: `factory/pbi-${EXT}-r1`, configSha: m.configSha!,
-        sopVersion: m.sopVersion!, dodVerdicts: [], dodCheckedSha: null, scenarioNotes: [], trustedComments: [], stageAttempts: {}, resume: null,
+        sopVersion: m.sopVersion!, dodVerdicts: [], dodCheckedSha: null, effort: "medium", scenarioNotes: [], trustedComments: [], stageAttempts: {}, resume: null,
       } satisfies CellContext;
       return { api, ctx };
     },
@@ -217,7 +218,7 @@ async function dbSide(): Promise<Side & { itemId(): string; dashboard(path: stri
       }));
       const api = httpCellApi({ controlUrl: cellBase, runId: env.RUN_ID, runToken: runToken(SECRET, env.RUN_ID, Number(env.GENERATION)), generation: Number(env.GENERATION) });
       const stage = async (b: { stageId: string; attempt: number; status: "started" | "passed" }) =>
-        api.stage({ ...b, model: SOP.models.coding, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+        api.stage({ ...b, model: SOP.models.coding, effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 });
       return { api: { transition: api.transition, moveSop: api.moveSop, stage }, ctx: await api.context() };
     },
     async requeueAt(stage) {
@@ -394,7 +395,9 @@ export async function openActivityLog(world: object): Promise<void> {
 
 // ---- Then ----
 
+// PBI 319 says the same words as its When, where the cell runs that stage for a scenario of its own.
 Then("the cell runs the {word} stage", long, async function (stage: string) {
+  if (isPbi319(this)) return runsTheStage(this, stage);
   const seen = await side(this).seen();
   assert.deepEqual(ctx(this).ran, [stage], `the cell ran ${JSON.stringify(ctx(this).ran)}; open questions: ${JSON.stringify(seen.open)}`);
   assert.deepEqual(seen.stages, [stage], `the run recorded the stages ${JSON.stringify(seen.stages)}`);

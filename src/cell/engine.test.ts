@@ -126,7 +126,7 @@ function harness(o: { nextStage?: string; signedOff?: boolean; script?: Script; 
     ctx: {
       externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds"], nextStage: o.nextStage ?? "red",
       decision: null, lockSha, lockedFiles: signedOff ? [FEATURE] : [], prNumber: 7, repo: "acme/app", base: "main", branch: BRANCH,
-      configSha: "c0ffee", sopVersion: SOP.version, dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: {}, ...o.ctx,
+      configSha: "c0ffee", sopVersion: SOP.version, dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: {}, effort: "medium", ...o.ctx,
     },
     agent: async (a) => {
       agentCalls.push({ ...a, stage });
@@ -274,7 +274,7 @@ describe("stageMeter", () => {
   const result = (cost: number): AgentResult => ({
     ok: true, text: "done", costUsd: cost, tokensIn: 10, tokensOut: 2, model: "m", limit: null, usage: { utilization: 0.4, resetsAt: null }, transcript: `{"c":${cost}}\n`,
   });
-  const args = (prompt: string): AgentArgs => ({ prompt, model: "m", cwd: ".", mode: "cell", signal: new AbortController().signal });
+  const args = (prompt: string): AgentArgs => ({ prompt, model: "m", effort: "medium", cwd: ".", mode: "cell", signal: new AbortController().signal });
 
   test("charges each call to the open stage and hands the sum back when it closes", async () => {
     const meter = stageMeter(async (a) => result(a.prompt === "one" ? 0.25 : 0.5));
@@ -311,7 +311,7 @@ describe("stageMeter's uploads of a running stage's transcript (PBI 209)", () =>
     });
     return { calls, agent };
   }
-  const args: AgentArgs = { prompt: "p", model: "m", cwd: ".", mode: "cell", signal: new AbortController().signal };
+  const args: AgentArgs = { prompt: "p", model: "m", effort: "medium", cwd: ".", mode: "cell", signal: new AbortController().signal };
   const turn = () => new Promise((r) => setImmediate(r));
 
   test("uploads the transcript so far each tick there's something new, across finished and running calls", async () => {
@@ -392,6 +392,25 @@ describe("stageMeter's uploads of a running stage's transcript (PBI 209)", () =>
 });
 
 describe("runCell", () => {
+  test("every agent call, the risk classifier's included, and every stage report name the effort the cell started with (PBI 319)", async () => {
+    const h = harness({ ctx: { effort: "xhigh" } });
+    assert.equal(await h.run(), "done");
+    assert.ok(h.agentCalls.some((a) => a.mode === "judge"), "the risk classifier ran");
+    assert.deepEqual([...new Set(h.agentCalls.map((a) => a.effort))], ["xhigh"]);
+    const reports = h.calls.filter((c) => c.route === "/stage");
+    assert.ok(reports.length > 0);
+    assert.deepEqual([...new Set(reports.map((c) => c.body.effort))], ["xhigh"]);
+  });
+
+  test("a cell with no effort to pass on fails its attempt naming the effort, and no call reaches the agent (PBI 319)", async () => {
+    const h = harness({ ctx: { effort: undefined } });
+    await assert.rejects(h.run(), /names no effort/);
+    assert.deepEqual(h.agentCalls, []);
+    const failed = h.calls.find((c) => c.route === "/stage" && c.body.status === "failed");
+    assert.equal(failed?.body.stageId, "red");
+    assert.match(String(failed?.body.message), /names no effort/);
+  });
+
   test("every cell-mode agent call carries the repo's web tools", async () => {
     const h = harness();
     h.deps.config.webTools = ["WebSearch"];

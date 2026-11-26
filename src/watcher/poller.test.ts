@@ -100,7 +100,7 @@ describe("pollOnce", dbTest, () => {
   });
 
   test("each judge call's spend is stored for the item, a call that failed on a usage limit included (PBI 132)", async () => {
-    const spent = { model: "claude-haiku-4-5", tokensIn: 900, tokensOut: 0, costUsd: 0.0012 };
+    const spent = { model: "claude-haiku-4-5", effort: "xhigh" as const, tokensIn: 900, tokensOut: 0, costUsd: 0.0012 };
     const limited = async (_item: FactoryItem, _dor: Policy, report?: (s: typeof spent) => void): Promise<string> => {
       report?.(spent);
       throw new Error("readiness judge failed: usage limit");
@@ -109,8 +109,8 @@ describe("pollOnce", dbTest, () => {
     await pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: limited, sourceId });
     const r = await row(ext);
     assert.equal(r.state, "Eligible");
-    const checks = (await db.pool.query("select model, tokens_in, tokens_out, cost_usd::float8 as cost from readiness_check where item_id = $1", [r.id])).rows;
-    assert.deepEqual(checks, [{ model: "claude-haiku-4-5", tokens_in: 900, tokens_out: 0, cost: 0.0012 }]);
+    const checks = (await db.pool.query("select model, effort, tokens_in, tokens_out, cost_usd::float8 as cost from readiness_check where item_id = $1", [r.id])).rows;
+    assert.deepEqual(checks, [{ model: "claude-haiku-4-5", effort: "xhigh", tokens_in: 900, tokens_out: 0, cost: 0.0012 }]);
   });
 
   test("an oversized item whose split got no answer stays Eligible, and the next poll asks again and posts it", async () => {
@@ -119,7 +119,7 @@ describe("pollOnce", dbTest, () => {
     let answer = false;
     const children = [{ title: "A", body: "Parent t", criteria: [1], needs: [] }, { title: "B", body: "Parent t", criteria: [2], needs: [1] }];
     const agent = async () => (answer ? { ok: true, text: JSON.stringify({ children }) } : { ok: false, text: "usage limit" }) as never;
-    const split = { sop: { models: { coding: "c" } }, agent, seen: new Map() };
+    const split = { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, seen: new Map() };
     const ext = await seed({ acceptanceCriteria: ["one", "two"] });
     const pollBig = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
     await pollBig();
@@ -171,7 +171,7 @@ describe("pollOnce", dbTest, () => {
       addBlockedBy: async () => {},
       removeLabel: async (id: string) => void (await fake.seed({ externalId: id, labels: [], repo: REPO, acceptanceCriteria: ["one", "two"] })),
     };
-    const split = { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "AC" } };
+    const split = { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, seen: new Map(), file: { board, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "AC" } };
     const ext = await seed({ acceptanceCriteria: ["one", "two"] });
     const pollSplit = () => pollOnce({ pool: db.pool, adapter: fake.adapter, repoHost: host, judge: big, sourceId, split });
     const moves = async () => (await db.pool.query(

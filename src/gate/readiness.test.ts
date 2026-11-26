@@ -121,7 +121,7 @@ describe("gate", () => {
 
 describe("gate: an oversized item (PBI 143)", () => {
   const split = (ok: boolean, text: string) => ({
-    sop: { models: { coding: "c" } },
+    sop: { models: { coding: "c" } }, effort: async () => "medium" as const,
     agent: async (a: { model: string }) => ({ ok, text, costUsd: 0, tokensIn: 0, tokensOut: 0, model: a.model, limit: null, usage: null, transcript: "" }),
   });
   const valid = JSON.stringify({ children: [{ title: "A", body: "b", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
@@ -303,7 +303,7 @@ describe("gate: an oversized item (PBI 143)", () => {
 });
 
 describe("gate's readiness checks (PBI 132)", () => {
-  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const spend = { model: "claude-haiku-4-5", effort: "low" as const, tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
   const at = new Date("2026-11-09T10:15:00Z");
 
   async function recorded(judge: GateContext["judge"]) {
@@ -336,7 +336,7 @@ describe("gate's readiness checks (PBI 132)", () => {
 
   const oversized = [JSON.stringify({ index: 1, status: "passed", reason: "ok" }), JSON.stringify({ flags: [], oversized: true })].join("\n");
   const children = JSON.stringify({ children: [{ title: "A", body: "b", criteria: [1], needs: [] }, { title: "B", body: "b", criteria: [2], needs: [1] }] });
-  const splitDeps = (agent: SplitDeps["agent"]): SplitDeps => ({ sop: { models: { coding: "claude-opus-5-5" } }, agent, seen: new Map() });
+  const splitDeps = (agent: SplitDeps["agent"]): SplitDeps => ({ sop: { models: { coding: "claude-opus-5-5" } }, agent, seen: new Map(), effort: async () => "high" as const });
   const coded = (ok: boolean) => async (a: AgentArgs): Promise<AgentResult> =>
     ({ ok, text: children, costUsd: 0.21, tokensIn: 4000, tokensOut: 600, model: a.model, limit: null, usage: null, transcript: "" });
 
@@ -350,7 +350,7 @@ describe("gate's readiness checks (PBI 132)", () => {
       await gate(s.item, ctx);
       assert.deepEqual(checks, [
         { ...spend, kind: "judge", ranAt: at, verdict: { outcome: "passed" } },
-        { model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, kind: "split", ranAt: at },
+        { model: "claude-opus-5-5", effort: "high", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, kind: "split", ranAt: at },
       ], String(ok));
       checks.length = 0;
       await gate(s.item, ctx);
@@ -364,7 +364,7 @@ describe("gate's readiness checks (PBI 132)", () => {
     const checks: ReadinessCheck[] = [];
     await gate(s.item, s.ctx(oversized, { split: splitDeps(async () => { throw new Error("never started"); }), now: () => at,
       recordCheck: async (_i, c) => { checks.push(c); } }));
-    assert.deepEqual(checks, [{ model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0, kind: "split", ranAt: at }]);
+    assert.deepEqual(checks, [{ model: "claude-opus-5-5", effort: "high", tokensIn: 0, tokensOut: 0, costUsd: 0, kind: "split", ranAt: at }]);
   });
 
   test("a check that can't be recorded is logged, and the judge's reply or error still comes out", async () => {
@@ -403,7 +403,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     const agent = async (a: AgentArgs) => { prompts.push(a.prompt); return answer(a.prompt.startsWith("Rewrite") ? '{"body":"b again"}' : two); };
     const b = board(new Map());
     const out = await gate(s.item, s.ctx("", {
-      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file },
       judge: async (i, d) => verdicts(d, i.title === "B", i.title !== "A" && i.title !== "B"),
     }));
     assert.equal(prompts.filter((p) => p.startsWith("Rewrite")).length, 1);
@@ -421,7 +421,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     const agent = async (a: AgentArgs) => { if (a.prompt.startsWith("Rewrite")) rewrites++; return answer(two); };
     const b = board(new Map());
     await gate(s.item, s.ctx("", {
-      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file },
       judge: async (i, d) => verdicts(d, false, i.title !== "A" && i.title !== "B", i.title === "B" ? ["asks for a live API key"] : []),
     }));
     assert.equal(rewrites, 0);
@@ -437,7 +437,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     const b = board(bodies);
     const agent = async () => answer('{"body":"a, now titled\\n\\n## Acceptance criteria\\n\\n- reworded"}');
     const out = await gate(s.item, s.ctx("", {
-      split: { sop: { models: { coding: "c" } }, agent, file: b.file },
+      split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file },
       judge: async (i, d) => verdicts(d, !i.body.startsWith("a, now titled")),
     }));
     const edited = bodies.get(s.id)!;
@@ -455,7 +455,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
       const bodies = new Map<string, string>();
       let asked = 0;
       const out = await gate(s.item, s.ctx("", {
-        split: { sop: { models: { coding: "c" } }, agent: async () => { asked++; return answer('{"body":"x"}'); }, file: board(bodies, who).file },
+        split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent: async () => { asked++; return answer('{"body":"x"}'); }, file: board(bodies, who).file },
         judge: async (_i, d) => verdicts(d, true, false, [...flags]),
       }));
       assert.equal(asked, 0);
@@ -475,7 +475,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
 });
 
 describe("gate's check verdicts (PBI 348)", () => {
-  const spend = { model: "claude-haiku-4-5", tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
+  const spend = { model: "claude-haiku-4-5", effort: "low" as const, tokensIn: 1200, tokensOut: 80, costUsd: 0.0031 };
   const dorText = "- [ ] Has a title\n- [ ] Names its spec section\n";
 
   async function checksOf(reply: string | Error) {
@@ -538,7 +538,7 @@ describe("gate's check verdicts (PBI 348)", () => {
     };
     await gate(s.item, s.ctx(oversized, {
       judge: async (i, d, spent) => { spent?.(spend); return i.externalId === s.item.externalId ? oversized : passAll(d.criteria.length); },
-      split: { sop: { models: { coding: "c" } }, agent, seen: new Map(), file: { board: b, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } },
+      split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, seen: new Map(), file: { board: b, optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } },
       recordCheck: async (_i, c) => { checks.push(c); },
     }));
     assert.deepEqual(checks.map((c) => [c.kind, c.child, c.verdict?.outcome]), [

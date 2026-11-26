@@ -193,7 +193,7 @@ Given("the factory holds an oversized item in state {string} that already has on
   c.judge = "fail";
   c.failLine = undefined;
   c.oversized = true;
-  c.split = { sop: { models: { coding: "coding-model" } }, agent: agent(k), seen: new Map() };
+  c.split = { sop: { models: { coding: "coding-model" } }, agent: agent(k), seen: new Map(), effort: async () => "medium" };
   if (!(await gateInto(c, c.extIds, state))) return;
   assert.equal((await proposals(c, c.extIds[0])).length, 1, "setup didn't post one split proposal");
   await settle(this, c);

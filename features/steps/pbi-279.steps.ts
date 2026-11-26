@@ -484,7 +484,9 @@ export function rowFor(t: Table, what: string): El[] {
 
 export function showsCells(row: El[], want: string[]): void {
   const got = row.map(text);
-  for (const w of want) assert.ok(got.includes(w), `the row doesn't show "${w}": ${JSON.stringify(got)}`);
+  // PBI 319: a model shows with its effort after it, as "opus (medium)", so a model's cell counts as showing the model.
+  const shows = (w: string) => got.includes(w) || got.some((g) => g.startsWith(`${w} (`) && /^\((low|medium|high|xhigh|max)\)$/.test(g.slice(w.length + 1)));
+  for (const w of want) assert.ok(shows(w), `the row doesn't show "${w}": ${JSON.stringify(got)}`);
 }
 
 /** The element whose title is `title`, in the row's cells. */

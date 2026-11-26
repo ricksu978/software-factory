@@ -158,7 +158,7 @@ async function check(world: object, k: Check): Promise<void> {
   const ranAt = k.ranAt ? new Date(k.ranAt) : new Date(Date.parse("2026-11-09T07:00:00Z") + c.checks * 60_000);
   c.checks++;
   await recordReadinessCheck(pool(), item(world).id, {
-    model: "claude-haiku-4-5", tokensIn: k.tokensIn ?? 1000, tokensOut: k.tokensOut ?? 50, costUsd: k.cost ?? 0.0031, ranAt,
+    model: "claude-haiku-4-5", effort: "medium", tokensIn: k.tokensIn ?? 1000, tokensOut: k.tokensOut ?? 50, costUsd: k.cost ?? 0.0031, ranAt,
   });
 }
 

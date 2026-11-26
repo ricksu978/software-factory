@@ -173,8 +173,8 @@ When("the cell reports PR {int} opened at {int}:{int}", long, async function (n:
 // the item back. The stage reports go through the cell API as the cell sends them, so the run's resume pointer ends
 // wherever the cell API leaves it after an address run.
 When("the address run reports PR {int} opened again at {int}:{int}", long, async function (n: number, h: number, mi: number) {
-  await call(this, "stage", { stageId: "address", attempt: 1, status: "started" }, at(h, mi));
-  await call(this, "stage", { stageId: "address", attempt: 1, status: "passed" }, at(h, mi));
+  await call(this, "stage", { stageId: "address", attempt: 1, status: "started", model: "claude-opus-5-5", effort: "medium" }, at(h, mi));
+  await call(this, "stage", { stageId: "address", attempt: 1, status: "passed", model: "claude-opus-5-5", effort: "medium" }, at(h, mi));
   await opened(this, n, h, mi);
 });
 
