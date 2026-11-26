@@ -19,7 +19,7 @@ import { summaryOf } from "./pr-body.ts";
 import { classifyRisk, type Tier } from "../risk/shadow.ts";
 import { STAGE_IDS, type Sop, type SopStage, type StageId } from "../config/sop.ts";
 import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, type Policy, type Verdict } from "../policy/policy.ts";
-import { pendingCiQuestion } from "./ci-cap.ts";
+import { cancelledCiQuestion, pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckAnswer, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase, type BaseLine } from "./base-run.ts";
 import { ciFailureOf, ciFindings, ciQuestion, sharedCiLines, type CiFailure } from "./ci-failure.ts";
@@ -172,6 +172,19 @@ class AlreadyMerged extends Error {}
  * as it does for a merged PR, and the poller withdraws the item (PBI 212).
  */
 class ClosedUnmerged extends Error {}
+/**
+ * PBI 423: CI on the commit a stage pushed was cancelled, and the run's branch on origin has moved on from that commit,
+ * as when a later push to the branch cancels a push's run under `concurrency: cancel-in-progress`. The cancelled run
+ * proves nothing about the commit, so the attempt ends stopped, charging nothing, and the item goes back to Queued at
+ * the same stage. Its next claim clones the branch and so starts from the newest commit.
+ */
+class Superseded extends Error {
+  readonly head: string;
+  constructor(sha: string, head: string) {
+    super(`CI on ${sha} was cancelled, and the branch has moved on to ${head} since, as when a later push cancels a push's run. A cancelled run neither failed nor passed, so this attempt counts against no retries, and the item goes back to Queued at this stage, whose next claim starts from ${head}.`);
+    this.head = head;
+  }
+}
 
 /**
  * What a `run:` line, a bdd command or a repo command sees: PATH, HOME, CI, FACTORY_PG_BIN when the image sets it, so
@@ -576,15 +589,18 @@ export const dodFindings = (v: Verdict[]) => v.filter((x) => x.status === "faile
 
 /**
  * The verdict a line's named check gives, or null when it gives none. A check run twice on one commit, as a re-run
- * leaves it, fails the line when either run failed, and gives no verdict while either still runs.
+ * leaves it, fails the line when either run failed, and gives no verdict while either still runs. PBI 423: a cancelled
+ * run neither fails nor passes the line, so a check whose every run was cancelled gives none, and answers `cancelled`.
  */
-function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | null {
+function ciVerdict(c: Criterion, checks: CiCheck[]): Verdict | "pending" | "cancelled" | null {
   const named = checks.filter((x) => x.name === c.ci);
   if (!named.length) return null;
   const failed = named.find((x) => x.conclusion === "failure");
   if (failed) return { index: c.index, criterion: c.text, status: "failed", reason: `CI check "${failed.name}" failed: ${failed.url}` };
   if (named.some((x) => x.conclusion === "pending")) return "pending";
-  return { index: c.index, criterion: c.text, status: "passed", reason: `CI check "${named[0].name}" passed: ${named[0].url}` };
+  const passed = named.find((x) => x.conclusion === "success");
+  if (!passed) return "cancelled";
+  return { index: c.index, criterion: c.text, status: "passed", reason: `CI check "${passed.name}" passed: ${passed.url}` };
 }
 
 /**
@@ -724,10 +740,13 @@ export async function checkDefinitionOfDone(d: {
   const rest: Criterion[] = [];
   for (const c of dod.criteria) {
     const v = c.ci && checks ? ciVerdict(c, checks) : null;
-    if (v && v !== "pending") verdicts.push(v);
+    if (v && v !== "pending" && v !== "cancelled") verdicts.push(v);
     else {
       if (c.ci && checks && v === null) {
         missing.push(`the CI check "${c.ci}" that Definition of Done line ${c.index} names was missing on ${head}, so the line was judged without it`);
+      }
+      if (v === "cancelled") {
+        missing.push(`the CI check "${c.ci}" that Definition of Done line ${c.index} names was cancelled on ${head}, which neither fails nor passes it, so the line was judged without it`);
       }
       rest.push(c);
     }
@@ -845,6 +864,8 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     ciFailure?: CiFailure;
     /** PBI 393: the tries and findings this failed attempt hands the next claim, when it ends the claim. */
     retryCarry?: { tried: number; findings: string[] };
+    /** PBI 423: the branch's head on origin, when a later push cancelled CI on the commit this attempt pushed. */
+    supersededBy?: string;
   } | null = null;
   let dodVerdicts = ctx.dodVerdicts;
   // The last Green gate run that passed in this claim (PBI 389). A later claim has none, so its checks run as before.
@@ -932,6 +953,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       ...(c.restates?.length ? { restates: c.restates } : {}),
       ...(c.ciFailure ? { ciFailure: c.ciFailure } : {}),
       ...(status === "failed" && c.retryCarry ? { retryCarry: c.retryCarry } : {}),
+      ...(status === "stopped" && c.supersededBy ? { supersededBy: c.supersededBy } : {}),
       // The SDK reports Unix seconds, and the cell API reads an ISO time.
       ...(m.usage ? { usage: { utilization: m.usage.utilization, resetsAt: m.usage.resetsAt === null ? null : new Date(m.usage.resetsAt * 1000).toISOString() } } : {}) });
     if (status !== "stopped") await uploads();
@@ -1151,6 +1173,9 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   // a calm stop. While it's open the refusal fails the attempt as before (PBI 212).
   // PBI 233: `stale`, when given, says CI still shows a run that was there before a re-run, so the answer is the old run's
   // and is waited past as pending, under the same cap.
+  // PBI 423: a cancelled answer neither failed nor passed. When the branch on origin has moved on from `sha`, a later
+  // push cancelled the run, and the wait ends with Superseded. Otherwise, as when a person cancelled the run, it's waited
+  // past as pending, under the same cap, for a re-run or a push.
   const waitForChecks = async (sha: string, stale?: () => Promise<boolean>): Promise<CheckAnswer> => {
     const began = d.now().getTime();
     for (;;) {
@@ -1168,8 +1193,12 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
         if (!state.open) throw new ClosedUnmerged(`PR #${n} for \`${ctx.branch}\` was closed without a merge while the factory waited for CI on ${sha}, so the stage stops here.`);
         throw e;
       });
-      if (s.status !== "pending" && !(stale && await stale())) return s;
-      const question = await pendingCiQuestion(api, sha, d.now().getTime() - began);
+      if (s.status === "cancelled") {
+        const now = await git.branchHead({ signal: fence.signal });
+        if (now && now !== sha) throw new Superseded(sha, now);
+      } else if (s.status !== "pending" && !(stale && await stale())) return s;
+      const waited = d.now().getTime() - began;
+      const question = s.status === "cancelled" ? cancelledCiQuestion(sha, waited) : await pendingCiQuestion(api, sha, waited);
       if (question) throw new Blocked(question);
       await sleep(CHECKS_POLL_MS);
       if (abort.signal.aborted) throw abort.signal.reason instanceof Error ? abort.signal.reason : new Stop("stopped");
@@ -2053,6 +2082,18 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     if (e instanceof Restarting) {
       await api.release();
       return "restarting";
+    }
+    // PBI 423: the attempt's stopped report ends the claim, and the item goes back to Queued at the same stage. The
+    // commit waited on is pushed already, and the branch has moved on from it, so nothing is pushed.
+    if (e instanceof Superseded) {
+      if (!current) {
+        await api.release();
+        return "stopped";
+      }
+      current.message = e.message;
+      current.supersededBy = e.head;
+      await end("stopped");
+      return "stopped";
     }
     if (e instanceof Limited) {
       await git.commitAll("work in progress, usage limit").catch(() => {});

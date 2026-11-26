@@ -25,6 +25,11 @@ export type Git = {
    */
   push(fence?: RetryFence): Promise<void>;
   head(): Promise<string>;
+  /**
+   * PBI 423: the commit the run's branch points at on origin now, read without fetching, or null when origin has no
+   * such branch. A network fault is retried, as for push, and `fence` stops the retries.
+   */
+  branchHead(fence?: RetryFence): Promise<string | null>;
 };
 
 /** Runs one git command in `cwd`. It rejects as execFile does, with the exit code, signal and stderr on the error. */
@@ -104,6 +109,10 @@ export function shellGit(dir: string, branch: string, deps: GitDeps = {}): Git {
       await remote(fence, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
     },
     head: () => git("rev-parse", "HEAD"),
+    async branchHead(fence = {}) {
+      const out = (await remote(fence, "ls-remote", "origin", `refs/heads/${branch}`)).stdout.trim();
+      return out ? out.split(/\s/)[0] : null;
+    },
   };
 }
 

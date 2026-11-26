@@ -250,8 +250,10 @@ function ci(world: object, sha: string, set: { name: string; status: CheckRun["s
     else runs.push(run);
   }
   c.host.runs.set(key, runs);
-  // GitHub's checksOnSha counts a cancelled run as failed, as it does any completed run that didn't pass.
-  const status = runs.some((r) => r.status === "failure" || r.status === "cancelled") ? "failure" : runs.some((r) => r.status === "pending") ? "pending" : "success";
+  // GitHub's checksOnSha: a failed run fails the commit, then a run still going leaves it pending, and a cancelled one
+  // neither fails nor passes it (PBI 423).
+  const status = runs.some((r) => r.status === "failure") ? "failure" : runs.some((r) => r.status === "pending") ? "pending"
+    : runs.some((r) => r.status === "cancelled") ? "cancelled" : "success";
   c.host.checks.set(key, status);
 }
 

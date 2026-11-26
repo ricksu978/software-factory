@@ -16,7 +16,8 @@ export class LeaseLost extends Error {
   override name = "LeaseLost";
 }
 
-export type CheckStatus = "pending" | "success" | "failure" | "none";
+/** CI's verdict on a commit, as the cell API answers it. `cancelled` neither failed nor passed (PBI 423). */
+export type CheckStatus = "pending" | "success" | "failure" | "cancelled" | "none";
 /**
  * The cell API's answer about CI on a commit. On failure it names each failed check with its URL and the last 100
  * lines of its log, or a null log when the repo host couldn't give it (PBI 232). Otherwise `failedChecks` is empty.
@@ -43,6 +44,12 @@ export type StageReport = {
    * prepared: the tries its stage had spent and the attempt's findings, which the next claim's context hands back.
    */
   retryCarry?: { tried: number; findings: string[] };
+  /**
+   * PBI 423: set on a stopped attempt whose wait on CI a later push to the branch ended, cancelling the run on the
+   * commit the attempt pushed: the branch's head on origin then. The report ends the claim, and the item goes back to
+   * Queued at the same stage, whose next claim starts from that commit.
+   */
+  supersededBy?: string;
 };
 /** PBI 292: a CI failure on a commit a stage pushed, as Green gets it back to fix. */
 export type { CiFailure };

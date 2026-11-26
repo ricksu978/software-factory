@@ -508,6 +508,21 @@ A task that touches one of them follows this section and does not restate it.
    from `GET /internal/cells/:runId/pending-checks?sha=<sha>`.
    Pending CI isn't failed CI,
    so a timeout never goes back to green or counts against a retry (PBI 234).
+   `cancelled` neither failed nor passed (PBI 423).
+   On it the engine reads the run's branch on origin with `git.branchHead`,
+   an `ls-remote` that fetches nothing.
+   When the branch has moved on from the commit,
+   a later push cancelled the run,
+   so the wait ends at once,
+   whatever the cap,
+   and the attempt is reported `stopped` with `supersededBy`,
+   which ends the claim and sends the item back to Queued at the same stage.
+   It goes to no Green pass and counts against no retry.
+   When the branch still points at the commit,
+   the cell waits as for `pending`,
+   and at the cap it's `blocked` with a question that says the run was cancelled and nothing was pushed after it.
+   A `dod.md` line whose named check was only cancelled on the commit gets no verdict from it and falls back to its command or the judge,
+   with a note saying the check was cancelled.
    A `dod.md` line that names a CI check reads the checks by name through `GET /internal/cells/:runId/ci-checks?sha=<sha>` in the same way (PBI 229).
    Phase 0 requires CI on the target repo.
    Cell tokens keep the permissions in Global Constraints.
@@ -2498,8 +2513,8 @@ export interface BacklogAdapter {
 export interface RepoHost {
   cellToken(repo: string): Promise<{ token: string; expiresAt: string }>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
-  checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
-  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">; // "none": no check has reported on the sha at all
+  checksOnHead(repo: string, prNumber: number): Promise<Exclude<CiStatus, "none">>;
+  checksOnSha(repo: string, sha: string): Promise<CiStatus>; // CiStatus is "pending" | "success" | "failure" | "cancelled" | "none"; "none": no check has reported on the sha at all; "cancelled": none failed or still runs and one was cancelled (PBI 423)
   failedChecksOnSha(repo: string, sha: string): Promise<{ name: string; url: string; log: string | null }[]>; // PBI 232: the last 100 log lines, capped as logTail does, for the first LOGGED_CHECKS checks; null after those or when the host can't give it
   pendingChecksOnSha(repo: string, sha: string): Promise<string[]>; // PBI 234: each check run not yet completed, by name, and each pending commit status, by context
   onBranch(repo: string, branch: string, sha: string): Promise<boolean>; // the branch head or one of its ancestors (Task 12)
@@ -2692,9 +2707,25 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
       `none` means `GET .../commits/{sha}/check-runs` and `GET .../commits/{sha}/status` both report `total_count: 0`.
       A `githubRepoHost` that never returns `none` leaves the cell API answering `pending` for good,
       instead of `none` after 10 minutes.
+    - **A cancelled run (PBI 423).**
+      A completed run whose conclusion is `cancelled` neither failed nor passed,
+      in every read of a commit's checks.
+      `checksOnSha` answers `failure` when a run failed,
+      then `pending` while one still runs,
+      then `cancelled` when one was cancelled,
+      and `success` only when every run passed,
+      was skipped or ended neutral.
+      `failedChecksOnSha` and `rerunChecksOnSha` leave a cancelled run out,
+      so it's never named or re-run as failed,
+      and `ciChecksOnSha` gives it the conclusion `cancelled`.
+      `timed_out` and `action_required` still read as `failure`.
+      `pollMergedCi` takes a merge commit that reads `cancelled` as one whose only unpassed runs were cancelled,
+      so it waits on main uncharged,
+      as `compareWithParent`'s `cancelled` does.
     - **`failedChecksOnSha` (PBI 232).**
       A failed check is a check run that completed with a conclusion other than `success`,
-      `neutral` or `skipped`,
+      `neutral`,
+      `skipped` or `cancelled`,
       as `checksOnSha` reads it.
       Its URL is `html_url`,
       else `details_url`.
@@ -4411,7 +4442,9 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     and a `prUrl` that differs gets 400,
     here and on `pr_opened`,
     because the board links it from a public item.
-  - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "none", failedChecks: { name, url, log }[] }` for that commit on the run's branch.
+  - `GET /checks?sha=<sha>` returns `{ status: "pending" | "success" | "failure" | "cancelled" | "none", failedChecks: { name, url, log }[] }` for that commit on the run's branch.
+    `cancelled` is a commit whose only unpassed checks were cancelled,
+    which neither failed nor passed (PBI 423).
     On `failure`,
     `failedChecks` comes from `RepoHost.failedChecksOnSha`:
     each failed check's name and URL,
@@ -4504,7 +4537,7 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     or one naming no test,
     leaves `failingTests` out,
     so the check still goes back with its name and URL.
-  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed" | "stopped", model, effort, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage?, message?, scenarioNotes? }`.
+  - `POST /stage` takes `{ stageId, attempt, status: "started" | "passed" | "failed" | "stopped", model, effort, tokensIn, tokensOut, costUsd, transcriptRef?, reportRef?, usage?, message?, scenarioNotes?, supersededBy? }`.
     A report whose `model` is missing or blank,
     or whose `effort` isn't one of `EFFORTS`,
     answers 400 and stores nothing (PBI 319).
@@ -4536,6 +4569,17 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     so the restarted factory starts it again without waiting out the lease.
     Under a pause or a stop-run the claim stays,
     so the scheduler's handling of those holds.
+    A `stopped` report with `supersededBy`,
+    the branch's head on origin,
+    comes from a stage whose wait on CI a later push to the branch ended by cancelling the run on its commit (PBI 423).
+    It ends the claim whatever is set:
+    when no restart already ended it,
+    the item goes back to Queued through `ci_superseded`,
+    whose payload names the stage,
+    the attempt and that head,
+    with `run.next_stage` where it was.
+    `GET /context` offers no `resume` for such an attempt,
+    so the next claim starts the stage afresh from the branch's newest commit.
   - `POST /release` takes `{}`.
     A cell that a stop found between a stage's `passed` report and its transition has no open attempt to report `stopped`,
     so it sends this instead before it exits (PBI 140).

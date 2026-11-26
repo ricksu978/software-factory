@@ -253,18 +253,19 @@ const leaseReply = (a: { stop: boolean; restarting: boolean }) => ({ ok: true, s
  * switch or an operator, whose handling keeps the claim. The one lease_expired records why: `reason: "restart"` while
  * a restart is being prepared, which a later claim reads to resume a stopped attempt, and `drain: true` under a drain.
  */
-async function endClaimForWrapUp(c: pg.PoolClient, run: Run, now: Date, boundary: boolean): Promise<void> {
+async function endClaimForWrapUp(c: pg.PoolClient, run: Run, now: Date, boundary: boolean): Promise<boolean> {
   const set = await c.query<{ restart: boolean; drain: boolean }>(
     `with o as (select kind from override where cleared_at is null and scope = 'factory' and (expires_at is null or expires_at > $1))
      select exists (select from o where kind = 'restart') as restart, exists (select from o where kind = 'drain') as drain`,
     [now],
   );
   const { restart, drain } = set.rows[0];
-  if (!restart && !(boundary && drain)) return;
+  if (!restart && !(boundary && drain)) return false;
   // Any attempt still started belongs to a cell that died before this one (PBI 239). The cell's own attempt is reported by now.
   await closeStartedAttempts(c, run.item_id, now);
   await transitionItem(c, run.item_id, "lease_expired", { actor: "agent", actorId: run.run_id },
     { reason: restart ? "restart" : "drain", ...(drain ? { drain: true } : {}) });
+  return true;
 }
 
 /** What's set over a running cell now: the overrides a lease renewal answers with, and that a release reads too. */
@@ -330,17 +331,21 @@ const routes: Record<string, Route> = {
     // wrap-up, which stopped the cells still running once it ran out (PBI 300 took that stop away).
     // A later claim's lease_expired says nothing about this attempt: that cell may have opened no attempt at this stage.
     // event.at and stage_run.started_at both come from the database's clock, so they compare.
-    const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean; retry_carry: { tried: number; findings: string[] } | null }>(
+    // PBI 423: an attempt a later push superseded, cancelling CI on its commit, was stopped with nothing left in
+    // progress: the commit it waited on is pushed and the branch moved on. The next claim starts the stage afresh.
+    const last = await c.query<{ attempt: number; status: string; message: string | null; restarted: boolean; superseded: boolean; retry_carry: { tried: number; findings: string[] } | null }>(
       `select s.attempt, s.status, s.message, s.retry_carry,
          coalesce((select e.payload->>'reason' = 'restart' from event e
                    where e.item_id = $3 and e.kind = 'transition' and e.payload->>'event' = 'lease_expired'
                      and e.at >= s.started_at
-                   order by e.at limit 1), false) as restarted
+                   order by e.at limit 1), false) as restarted,
+         exists (select from event e where e.item_id = $3 and e.kind = 'transition' and e.payload->>'event' = 'ci_superseded'
+                   and e.payload->>'stageId' = s.stage_id and (e.payload->>'attempt')::int = s.attempt and e.at >= s.started_at) as superseded
        from stage_run s where s.run_id = $1 and s.stage_id = $2 order by s.attempt desc limit 1`,
       [run.run_id, run.next_stage, run.item_id],
     );
     const l = last.rows[0];
-    const stopped = l?.status === "stopped" && (l.message !== LEASE_RAN_OUT || l.restarted);
+    const stopped = l?.status === "stopped" && !l.superseded && (l.message !== LEASE_RAN_OUT || l.restarted);
     const resume = stopped ? { stageId: run.next_stage, attempt: l.attempt } : null;
     // PBI 393: when the next stage's last attempt failed and its cell ended the claim at that attempt boundary, under a
     // drain or a restart being prepared, the next claim spends only the stage's retries left and briefs its first
@@ -549,7 +554,13 @@ const routes: Record<string, Route> = {
     // A cell that stops while a restart is being prepared has pushed its work and is about to exit, so its claim ends
     // here. The item goes back to Queued at the stage it was in, and the restarted factory starts it again at once
     // instead of waiting out the lease. Under a pause or a stop_run the claim stays, so the scheduler's handling holds.
-    if (status === "stopped") await endClaimForWrapUp(c, run, now, false);
+    // PBI 423: a stopped attempt whose CI run a later push to the branch cancelled ends the claim whatever is set, and
+    // the item goes back to Queued at the same stage. It counts against none of the stage's retries, as any stopped one.
+    const supersededBy = status === "stopped" && body.supersededBy !== undefined ? str(body.supersededBy, "supersededBy") : null;
+    if (status === "stopped" && !(await endClaimForWrapUp(c, run, now, false)) && supersededBy !== null) {
+      await closeStartedAttempts(c, run.item_id, now);
+      await transitionItem(c, run.item_id, "ci_superseded", { actor: "agent", actorId: run.run_id }, { stageId, attempt, head: supersededBy });
+    }
     const usage = body.usage as { utilization?: unknown; resetsAt?: unknown } | undefined;
     if (typeof usage?.utilization === "number") {
       const resetsAt = typeof usage.resetsAt === "string" ? new Date(usage.resetsAt) : new Date(now.getTime() + USAGE_PAUSE_MS);

@@ -30,3 +30,14 @@ export async function pendingCiQuestion(api: CellApi, sha: string, waitedMs: num
   return `CI on ${sha} stayed pending for ${minutes} minutes, so the cell stopped waiting. ${which}. `
     + "Look at why the check hasn't reported, then rerun it or answer how the run should go on.";
 }
+
+/**
+ * PBI 423: called each time CI answers cancelled on `sha` while the run's branch still points at it, so no later push
+ * cancelled the run: a person may have. A cancelled run neither failed nor passed, so the cell waits for a re-run or a
+ * push under the same cap as pending CI, and then asks a person. Null while it should go on waiting.
+ */
+export function cancelledCiQuestion(sha: string, waitedMs: number): string | null {
+  if (waitedMs < PENDING_CI_CAP_MS) return null;
+  return `CI on ${sha} was cancelled, and nothing was pushed to the branch after it, so the cell stopped waiting after ${PENDING_CI_CAP_MS / 60_000} minutes. `
+    + "A cancelled run neither failed nor passed. Rerun CI on the commit, or answer how the run should go on.";
+}

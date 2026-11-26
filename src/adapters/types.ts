@@ -175,6 +175,14 @@ export function logTail(log: string): string {
 export type DiffRange = { path: string; from: number; to: number };
 
 /**
+ * CI's verdict on a commit. `failure` when a check failed, timed out or needs action. `pending` while one still runs.
+ * `cancelled` when no check failed or still runs and one was cancelled, as when a later push to the branch cancelled
+ * its run: that neither failed nor passed, so a commit whose only unpassed check was cancelled isn't green (PBI 423).
+ * `success` when every check passed, was skipped or ended neutral. `none` when no check has reported at all.
+ */
+export type CiStatus = "pending" | "success" | "failure" | "cancelled" | "none";
+
+/**
  * A named check CI reported on a commit, with the URL of its run (PBI 229). `pending` is a check still running, which
  * has reported nothing yet. `cancelled` is a run that ended cancelled, as when a later push to the branch cancelled it,
  * which neither failed nor passed (PBI 423).
@@ -218,9 +226,12 @@ export interface RepoHost {
    */
   missingPermissions?(repo: string): Promise<string[]>;
   openOrUpdatePr(p: { repo: string; branch: string; base: string; title: string; body: string }): Promise<{ number: number; url: string }>;
-  checksOnHead(repo: string, prNumber: number): Promise<"pending" | "success" | "failure">;
-  /** "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run contract 6). */
-  checksOnSha(repo: string, sha: string): Promise<"pending" | "success" | "failure" | "none">;
+  checksOnHead(repo: string, prNumber: number): Promise<Exclude<CiStatus, "none">>;
+  /**
+   * "none" means no check has reported on the sha at all, which the cell API turns into `none` after 10 minutes (Run
+   * contract 6). "cancelled" means no check failed or is still running and at least one was cancelled (PBI 423).
+   */
+  checksOnSha(repo: string, sha: string): Promise<CiStatus>;
   /**
    * The checks that failed on `sha`, each with its URL and the last 100 lines of its log, or a null log when the host
    * can't give it (PBI 232). Only the first LOGGED_CHECKS failed checks carry a log; the rest have a null one. A check that passed, was skipped or ended neutral isn't one of them.

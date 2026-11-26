@@ -672,6 +672,56 @@ describe("runCell", () => {
     assert.deepEqual(h.transitions(), []);
   });
 
+  // PBI 423: CI on open-pr's head is cancelled. `push` lands a person's commit on origin's branch first, as the later
+  // push that cancels the run does under `cancel-in-progress`.
+  const cancelledCi = (h: ReturnType<typeof harness>, push: boolean) => {
+    let theirs: string | null = null;
+    h.deps.api.checks = async (sha) => {
+      h.calls.push({ route: "/checks", body: { sha } });
+      if (push && !theirs) {
+        const other = join(h.root, "person");
+        git(h.root, "clone", "-q", "-b", BRANCH, h.origin, other);
+        git(other, "config", "user.email", "p@example.com");
+        git(other, "config", "user.name", "p");
+        writeFileSync(join(other, "person.txt"), "pushed\n");
+        git(other, "add", "-A");
+        git(other, "commit", "-q", "-m", "a person's push");
+        git(other, "push", "-q", "origin", BRANCH);
+        theirs = git(other, "rev-parse", "HEAD");
+      }
+      return { status: "cancelled", failedChecks: [] };
+    };
+    return {
+      theirs: () => theirs,
+      last: () => h.calls.filter((c) => c.route === "/stage" && c.body.stageId === "open-pr").at(-1)!.body,
+    };
+  };
+
+  test("a cancelled run on open-pr's head that a later push superseded ends the claim stopped, charging nothing and moving nothing (PBI 423)", async () => {
+    const h = harness({ nextStage: "open-pr" });
+    const c = cancelledCi(h, true);
+    assert.equal(await h.run(), "stopped");
+    assert.equal(c.last().status, "stopped");
+    assert.equal(c.last().supersededBy, c.theirs());
+    assert.match(c.last().message, /was cancelled, and the branch has moved on/);
+    assert.equal(c.last().ciFailure, undefined);
+    assert.deepEqual(h.transitions(), []);
+    assert.ok(!h.routes().includes("/repo/requestReviewers"));
+    assert.ok(!h.started().includes("green"));
+  });
+
+  test("a cancelled run with no later push on the branch is waited on as pending, and asks a person at the cap (PBI 423)", async () => {
+    let t = 0;
+    const h = harness({ nextStage: "open-pr", deps: { now: () => new Date(t), sleep: async () => { t += 30 * 60_000; } } });
+    cancelledCi(h, false);
+    assert.equal(await h.run(), "waiting");
+    assert.ok(h.calls.filter((x) => x.route === "/checks").length >= 2);
+    const [blocked] = h.transitions();
+    assert.equal(blocked.event, "blocked");
+    assert.match(blocked.question.body, /was cancelled, and nothing was pushed to the branch after it/);
+    assert.ok(!h.started().includes("green"));
+  });
+
   test("a CI refusal while the PR is still open fails the attempt with the refusal, as before", async () => {
     const h = harness({ nextStage: "open-pr" });
     const last = refusedCi(h, { merged: false, open: true });

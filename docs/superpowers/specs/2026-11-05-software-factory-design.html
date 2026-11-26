@@ -1655,7 +1655,61 @@ stateDiagram-v2
 
       CI green.</td>
       
-      <td>Before a red CI is charged to the attempt,
+      <td>A check run that was cancelled neither failed nor passed,
+
+      as when GitHub cancels a push's run because a newer push to the same branch started under <code>concurrency: cancel-in-progress</code>.
+
+      No read of a PR's or a branch's checks takes it as failed or as passed (PBI 423).
+
+      A commit whose only unpassed checks were cancelled isn't green:
+
+      the cell API answers <code>cancelled</code> for it,
+
+      names no failed check,
+
+      and gives each cancelled check the conclusion <code>cancelled</code>.
+
+      A check that failed beside a cancelled one is still a failure,
+
+      and it is the only one named.
+
+      A timed-out check and one that needs action still count as failed.
+
+      When CI on the commit a stage pushed reads cancelled and the run's branch on origin has moved on from that commit,
+
+      a later push cancelled the run.
+
+      The stage ends its wait at once,
+
+      whatever the pending CI cap,
+
+      and reports its attempt stopped,
+
+      so it counts against none of the stage's retries and goes to no Green pass.
+
+      The report ends the claim:
+
+      the item goes back to Queued at the same stage,
+
+      through the event <code>ci_superseded</code>,
+
+      and its next claim clones the branch,
+
+      so it starts from the branch's newest commit and reads CI there.
+
+      That next claim starts the stage afresh rather than resuming the stopped attempt.
+
+      When the branch still points at the commit,
+
+      as when a person cancelled the run,
+
+      the cell waits as it does for pending CI,
+
+      for a re-run or a push,
+
+      and after 60 minutes asks a person instead.
+
+      Before a red CI is charged to the attempt,
 
       the factory re-runs the failed checks once,
 
@@ -1973,6 +2027,12 @@ stateDiagram-v2
       and the failing check only holds the merge.
 
       A base whose CI can't be read leaves the failure the item's.
+
+      A cancelled check on the head isn't a failure,
+
+      so a head whose only unpassed checks were cancelled leaves the item in review and re-runs nothing,
+
+      and a failed check beside a cancelled one sends the item back naming only the failed check (PBI 423).
 
       Before the item goes back, its failed checks on the head are re-run once, as the cell re-runs them (PBI 233),
 
@@ -3212,6 +3272,10 @@ Feature: Export invoices to CSV
 
     and an item waiting on any other question still waits for a person (PBI 260).
 
+    A base commit whose only unpassed checks were cancelled gives no verdict either way,
+
+    so an older commit decides and the answer doesn't name it (PBI 423).
+
     <span class="tag call">My call</span></li>
 
     <li><b>CI checks.</b>
@@ -3253,6 +3317,14 @@ Feature: Export invoices to CSV
     or the check is still running,
 
     the cell runs the line's command or judges the line as it did before.
+
+    A run of the named check that was cancelled neither fails nor passes the line (PBI 423).
+
+    When every run of it on the commit was cancelled,
+
+    the line falls back the same way,
+
+    and the attempt's notes say the check was cancelled.
 
     A named check that CI didn't run on a commit it did report on also falls back,
 
@@ -5975,7 +6047,9 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
     so a check cancelled on the first parent counts as one that never ran there.
 
-    A merge whose own runs were cancelled and none failed broke nothing:
+    A merge whose own runs were cancelled and none failed broke nothing,
+
+    whether CI on it reads as failed or as cancelled (PBI 423):
 
     it isn't charged,
 

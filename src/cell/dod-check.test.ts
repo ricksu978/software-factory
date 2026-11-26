@@ -61,6 +61,22 @@ describe("checkDefinitionOfDone with a ci: line", () => {
     assert.ok(r.verdicts[0].reason.includes(`${URL}-2`));
   });
 
+  test("a check whose only run was cancelled neither fails nor passes the line, so its command runs, and the notes say why (PBI 423)", async () => {
+    const r = await check([`A. \`run: ${mark(0)}\` \`ci: ci\``], [{ name: "ci", conclusion: "cancelled", url: URL }]);
+    assert.equal(r.ran, true);
+    assert.equal(r.verdicts[0].reason, "exit 0");
+    assert.ok(r.missing.some((m) => /"ci".*cancelled on abc1234.*neither fails nor passes/.test(m)), r.missing.join("\n"));
+  });
+
+  test("a cancelled run beside a passed run of the same check passes the line on the passed one (PBI 423)", async () => {
+    const r = await check([`A. \`run: ${mark(1)}\` \`ci: ci\``], [
+      { name: "ci", conclusion: "cancelled", url: URL }, { name: "ci", conclusion: "success", url: `${URL}-2` },
+    ]);
+    assert.equal(r.ran, false);
+    assert.equal(r.verdicts[0].status, "passed");
+    assert.ok(r.verdicts[0].reason.includes(`${URL}-2`), r.verdicts[0].reason);
+  });
+
   test("a line with a check and no command goes to the judge when the check is missing", async () => {
     const r = await check(["Docs read well. `ci: docs`"], [], async (j) => j.map((c) => ({ index: c.index, criterion: c.text, status: "passed", reason: "judged" })));
     assert.equal(r.verdicts[0].reason, "judged");

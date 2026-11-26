@@ -41,6 +41,16 @@ function repos() {
 }
 
 describe("shellGit", () => {
+  test("branchHead reads the branch's head on origin without fetching, and null when origin has no such branch (PBI 423)", async () => {
+    const { work } = repos();
+    const g = shellGit(work, "feature");
+    assert.equal(await g.branchHead(), null);
+    git(work, "push", "-q", "origin", "HEAD:refs/heads/feature");
+    const pushed = git(work, "rev-parse", "HEAD");
+    commit(work, "c.txt", "not pushed\n");
+    assert.equal(await g.branchHead(), pushed);
+  });
+
   test("fetchBase fetches the base and returns the commit it fetched", async () => {
     const { pusher, work } = repos();
     const b1 = commit(pusher, "b.txt", "base\n");

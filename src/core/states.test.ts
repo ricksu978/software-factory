@@ -14,6 +14,7 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Accepted", "dod_failed", "Failed"], ["InProgress", "retries_exhausted", "Failed"],
   ["NeedsInput", "timed_out", "Abandoned"], ["SignOff", "timed_out", "Abandoned"],
   ["InProgress", "lease_expired", "Queued"], ["InProgress", "usage_limited", "Queued"],
+  ["InProgress", "ci_superseded", "Queued"],
   ["Failed", "requeued", "Queued"], ["Abandoned", "requeued", "Queued"],
   ["Abandoned", "reopened_signoff", "SignOff"], ["Abandoned", "reopened_question", "NeedsInput"],
   ...(["Queued", "InProgress", "SignOff", "NeedsInput", "InReview"] as const).flatMap((s) => [
