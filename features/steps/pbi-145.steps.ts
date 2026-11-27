@@ -4,8 +4,8 @@
 // {string}" read the page. Its hooks run only for its own scenarios, so this feature has its own.
 //
 // The page's contract these steps read: a PR link is an <a href> whose text is just "PR #N". On Floor, an item's row is
-// the <li> under "Waiting on you", or the <tr> in the "In flight" table, that holds the link to its Run detail. On Run
-// detail, the line with the item's state is the <p> whose text starts with the state.
+// the <li> under "Waiting on you" that holds the link to its Run detail, the one place Floor lists an InReview item
+// (PBI 430). On Run detail, the line with the item's state is the <p> whose text starts with the state.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -118,11 +118,12 @@ When("a viewer opens the Run detail of {string}", long, async function (title: s
 
 // ---- reading the page ----
 
-const FLOOR_PLACE = `(Floor's "Waiting on you"|"Waiting on you"|Floor's "In flight" table|the "In flight" table)`;
+// PBI 430: an InReview item is listed under "Waiting on you" only.
+const FLOOR_PLACE = `(Floor's "Waiting on you"|"Waiting on you")`;
 
 /** The Floor section a place names, as PBI 131's scope reads it. */
-function section(place: string): string {
-  return /In flight/.test(place) ? `"In flight"` : `"Waiting on you"`;
+function section(_place: string): string {
+  return `"Waiting on you"`;
 }
 
 /**
@@ -136,8 +137,7 @@ function runDetailPath(world: object, id: string): string {
 /** The html of the item's row in a Floor section: the <li> or <tr> holding the link to its Run detail. */
 function row(world: object, place: string, it: Item): string {
   const html = scope(page(world), section(place));
-  const tag = /In flight/.test(place) ? "tr" : "li";
-  const rows = [...html.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, "gi"))].map((m) => m[1]);
+  const rows = [...html.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]);
   const mine = rows.filter((r) => r.includes(`href="${runDetailPath(world, it.id)}"`));
   assert.equal(mine.length, 1, `${place} has ${mine.length} rows for "${it.title}": ${placeText(render(html))}`);
   return mine[0];
@@ -192,20 +192,9 @@ Then("on {string}, the {string} link for {string} goes to {string}", function (p
   assert.equal(prHref(this, `"${place}"`, byTitle(this, title), n), url, `"${n}" for "${title}" doesn't link to ${url}`);
 });
 
-Then("{string} in the {string} table links to {string}", function (n: string, place: string, url: string) {
-  assert.equal(prHref(this, `the "${place}" table`, theItem(this), n), url, `"${n}" in the "${place}" table doesn't link to ${url}`);
-});
-
-Then("{string} and the {string} table each show {string} for the item", function (a: string, b: string, n: string) {
-  const it = theItem(this);
-  const hrefs = [prHref(this, `"${a}"`, it, n), prHref(this, `the "${b}" table`, it, n)];
-  (this as { pbi145?: { hrefs?: string[] } }).pbi145 = { hrefs };
-});
-
-Then("both links go to {string}", function (url: string) {
-  const hrefs = (this as { pbi145?: { hrefs?: string[] } }).pbi145?.hrefs;
-  assert.ok(hrefs?.length === 2, "no two links were read yet");
-  for (const h of hrefs) assert.equal(h, url, `a "PR #N" link goes to ${h}`);
+Then("Floor shows the {string} link once", function (n: string) {
+  const got = render(page(this)).links.filter((l) => l.text === n);
+  assert.equal(got.length, 1, `Floor shows ${got.length} links "${n}": ${JSON.stringify(got)}`);
 });
 
 Then("{string} on {string} still links to {string}", function (n: string, place: string, url: string) {

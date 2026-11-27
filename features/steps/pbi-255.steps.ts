@@ -551,20 +551,20 @@ function floorPage(world: object): string {
   return c.page!;
 }
 
-/** The text of each item in Floor's "Next up" list, in order. */
+/** The text of each item Floor's "Production Line" lists to claim, in order: its rows past the InProgress ones (PBI 430). */
 function nextUp(world: object): string[] {
-  const section = scope(floorPage(world), '"Next up"');
-  return [...section.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => text(m[1]));
+  const section = scope(floorPage(world), '"Production Line"');
+  return [...section.matchAll(/<tr><td>([\s\S]*?)<\/tr>/gi)].map((m) => m[1]).filter((r) => !/<td>InProgress<\/td>/.test(r)).map(text);
 }
 
 const names = (line: string, ext: string) => new RegExp(`#${escapeRe(ext)}\\b`).test(line);
 
-Then("the first item in the Floor's \"Next up\" list is the bug item", function () {
+Then("the first item to claim in the Floor's \"Production Line\" list is the bug item", function () {
   const bug = ctx(this).bug;
   assert.ok(bug, "no bug item was put in place");
   const list = nextUp(this);
-  assert.ok(list.length > 0, "Floor's \"Next up\" list is empty");
-  assert.ok(names(list[0], bug.externalId), `Floor's "Next up" list starts with "${list[0]}", not the bug item #${bug.externalId}`);
+  assert.ok(list.length > 0, "Floor's \"Production Line\" list is empty");
+  assert.ok(names(list[0], bug.externalId), `Floor's "Production Line" list starts with "${list[0]}", not the bug item #${bug.externalId}`);
 });
 
 Then("item {int} comes after it", function (n: number) {
@@ -572,7 +572,7 @@ Then("item {int} comes after it", function (n: number) {
   const list = nextUp(this);
   const at = list.findIndex((l) => names(l, String(n)));
   const bugAt = list.findIndex((l) => names(l, bug.externalId));
-  assert.ok(at >= 0, `Floor's "Next up" list doesn't show item ${n}: ${JSON.stringify(list)}`);
+  assert.ok(at >= 0, `Floor's "Production Line" list doesn't show item ${n}: ${JSON.stringify(list)}`);
   assert.ok(bugAt >= 0 && at > bugAt, `item ${n} doesn't come after the bug item: ${JSON.stringify(list)}`);
 });
 

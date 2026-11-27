@@ -3,7 +3,7 @@
 // the item in state" steps, and PBI 142's "the poller runs twice" and "the item still carries its label", read the same
 // context. Items are put in their starting state with plain SQL, since no move the factory makes today reaches them:
 // a withdrawal from NotReady or Eligible is what this item adds, so a Given can't ask the poller for one. The
-// dashboard's "Not ready" list is read from Floor as the real dashboard renders it, on a free port.
+// dashboard's Not ready items, under "Waiting on you" (PBI 430), are read from Floor as the real dashboard renders it, on a free port.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
@@ -13,7 +13,7 @@ import { dashboardRoutes } from "../../src/http/routes.ts";
 import { startServer } from "../../src/http/server.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, polled, REPO, setup, stateOf, type Ctx as PollCtx } from "./pbi-12.steps.ts";
-import { scope } from "./pbi-131.steps.ts";
+import { notReadyRows } from "./pbi-131.steps.ts";
 import { scriptedJudge } from "./pbi-132.steps.ts";
 
 type Move = { from: string; to: string };
@@ -60,7 +60,7 @@ async function unlabel(c: PollCtx): Promise<void> {
   await c.fake!.seed({ ...item, labels: item.labels.filter((l) => l !== LABEL) });
 }
 
-/** Floor's "Not ready" section as the dashboard renders it now. */
+/** The Not ready rows of Floor's "Waiting on you" (PBI 430), as the dashboard renders them now. */
 async function notReadyList(sourceId: string): Promise<string> {
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
@@ -77,7 +77,7 @@ async function notReadyList(sourceId: string): Promise<string> {
       });
       const html = await r.text();
       assert.equal(r.status, 200, `Floor answered ${r.status}: ${html.slice(0, 300)}`);
-      return scope(html, '"Not ready"');
+      return notReadyRows(html);
     } finally {
       await handler.close();
     }
@@ -153,9 +153,9 @@ Given(
   },
 );
 
-Given("the dashboard's \"Not ready\" list shows the item", long, async function () {
+Given("the dashboard's \"Waiting on you\" list shows the item as Not ready", long, async function () {
   const c = pollCtx(this);
-  assert.ok(await shows(c, c.extIds[0]), `the "Not ready" list doesn't show item ${c.extIds[0]}`);
+  assert.ok(await shows(c, c.extIds[0]), `"Waiting on you" doesn't show item ${c.extIds[0]}`);
 });
 
 Given("the readiness judge passes every line", function () {
@@ -182,16 +182,16 @@ When("a person adds the {string} label back to the item on the board", async fun
 // ---- outcomes ----
 
 
-Then("the dashboard's \"Not ready\" list doesn't show the item", long, async function () {
+Then("the dashboard's \"Waiting on you\" list doesn't show the item as Not ready", long, async function () {
   const c = pollCtx(this);
   polled(c);
-  assert.ok(!(await shows(c, c.extIds[0])), `the "Not ready" list still shows item ${c.extIds[0]}`);
+  assert.ok(!(await shows(c, c.extIds[0])), `"Waiting on you" still shows item ${c.extIds[0]}`);
 });
 
-Then("the dashboard's \"Not ready\" list doesn't show item {int}", long, async function (n: number) {
+Then("the dashboard's \"Waiting on you\" list doesn't show item {int} as Not ready", long, async function (n: number) {
   const c = pollCtx(this);
   polled(c);
-  assert.ok(!(await shows(c, String(n))), `the "Not ready" list still shows item ${n}`);
+  assert.ok(!(await shows(c, String(n))), `"Waiting on you" still shows item ${n}`);
 });
 
 Then("the readiness judge was not asked about the item", function () {

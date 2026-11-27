@@ -12,7 +12,8 @@
 // - Each override is a row of the override table with `scope = 'item'`, its kind, the reason, and `created_by` the
 //   person who set it. Active means not cleared and not past any expiry. When one ends, `cleared_at` records when.
 // - While an item has an active `start_now` override, its page says it is "marked Start now", to anyone who opens it.
-// - Floor's "Next up" lists the items in the order the next free slots claim them, each linking to its page.
+// - Floor's "Production Line" lists the items to claim in the order the next free slots claim them, each linking to
+//   its page, after the InProgress items (PBI 430).
 // - The board is the fake board: its order is each issue's `rank`. The factory asks it to reorder nothing, so no
 //   board call beyond reading it and commenting is made from the moment the operator signs in.
 // - The readiness gate's verdicts are the state machine's own moves: passing sends an item to Queued, through
@@ -28,7 +29,7 @@ import type { Server } from "node:http";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
 import { withTx } from "../../src/store/db.ts";
-import { nextUp, overrideItem, transitionItem } from "../../src/store/items.ts";
+import { overrideItem, transitionItem } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { ctx as p89, headers } from "./pbi-89.steps.ts";
@@ -398,34 +399,31 @@ Then(re(`item "([^"]+)"'s page no longer shows it is marked "([^"]+)"`), async f
 
 // ---- Floor ----
 
+/**
+ * The items Floor's "Production Line" lists to claim, in order (PBI 430): its rows past the InProgress ones, leaving
+ * out a held item and one that waits on another PBI, which the claim skips.
+ */
 export async function nextUpNames(world: object): Promise<string[]> {
   const page = await fetchPage(world, "/", p89(world).login!);
-  const start = page.indexOf("<h2>Next up</h2>");
-  assert.ok(start >= 0, "Floor has no Next up");
+  const start = page.indexOf("<h2>Production Line</h2>");
+  assert.ok(start >= 0, "Floor has no Production Line");
   const end = page.indexOf("<h2>", start + 1);
   const section = page.slice(start, end < 0 ? undefined : end);
   const byId = new Map([...ctx(world).items.entries()].map(([n, it]) => [it.id, n]));
-  const ids = [...section.matchAll(/href="\/items\/([0-9a-f-]{36})"/g)].map((h) => h[1]);
-  // Floor shows the first FLOOR_NEXT_UP items of the claim order. PBI 311's scenarios name more, so for them the rest
-  // is read from the claim order Floor shows, once Floor's own list is found to be its head.
-  if ((world as { nextUpBeyondFloor?: boolean }).nextUpBeyondFloor && ids.length === FLOOR_NEXT_UP) {
-    const all = (await nextUp(pool(), 100)).map((r) => r.id);
-    assert.deepEqual(ids, all.slice(0, FLOOR_NEXT_UP), "Floor's Next up isn't the head of the claim order");
-    ids.push(...all.slice(FLOOR_NEXT_UP));
-  }
+  const rows = [...section.matchAll(/<tr><td>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
+  const ids = rows
+    .filter((r) => !/<td>InProgress<\/td>/.test(r) && !/Waits on #/.test(r) && !/<span class="badge">held<\/span>/.test(r))
+    .map((r) => /href="\/items\/([0-9a-f-]{36})"/.exec(r)?.[1] ?? "(a row for no item)");
   return ids.map((id) => byId.get(id) ?? id);
 }
 
-/** How many items Floor's "Next up" shows. */
-const FLOOR_NEXT_UP = 5;
-
-Then(re(`Floor's "Next up" lists ${LIST}, in that order`), async function (list: string) {
-  assert.deepEqual(await nextUpNames(this), names(list), "Floor's Next up");
+Then(re(`Floor's "Production Line" lists ${LIST} to claim, in that order`), async function (list: string) {
+  assert.deepEqual(await nextUpNames(this), names(list), "Floor's Production Line, to claim");
 });
 
-Then(re(`Floor's "Next up" doesn't list "([^"]+)"`), async function (name: string) {
+Then(re(`Floor's "Production Line" doesn't list "([^"]+)" to claim`), async function (name: string) {
   const listed = await nextUpNames(this);
-  assert.ok(!listed.includes(name), `Floor's Next up lists "${name}": ${listed.join(", ")}`);
+  assert.ok(!listed.includes(name), `Floor's Production Line lists "${name}" to claim: ${listed.join(", ")}`);
 });
 
 // ---- the board ----
@@ -529,8 +527,8 @@ When(re(`the item's author fixes item "([^"]+)" and the readiness gate passes it
 
 // An item reaches Done, Failed, Abandoned or Split by running in the scenario's free WIP slot, and the slot it ran in
 // doesn't free up for another item until a scenario says "a WIP slot frees up", as the readiness rule's scenarios do.
-// So the tick after it only ends the item's overrides, and an item re-queued afterwards is seen in Next up beside the
-// items it was queued with.
+// So the tick after it only ends the item's overrides, and an item re-queued afterwards is seen in Production Line
+// beside the items it was queued with.
 When(re(`item "([^"]+)" reaches (Done|Failed|Abandoned|Split)`), async function (name: string, state: ItemState) {
   const it = itemOf(this, name);
   await withTx(pool(), (c) => overrideItem(c, it.id, state, { actor: "system", actorId: "pbi-265" }, `the scenario moves it to ${state}`));

@@ -11,11 +11,12 @@
 // 131's "a viewer opens Floor". Both pages are recorded through PBI 19's recordResponse, where PBI 131's page() reads
 // them back. "The page doesn't show" is PBI 145's step, which reads them there too.
 //
-// The page's contract these steps read. A Split parent's children are a list (<ol> or <ul>): on Run detail the first
-// list after the text "Split into", and on Floor the first list after the text "Split into" that follows the
-// parent's title. Each top-level <li> of that list is one child, in the order of the split. Its text holds "#N Title",
-// it holds a link (<a href>) to the child's issue whose text holds "#N" or the title, and it shows the child's state,
-// or "Not in the factory" for a child the factory doesn't hold.
+// The page's contract these steps read. A Split parent's children are a list (<ol> or <ul>) on Run detail, the first
+// list after the text "Split into". Each top-level <li> of that list is one child, in the order of the split. Its text
+// holds "#N Title", it holds a link (<a href>) to the child's issue whose text holds "#N" or the title, and it shows
+// the child's state, or "Not in the factory" for a child the factory doesn't hold. On Floor (PBI 430), a child the
+// factory holds is a row, an <li> or <tr>, whose text holds its title and "part of #N", where "#N" links to the
+// parent's Run detail, and the parent's title shows nowhere.
 import { After, Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -529,21 +530,6 @@ function detailChildren(world: object): Child[] {
   return kids;
 }
 
-const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-/** Floor's children of a parent: the first list after the text "Split into" that follows the parent's title. */
-function floorChildren(world: object, parent: string): Child[] {
-  const html = pageHtml(world);
-  const { title } = named(parent);
-  const p = textAt(html, escapeText(title));
-  assert.ok(p >= 0, `Floor doesn't show ${parent}`);
-  const at = textAt(html, SPLIT_INTO, p);
-  assert.ok(at >= 0, `Floor doesn't show ${parent} as "${SPLIT_INTO}"`);
-  const kids = listAfter(html, at);
-  assert.ok(kids, `Floor shows "${SPLIT_INTO}" after ${parent} with no list of children`);
-  return kids;
-}
-
 const show = (kids: Child[]) => kids.map((k) => `[${k.text}]`).join(" ") || "none";
 
 function childIn(kids: Child[], child: string): Child {
@@ -599,65 +585,29 @@ Then("the line with the item's state shows {string}", function (state: string) {
   assert.ok(hasWord(render(line[1]).text, state), `the state line reads: ${render(line[1]).text.trim()}`);
 });
 
-Then("Floor shows {string} as {string} these children, in order:", function (parent: string, _label: string, table: DataTable) {
-  inOrder(floorChildren(this, parent), table);
-});
-
-Then("under {string} on Floor, child {string} shows the state {string}", function (parent: string, child: string, state: string) {
-  const kid = childIn(floorChildren(this, parent), child);
-  assert.ok(hasWord(kid.text.replace(child, ""), state), `child ${child} doesn't show "${state}": ${kid.text}`);
-});
-
-Then("under {string} on Floor, child {string} shows {string}", function (parent: string, child: string, text: string) {
-  const kid = childIn(floorChildren(this, parent), child);
-  assert.ok(kid.text.replace(child, "").includes(text), `child ${child} doesn't show "${text}": ${kid.text}`);
-});
-
-function onlyChildren(world: object, parent: string, ns: string[]): void {
-  const kids = floorChildren(world, parent);
-  assert.equal(kids.length, ns.length, `children shown under ${parent}: ${show(kids)}`);
-  ns.forEach((n, i) => assert.ok(new RegExp(`${n}(?!\\d)`).test(kids[i].text), `child ${i + 1} under ${parent} isn't ${n}: ${show(kids)}`));
-}
-
-Then("Floor shows {string} as {string} {string}, {string} and {string}, and nothing else", function (parent: string, _label: string, a: string, b: string, d: string) {
-  onlyChildren(this, parent, [a, b, d]);
-});
-
-Then("Floor shows {string} as {string} {string} and {string}, and nothing else", function (parent: string, _label: string, a: string, b: string) {
-  onlyChildren(this, parent, [a, b]);
-});
-
-Then("{string} under {string} links to {string}", function (child: string, parent: string, url: string) {
-  const kid = childIn(floorChildren(this, parent), child);
-  assert.ok(linksTo(kid, child, url), `${child} doesn't link to ${url}: ${JSON.stringify(kid.links)}`);
-});
-
-/** Floor's text and links outside every "Split into" list, so a parent's own links aren't read from a child's. */
-function floorOutsideSplits(world: object): ReturnType<typeof render> {
-  let html = pageHtml(world);
-  for (let at = textAt(html, SPLIT_INTO); at >= 0; at = textAt(html, SPLIT_INTO, at)) {
-    const l = list(html, at);
-    if (!l) break;
-    html = html.slice(0, at) + html.slice(l.end);
+/** Floor's row for an item, the first <li> or <tr> whose text holds its title (PBI 430). */
+function floorRow(world: object, title: string): ReturnType<typeof render> | null {
+  const html = pageHtml(world);
+  for (const m of html.matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)) {
+    const r = render(m[2]);
+    if (r.text.includes(title)) return r;
   }
-  return render(html);
+  return null;
 }
 
-Then("{string} on Floor still links to {string}", function (ref: string, url: string) {
-  const r = floorOutsideSplits(this);
-  assert.ok(r.links.some((l) => l.href === url && l.text.includes(ref)), `no "${ref}" on Floor links to ${url}: ${JSON.stringify(r.links)}`);
-});
-
-Then("{string} on Floor still links to the parent's Run detail", long, async function (title: string) {
+Then("Floor shows {string} as {string}, which links to the parent's Run detail", long, async function (child: string, part: string) {
   const b = main(this);
+  const { title } = named(child);
+  const r = floorRow(this, title);
+  assert.ok(r, `Floor doesn't show ${child}`);
+  assert.ok(r.text.replace(/\s+/g, " ").includes(part), `${child} on Floor doesn't show "${part}": ${r.text}`);
   const url = `/items/${await itemId(b.sourceId, b.c.parentId!)}`;
-  const r = floorOutsideSplits(this);
-  assert.ok(r.links.some((l) => l.href === url && l.text.includes(title)), `no "${title}" on Floor links to ${url}: ${JSON.stringify(r.links)}`);
+  assert.ok(r.links.some((l) => l.href === url && part.endsWith(l.text)), `"${part}" doesn't link to the parent's Run detail: ${JSON.stringify(r.links)}`);
 });
 
-Then("Floor shows the child {string} under {string} as written", function (child: string, _label: string) {
-  const c = main(this).c;
-  childIn(floorChildren(this, `#${c.parentId} ${c.parentTitle}`), child);
+Then("Floor doesn't list {string}", function (parent: string) {
+  const { title } = named(parent);
+  assert.ok(!render(pageHtml(this)).text.includes(title), `Floor shows ${parent}`);
 });
 
 Then("the page shows the child {string} under {string} as written", function (child: string, _label: string) {

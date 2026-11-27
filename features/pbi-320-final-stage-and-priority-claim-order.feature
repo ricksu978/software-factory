@@ -107,7 +107,7 @@ Feature: Final-stage items and the items they depend on are claimed first, then 
       And item "C" is Queued, has priority 1, and is first on the board
       And the board orders the items "C", "A", "B"
       When the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "B", "A", "C", in that order
+      Then Floor's "Production Line" lists "B", "A", "C" to claim, in that order
 
   Rule: The scheduler claims Start now first, then the final-stage group, then every other item, by priority within each group
 
@@ -162,22 +162,22 @@ Feature: Final-stage items and the items they depend on are claimed first, then 
       And item "M" is in SignOff with its sign-off answered and has priority 3
       And items "A" and "B" are Queued, in that board order, with priorities 2 and 1
       When the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "B", "N", "A", "M", in that order
+      Then Floor's "Production Line" lists "B", "N", "A", "M" to claim, in that order
 
     @ac-3
     Scenario: Move up orders items within one priority, and a higher priority still comes first
       Given items "A", "B" and "C" are Queued, in that board order
       And items "A", "B" and "C" have priorities 2, 1 and 1
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
-      Then Floor's "Next up" lists "C", "B", "A", in that order
+      Then Floor's "Production Line" lists "C", "B", "A" to claim, in that order
 
     @ac-3
-    Scenario: Floor's Next up shows the claim order, and the scheduler claims by it
+    Scenario: Floor's Production Line shows the claim order, and the scheduler claims by it
       Given items "A", "B" and "C" are Queued, in that board order
       And items "A", "B" and "C" have priorities 5, 3 and 3
       And item "D" has an open PR, is Queued to address requested changes, and has priority 4
       When the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "D", "B", "C", "A", in that order
+      Then Floor's "Production Line" lists "D", "B", "C", "A" to claim, in that order
       When the scheduler ticks once
       Then item "D" is "InProgress"
 

@@ -333,7 +333,9 @@ Given(re(`item ([0-9]+) was turned down by the readiness gate and went NotReady 
 
 Given(re(`item ([0-9]+)${TITLE} is Failed after the event "([^"]+)"(?: and (?:hasn't been re-checked yet|was last re-checked at "([^"]+)" UTC))?`),
   async function (n: string, title: string | undefined, event: string, rechecked?: string) {
-    await failed(this, n, event, anHourAgo(this), rechecked ? at(this, rechecked) : null);
+    // PBI 369 counts only a re-check since the item's last move to Failed, so a named re-check comes an hour after it.
+    const check = rechecked ? at(this, rechecked) : null;
+    await failed(this, n, event, check ? new Date(check.getTime() - 3_600_000) : anHourAgo(this), check);
     await titled(this, n, title);
   });
 

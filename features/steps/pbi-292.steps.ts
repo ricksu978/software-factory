@@ -39,7 +39,7 @@
 //
 // The @db scenarios serve the real dashboard on PBI 4's test database, as PBI 215's do. An item fixing CI is one in
 // progress whose cell holds its lease, with a run at green, whose Green attempt the real cell API's POST /stage
-// reported started with `ciFailure`. On the Floor, an item's row is the In flight table's <tr> that links to
+// reported started with `ciFailure`. On the Floor, an item's row is the Production Line table's <tr> that links to
 // /items/<id>, and its stage is that row's cell under the "Stage" heading. The item "says it is fixing CI" when the
 // text says "fixing CI". The item's page is GET /items/<id>; it names a check when its text holds the check's name as a
 // word and its markup holds the check's URL.
@@ -582,7 +582,15 @@ Then("item {int}'s stage on the Floor says it is fixing CI", function (n: number
 });
 
 Then("item {int}'s stage on the Floor doesn't say it is fixing CI", function (n: number) {
-  const { stage } = floorRow(this, n);
+  // PBI 430: an item waiting on a question is listed under "Waiting on you", which has no Stage column, so its whole
+  // row there mustn't say it either.
+  const html = page(this);
+  const id = itemId(this, n);
+  const from = html.indexOf("<h2>Waiting on you</h2>");
+  const to = html.indexOf("<h2>Production Line</h2>");
+  const waiting = from < 0 ? "" : html.slice(from, to < 0 ? undefined : to);
+  const listed = [...waiting.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((m) => m[1]).find((r) => r.includes(`href="/items/${id}"`));
+  const stage = listed === undefined ? floorRow(this, n).stage : text(listed);
   assert.doesNotMatch(stage, FIXING, `item ${n}'s stage on the Floor is "${stage}"`);
 });
 

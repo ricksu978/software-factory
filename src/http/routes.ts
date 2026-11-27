@@ -11,7 +11,8 @@ import { decide, decideFeatureChange, FEATURE_CHANGE, revivable, type DecisionKi
 import { issueRepos } from "../store/issues.ts";
 import { repoName } from "../store/runs.ts";
 import { withTx } from "../store/db.ts";
-import { claimKeys, ENDED_BY_BOARD_ORDER, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
+import { claimKeys, ENDED_BY_BOARD_ORDER, factoryQueue, LEASE_RAN_OUT, moveInQueue, nextUp } from "../store/items.ts";
+import { PRODUCTION_LINE_ROWS, twoLists, type ProductionLineRow, type WaitingOnYouRow } from "./floor-lists.ts";
 import { readinessChecks, readinessSpend } from "../store/readiness-checks.ts";
 import { activeOverrides, setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readCellImage } from "../store/cell-image.ts";
@@ -98,36 +99,35 @@ export function tokenBanner(env: Record<string, string | undefined>, now = Date.
 }
 
 export async function floor(pool: pg.Pool) {
-  // One row per item, by its oldest open question, counted as the scheduler counts the waiting (Run contract 3).
-  const waiting = (await pool.query(
-    `select i.id, i.external_id, i.title, i.state, min(q.asked_at) as since from item i
+  // One row per item, by its oldest open question, counted as the scheduler counts the waiting (Run contract 3). The
+  // question shown is that oldest one's.
+  const asked = (await pool.query<{ id: string; external_id: string; title: string; state: string; since: Date; question: string }>(
+    `select distinct on (i.id) i.id, i.external_id, i.title, i.state, q.asked_at as since, q.body as question from item i
      join question q on q.item_id = i.id and q.answer is null and q.closed_at is null
-     where i.state in ('SignOff', 'NeedsInput') group by i.id order by since`,
+     where i.state in ('SignOff', 'NeedsInput') order by i.id, q.asked_at, q.id`,
   )).rows;
   const reviews = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, (select max(at) from event e where e.item_id = i.id and e.payload->>'to' = 'InReview') as since,
        r.pr_number, r.pr_url
      from item i left join lateral (select pr_number, pr_url from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
-     where i.state = 'InReview' order by since nulls last, i.title`,
+     where i.state = 'InReview'`,
   )).rows;
   // PBI 366: an item in FeatureChangeRequest waits on the Product Owner from its move there, with no question asked.
   const featureChanges = (await pool.query(
     `select i.id, i.external_id, i.title, i.state, true as feature_change,
        (select max(at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'FeatureChangeRequest') as since
-     from item i where i.state = 'FeatureChangeRequest' order by since nulls last, i.title`,
+     from item i where i.state = 'FeatureChangeRequest'`,
   )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
   // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
-  const notReady = (await pool.query<{ id: string; external_id: string; title: string; failed: string[] }>(
-    `select i.id, i.external_id, i.title, coalesce(array_agg(case when p.criterion_index > 0 then p.criterion else p.reason end order by p.criterion_index)
-       filter (where p.id is not null), '{}') as failed
+  // A Not ready item waits from its last move to NotReady, or else from the gate's verdict.
+  const notReady = (await pool.query<{ id: string; external_id: string; title: string; state: string; failed: string[]; since: Date | null }>(
+    `select i.id, i.external_id, i.title, i.state, coalesce(array_agg(case when p.criterion_index > 0 then p.criterion else p.reason end order by p.criterion_index)
+       filter (where p.id is not null), '{}') as failed,
+       coalesce((select max(e.at) from event e where e.item_id = i.id and e.kind in ('transition', 'override') and e.payload->>'to' = 'NotReady'), max(p.at)) as since
      from item i left join policy_result p on p.item_id = i.id and p.file = 'dor' and p.status = 'failed'
        and p.at = (select max(at) from policy_result where item_id = i.id and file = 'dor')
-     where i.state = 'NotReady' group by i.id order by i.title`,
-  )).rows;
-  // A Queued item the gate passed but whose dependencies are still open waits here, not in Next up (PBI 237).
-  const blocked = (await pool.query<{ id: string; external_id: string; title: string; blocked_by: string[] }>(
-    "select id, external_id, title, blocked_by from item where state = 'Queued' and cardinality(blocked_by) > 0 order by title",
+     where i.state = 'NotReady' group by i.id`,
   )).rows;
   // PBI 215: items waiting on a question that says the base fails in the cell, for Floor's notice.
   const baseFails = (await pool.query<{ id: string; external_id: string; title: string; sha: string; tests: string[] }>(
@@ -136,15 +136,6 @@ export async function floor(pool: pg.Pool) {
      from item i join question q on q.item_id = i.id and q.answer is null and q.closed_at is null and q.base_failure is not null
      where i.state = 'NeedsInput' order by q.asked_at`,
   )).rows;
-  // PBI 227: Split parents with a child still to follow, one the factory doesn't hold or holds short of an end state.
-  const splitParents = (await pool.query<{ id: string; external_id: string; title: string }>(
-    `select p.id, p.external_id, p.title from item p where p.state = 'Split' and exists (
-       select 1 from split_child sc left join item ci on ci.source_id = p.source_id and ci.external_id = sc.external_id
-       where sc.parent_id = p.id and (ci.state is null or ci.state not in ('Done', 'Abandoned', 'Split')))
-     order by p.title`,
-  )).rows;
-  const children = await splitChildren(pool, splitParents.map((p) => p.id));
-  const split = splitParents.map((p) => ({ ...p, children: children.get(p.id) ?? [] }));
   // PBI 255: each break on main that still stands, with the item it charged and its bug item, for Floor's notice.
   const mainBreaks = (await pool.query<{ branch: string; sha: string; repo_url: string; pr_number: number | null; charged: string | null; bug_external_id: string | null; bug_id: string | null; bug_title: string | null; bug_state: string | null }>(
     `select b.branch, b.merge_sha as sha, repo.url as repo_url, b.pr_number, charged.external_id as charged, b.bug_external_id, bug.id as bug_id, bug.title as bug_title, bug.state as bug_state
@@ -153,6 +144,7 @@ export async function floor(pool: pg.Pool) {
   )).rows.map(({ repo_url, ...b }): MainBreakRow => ({ ...b, repo: repoName(repo_url) }));
   const overrides = await activeOverrides(pool, new Date());
   const overridden = new Set(overrides.filter((o) => o.scope === "item").map((o) => o.targetId));
+  const badges = (r: { id: string; held: boolean }) => [...(r.held ? ["held"] : []), ...(overridden.has(r.id) ? ["override"] : [])];
   // PBI 292: an item In progress whose run's newest attempt is a Green attempt sent back to fix a CI failure is fixing
   // CI, with the commit CI failed on and the failed checks.
   // The last agent message is the newest non-empty one the open run's stages sent (the cell API cuts it to 500). The
@@ -162,12 +154,12 @@ export async function floor(pool: pg.Pool) {
        (select max(started_at) from stage_run s where s.run_id = r.id) as since,
        coalesce((select sum(cost_usd) from stage_run s where s.run_id = r.id), 0)::text as cost,
        (select message from stage_run s where s.run_id = r.id and message <> '' and message <> $1 order by ended_at desc nulls last, started_at desc limit 1) as message,
-       (select case when i.state = 'InProgress' and s.stage_id = 'green' then s.ci_failure end from stage_run s
+       (select case when s.stage_id = 'green' then s.ci_failure end from stage_run s
          where s.run_id = r.id order by s.started_at desc, s.attempt desc limit 1) as ci_failure
      from item i left join lateral (select * from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
-     where i.state in ('InProgress', 'SignOff', 'NeedsInput', 'InReview') order by i.title`,
+     where i.state = 'InProgress' order by i.title`,
     [LEASE_RAN_OUT],
-  )).rows.map((a) => ({ ...a, badges: [...(a.held ? ["held"] : []), ...(overridden.has(a.id) ? ["override"] : [])] }));
+  )).rows.map(({ held, ...a }) => ({ ...a, badges: badges({ id: a.id, held }), waitsOn: [] as string[] }));
   const factory = overrides.filter((o) => o.scope === "factory").map((o) => ({ kind: o.kind, reason: o.reason }));
   // A restart being prepared (PBI 140) and a drain (PBI 316) both show how many cells still hold a live lease, counted
   // once so the two lines agree. None is stopped (PBI 300).
@@ -177,25 +169,45 @@ export async function floor(pool: pg.Pool) {
     ? (await pool.query<{ n: number }>("select count(*)::int as n from item where state = 'InProgress' and lease_expires > now()")).rows[0].n
     : undefined;
   const restart: Restart | null = prepared ? { running: running!, reason: prepared.reason } : null;
-  // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
-  const waitingCount = waiting.length + featureChanges.length + reviews.length;
-  const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
-  // PBI 320: each item's priority and group, and every final-stage item, an item in the group through a dependent
-  // included, wherever it is, in the order the group is claimed.
+  // The claimable items come from the claim's own query, so Production Line can't show an order the claim doesn't
+  // take. It applies the same brake the scheduler does: at capacity, only work already in flight starts.
+  const waitingCount = asked.length + featureChanges.length + reviews.length;
+  const queue = await factoryQueue(pool);
+  const claimable = await nextUp(pool, PRODUCTION_LINE_ROWS, { resumeOnly: waitingCount >= capacity });
+  // PBI 320: each item's priority and group, an item in the group through a dependent included.
   const keys = await claimKeys(pool);
-  const finalIds = [...keys].filter(([, k]) => k.finalStage).sort(([, a], [, b]) => a.priority - b.priority).map(([id]) => id);
-  const finalRows = (await pool.query<{ id: string; external_id: string; title: string; state: string }>(
-    "select id, external_id, title, state from item where id = any($1::uuid[])", [finalIds],
-  )).rows;
-  const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
-  // PBI 369: each item that failed its Definition of Done on main, and when the factory last re-checked it.
+  // PBI 369: each item that failed its Definition of Done on main, since its move to Failed, and when the factory
+  // last re-checked it.
   const failed = await failedOnMain(pool);
-  const repos = await issueRepos(pool, [...waiting, ...featureChanges, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split, ...failed].map((r) => r.id));
+  // PBI 430: each split child the factory holds, with the parent it's part of.
+  const parents = new Map((await pool.query<{ child: string; id: string; external_id: string }>(
+    `select c.id as child, p.id, p.external_id from split_child sc join item p on p.id = sc.parent_id
+     join item c on c.source_id = p.source_id and c.external_id = sc.external_id`,
+  )).rows.map((r) => [r.child, { id: r.id, external_id: r.external_id }]));
+  const repos = await issueRepos(pool, [...asked, ...featureChanges, ...reviews, ...notReady, ...active, ...queue, ...baseFails, ...failed].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
+  const part = (id: string) => parents.get(id) ?? null;
+  const waiting: Omit<WaitingOnYouRow, "repo">[] = [
+    ...asked.map((r) => ({ ...r, why: r.state === "SignOff" ? "sign-off" as const : "question" as const, partOf: part(r.id) })),
+    ...reviews.map((r) => ({ ...r, why: "review" as const, partOf: part(r.id) })),
+    ...featureChanges.map((r) => ({ ...r, why: "feature-change" as const, partOf: part(r.id) })),
+    ...notReady.map((r) => ({ ...r, why: "not-ready" as const, partOf: part(r.id) })),
+    ...failed.map(({ failed_at, ...f }) => ({ ...f, state: "Failed", since: failed_at, why: "failed-on-main" as const, partOf: part(f.id) })),
+  ];
+  const queued = (r: (typeof queue)[number]): Omit<ProductionLineRow, "repo"> => ({
+    id: r.id, external_id: r.external_id, title: r.title, state: r.state, stage: null, since: null, cost: null, message: null, ci_failure: null,
+    badges: badges(r), waitsOn: r.blocked_by, partOf: part(r.id),
+  });
+  const inQueue = new Map(queue.map((r) => [r.id, r]));
+  const lists = twoLists({
+    waiting: withRepo(waiting),
+    inProgress: withRepo(active.map((a) => ({ ...a, partOf: part(a.id) }))),
+    claimable: withRepo(claimable.flatMap((c) => (inQueue.has(c.id) ? [queued(inQueue.get(c.id)!)] : []))),
+    queue: withRepo(queue.map(queued)),
+  });
   return {
-    active: withRepo(active), waiting: withRepo([...waiting, ...featureChanges, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
-    keys, finalStage: withRepo(finalStage),
-    baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split), failed: withRepo(failed),
+    ...lists, waitingCount, capacity, factory, keys,
+    baseFails: withRepo(baseFails), mainBreaks,
     restart, running, cellImage: await readCellImage(pool),
   };
 }

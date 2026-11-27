@@ -1,4 +1,4 @@
-// PBI 265: Start now, Move up and Move down, read by the claim order that claimNext and Floor's "Next up" share.
+// PBI 265: Start now, Move up and Move down, read by the claim order that claimNext and Floor's "Production Line" share.
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { withTx } from "./db.ts";

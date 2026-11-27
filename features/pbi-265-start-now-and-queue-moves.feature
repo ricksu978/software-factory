@@ -7,7 +7,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
   with the person who set it, as Hold is.
   Start now goes ahead of every other item, including one whose question has been answered, which today always
   comes first. None of the three gets past the readiness gate, a hold or an open blocker. A Start now item that
-  isn't ready waits until it passes readiness, and is claimed first from then on. Floor's "Next up" uses the
+  isn't ready waits until it passes readiness, and is claimed first from then on. Floor's "Production Line" uses the
   claim order, so it shows a change as soon as the operator makes it. Like every item override, each one ends
   when the item reaches Done, Failed, Abandoned or Split (spec §8, Expiry).
   Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them. The board,
@@ -95,7 +95,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
     Scenario: Move up puts an item one place earlier in the factory queue
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
-      Then Floor's "Next up" lists "A", "C", "B", in that order
+      Then Floor's "Production Line" lists "A", "C", "B" to claim, in that order
       And the board still orders the items "A", "B", "C"
       And the factory asked the board to reorder nothing
 
@@ -103,7 +103,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
     Scenario: Move down puts an item one place later in the factory queue
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Move down" on item "A" with the reason "waiting on a design review"
-      Then Floor's "Next up" lists "B", "A", "C", in that order
+      Then Floor's "Production Line" lists "B", "A", "C" to claim, in that order
       And the board still orders the items "A", "B", "C"
       And the factory asked the board to reorder nothing
 
@@ -112,7 +112,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
       And the operator presses "Move up" on item "C" with the reason "really, first"
-      Then Floor's "Next up" lists "C", "A", "B", in that order
+      Then Floor's "Production Line" lists "C", "A", "B" to claim, in that order
       And the board still orders the items "A", "B", "C"
 
     @ac-2
@@ -128,7 +128,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
       And the poller reads the board, still ordered "A", "B", "C"
-      Then Floor's "Next up" lists "A", "C", "B", in that order
+      Then Floor's "Production Line" lists "A", "C", "B" to claim, in that order
 
     @ac-2
     Scenario: An item's page offers Move up and Move down
@@ -158,10 +158,10 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       When the operator presses "<control>" on item "B" with the reason "   "
       Then the dashboard answers 400
       And item "B" has no "<control>" override
-      And Floor's "Next up" lists "A", "B", "C", in that order
+      And Floor's "Production Line" lists "A", "B", "C" to claim, in that order
       When the operator presses "<control>" on item "B" with the reason "<reason>"
       Then item "B" has an active "<control>" override
-      And Floor's "Next up" lists <order>, in that order
+      And Floor's "Production Line" lists <order> to claim, in that order
 
       Examples:
         | control   | reason                     | order           |
@@ -177,29 +177,29 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       Then the page shows item "B" is marked "Start now"
       And the page offers no "Start now", "Move up" or "Move down" control
 
-  Rule: Floor's "Next up" shows the new order as soon as the operator changes it
+  Rule: Floor's "Production Line" shows the new order as soon as the operator changes it
 
     @ac-4
-    Scenario: Next up puts an item started now first, before the scheduler ticks
+    Scenario: Production Line puts an item started now first, before the scheduler ticks
       Given items "A", "B", "C" and "D" are Queued, in that board order
       When the operator presses "Start now" on item "D" with the reason "customer demo on Friday"
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "D", "A", "B", "C", in that order
+      Then Floor's "Production Line" lists "D", "A", "B", "C" to claim, in that order
 
     @ac-4
-    Scenario: Next up puts an item started now ahead of an answered item
+    Scenario: Production Line puts an item started now ahead of an answered item
       Given item "B" is in NeedsInput with its question answered
       And item "A" is Queued
       When the operator presses "Start now" on item "A" with the reason "customer demo on Friday"
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "A", "B", in that order
+      Then Floor's "Production Line" lists "A", "B" to claim, in that order
 
     @ac-4
-    Scenario: Next up shows a move down before the scheduler ticks
+    Scenario: Production Line shows a move down before the scheduler ticks
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Move down" on item "A" with the reason "waiting on a design review"
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "B", "A", "C", in that order
+      Then Floor's "Production Line" lists "B", "A", "C" to claim, in that order
 
   Rule: Start now, Move up and Move down never get an item past the readiness gate, a hold or an open blocker
 
@@ -225,7 +225,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       And the scheduler ticks once
       Then item "A" is "Queued" and still on Hold
       And item "B" is "InProgress"
-      And Floor's "Next up" doesn't list "A"
+      And Floor's "Production Line" doesn't list "A" to claim
       When the operator releases the hold on item "A"
       And a WIP slot frees up
       And the scheduler ticks once
@@ -240,7 +240,7 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       And the scheduler ticks once
       Then item "A" is "Queued"
       And item "B" is "InProgress"
-      And Floor's "Next up" doesn't list "A"
+      And Floor's "Production Line" doesn't list "A" to claim
       When the issue blocking item "A" closes and the poller reads it
       And a WIP slot frees up
       And the scheduler ticks once
@@ -248,14 +248,14 @@ Feature: The dashboard can start an item next, or move it up or down the factory
       And item "C" is "Queued"
 
     @ac-5
-    Scenario: A held item moved up stays out of Next up until its hold is released, then takes its new place
+    Scenario: A held item moved up stays out of the items to claim until its hold is released, then takes its new place
       Given items "A", "B" and "C" are Queued, in that board order
       And item "C" is on Hold
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
-      Then Floor's "Next up" lists "A", "B", in that order
+      Then Floor's "Production Line" lists "A", "B" to claim, in that order
       When the operator releases the hold on item "C"
       And the scheduler ticks once with no free WIP slot
-      Then Floor's "Next up" lists "A", "C", "B", in that order
+      Then Floor's "Production Line" lists "A", "C", "B" to claim, in that order
 
   Rule: Each of these overrides ends when the item reaches Done, Failed, Abandoned or Split
 
@@ -296,9 +296,9 @@ Feature: The dashboard can start an item next, or move it up or down the factory
     Scenario: A Failed item that was started now goes back to its board place when it's re-queued
       Given items "A", "B" and "C" are Queued, in that board order
       When the operator presses "Start now" on item "C" with the reason "customer demo on Friday"
-      Then Floor's "Next up" lists "C", "A", "B", in that order
+      Then Floor's "Production Line" lists "C", "A", "B" to claim, in that order
       When item "C" reaches Failed
       And the scheduler ticks once
       And the operator re-queues item "C" with the reason "try again"
       And the scheduler ticks once with no free WIP slot
-      Then Floor's "Next up" lists "A", "B", "C", in that order
+      Then Floor's "Production Line" lists "A", "B", "C" to claim, in that order

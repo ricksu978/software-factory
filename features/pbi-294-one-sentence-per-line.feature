@@ -157,4 +157,4 @@ Feature: The spec and the Phase 0 plan keep one sentence per line, so PRs that c
       When I read the parameter type of the Floor page in "src/http/views.ts"
       Then each entry sits on a line of its own
       And the type holds at least these entries:
-        | active | waiting | waitingCount | capacity | next | notReady | blocked | factory | canOperate | restart | running | cellImage | baseFails | mainBreaks | split | keys | finalStage | failed | zone |
+        | waitingOnYou | productionLine | productionMore | waitingCount | capacity | factory | canOperate | restart | running | cellImage | baseFails | mainBreaks | keys | zone |
