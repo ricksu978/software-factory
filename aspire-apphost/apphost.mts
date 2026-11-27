@@ -166,6 +166,29 @@ for (const app of [control, cellApi, worker]) {
 const bffSessionKey = await secret('bff-session-key');
 const bffIssuer = runMode ? 'http://localhost:7430/realms/factory' : await builder.addParameter('oidc-issuer');
 const bffClientSecret = runMode ? '' : await secret('oidc-client-secret');
+// The orchestrator API (redesign step 6a, src/api/main.ts): §05's /v1 routes and GitHub's webhook, which the BFF forwards
+// to it. It is pinned to 7402 beside the cell API's 7401, and floats with the others under FACTORY_FLOAT_PORTS. It checks
+// every caller's access token against the issuer the BFF signs people in at, so under `aspire run` it reads the local
+// Keycloak realm's keys at start and waits for Keycloak. The GitHub App's settings build its repo host, which commits an
+// approved feature change request's files (PBI 365).
+const api = await builder.addNodeApp('api', repo, 'src/api/main.ts')
+  .withNpm({ install: false })
+  .withHttpEndpoint(floatPorts ? { env: 'PORT' } : { port: 7402, env: 'PORT' })
+  .withEnvironment('FACTORY_DB_URI', dbUri)
+  .withEnvironment('OIDC_ISSUER', bffIssuer)
+  .withEnvironment('API_AUDIENCE', apiAudience)
+  .withEnvironment('GITHUB_WEBHOOK_SECRET', webhookSecret)
+  .withEnvironment('GITHUB_APP_KEY_FILE', appKeyFile)
+  .withEnvironment('GITHUB_APP_ID', appId)
+  .withEnvironment('GITHUB_PROJECT_TOKEN', projectToken)
+  .withEnvironment('CLAUDE_TOKEN_CREATED_AT', tokenCreatedAt)
+  .waitForCompletion(migrate, { exitCode: 0 });
+if (runBlob) await api.withEnvironment('FACTORY_BLOB', runBlob);
+else await api.withEnvironment('FACTORY_BLOB', blobs);
+if (keycloak) await api.waitFor(keycloak);
+// The BFF reaches the API from this machine, on the API's own endpoint, so it follows the port whether pinned or picked.
+const apiPort = await api.getEndpoint('http').property(EndpointProperty.Port);
+
 // The SPA (redesign step 8a): the BFF serves web/dist, which `npm run build` (scripts/build-spa.ts) type-checks and
 // builds with Vite. Under `aspire run` a resource of its own builds it from this checkout, after the start checks' pull,
 // and the BFF waits for it to exit with 0, so 7403 never serves a missing or stale build. A type error exits non-zero,
@@ -184,7 +207,9 @@ const bff = await builder.addNodeApp('bff', repo, 'src/bff/main.ts')
   .withEnvironment('OIDC_CLIENT_SECRET', bffClientSecret)
   .withEnvironment('OIDC_SCOPES', 'openid')
   .withEnvironment('BFF_SESSION_KEY', bffSessionKey)
-  .waitForCompletion(migrate, { exitCode: 0 });
+  .withEnvironment('API_URL', refExpr`http://localhost:${apiPort}`)
+  .waitForCompletion(migrate, { exitCode: 0 })
+  .waitFor(api);
 if (spaBuild) await bff.waitForCompletion(spaBuild, { exitCode: 0 });
 // The address the browser reaches the BFF on, built from its own endpoint so it follows the port.
 const bffPort = await bff.getEndpoint('http').property(EndpointProperty.Port);

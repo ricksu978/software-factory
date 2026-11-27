@@ -8,16 +8,16 @@ import { cleanPath, main, MAX_JSON, MAX_WEBHOOK, startApi, type Api } from "./ma
 
 describe("the API at startup", () => {
   test("names every setting it lacks, before it connects or listens", async () => {
-    await assert.rejects(main({}), /FACTORY_DB_URI, FACTORY_BLOB, OIDC_ISSUER, API_AUDIENCE, GITHUB_WEBHOOK_SECRET are not set/);
+    await assert.rejects(main({}), /FACTORY_DB_URI, FACTORY_BLOB, OIDC_ISSUER, API_AUDIENCE, GITHUB_WEBHOOK_SECRET, GITHUB_APP_ID, GITHUB_APP_KEY are not set/);
   });
 
   test("refuses a PORT that isn't a port", async () => {
-    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", PORT: "web" };
+    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", GITHUB_APP_ID: "1", GITHUB_APP_KEY: "k", PORT: "web" };
     await assert.rejects(main(env), /PORT web isn't a port/);
   });
 
   test("refuses to start without PORT in an environment that names the cell API's address", async () => {
-    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", CELL_CONTROL_URL: "http://localhost:7401" };
+    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", GITHUB_APP_ID: "1", GITHUB_APP_KEY: "k", CELL_CONTROL_URL: "http://localhost:7401" };
     await assert.rejects(main(env), /PORT is not set, and the API doesn't take its port from CELL_CONTROL_URL/);
   });
 });

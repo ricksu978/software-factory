@@ -256,7 +256,7 @@ async function cellApiEnv(world: object, cellApiPort: number): Promise<Record<st
 async function apiEnv(world: object, port: number | null, cellApiPort: number): Promise<Record<string, string>> {
   const ports = scenarioPorts(world);
   const env: Record<string, string> = {
-    FACTORY_ENV: "local", FACTORY_BLOB: BLOB, GITHUB_WEBHOOK_SECRET: "webhook-secret",
+    FACTORY_ENV: "local", FACTORY_BLOB: BLOB, GITHUB_WEBHOOK_SECRET: "webhook-secret", GITHUB_APP_ID: "1", GITHUB_APP_KEY: "k",
     OIDC_ISSUER: (await provider(world)).issuer, API_AUDIENCE: TEST_AUDIENCE,
     CELL_CONTROL_URL: `http://localhost:${await ports.real(cellApiPort)}`,
   };

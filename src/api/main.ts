@@ -4,17 +4,21 @@
 // points at, and so are its issuer, audience and expiry. The caller is looked up in "user" on every request, so
 // removing someone ends their access on their next request.
 import { createAdaptorServer, type HttpBindings } from "@hono/node-server";
+import { App } from "@octokit/app";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Server } from "node:http";
 import type pg from "pg";
+import { loadAppKey } from "../adapters/github/app-key.ts";
+import { githubRepoHost } from "../adapters/github/repo-host.ts";
+import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { RepoHost } from "../adapters/types.ts";
 import { decide, decideFeatureChange, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
 import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "../http/configuration.ts";
 import { activity, BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
-import { blobReader } from "../main.ts";
+import { blobReader, githubSources, missing } from "../main.ts";
 import { createPool, withTx } from "../store/db.ts";
 import { moveInQueue } from "../store/items.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
@@ -369,10 +373,13 @@ export async function startApi(d: ApiDeps, port: number = API_PORT): Promise<Api
  * Every setting is checked before anything connects or listens, so a missing one stops it with nothing started.
  */
 export async function main(env: Record<string, string | undefined>): Promise<{ stop(): Promise<void> }> {
-  const names = ["FACTORY_DB_URI", "FACTORY_BLOB", "OIDC_ISSUER", "API_AUDIENCE", "GITHUB_WEBHOOK_SECRET"];
+  loadAppKey(env);
+  // The GitHub App's settings build the repo host, which reads CI on a check suite's delivery and commits an approved
+  // feature change request's files (PBI 365), as the cell API and the worker build theirs.
+  const names = ["FACTORY_DB_URI", "FACTORY_BLOB", "OIDC_ISSUER", "API_AUDIENCE", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY"];
   const unset = names.filter((name) => !env[name]);
   if (unset.length) throw new Error(`refusing to start the API: ${unset.join(", ")} ${unset.length === 1 ? "is" : "are"} not set`);
-  const [dbUri, blob, issuer, audience, webhookSecret] = names.map((name) => env[name]!);
+  const [dbUri, blob, issuer, audience, webhookSecret, appId, appKey] = names.map((name) => env[name]!);
   // An environment that names the cell API's address but no PORT was written for today's combined control plane, which
   // took its port from PORT alone. The API refuses it rather than guess a port, theirs or its own (PBI 222, PBI 283).
   if (!env.PORT && env.CELL_CONTROL_URL) throw new Error("refusing to start the API: PORT is not set, and the API doesn't take its port from CELL_CONTROL_URL");
@@ -381,7 +388,10 @@ export async function main(env: Record<string, string | undefined>): Promise<{ s
 
   const pool = createPool(dbUri);
   try {
-    const api = await startApi({ pool, issuer, audience, webhookSecret, readBlob: blobReader(blob), env: { ...env } }, port);
+    const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
+    const { installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
+    const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
+    const api = await startApi({ pool, issuer, audience, webhookSecret, repoHost, readBlob: blobReader(blob), env: { ...env } }, port);
     console.log(`The orchestrator API answers on port ${port}.`);
     return {
       async stop() {
