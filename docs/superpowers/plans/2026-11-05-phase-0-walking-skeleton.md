@@ -4581,7 +4581,12 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     A `stopped` report with `supersededBy`,
     the branch's head on origin,
     comes from a stage whose wait on CI a later push to the branch ended by cancelling the run on its commit (PBI 423).
-    It ends the claim whatever is set:
+    It ends the claim under a pause or the kill switch as well,
+    but not under an operator's stop-run on the item:
+    that keeps the claim,
+    so the scheduler stops the run,
+    fails the item and holds it rather than dropping the stop.
+    Otherwise,
     when no restart already ended it,
     the item goes back to Queued through `ci_superseded`,
     whose payload names the stage,

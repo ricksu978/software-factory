@@ -1703,6 +1703,8 @@ stateDiagram-v2
 
       and starts the stage afresh rather than resuming the stopped attempt.
 
+      An operator's stop-run on the item still wins: the claim stays, and the item is failed and held as any stopped run is.
+
       When the branch still points at the commit,
 
       as when a person cancelled the run,
