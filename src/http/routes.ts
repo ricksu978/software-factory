@@ -41,6 +41,17 @@ export type DashboardDeps = {
   readBlob?: (path: string) => Promise<string | null>;
   /** The time now: what Run detail's durations count open spells up to (PBI 187), and how long a running stage attempt has taken so far (PBI 189). Defaults to the system clock. */
   now?: () => Date;
+  /**
+   * PBI 439: what accepting a proposed rewrite on the item page needs. `editBody` writes the accepted text over the
+   * item's issue body as the factory, and `recheck` runs the readiness check on the item at once, without waiting for
+   * the poller. Without it, no rewrite can be accepted.
+   */
+  rewrites?: RewriteDeps;
+};
+
+export type RewriteDeps = {
+  editBody(externalId: string, body: string): Promise<void>;
+  recheck(itemId: string): Promise<void>;
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];

@@ -38,7 +38,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
+import { dashboardRoutes, type DashboardDeps } from "../../src/http/routes.ts";
 import { startServer } from "../../src/http/server.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { ruleChangesHash } from "../../src/gate/rule-changes.ts";
@@ -65,15 +65,19 @@ const AFTERS: Record<string, string> = {
 const OWNER = "olive";
 const VIEWER = "vic";
 
-type Role = "viewer" | "operator" | "owner";
+export type Role = "viewer" | "operator" | "owner";
 type Entry = { place: string; before?: string; after?: string };
-type Ctx = {
+export type Ctx = {
   /** Each spec section's HTML body and each policy file's rule, by ref, then by place ("§6" or "policy/dor.md"). */
   rules: Map<string, Map<string, string>>;
   /** The item's rules section: the entries the steps built, or the scenario's own text, or none. */
   entries: Entry[];
   section?: string | null;
   lead: string;
+  /** The item's acceptance criteria. Unset, CRITERIA (PBI 439 sets its own). */
+  criteria?: string[];
+  /** More dependencies the dashboard is made with (PBI 439). */
+  dashboardDeps?: Partial<DashboardDeps>;
   fake?: ReturnType<typeof fakeBacklog>;
   host?: ReturnType<typeof fakeRepoHost>;
   server?: Server;
@@ -92,7 +96,7 @@ type Ctx = {
   finding?: { reason: string | null };
 };
 
-function ctx(world: object): Ctx {
+export function ctx(world: object): Ctx {
   const w = world as { pbi395?: Ctx };
   w.pbi395 ??= { rules: new Map(), entries: [], lead: LEAD, roles: new Map() };
   return w.pbi395;
@@ -116,7 +120,7 @@ After({ tags: "@pbi-395", ...long }, async function () {
   await new Promise<void>((resolve) => c.server!.close(() => resolve()));
 });
 
-function item(world: object): Item {
+export function item(world: object): Item {
   const it = itemCtx(world).items.at(-1);
   assert.ok(it, "no item was set up");
   return it;
@@ -130,7 +134,7 @@ function named(world: object, ext: string): Item {
 
 // ---- the factory's own rules ----
 
-function rulesAt(c: Ctx, ref: string): Map<string, string> {
+export function rulesAt(c: Ctx, ref: string): Map<string, string> {
   let m = c.rules.get(ref);
   if (!m) c.rules.set(ref, (m = new Map()));
   return m;
@@ -161,7 +165,7 @@ function factoryRepo(c: Ctx): FactoryRepo {
 }
 
 /** The rule's text on main, as an item quotes it. */
-function onMain(c: Ctx, place: string): string {
+export function onMain(c: Ctx, place: string): string {
   const raw = rulesAt(c, "main").get(place);
   assert.ok(raw !== undefined, `main holds no rule at ${place}`);
   return place.startsWith("§") ? text(raw) : raw;
@@ -199,8 +203,8 @@ function rulesSection(c: Ctx): string {
   return `${RULES_HEADING}\n\n${c.entries.map(entry).join("\n")}`;
 }
 
-function body(c: Ctx): string {
-  const criteria = `## Acceptance criteria\n\n${CRITERIA.map((a) => `- ${a}`).join("\n")}\n`;
+export function body(c: Ctx): string {
+  const criteria = `## Acceptance criteria\n\n${(c.criteria ?? CRITERIA).map((a) => `- ${a}`).join("\n")}\n`;
   const rules = rulesSection(c);
   return `${c.lead}\n${criteria}${rules ? `\n${rules}\n` : ""}`;
 }
@@ -302,7 +306,7 @@ Given("the readiness judge passes line {int} and finds the item changes spec sec
 
 // ---- the board, the repo and the poll ----
 
-async function board(world: object): Promise<void> {
+export async function board(world: object): Promise<void> {
   const c = ctx(world);
   const p = pollCtx(world);
   const it = item(world);
@@ -321,19 +325,19 @@ async function board(world: object): Promise<void> {
     p.lastLine ??= { rules: [] };
   }
   await c.fake.seed({
-    externalId: it.ext, title: it.title, body: body(c), acceptanceCriteria: CRITERIA, labels: ["factory"], status: "Backlog", rank: 1,
+    externalId: it.ext, title: it.title, body: body(c), acceptanceCriteria: c.criteria ?? CRITERIA, labels: ["factory"], status: "Backlog", rank: 1,
     repo: "acme/widgets", fields: {}, closed: false,
   });
 }
 
 /** Counts the board item's comments so far, so the comment steps read only the ones that come after. */
-async function markComments(world: object): Promise<void> {
+export async function markComments(world: object): Promise<void> {
   const c = ctx(world);
   const it = item(world);
   commentCtx(world).commentsBefore.set(it.ext, c.fake ? (await c.fake.comments(it.ext)).length : 0);
 }
 
-async function check(world: object): Promise<void> {
+export async function check(world: object): Promise<void> {
   await board(world);
   await markComments(world);
   // A poll that fails is kept in the harness, and the Thens that read it say so.
@@ -355,7 +359,7 @@ Given("the readiness check has checked item {string}", long, async function (ext
 // "<login>, a viewer, is signed in" and "<login>, a operator, is signed in" are PBI 105's step, which makes the user
 // with that role. "an operator" and "the owner" are this feature's.
 
-async function dashboard(world: object): Promise<Ctx> {
+export async function dashboard(world: object): Promise<Ctx> {
   const c = ctx(world);
   if (c.server) return c;
   let handler: ReturnType<typeof dashboardRoutes> | undefined;
@@ -363,14 +367,14 @@ async function dashboard(world: object): Promise<Ctx> {
   c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
   handler = dashboardRoutes({
     pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: (c.fake ?? fakeBacklog()).adapter, sourceId: item(world).sourceId,
-    now: () => c.clock ?? new Date(),
+    now: () => c.clock ?? new Date(), ...c.dashboardDeps,
   });
   c.close = handler.close;
   return c;
 }
 
 /** The user `login`, made with `role` unless a step made them already, such as PBI 105's "..., a viewer, is signed in". */
-async function user(login: string, role: Role, set = false): Promise<string> {
+export async function user(login: string, role: Role, set = false): Promise<string> {
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2)
      on conflict (provider, subject) do ${set ? "update set role = excluded.role" : "nothing"}`,
@@ -383,7 +387,7 @@ function roleOf(c: Ctx, login: string): Role {
   return c.roles.get(login) ?? (login === OWNER ? "owner" : "viewer");
 }
 
-async function openPage(world: object, login: string): Promise<void> {
+export async function openPage(world: object, login: string): Promise<void> {
   const c = await dashboard(world);
   await user(login, roleOf(c, login));
   const r = await fetch(`${c.origin}/items/${item(world).id}`, { headers: { ...headers(login), cookie: "tz=UTC" }, redirect: "manual" });
@@ -574,7 +578,7 @@ Then("the other names the policy file {string} with the After {string}", functio
 
 // ---- the factory's state, history and events ----
 
-async function stateOf(world: object, ext: string): Promise<string> {
+export async function stateOf(world: object, ext: string): Promise<string> {
   const r = await pool().query<{ state: string }>("select state from item where id = $1", [named(world, ext).id]);
   return r.rows[0]?.state ?? "(none)";
 }
@@ -764,7 +768,7 @@ Then("that comment doesn't mention the owner's approval", long, async function (
 
 // ---- reading the item page ----
 
-function html(world: object): string {
+export function html(world: object): string {
   const p = ctx(world).page;
   assert.ok(p, "no item page was opened");
   assert.equal(p.status, 200, `the item page answered ${p.status}: ${p.html.slice(0, 300)}`);
