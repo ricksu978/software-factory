@@ -530,6 +530,15 @@ describe("cell API", dbTest, () => {
     assert.deepEqual(e.rows.map((r) => r.event), ["lease_expired"]);
   });
 
+  test("a stopped attempt a later push superseded, reported under an operator's stop_run, keeps the claim for the stop", async () => {
+    const cell = await claimed("open-pr");
+    await db.pool.query("insert into override (scope, kind, target_id, reason) values ('item', 'stop_run', $1, 'wrong item')", [cell.itemId]);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "open-pr", attempt: 1, status: "stopped", supersededBy: "c0ffee2" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+    const e = await db.pool.query("select 1 from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'ci_superseded'", [cell.itemId]);
+    assert.equal(e.rowCount, 0);
+  });
+
   test("a stopped attempt reported under a pause keeps the claim, so the lease runs out as before", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");

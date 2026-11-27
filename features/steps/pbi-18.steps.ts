@@ -68,6 +68,8 @@ export type Ctx = {
   prelude?: () => Promise<void>;
   /** Extra engine dependencies, as PBI 399's steps add to run the repo's commands on a fake clock. */
   deps?: Record<string, unknown>;
+  /** PBI 423: the answers the cell's leases got, in order, as endState reads whether a restart or a drain was set. */
+  leaseAnswers?: { restarting?: boolean }[];
 };
 
 function ctx(world: object): Ctx {
@@ -274,7 +276,7 @@ function agent(c: Ctx) {
 
 function cellApi(c: Ctx) {
   const record = (route: string, body: Record<string, any> = {}) => c.calls.push({ route, body, at: (c.now ?? (() => new Date()))().getTime() });
-  return {
+  const api: Record<string, any> = {
     async lease() { record("/lease"); return { stop: false }; },
     async stage(b: Record<string, any>) { record("/stage", b); if (b.status === "started") c.stage = b.stageId; },
     async transition(b: Record<string, any>) { record("/transition", b); },
@@ -291,6 +293,14 @@ function cellApi(c: Ctx) {
     async upload(b: Record<string, any>) { record("/upload-url", { kind: b.kind, stageId: b.stageId, attempt: b.attempt }); },
     ...c.apiExtra,
   };
+  // PBI 423: endState reads whether a restart or a drain was set when the claim ended, so each lease's answer is kept.
+  const lease = api.lease as (...a: unknown[]) => Promise<any>;
+  api.lease = async (...a: unknown[]) => {
+    const answer = await lease(...a);
+    c.leaseAnswers = [...(c.leaseAnswers ?? []), answer];
+    return answer;
+  };
+  return api;
 }
 
 function policy(name: PolicyName, text: string): Policy {
@@ -389,13 +399,22 @@ Then("the item's scenarios are posted on item {int} for sign-off", function (_it
 });
 
 /**
- * PBI 423: the state the cell's claim left the item in. A claim that ends on a release, or on an attempt reported
- * `stopped`, after its last transition sends the item back to Queued at the stage the run records, as the cell API
- * ends such a claim. Otherwise the last transition moves the item on from InProgress.
+ * PBI 423: the state the cell's claim left the item in. The cell API ends a claim, sending the item back to Queued at
+ * the stage the run records, on an attempt reported `stopped` with `supersededBy`, and on a release or a `stopped`
+ * report while a restart or a drain is set, which the lease's last answer before it names as `restarting`. Otherwise
+ * the claim stays, and the last transition moves the item on from InProgress.
  */
 export function endState(c: Ctx): string {
   assert.equal(c.error, null, `the cell failed: ${String(c.error)}`);
-  const ends = c.calls.filter((x) => x.route === "/transition" || x.route === "/release" || (x.route === "/stage" && x.body.status === "stopped"));
+  const answers = c.leaseAnswers ?? [];
+  let leases = 0;
+  const ends = c.calls.filter((x) => {
+    if (x.route === "/lease") leases++;
+    if (x.route === "/transition") return true;
+    const restarting = leases > 0 && answers[leases - 1]?.restarting === true;
+    if (x.route === "/release") return restarting;
+    return x.route === "/stage" && x.body.status === "stopped" && (typeof x.body.supersededBy === "string" || restarting);
+  });
   const last = ends.at(-1);
   assert.ok(last, "the cell sent no transition");
   return last.route === "/transition" ? String(next("InProgress", last.body.event as ItemEvent)) : "Queued";

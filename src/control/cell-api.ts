@@ -554,10 +554,12 @@ const routes: Record<string, Route> = {
     // A cell that stops while a restart is being prepared has pushed its work and is about to exit, so its claim ends
     // here. The item goes back to Queued at the stage it was in, and the restarted factory starts it again at once
     // instead of waiting out the lease. Under a pause or a stop_run the claim stays, so the scheduler's handling holds.
-    // PBI 423: a stopped attempt whose CI run a later push to the branch cancelled ends the claim whatever is set, and
-    // the item goes back to Queued at the same stage. It counts against none of the stage's retries, as any stopped one.
+    // PBI 423: a stopped attempt whose CI run a later push to the branch cancelled ends the claim, and the item goes
+    // back to Queued at the same stage. It counts against none of the stage's retries, as any stopped one. An operator's
+    // stop_run on the item keeps the claim, as above, so the scheduler fails and holds the item instead of dropping the stop.
     const supersededBy = status === "stopped" && body.supersededBy !== undefined ? str(body.supersededBy, "supersededBy") : null;
-    if (status === "stopped" && !(await endClaimForWrapUp(c, run, now, false)) && supersededBy !== null) {
+    if (status === "stopped" && !(await endClaimForWrapUp(c, run, now, false)) && supersededBy !== null
+      && !(await overridesOver(deps, c, run, now)).stopRun) {
       await closeStartedAttempts(c, run.item_id, now);
       await transitionItem(c, run.item_id, "ci_superseded", { actor: "agent", actorId: run.run_id }, { stageId, attempt, head: supersededBy });
     }

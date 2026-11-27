@@ -14,8 +14,9 @@
 //   The cell API's `release` is recorded as a "/release" call.
 //   - "While the factory waits on CI for <a>, a person pushes the commit <b> to the item's branch": on the factory's
 //     first read of CI on <a>, a person's commit lands on origin's item branch, and <b> names it.
-//   - The item "moves to Queued" when the claim ends on a release or an attempt reported `stopped` after its last
-//     transition, as the cell API ends such a claim (PBI 18's steps), and "the item's run resumes from" the stage the
+//   - The item "moves to Queued" when the claim ends, after its last transition, on an attempt reported `stopped` with
+//     `supersededBy`, or on a release or a `stopped` report while a restart or a drain is set, as the cell API ends
+//     such a claim (PBI 18's steps), and "the item's run resumes from" the stage the
 //     claim started at, moved on past each stage it reported passed, as the cell API moves it.
 //   - An attempt "counts against the stage's retries" when it ended `failed` or handed the next claim a retry carry.
 //   - "The next claim's cell runs from <stage>" only once the first claim sent the item back to Queued with its run
