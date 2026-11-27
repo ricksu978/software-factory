@@ -177,11 +177,18 @@ const files: ReadinessTexts = {
 };
 
 Given("the readiness logic as it stood before this item, with the judge's prompt of that time", function () {
-  ctx(this).earlier = earlier();
+  const logic = earlier();
+  assert.ok(logic.judgePrompt.includes("Add a short flag for each thing the item asks for that no cell may do"),
+    "the earlier logic's judge's prompt doesn't hold the old flag sentence");
+  assert.equal(logic.version, EARLIER_VERSION);
+  ctx(this).earlier = logic;
 });
 
 When("the factory computes its current readiness logic", function () {
-  ctx(this).current = readinessLogic();
+  const logic = readinessLogic();
+  assert.ok(standIns.test(logic.judgePrompt), "the current logic's judge's prompt doesn't hold the stand-in sentence");
+  assert.notEqual(logic.judgePrompt, EARLIER_JUDGE_PROMPT, "the current logic's judge's prompt is the one from before this item");
+  ctx(this).current = logic;
 });
 
 Then("the current logic's fingerprint for a set of repo files differs from the earlier logic's fingerprint for the same files", function () {
@@ -221,11 +228,16 @@ Given("the factory holds an item in state {string}, checked under the judge's pr
 });
 
 Given("the factory starts with its current readiness logic", function () {
-  pollCtx(this).logic = readinessLogic();
+  const logic = readinessLogic();
+  assert.ok(standIns.test(logic.judgePrompt), "the current logic's judge's prompt doesn't hold the stand-in sentence");
+  assert.notEqual(logic.judgePrompt, EARLIER_JUDGE_PROMPT, "the current logic's judge's prompt is the one from before this item");
+  pollCtx(this).logic = logic;
 });
 
 Given("the readiness judge flags {string}", function (text: string) {
+  assert.ok(text.trim(), "the flag's text is empty");
   const c = pollCtx(this);
+  assert.ok(c.fake, "the poller harness wasn't set up");
   c.judge = "pass";
   c.lastLine = { ...c.lastLine, flags: [text] };
 });
