@@ -3,6 +3,7 @@
 // Run from the repo root: node .claude/skills/watch-floor/watch-floor.mjs            (watch)
 //                         node .claude/skills/watch-floor/watch-floor.mjs --selftest (check the parser)
 import { execSync } from "node:child_process";
+import { dirname, join } from "node:path";
 
 const BASE = process.env.FLOOR_URL ?? "http://localhost:7400";
 const POLL_MS = 30_000;
@@ -46,8 +47,15 @@ export function digest(floor, config = "", now = Date.now()) {
   ].filter(Boolean).join(" | ");
 }
 
+// The running AppHost belongs to the main checkout. From a worktree, `aspire` finds none under the current directory
+// and fails on a selection prompt it can't show, so name the main checkout's AppHost.
+function apphost() {
+  const common = execSync("git rev-parse --path-format=absolute --git-common-dir", { encoding: "utf8" }).trim();
+  return join(dirname(common), "aspire-apphost");
+}
+
 function token() {
-  const log = execSync('aspire logs control --search "dev-login"', { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
+  const log = execSync(`aspire logs control --apphost "${apphost()}" --search "dev-login"`, { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
   const all = [...log.matchAll(/dev-login\?token=([0-9a-f]+)/g)];
   if (!all.length) throw new Error("no dev-login token in `aspire logs control`");
   return all.at(-1)[1];
