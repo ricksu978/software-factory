@@ -255,7 +255,11 @@ Then("the checks name {string} as passed", function (name: string) {
 // ---- the cell's Givens ----
 
 Given("open-pr pushes the PR's first head {string}", function (label: string) {
-  ci292(this).roles.set(label, { kind: "head" });
+  const roles = ci292(this).roles;
+  const known = roles.get(label);
+  assert.ok(!known || known.kind === "head", `"${label}" already labels another commit: ${JSON.stringify(known)}`);
+  roles.set(label, { kind: "head" });
+  assert.deepEqual(roles.get(label), { kind: "head" });
 });
 
 Given("while the factory waits on CI for {string}, a person pushes the commit {string} to the item's branch", function (waitOn: string, label: string) {
@@ -380,7 +384,11 @@ Then("the open-pr attempt doesn't end as failed", function () {
 // ---- the Definition of Done ----
 
 Given("the Definition of Done has the line {string}, naming the CI check {string}", function (line: string, check: string) {
-  mine(this).dod.push(`- [ ] ${line} \`ci: ${check}\``);
+  const built = `- [ ] ${line} \`ci: ${check}\``;
+  const parsed = parseCriteria(built);
+  assert.equal(parsed.length, 1, `the line "${built}" parses as ${parsed.length} criteria`);
+  assert.equal(parsed[0].ci, check, `the line "${built}" names the CI check ${JSON.stringify(parsed[0].ci)}, not "${check}"`);
+  mine(this).dod.push(built);
 });
 
 When("the Definition of Done is verified on {string}", long, async function (label: string) {
