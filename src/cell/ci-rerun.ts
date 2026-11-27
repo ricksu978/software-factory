@@ -13,13 +13,10 @@ export function failedNames(checks: CiCheck[] | null): string[] {
  * One sentence per re-run check: it passed, failed again, was cancelled, or hadn't finished on the re-run. `after` is each check as the re-run left it;
  * when it couldn't be read, CI's overall answer `status` stands for every check.
  */
-export function rerunNotes(sha: string, rerun: string[], status: "success" | "failure" | "cancelled", after: CiCheck[] | null): string[] {
+export function rerunNotes(sha: string, rerun: string[], status: "success" | "failure", after: CiCheck[] | null): string[] {
   return rerun.map((name) => {
     const head = `The check "${name}" failed on ${short(sha)}, so the factory re-ran it once, and`;
-    if (!after) {
-      if (status === "cancelled") return `${head} CI's run was cancelled after the re-run.`;
-      return status === "success" ? `${head} it passed on the re-run.` : `${head} CI was still red after the re-run.`;
-    }
+    if (!after) return status === "success" ? `${head} it passed on the re-run.` : `${head} CI was still red after the re-run.`;
     const mine = after.filter((c) => c.name === name);
     if (mine.some((c) => c.conclusion === "failure")) return `${head} it failed again on the re-run.`;
     // A check whose re-run hasn't finished hasn't passed.

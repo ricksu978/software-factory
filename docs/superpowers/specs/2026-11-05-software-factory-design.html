@@ -813,7 +813,7 @@ stateDiagram-v2
   InProgress --> Failed: retry budget spent
   NeedsInput --> Abandoned: no answer in 5 days
   SignOff --> Abandoned: no answer in 5 days
-  InProgress --> Queued: lease expired, or a usage limit
+  InProgress --> Queued: lease expired, a usage limit, or a later push cancelled the CI run a stage waits on
   Accepted --> Failed: DoD fails after merge, bug PBI filed
   Failed --> Queued: human re-queues
   Failed --> Accepted: re-check finds the merge no longer broke main
@@ -1677,29 +1677,31 @@ stateDiagram-v2
 
       A timed-out check and one that needs action still count as failed.
 
-      When CI on the commit a stage pushed reads cancelled and the run's branch on origin has moved on from that commit,
+      Before a red CI is charged to the attempt,
 
-      a later push cancelled the run.
+      the factory re-runs the failed checks once,
+
+      and only those,
+
+      so a flaky check doesn't cost an attempt.
+
+      A check run that was cancelled is neither failed nor passed, and it is never charged.
+
+      When a later push to the branch cancelled the run a stage waits on, the stage ends its wait without charging the attempt, and the item goes back to Queued at the same stage, so its next claim starts from the branch's newest commit.
+
+      A later push cancelled the run when CI on the commit a stage pushed reads cancelled and the run's branch on origin has moved on from that commit.
 
       The stage ends its wait at once,
 
       whatever the pending CI cap,
 
-      and reports its attempt stopped,
+      and reports its attempt stopped, so it goes to no Green pass.
 
-      so it counts against none of the stage's retries and goes to no Green pass.
+      The item goes back to Queued through the event <code>ci_superseded</code>,
 
-      The report ends the claim:
+      and its next claim clones the branch, reads CI there,
 
-      the item goes back to Queued at the same stage,
-
-      through the event <code>ci_superseded</code>,
-
-      and its next claim clones the branch,
-
-      so it starts from the branch's newest commit and reads CI there.
-
-      That next claim starts the stage afresh rather than resuming the stopped attempt.
+      and starts the stage afresh rather than resuming the stopped attempt.
 
       When the branch still points at the commit,
 
@@ -1710,14 +1712,6 @@ stateDiagram-v2
       for a re-run or a push,
 
       and after 60 minutes asks a person instead.
-
-      Before a red CI is charged to the attempt,
-
-      the factory re-runs the failed checks once,
-
-      and only those,
-
-      so a flaky check doesn't cost an attempt.
 
       A pass on the re-run counts as green,
 

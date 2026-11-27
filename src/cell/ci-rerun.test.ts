@@ -61,9 +61,6 @@ describe("rerunNotes", () => {
       `The check "ci" failed on c0ffee1, so the factory re-ran it once, and it failed again on the re-run.`,
       `The check "e2e" failed on c0ffee1, so the factory re-ran it once, and its re-run was cancelled.`,
     ]);
-    assert.deepEqual(rerunNotes(SHA, ["ci"], "cancelled", null), [
-      `The check "ci" failed on c0ffee1, so the factory re-ran it once, and CI's run was cancelled after the re-run.`,
-    ]);
   });
 });
 
