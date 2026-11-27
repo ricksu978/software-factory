@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
 import { withEffort } from "../../../src/store/effort.ts";
-import { FEATURE_CHANGE_ANCHOR } from "../../../src/core/feature-change.ts";
+import { FEATURE_CHANGE_ANCHOR, lineDiff } from "../../../src/core/feature-change.ts";
 import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
@@ -109,8 +109,8 @@ function TimeSection({ t }: { t: ItemDurations }) {
 }
 
 /**
- * PBI 366: the feature change request the item waits on, each file under its path with the stage's reason and the
- * version it proposes. The dashboard's item page also marks the lines changed from the lock commit.
+ * PBI 366: the feature change request the item waits on, each file under its path with the stage's reason and its
+ * change from the lock commit, each line taken out and put in marked by its side, as the dashboard's item page draws it.
  */
 function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]> }) {
   return (
@@ -121,7 +121,7 @@ function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]
         <div key={f.path}>
           <h3 className="mt-3 font-mono text-sm font-semibold">{f.path}</h3>
           <p data-reason>{f.reason}</p>
-          <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{f.after}</pre>
+          <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{lineDiff(f.before, f.after).map((l, i) => <span key={i}>{i > 0 && "\n"}{l === null ? "…" : l.side === "before" ? <del data-side="before">{l.text}</del> : l.side === "after" ? <ins data-side="after">{l.text}</ins> : <span data-side="same">{l.text}</span>}</span>)}</pre>
         </div>
       ))}
     </>
