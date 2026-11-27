@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { CiFailure, FloorData, FloorProps, MainBreak } from "../api.ts";
 import { FLOOR_KINDS } from "../forms.ts";
-import { PATHS } from "../routes.ts";
+import { PATHS, runPath } from "../routes.ts";
 import { age, blockedReason, drainLine, heartbeatLine, mainRedLead, recheckLine, restartLine, schedulerBanner } from "../lines.ts";
-import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, PrLink, SplitInto, Standing } from "./parts.tsx";
+import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, PrLink, SplitInto, Standing, WaitsOnOwner } from "./parts.tsx";
 
 export { submitFloorControls } from "../forms.ts";
 
@@ -131,7 +131,7 @@ export function Floor({ data: f, now, zone, message, onSubmit, onReasonField, co
       </p>
       <H2>Waiting on you</H2>
       <List empty="Nothing waits on you." rows={f.waiting.map((w) => (
-        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}, waiting {age(w.since, now)}</span>{st(w.id)}</li>
+        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}, waiting {age(w.since, now)}</span>{w.feature_change && <WaitsOnOwner path={runPath(w.id)} />}{st(w.id)}</li>
       ))} />
       <H2>Next up</H2>
       <List empty="Nothing is ready to start." rows={f.next.map((n) => <li key={n.id}><ItemName r={n} />{st(n.id)}</li>)} />

@@ -110,6 +110,12 @@ export async function floor(pool: pg.Pool) {
      from item i left join lateral (select pr_number, pr_url from run where item_id = i.id and ended_at is null order by started_at desc limit 1) r on true
      where i.state = 'InReview' order by since nulls last, i.title`,
   )).rows;
+  // PBI 366: an item in FeatureChangeRequest waits on the Product Owner from its move there, with no question asked.
+  const featureChanges = (await pool.query(
+    `select i.id, i.external_id, i.title, i.state, true as feature_change,
+       (select max(at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'FeatureChangeRequest') as since
+     from item i where i.state = 'FeatureChangeRequest' order by since nulls last, i.title`,
+  )).rows;
   const capacity = (await pool.query<{ review_capacity: number }>("select review_capacity from wip_policy limit 1")).rows[0]?.review_capacity ?? 3;
   // An engine rule or a judge flag is stored at index 0 with its explanation in reason, as the gate's comment reads it.
   const notReady = (await pool.query<{ id: string; external_id: string; title: string; failed: string[] }>(
@@ -172,7 +178,7 @@ export async function floor(pool: pg.Pool) {
     : undefined;
   const restart: Restart | null = prepared ? { running: running!, reason: prepared.reason } : null;
   // "Next up" applies the same brake the scheduler does: at capacity, only work already in flight starts.
-  const waitingCount = waiting.length + reviews.length;
+  const waitingCount = waiting.length + featureChanges.length + reviews.length;
   const next = await nextUp(pool, 5, { resumeOnly: waitingCount >= capacity });
   // PBI 320: each item's priority and group, and every final-stage item, an item in the group through a dependent
   // included, wherever it is, in the order the group is claimed.
@@ -184,10 +190,10 @@ export async function floor(pool: pg.Pool) {
   const finalStage = finalIds.flatMap((id) => finalRows.filter((r) => r.id === id));
   // PBI 369: each item that failed its Definition of Done on main, and when the factory last re-checked it.
   const failed = await failedOnMain(pool);
-  const repos = await issueRepos(pool, [...waiting, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split, ...failed].map((r) => r.id));
+  const repos = await issueRepos(pool, [...waiting, ...featureChanges, ...reviews, ...notReady, ...blocked, ...active, ...next, ...baseFails, ...finalStage, ...split, ...failed].map((r) => r.id));
   const withRepo = <T extends { id: string }>(rows: T[]) => rows.map((r) => ({ ...r, repo: repos.get(r.id) ?? null }));
   return {
-    active: withRepo(active), waiting: withRepo([...waiting, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
+    active: withRepo(active), waiting: withRepo([...waiting, ...featureChanges, ...reviews]), waitingCount, capacity, next: withRepo(next), notReady: withRepo(notReady), blocked: withRepo(blocked), factory,
     keys, finalStage: withRepo(finalStage),
     baseFails: withRepo(baseFails), mainBreaks, split: withRepo(split), failed: withRepo(failed),
     restart, running, cellImage: await readCellImage(pool),
