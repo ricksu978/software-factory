@@ -3480,7 +3480,11 @@ Feature: Export invoices to CSV
 
         <li>The readiness check flags item text that asks for credentials,
 
-        CI changes or access outside the repo.</li>
+        CI changes or access outside the repo that building the item needs.
+
+        A feature the item builds that handles credentials or other repos once it runs isn't flagged,
+
+        as long as the item's tests use stand-ins (PBI 433).</li>
 
         <li>The readiness check reports whether an item is too big for one Sprint.
 
