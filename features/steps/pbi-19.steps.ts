@@ -32,7 +32,7 @@ import { applyComment } from "../../src/control/decisions.ts";
 import { startShell, type ShellPage } from "../../web/src/shell.ts";
 import { startProvider, type Provider } from "../fixtures/pbi-288-provider.ts";
 import { recordOpened, recordSignIn } from "../support/sign-ins.ts";
-import { keying, renderNoAccess, renderPage, underIssuer } from "../support/split-services.ts";
+import { keying, renderNoAccess, renderPage, underIssuer, type Page } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { Browser, type Seen } from "./pbi-288.steps.ts";
 
@@ -161,7 +161,7 @@ export type Opened = { status: number; page: string; shown: ShellPage | null; js
  * Opens the SPA as `b`'s person would: its shell reads /bff/v1/floor through the BFF, and shows the no-access page on
  * a 403 or the page `read` answers otherwise, rendered from what the API answered.
  */
-export async function openSpa(dash: Dashboard, b: Browser, page: "floor" | "item" | "phase0" | "activity", read: string): Promise<Opened> {
+export async function openSpa(dash: Dashboard, b: Browser, page: Page, read: string): Promise<Opened> {
   let shown: ShellPage | null = null;
   const shell = await startShell({
     fetch: (async (path: string, init?: RequestInit) => {

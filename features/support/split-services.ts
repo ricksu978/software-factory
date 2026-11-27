@@ -98,12 +98,13 @@ AfterAll({ timeout: 60_000 }, async function () {
   vite = undefined;
 });
 
-export type Page = "floor" | "item" | "phase0" | "activity";
+export type Page = "floor" | "item" | "phase0" | "activity" | "configuration";
 const COMPONENTS: Record<Page, [string, string]> = {
   floor: ["/src/pages/Floor.tsx", "Floor"],
   item: ["/src/pages/RunDetail.tsx", "RunDetail"],
   phase0: ["/src/pages/Phase0.tsx", "Phase0"],
   activity: ["/src/pages/Activity.tsx", "Activity"],
+  configuration: ["/src/pages/Configuration.tsx", "Configuration"],
 };
 
 /** The SPA's no-access page, which its shell shows when the API answers a read with 403, saying `text`. */
@@ -112,9 +113,13 @@ export async function renderNoAccess(text: string): Promise<string> {
   return renderToString(createElement(mod.NoAccess, { text }));
 }
 
-/** The SPA's `page` rendered from `data`, what the API answered for it, in the viewer's zone at `now`. */
-export async function renderPage(page: Page, data: unknown, o: { zone?: string; now?: Date } = {}): Promise<string> {
+/**
+ * The SPA's `page` rendered from `data`, what the API answered for it, in the viewer's zone at `now`. `message` is what
+ * the page says about the last form sent, such as why the factory refused it, and `notice` what the Configuration page
+ * says once a change is saved.
+ */
+export async function renderPage(page: Page, data: unknown, o: { zone?: string; now?: Date; message?: string | null; notice?: string | null } = {}): Promise<string> {
   const [path, name] = COMPONENTS[page];
   const mod = await load<Record<string, ComponentType<Record<string, unknown>>>>(path);
-  return renderToString(createElement(mod[name], { data, zone: o.zone ?? "UTC", now: o.now ?? new Date(), message: null }));
+  return renderToString(createElement(mod[name], { data, zone: o.zone ?? "UTC", now: o.now ?? new Date(), message: o.message ?? null, notice: o.notice ?? null }));
 }

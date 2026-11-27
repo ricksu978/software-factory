@@ -1,6 +1,7 @@
 // Run detail in the SPA (redesign step 8b): the item, where it stands and what its run is pinned to, its stages, time,
-// policies, readiness checks and scenario verdicts, the Sign off and Answer forms, and an operator's Controls, as
-// today's Run detail in src/http/views.ts shows them.
+// policies, readiness checks and scenario verdicts, the Sign off and Answer forms, an operator's Controls, a feature
+// change request with the Product Owner's decision on it (PBI 365, PBI 366) and the item's rule changes with the
+// owner's approval (PBI 395), as today's Run detail in src/http/views.ts shows them.
 import { useEffect, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,13 +11,13 @@ import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
 import { withEffort } from "../../../src/store/effort.ts";
 import { FEATURE_CHANGE_ANCHOR, lineDiff } from "../../../src/core/feature-change.ts";
-import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
+import type { CiFailure, DiffWord, ItemData, ItemDurations, OnSubmit, ReadinessCheck, RuleChanges as RuleChangesData, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
 import { CheckLink } from "./Floor.tsx";
 import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time, WaitsOnOwner } from "./parts.tsx";
 
-export { submitAnswer, submitItemControls, submitSignOff } from "../forms.ts";
+export { submitAnswer, submitFeatureChange, submitItemControls, submitRuleApproval, submitSignOff } from "../forms.ts";
 
 function Head({ columns }: { columns: string[] }) {
   return (
@@ -111,8 +112,10 @@ function TimeSection({ t }: { t: ItemDurations }) {
 /**
  * PBI 366: the feature change request the item waits on, each file under its path with the stage's reason and its
  * change from the lock commit, each line taken out and put in marked by its side, as the dashboard's item page draws it.
+ * A product owner gets the decision after the changes (PBI 365): Approve commits the proposed files and locks them
+ * there, and Ask for changes keeps the lock and sends the note to the stage that asked.
  */
-function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]> }) {
+function FeatureChange({ files, canDecide, onSubmit }: { files: NonNullable<ItemData["featureChange"]>; canDecide: boolean; onSubmit?: OnSubmit }) {
   return (
     <>
       <H2 id={FEATURE_CHANGE_ANCHOR}>Feature change request</H2>
@@ -124,6 +127,61 @@ function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]
           <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{lineDiff(f.before, f.after).map((l, i) => <span key={i}>{i > 0 && "\n"}{l === null ? "…" : l.side === "before" ? <del data-side="before">{l.text}</del> : l.side === "after" ? <ins data-side="after">{l.text}</ins> : <span data-side="same">{l.text}</span>}</span>)}</pre>
         </div>
       ))}
+      {canDecide && (
+        <form aria-label="Feature change" className="mt-3 max-w-xl space-y-2" onSubmit={onSubmitWith("note", onSubmit && ((b, v) => onSubmit("Feature change", b, v)))}>
+          <label htmlFor="feature-change-note" className="block text-sm font-medium">Note for the factory</label>
+          <Textarea id="feature-change-note" name="note" />
+          <p className="flex gap-2"><Button type="submit">Approve the change</Button><Button type="submit" variant="outline">Ask for changes</Button></p>
+        </form>
+      )}
+    </>
+  );
+}
+
+/** PBI 365: who approved or turned down the item's last feature change request, and when. */
+function FeatureChangeDecision({ d, zone }: { d: NonNullable<ItemData["featureChangeDecision"]>; zone: string }) {
+  return <p id="feature-change-decision">{d.by} {d.kind === "approve" ? "approved" : "turned down"} the feature change request at <Time at={d.at} zone={zone} />.</p>;
+}
+
+/** A rule's Before or After, each word that changes marked. */
+function Words({ words }: { words: DiffWord[] }) {
+  return words.map((w, i) => <span key={i}>{i > 0 && " "}{w.changed ? <mark>{w.text}</mark> : w.text}</span>);
+}
+
+/**
+ * The Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked, what's wrong
+ * with an entry, whether the item waits for the owner's approval or who approved it, and the owner's approval form.
+ */
+function RuleChanges({ r, zone, onSubmit }: { r: RuleChangesData; zone: string; onSubmit?: OnSubmit }) {
+  const names = r.changes.map((c) => c.name);
+  const list = names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  const side = (which: "before" | "after", label: string, text: string | null, words: DiffWord[] | undefined) => (
+    <div>
+      <h4 className="font-medium">{label}</h4>
+      {text === null
+        ? <p className="text-muted-foreground">No {label} given.</p>
+        : <blockquote data-side={which} className="border-l-2 pl-3">{words ? <Words words={words} /> : text}</blockquote>}
+    </div>
+  );
+  return (
+    <>
+      <H2>Rule changes</H2>
+      {r.approval
+        ? <p>{r.approval.by} approved the rule change at <Time at={r.approval.at} zone={zone} />.</p>
+        : r.waiting ? <p>This item waits for the owner to approve its rule changes: {list}.</p> : null}
+      {r.changes.map((c) => (
+        <div key={c.key} className="mt-3" data-rule={c.key}>
+          <h3 className="font-semibold">{c.place.kind === "spec" ? `Spec ${c.place.section}` : c.place.path}</h3>
+          {c.problem && <Banner><p>{c.problem}</p></Banner>}
+          <div className="grid grid-cols-2 gap-4">{side("before", "Before", c.before, c.words?.before)}{side("after", "After", c.after, c.words?.after)}</div>
+        </div>
+      ))}
+      {r.canApprove && (
+        <form aria-label="Rule approval" className="mt-3" onSubmit={onSubmitWith("ruleChangesHash", onSubmit && ((b, v) => onSubmit("Rule approval", b, v)))}>
+          <Input type="hidden" name="ruleChangesHash" value={r.hash} />
+          <p><Button type="submit">Approve rule change</Button></p>
+        </form>
+      )}
     </>
   );
 }
@@ -193,7 +251,10 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
       <h1 className="mb-2 text-2xl font-semibold"><IssueRef external_id={d.item.external_id} repo={d.item.repo} /> {d.item.title}</h1>
       <Message text={message} />
       <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}{d.item.state === "FeatureChangeRequest" && d.featureChange?.length ? <>.<WaitsOnOwner path="" /></> : null}</p>
-      {d.featureChange?.length ? <FeatureChange files={d.featureChange} /> : null}
+      {d.ruleChanges ? <RuleChanges r={d.ruleChanges} zone={zone} onSubmit={onSubmit} /> : null}
+      {d.featureChange?.length
+        ? <FeatureChange files={d.featureChange} canDecide={d.canDecideFeatureChange === true} onSubmit={onSubmit} />
+        : d.featureChangeDecision ? <FeatureChangeDecision d={d.featureChangeDecision} zone={zone} /> : null}
       {d.recheck && <p>{recheckLine(d.recheck.last, zone, true)}</p>}
       {d.splitInto?.length ? <><H2>Split into</H2><SplitInto children={d.splitInto} /></> : null}
       {d.claim && <p>{claimLines(d.claim)}</p>}

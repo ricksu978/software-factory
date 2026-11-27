@@ -1,5 +1,5 @@
 // Step definitions for features/pbi-176-live-settings-with-reason.feature. PBI 176 builds on PBI 175's Configuration
-// page, so its scenarios share PBI 175's hooks, dashboard and steps (pbi-175.steps.ts runs its hooks for @pbi-176 too),
+// page, so its scenarios share PBI 175's hooks, API and steps (pbi-175.steps.ts runs its hooks for @pbi-176 too),
 // and this file adds only what PBI 176 says new: a reason on each change, the event that logs it, and the Activity page
 // showing it.
 //
@@ -8,8 +8,8 @@
 //   answers 4xx with "Give a reason for the change." and stores nothing.
 // - The change logs a `setting` event whose actor_id is the user's id, as PBI 175's does, and whose payload holds
 //   `setting` (the setting's label, such as "review capacity"), `from`, `to` and `reason`.
-// - The Activity page (GET /activity) shows the change as one <tr> that names who made it, the setting, the old and new
-//   values and the reason, the reason as text.
+// - The Activity page (the SPA's, drawn from GET /v1/activity) shows the change as one <tr> that names who made it,
+//   the setting, the old and new values and the reason, the reason as text.
 // - A usage report is a cell's POST /internal/cells/:runId/stage carrying `usage: { utilization, resetsAt }`, as the
 //   cell API already takes it.
 import { After, Given, Then, When } from "@cucumber/cucumber";
@@ -21,7 +21,7 @@ import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { startServer } from "../../src/http/server.ts";
 import { long, need } from "./pbi-8.steps.ts";
 import { ctx as schedulerCtx, newItem } from "./pbi-17.steps.ts";
-import { activityRows, change, ctx as configCtx, dashboard, decode, escapeRe, get, headers, text, user } from "./pbi-175.steps.ts";
+import { activityPage, activityRows, change, decode, escapeRe, get, text, user } from "./pbi-175.steps.ts";
 
 type Ctx = {
   /** Who opened the Activity page last, so a Then reads it as they see it. */
@@ -76,21 +76,14 @@ When(/^"([^"]*)" sends a change of (.+) to "([^"]*)" with the reason "(.*)" to t
 // ---- the Activity page ----
 
 When("{string} opens the Activity page", long, async function (login: string) {
-  const c = configCtx(this);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/activity`, { headers: headers(login), redirect: "manual" });
-  assert.equal(r.status, 200, `the Activity page answered ${r.status} for ${login}`);
+  await activityPage(this, login);
   ctx(this).activityLogin = login;
 });
 
 /** The Activity page's event rows, as text, read now as whoever opened it last, or as `login`. */
 async function activity(world: object, login: string): Promise<string[]> {
   const as = ctx(world).activityLogin ?? login;
-  const c = configCtx(world);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/activity`, { headers: headers(as), redirect: "manual" });
-  const page = await r.text();
-  assert.equal(r.status, 200, `the Activity page answered ${r.status} for ${as}`);
+  const page = await activityPage(world, as);
   ctx(world).activityPage = page;
   return [...page.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((m) => m[1]).filter((row) => /<td\b/i.test(row)).map(text);
 }

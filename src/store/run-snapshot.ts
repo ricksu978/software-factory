@@ -1,17 +1,17 @@
 // Run detail's snapshot of a run (redesign step 4c, PBI 224): the item's acceptance criteria in
-// `run.acceptance_criteria` and each locked file's text at the scenarios sha in `run_file`. The cell API stores it when
+// `run.acceptance_criteria`, its issue's body in `run.issue_body` (PBI 283), and each locked file's text at the scenarios sha in `run_file`. The cell API stores it when
 // it records a run's scenarios sha, and the worker's one-off backfill stores it for runs from before then, so Run
 // detail reads only the factory's own database.
 import type pg from "pg";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 
-export type Snapshot = { sha: string; criteria: string[]; files: { path: string; text: string }[] };
+export type Snapshot = { sha: string; criteria: string[]; body: string; files: { path: string; text: string }[] };
 
 /** Thrown when the board or the repo answers but hasn't got what the snapshot needs. */
 export class SnapshotMissing extends Error {}
 
 /**
- * Reads the snapshot of `externalId`'s run at `sha`: the item's criteria as the board holds them now, and each of
+ * Reads the snapshot of `externalId`'s run at `sha`: the item's criteria and body as the board holds them now, and each of
  * `paths` in `repo` at `sha`, each path once. An item the board doesn't hold, or a file the repo doesn't hold at
  * `sha`, throws SnapshotMissing. A failing read throws its own error.
  */
@@ -26,12 +26,12 @@ export async function readSnapshot(
     if (text === null) throw new SnapshotMissing(`${at.repo} holds no ${path} at ${at.sha}`);
     return { path, text };
   }));
-  return { sha: at.sha, criteria: [...item.acceptanceCriteria], files };
+  return { sha: at.sha, criteria: [...item.acceptanceCriteria], body: item.body, files };
 }
 
-/** Stores `s` as `runId`'s snapshot, replacing the run's earlier criteria and files. Run it inside a transaction. */
+/** Stores `s` as `runId`'s snapshot, replacing the run's earlier criteria, body and files. Run it inside a transaction. */
 export async function storeSnapshot(c: pg.ClientBase, runId: string, s: Snapshot): Promise<void> {
-  await c.query("update run set acceptance_criteria = $2 where id = $1", [runId, s.criteria]);
+  await c.query("update run set acceptance_criteria = $2, issue_body = $3 where id = $1", [runId, s.criteria, s.body]);
   await c.query("delete from run_file where run_id = $1", [runId]);
   if (s.files.length === 0) return;
   await c.query(

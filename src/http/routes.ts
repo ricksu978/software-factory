@@ -365,7 +365,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, i
 }
 
 /** PBI 365: the latest decision on a feature change request of the item, with who made it and when, or null. */
-async function featureChangeDecision(pool: pg.Pool, id: string): Promise<{ kind: "approve" | "changes"; by: string; at: Date } | null> {
+export async function featureChangeDecision(pool: pg.Pool, id: string): Promise<{ kind: "approve" | "changes"; by: string; at: Date } | null> {
   return (await pool.query<{ kind: "approve" | "changes"; by: string; at: Date }>(
     `select e.payload->>'kind' as kind, coalesce(u.github_login, u.email, u.subject) as by, e.at from event e
      left join "user" u on u.id::text = e.actor_id

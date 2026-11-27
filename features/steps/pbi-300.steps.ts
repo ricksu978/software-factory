@@ -74,12 +74,13 @@ async function startWorker(world: object): Promise<void> {
 
 After({ tags: "@pbi-300", ...long }, async function () {
   for (const r of ctx(this).restore.reverse()) r();
-  // PBI 140's cell API and PBI 175's dashboard, which their own After hooks close only for their own tags.
-  for (const s of [p140(this).cellServer, p175(this).server]) {
-    if (!s) continue;
+  // PBI 140's cell API and PBI 175's API, which their own After hooks close only for their own tags.
+  const s = p140(this).cellServer;
+  if (s) {
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
   }
+  await p175(this).close?.();
 });
 
 function ticked(world: object) {

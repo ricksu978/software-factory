@@ -265,10 +265,10 @@ async function apiEnv(world: object, port: number | null, cellApiPort: number): 
 }
 
 /** Starts the API's process and waits until it says it answers, or exits. Only PATH and SystemRoot come from this process. */
-async function spawnApi(world: object, entry = "src/api/main.ts"): Promise<void> {
+async function spawnApi(world: object): Promise<void> {
   const c = ctx(world);
   const db = (await testDb()) as unknown as { url: string };
-  const child = spawn(process.execPath, [entry], {
+  const child = spawn(process.execPath, ["src/api/main.ts"], {
     env: { PATH: process.env.PATH ?? "", SystemRoot: process.env.SystemRoot ?? "", FACTORY_DB_URI: db.url, ...c.env },
   });
   c.child = child;
@@ -336,10 +336,8 @@ Given("today's control plane's environment sets PORT to {int} and points cells a
 });
 
 Given("today's control plane's environment points cells at the cell API on {int} but doesn't set PORT", async function (cellApi: number) {
-  // The split services all default their port when PORT isn't set, so until the feature changes this scenario still
-  // runs the combined control plane (PBI 283's blocker).
-  ctx(this).env = { ...(await apiEnv(this, null, cellApi)), FACTORY_DEV_LOGIN: OWNER, CELL_SECRET: SECRET, GITHUB_APP_ID: "1", GITHUB_APP_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t" };
-  (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart = () => spawnApi(this, "src/main.ts");
+  ctx(this).env = await apiEnv(this, null, cellApi);
+  (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart = () => spawnApi(this);
 });
 
 // ---- When ----

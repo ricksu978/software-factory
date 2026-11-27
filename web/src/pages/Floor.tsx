@@ -70,7 +70,7 @@ function Banners({ f, now }: { f: FloorData; now: Date }) {
     <>
       {stale && <Banner>{stale}</Banner>}
       {f.mainBreaks.length > 0 && (
-        <Banner>
+        <Banner id="main-red">
           <p>{mainRedLead(f.mainBreaks)}</p>
           <ul className="ml-6 list-disc">{f.mainBreaks.map((r, i) => <MainBreakLine key={i} r={r} />)}</ul>
         </Banner>
@@ -90,7 +90,7 @@ function Banners({ f, now }: { f: FloorData; now: Date }) {
         </Banner>
       )}
       {f.baseFails.length > 0 && (
-        <Banner>
+        <Banner id="base-fails">
           <p>The base fails in cells. These items wait on it, since their Definition of Done or their CI fails the same tests on the base commit. Fix the base, then answer each item's question.</p>
           <ul className="ml-6 list-disc">
             {f.baseFails.map((r) => (
@@ -127,7 +127,7 @@ export function Floor({ data: f, now, zone, message, onSubmit, onReasonField, co
       <Banners f={f} now={now} />
       <WorkerLine f={f} now={now} />
       <p>
-        {f.waitingCount} of {f.capacity} waiting. <A href={PATHS.activity}>Activity</A> <A href={PATHS.phase0}>Phase 0 report</A>
+        {f.waitingCount} of {f.capacity} waiting. <A href={PATHS.activity}>Activity</A> <A href={PATHS.phase0}>Phase 0 report</A> <A href={PATHS.configuration}>Configuration</A>
       </p>
       <H2>Waiting on you</H2>
       <List empty="Nothing waits on you." rows={f.waiting.map((w) => (

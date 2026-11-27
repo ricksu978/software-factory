@@ -15,18 +15,12 @@
 //   any level, and the file's text shows in that section as written, line for line.
 // - The criteria list is the <h2>Criteria and their scenarios</h2> section. The sign-off form is the form labelled
 //   "Sign off", and a button is a <button> whose text is its label.
-import { After, Before, Given, Then, When } from "@cucumber/cucumber";
+import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { apiApp } from "../../src/api/main.ts";
-// Until /v1/items/:id carries the issue's body and a missing file (PBI 283's blocker), these scenarios read today's dashboard.
-import { createAuth } from "../../src/http/auth.ts";
-// Until /v1/items/:id carries the issue's body and a missing file (PBI 283's blocker), these scenarios read today's dashboard.
-import { dashboardRoutes } from "../../src/http/routes.ts";
-// Until /v1/items/:id carries the issue's body and a missing file (PBI 283's blocker), these scenarios read today's dashboard.
-import { startServer } from "../../src/http/server.ts";
+import { withTx } from "../../src/store/db.ts";
+import { storeSnapshot } from "../../src/store/run-snapshot.ts";
 import { backfillSnapshots } from "../../src/worker/snapshot-backfill.ts";
 import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
@@ -35,10 +29,6 @@ const REPO = "octo/repo";
 const OWNER = "owner-146";
 
 type Ctx = {
-  /** Today's dashboard, for the scenarios the API can't serve yet. */
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
   /** Whether a step took a feature file away at the scenarios sha. */
   missing?: boolean;
   board: ReturnType<typeof fakeBacklog>;
@@ -136,8 +126,12 @@ async function item(c: Ctx, ext: string, state: string, run: { scenariosSha: str
   }
 }
 
+/**
+ * Seeds issue `ext` waiting for sign-off at `sha` on `files`. The cell API takes no sign-off that locks no file, so a
+ * step that names none locks features/pbi-<ext>-scope.feature, the file the later steps name.
+ */
 async function waitingForSignOff(c: Ctx, ext: string, sha: string, files: string[]): Promise<void> {
-  await item(c, ext, "SignOff", { scenariosSha: sha, nextStage: "sign-off", files });
+  await item(c, ext, "SignOff", { scenariosSha: sha, nextStage: "sign-off", files: files.length ? files : [`features/pbi-${ext}-scope.feature`] });
   await pool().query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Please sign off the scenarios')", [c.itemId]);
 }
 
@@ -252,50 +246,33 @@ Given("the item is in flight at green", long, async function () {
   await pool().query("update run set next_stage = 'green' where id = $1", [c.runId]);
 });
 
-// Until /v1/items/:id carries the issue's body and a missing file (PBI 283's blocker), these scenarios read today's dashboard.
-async function dashboard(c: Ctx): Promise<void> {
-  if (c.server) return;
-  assert.ok(c.sourceId, "no board was set up");
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: c.board.adapter, sourceId: c.sourceId, repoHost: c.host });
-  c.close = handler.close;
+/**
+ * Neither the cell API nor the backfill stores a snapshot that lacks a locked file, so for a file missing at the
+ * scenarios sha these steps store the run's snapshot themselves: the board's criteria and body, and the files the repo
+ * holds at that sha.
+ */
+async function storeWithout(c: Ctx): Promise<void> {
+  const run = (await pool().query<{ sha: string; locked_files: string[] }>("select scenarios_sha as sha, locked_files from run where id = $1", [c.runId])).rows[0];
+  const issue = await c.board.adapter.getItem(c.ext ?? "146");
+  assert.ok(issue, "the board holds no item");
+  const files = run.locked_files.flatMap((path) => {
+    const text = c.host.files.get(key(run.sha, path));
+    return text === undefined ? [] : [{ path, text }];
+  });
+  await withTx(pool(), (tx) => storeSnapshot(tx, c.runId!, { sha: run.sha, criteria: [...issue.acceptanceCriteria], body: issue.body, files }));
 }
-
-After({ tags: "@pbi-146", ...long }, async function () {
-  const c = (this as { pbi146?: Ctx }).pbi146;
-  if (!c) return;
-  await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
-});
 
 When("the owner opens the item's Run detail", long, async function () {
   const c = ctx(this);
   assert.ok(c.itemId, "no item was set up");
-  // Until /v1/items/:id carries the issue's body and a missing file (PBI 283's blocker), these scenarios read today's dashboard.
-  if (c.body.trim() !== "" || c.missing) {
-    await pool().query(
-      `insert into "user" (provider, subject, github_login, role, product_owner) values ('microsoft', $1, $1, 'operator', true) on conflict (provider, subject) do nothing`,
-      [OWNER],
-    );
-    await dashboard(c);
-    const r = await fetch(`${c.origin}/items/${c.itemId}`, {
-      headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": OWNER, "x-ms-client-principal-name": OWNER },
-      redirect: "manual",
-    });
-    c.status = r.status;
-    c.page = await r.text();
-    return;
-  }
   // The run's snapshot, as the cell API stores it with the scenarios sha, read from the board and the repo host.
-  const filled = await backfillSnapshots({ pool: pool(), repoHost: c.host, backlogFor: () => c.board.adapter });
-  // A run that locked no files has no snapshot to store, and Run detail then shows no file.
-  const unfilled = filled.unfilled.filter((u) => !/locked no files/.test(u.reason));
-  assert.deepEqual(unfilled, [], "the run's snapshot couldn't be stored");
+  if (c.missing) await storeWithout(c);
+  else {
+    const filled = await backfillSnapshots({ pool: pool(), repoHost: c.host, backlogFor: () => c.board.adapter });
+    // A run that locked no files has no snapshot to store, and Run detail then shows no file.
+    const unfilled = filled.unfilled.filter((u) => !/locked no files/.test(u.reason));
+    assert.deepEqual(unfilled, [], "the run's snapshot couldn't be stored");
+  }
   await pool().query(
     `insert into "user" (issuer, subject, github_login, role, product_owner) values ($1, $2, $2, 'operator', true)
      on conflict on constraint user_issuer_subject do nothing`,
@@ -488,9 +465,7 @@ Then("Run detail shows {string} under the heading {string}", function (want: str
 
 Then("Run detail shows the sign-off form", function () {
   const c = ctx(this);
-  // The SPA labels its sign-off form, and today's dashboard posts it to the item's signoff address.
-  const html = page(c);
-  assert.ok(/<form\b[^>]*aria-label="Sign off"/.test(html) || html.includes(`action="/items/${c.itemId}/signoff"`), "Run detail doesn't show the sign-off form");
+  assert.ok(/<form\b[^>]*aria-label="Sign off"/.test(page(c)), "Run detail doesn't show the sign-off form");
 });
 
 Then("Run detail shows the {string} button", function (label: string) {

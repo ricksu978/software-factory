@@ -22,31 +22,28 @@
 // - An item waits for the owner's approval while it's NotReady and its last readiness check's dor.md results (the
 //   policy_result rows the poller writes, file 'dor', no run, at the newest `at`) hold one that isn't passed and is about
 //   the owner's approval: its criterion or its reason says "approv". A finding on a dor.md line is its row there.
-// - Each item page is the dashboard's /items/<id>, opened in UTC by a signed-in user ("user" rows by login, signed in
-//   with the headers Container Apps adds). The API and the SPA don't show rule changes or offer their approval yet, so
-//   until they do these steps drive today's dashboard. The page's "Rule changes" section (the content after its <h2> up
-//   to the next <h2>) holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy
-//   file's path, holding the rule's Before in a <blockquote data-side="before"> and its After in a
-//   <blockquote data-side="after">, each word that changes inside a <mark>. Owner approval is a <button> reading
-//   "Approve rule change" in a form that posts to /items/<id>/rule-approval with the shown changes' hash in a hidden
-//   ruleChangesHash field. A user approves by posting that form: the owner's post answers 303, anyone else's 403.
+// - Each item page is the SPA's Run detail, rendered in UTC from what the orchestrator API's GET /v1/items/<id> answers
+//   a signed-in user ("user" rows by login, put under the test issuer by features/support/split-services.ts, which
+//   builds the API in-process). The page's "Rule changes" section (the content after its <h2> up to the next <h2>)
+//   holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy file's path, holding
+//   the rule's Before in a <blockquote data-side="before"> and its After in a <blockquote data-side="after">, each word
+//   that changes inside a <mark>. Owner approval is a <button> reading "Approve rule change" in the form labelled "Rule
+//   approval". Pressing it sends that form as the SPA does, through web/src/forms.ts, which posts the shown changes'
+//   hash, from the API's answer, as `ruleChangesHash` to /bff/v1/items/<id>/rule-approval, which goes to the API's /v1
+//   path as the BFF forwards it. A user who sends an approval posts that body to the API's
+//   POST /v1/items/<id>/rule-approval: the owner's post answers 200, anyone else's 403.
 // - The approval is an event of kind "rule_change_approved" whose actor is human, its actor_id the approver's user id,
 //   at the time of the approval, and the item's move to Eligible is a transition whose event is "rule_change_approved".
 //   The rest of the readiness check runs on the next poll, so an approval here is the post, then one poll.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
-import { createAuth } from "../../src/http/auth.ts";
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
-import { dashboardRoutes } from "../../src/http/routes.ts";
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
-import { startServer } from "../../src/http/server.ts";
-import { ruleChangesHash } from "../../src/gate/rule-changes.ts";
+import { apiApp } from "../../src/api/main.ts";
 import type { Policy } from "../../src/policy/policy.ts";
-import { ruleChangesChecked, ruleChangesRead, type RuleChange } from "../../src/store/rule-changes.ts";
+import { ruleChangesRead, type RuleChange } from "../../src/store/rule-changes.ts";
+import { readItem, type Call, type ItemData } from "../../web/src/api.ts";
+import { submitRuleApproval } from "../../web/src/forms.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, underTestIssuer } from "../support/split-services.ts";
 import type { FactoryRepo } from "../../src/watcher/poller.ts";
 import { baseFiles, ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { ctx as itemCtx, type Item } from "./pbi-131.steps.ts";
@@ -80,9 +77,8 @@ type Ctx = {
   lead: string;
   fake?: ReturnType<typeof fakeBacklog>;
   host?: ReturnType<typeof fakeRepoHost>;
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
+  /** The orchestrator API the item page reads and approvals go to, and the time it takes as now. */
+  api?: ReturnType<typeof apiApp>;
   clock?: Date;
   roles: Map<string, Role>;
   page?: { status: number; html: string };
@@ -111,12 +107,8 @@ Before({ tags: "@pbi-395", ...long }, async function () {
 });
 
 After({ tags: "@pbi-395", ...long }, async function () {
-  // PBI 131's After only closes its own scenarios' server, and this feature opens its own.
-  const c = (this as { pbi395?: Ctx }).pbi395;
-  if (!c?.server) return;
-  await c.close?.();
-  c.server.closeAllConnections();
-  await new Promise<void>((resolve) => c.server!.close(() => resolve()));
+  // PBI 131's After only closes its own scenarios' server, and this feature builds its own API.
+  await (this as { pbi395?: Ctx }).pbi395?.api?.close();
 });
 
 function item(world: object): Item {
@@ -358,22 +350,13 @@ Given("the readiness check has checked item {string}", long, async function (ext
 // "<login>, a viewer, is signed in" and "<login>, a operator, is signed in" are PBI 105's step, which makes the user
 // with that role. "an operator" and "the owner" are this feature's.
 
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), these steps drive today's dashboard.
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
-
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), these steps drive today's dashboard.
-async function dashboard(world: object): Promise<Ctx> {
+function api(world: object): NonNullable<Ctx["api"]> {
   const c = ctx(world);
-  if (c.server) return c;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({
-    pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: (c.fake ?? fakeBacklog()).adapter, sourceId: item(world).sourceId,
+  c.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-395", readBlob: async () => null, env: {}, verify: testBearer,
     now: () => c.clock ?? new Date(),
   });
-  c.close = handler.close;
-  return c;
+  return c.api;
 }
 
 /**
@@ -393,39 +376,54 @@ function roleOf(c: Ctx, login: string): Role {
   return c.roles.get(login) ?? (login === OWNER ? "owner" : "viewer");
 }
 
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page is today's dashboard's.
+/** The item page as `login` opens it: the SPA's Run detail, drawn in UTC from what the API answers them. */
 async function openPage(world: object, login: string): Promise<void> {
-  const c = await dashboard(world);
+  const c = ctx(world);
   await user(login, roleOf(c, login));
-  const r = await fetch(`${c.origin}/items/${item(world).id}`, { headers: { ...headers(login), cookie: "tz=UTC" }, redirect: "manual" });
-  c.page = { status: r.status, html: await r.text() };
+  const r = await callApi(api(world).app, pool(), login, "GET", `/v1/items/${item(world).id}`);
+  c.page = { status: r.status, html: r.status === 200 ? await renderPage("item", r.json) : r.text };
 }
 
-// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the approval posts today's
-// dashboard's form.
-/** Posts the item page's approval form as `login`, at `at` when it names a time. */
-async function postApproval(world: object, login: string, at?: string): Promise<number> {
-  const c = await dashboard(world);
+/** Sends an approval of the item's rule changes to the API as `login`, with the hash of those the API shows them. */
+async function postApproval(world: object, login: string): Promise<number> {
+  const c = ctx(world);
   await user(login, roleOf(c, login));
-  c.clock = at ? new Date(at) : undefined;
-  // The form carries the hash of the rule changes the page shows, which are those the last readiness check stored.
-  const shown = ruleChangesHash((await ruleChangesChecked(pool(), item(world).id)) ?? []);
-  const r = await fetch(`${c.origin}/items/${item(world).id}/rule-approval`, {
-    method: "POST", redirect: "manual",
-    headers: { ...headers(login), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ ruleChangesHash: shown }).toString(),
-  });
-  await r.text();
+  const shown = await callApi(api(world).app, pool(), login, "GET", `/v1/items/${item(world).id}`);
+  const hash = (shown.json as ItemData | undefined)?.ruleChanges?.hash ?? "";
+  const r = await callApi(api(world).app, pool(), login, "POST", `/v1/items/${item(world).id}/rule-approval`, { ruleChangesHash: hash });
   c.approval = { status: r.status };
   return r.status;
 }
 
-/** The approval, then the next poll, which runs the rest of the readiness check. */
+/** The SPA's call as `login` makes it: each /bff/v1 path goes to the API's /v1 path with their bearer token, as the BFF forwards it. */
+async function callAs(world: object, login: string): Promise<Call> {
+  const app = api(world).app;
+  await underTestIssuer(pool(), login);
+  return async (path, init) => {
+    assert.match(path, /^\/bff\/v1\//, `the SPA calls ${path}, which the BFF doesn't forward`);
+    const headers = new Headers(init?.headers);
+    headers.set("authorization", `Bearer ${encodeURIComponent(login)}`);
+    const r = await app.request(path.slice("/bff".length), { ...init, headers });
+    if (init?.method === "POST") ctx(world).approval = { status: r.status };
+    return r;
+  };
+}
+
+/**
+ * The approval on the item page, at `at` when it names a time, then the next poll, which runs the rest of the readiness
+ * check. `login` opens the page and presses "Approve rule change", which the SPA sends through its Rule approval form.
+ */
 async function approve(world: object, login: string, at?: string): Promise<number> {
   await markComments(world);
-  const status = await postApproval(world, login, at);
+  const c = ctx(world);
+  c.clock = at ? new Date(at) : undefined;
+  await openPage(world, login);
+  assert.ok(control(world, "Approve rule change"), `${login}'s item page shows no "Approve rule change" control: ${text(html(world)).slice(0, 600)}`);
+  const call = await callAs(world, login);
+  await submitRuleApproval(call, await readItem(call, item(world).id), "Approve rule change", "");
   await poll(pollCtx(world));
-  return status;
+  assert.ok(c.approval, "the Rule approval form sent nothing");
+  return c.approval.status;
 }
 
 /** An item checked with a rules section that changes `section` and a judge that finds it does, as waiting leaves it. */
@@ -455,7 +453,7 @@ Given("{string}, the owner, approved item {string}'s change to spec section {str
 Given("the owner approved item {string}'s change to spec section {string} and the factory holds it in state {string}", long, async function (ext: string, section: string, state: string) {
   assert.equal(state, "Queued", "an approved item that passes goes on to Queued");
   await waiting(this, ext, section);
-  assert.equal(await approve(this, OWNER), 303, "the item page didn't accept the owner's approval");
+  assert.equal(await approve(this, OWNER), 200, "the API didn't accept the owner's approval");
   assert.equal(await stateOf(this, ext), state, `the approved item isn't in ${state} before the edit`);
 });
 
@@ -830,7 +828,7 @@ Then("the item page shows the {string} control", function (name: string) {
   const page = html(this);
   assert.ok(control(this, name), `the item page shows no "${name}" control: ${text(page).slice(0, 600)}`);
   const form = [...page.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)].find((m) => text(m[2]).includes(name));
-  assert.ok(form && form[1].includes(`/items/${item(this).id}/rule-approval`), `the "${name}" control doesn't post to /items/${item(this).id}/rule-approval`);
+  assert.ok(form && /\baria-label="Rule approval"/.test(form[1]), `the "${name}" control isn't in the Rule approval form, which the SPA sends to /bff/v1/items/${item(this).id}/rule-approval`);
 });
 
 Then("the owner sees the {string} control on item {string}'s item page", long, async function (name: string, ext: string) {

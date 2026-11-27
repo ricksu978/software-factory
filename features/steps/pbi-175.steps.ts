@@ -1,49 +1,48 @@
-// Step definitions for features/pbi-175-configuration-page.feature. The dashboard runs as the real node:http server on
-// a free port, on PBI 4's shared test database, and people sign in with the headers Container Apps adds, as PBI 19's
-// and PBI 105's steps do. "The factory started with" builds the env the dashboard is handed as DashboardDeps.env, so
-// an env-backed setting's value is the one the control plane read at start. Runtime settings are the one wip_policy
-// row, set and read with plain SQL; only the page and its change requests go through src.
+// Step definitions for features/pbi-175-configuration-page.feature. The settings are read and changed through the
+// orchestrator API, src/api/main.ts's apiApp, built in-process on PBI 4's shared test database with
+// features/support/split-services.ts and called as the person a step names. What a person sees is the SPA's own
+// Configuration page, web/src/pages/Configuration.tsx, rendered from what the API answered, as the browser renders it
+// (PBI 283). "The factory started with" builds the env the API is handed as ApiDeps.env, so an env-backed setting's
+// value is the one the API read at start. Runtime settings are the one wip_policy row, set and read with plain SQL;
+// only the page and its change requests go through src.
 //
 // The page's contract these steps read:
-// - The Configuration page is GET /configuration, and Floor links to it with an <a> whose text is "Configuration".
-//   Its <h1> is "Configuration".
+// - The Configuration page is the SPA's /configuration, drawn from GET /v1/configuration, and Floor links to it with an
+//   <a> whose text is "Configuration". Its <h1> is "Configuration".
 // - Runtime settings sit under <h2>Runtime settings</h2>, env-backed ones under <h2>Env-backed settings</h2>; each
 //   section runs to the next <h2>. A setting is one <tr>: its first <td> or <th> holds its name ("review capacity",
 //   case aside, or the env name such as "GITHUB_APP_ID"). Its value is the text of another cell, or the value of an
 //   <input> in the row. A setting with no value shows "not set". A row marked as needing a restart says "restart".
-// - A change is POST /configuration, a form with `setting` set to the key below (an env-backed setting's key is its
-//   env name) and `value` set to the new value, empty to clear it. A change that's taken answers 303 to the page or
-//   200 with it, and the page then says "<setting> changed"; one that breaks a rule answers 4xx with the reason.
-// - The activity log (GET /activity) shows a change as one <tr> that names who made it, the setting, and the old and
-//   new values.
+// - A change is POST /v1/configuration, a JSON body with `setting` set to the key below (an env-backed setting's key is
+//   its env name) and `value` set to the new value, empty to clear it. A change that's taken answers 200, and the page,
+//   read again, then says "<setting> changed"; one that breaks a rule answers 4xx with the reason, which the page says.
+// - The activity log (GET /v1/activity, drawn by the SPA's Activity page) shows a change as one <tr> that names who
+//   made it, the setting, and the old and new values.
 import { After, Before, BeforeStep, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { apiApp } from "../../src/api/main.ts";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { NO_ACCESS_TEXT } from "../../web/src/shell.ts";
+import { callApi, renderNoAccess, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, type Page } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as schedulerCtx, newItem, tick } from "./pbi-17.steps.ts";
-import { recordResponse } from "./pbi-19.steps.ts";
+import { browserOf, ctx as pbi19, openSpa, recordResponse } from "./pbi-19.steps.ts";
 
 type Ctx = {
   env: Record<string, string | undefined>;
-  server?: Server;
+  /** The orchestrator API, built on first use with the env the scenario says the factory started with. */
+  api$?: ReturnType<typeof apiApp>;
+  /** Ends the API's event feed. Other features' hooks call it too, so it ends it once. */
   close?: () => Promise<void>;
-  origin?: string;
   sourceId?: string;
   status?: number;
   page?: string;
-  /** The status of the last change sent to the page, before any redirect was followed. */
+  /** The status of the last change sent to the page. */
   posted?: number;
   /** The type of the step running now, so a step that reads the same as a Given and a Then knows which it is. */
   stepType?: string;
   /** Who the Background signed in to the dashboard, the person whose Floor the link steps read. */
   signedIn?: string;
-  /** Floor as this file's own dashboard served it to them, read by the link steps. */
-  floor?: string;
 };
 
 export function ctx(world: object): Ctx {
@@ -76,7 +75,6 @@ function runtime(name: string) {
 const keyOf = (name: string) => RUNTIME[name.trim().toLowerCase()]?.key ?? name.trim();
 
 const pool = () => need().pool;
-export const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 export const decode = (html: string) => html.replace(/&#39;/g, "'").replace(/&#x27;/gi, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 export const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
 const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
@@ -99,34 +97,30 @@ Before({ tags: "((@pbi-175 or @pbi-176 or @pbi-178) and @db) or @pbi-319", ...lo
 });
 
 After({ tags: "@pbi-175 or @pbi-176 or @pbi-178 or @pbi-319", ...long }, async function () {
-  const c = ctx(this);
-  await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
-  // PBI 19's "the factory's allowlist holds only" starts its own dashboard, which its After closes only for @pbi-19.
-  const other = (this as { pbi19?: { server?: Server } }).pbi19?.server;
-  if (other) {
-    other.closeAllConnections();
-    await new Promise<void>((resolve) => other.close(() => resolve()));
-  }
+  await ctx(this).close?.();
 });
 
-/** The dashboard, started on first use with the env the scenario says the factory started with. */
-export async function dashboard(c: Ctx): Promise<void> {
-  if (c.server) return;
+/**
+ * The orchestrator API and a fresh backlog source, made on first use, with the env the scenario says the factory
+ * started with. Other features' steps call it for the source their items go in.
+ */
+export async function dashboard(c: Ctx): Promise<ReturnType<typeof apiApp>> {
   c.sourceId ??= (await pool().query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-175:' || gen_random_uuid()) returning id")).rows[0].id;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({
-    pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId: c.sourceId, env: { ...c.env },
+  if (c.api$) return c.api$;
+  const api = apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-175", readBlob: async () => null, env: { ...c.env }, verify: testBearer,
   });
-  c.close = handler.close;
+  c.api$ = api;
+  c.close = async () => {
+    c.close = undefined;
+    if (c.api$ === api) c.api$ = undefined;
+    await api.close();
+  };
+  return api;
 }
 
 export async function user(login: string, role: string): Promise<void> {
+  // Keyed by a provider as the steps that share these users key them. callApi puts them under the test issuer.
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2)
      on conflict (provider, subject) do update set role = excluded.role`,
@@ -134,36 +128,60 @@ export async function user(login: string, role: string): Promise<void> {
   );
 }
 
+/** The SPA's page at `path`, a page's address as today's dashboard or the SPA names it, and the API route it reads. */
+function pageAt(path: string): { page: Page; route: string } {
+  const p = path.split("?")[0];
+  const fixed: Record<string, { page: Page; route: string }> = {
+    "/": { page: "floor", route: "/v1/floor" },
+    "/configuration": { page: "configuration", route: "/v1/configuration" },
+    "/activity": { page: "activity", route: "/v1/activity" },
+    "/phase0": { page: "phase0", route: "/v1/phase0" },
+  };
+  if (fixed[p]) return fixed[p];
+  const item = /^\/(?:items|runs)\/([^/]+)$/.exec(p);
+  assert.ok(item, `no SPA page is at ${path}`);
+  return { page: "item", route: `/v1/items/${item[1]}` };
+}
+
+/**
+ * What the SPA shows for a read the API answered: the page, the no-access page on a 403, or the API's own answer. The
+ * empty comments React puts between adjacent text, which a browser never shows, are left out, so "#<!-- -->482" reads
+ * "#482" as it does on screen.
+ */
+async function shown(page: Page, r: { status: number; text: string; json?: unknown }, o: { message?: string | null; notice?: string | null } = {}): Promise<string> {
+  if (r.status === 200) return (await renderPage(page, r.json, { zone: "UTC", ...o })).replace(/<!-- -->/g, "");
+  if (r.status === 403) return renderNoAccess(NO_ACCESS_TEXT);
+  return r.text;
+}
+
+/** Opens the SPA's page at `path` as `login`, reading what it shows from the API. */
 export async function get(world: object, path: string, login: string): Promise<void> {
   const c = ctx(world);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}${path}`, { headers: headers(login), redirect: "manual" });
+  const { page, route } = pageAt(path);
+  const r = await callApi((await dashboard(c)).app, pool(), login, "GET", route);
   c.status = r.status;
-  c.page = await r.text();
+  c.page = await shown(page, r);
   recordResponse(world, c.status, c.page);
 }
 
 /**
- * Sends a change to the page as `login`, from the dashboard's own origin, and follows a redirect back to the page.
- * `extra` adds form fields, such as PBI 176's `reason`.
+ * Sends a change to the Configuration page as `login`, as its form does, then reads the page again as the SPA draws
+ * it: with the factory's word on the saved change, or with the reason it turned the change down. `extra` adds fields to
+ * the change, such as PBI 176's `reason`.
  */
 export async function change(world: object, login: string, setting: string, value: string, extra: Record<string, string> = {}): Promise<void> {
   const c = ctx(world);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/configuration`, {
-    method: "POST",
-    headers: { ...headers(login), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ setting: keyOf(setting), value, ...extra }).toString(),
-    redirect: "manual",
-  });
+  const app = (await dashboard(c)).app;
+  const r = await callApi(app, pool(), login, "POST", "/v1/configuration", { setting: keyOf(setting), value, ...extra });
   c.posted = r.status;
-  c.status = r.status;
-  c.page = await r.text();
-  const location = r.headers.get("location");
-  if (r.status >= 300 && r.status < 400 && location) {
-    const next = await fetch(new URL(location, c.origin), { headers: headers(login), redirect: "manual" });
-    c.status = next.status;
-    c.page = await next.text();
+  const said = (r.json as { notice?: string; error?: string } | undefined) ?? {};
+  const again = await callApi(app, pool(), login, "GET", "/v1/configuration");
+  if (r.status === 200) {
+    c.status = again.status;
+    c.page = await shown("configuration", again, { notice: said.notice ?? null });
+  } else {
+    c.status = r.status;
+    c.page = again.status === 200 ? await shown("configuration", again, { message: said.error ?? r.text }) : r.text;
   }
   recordResponse(world, c.status, c.page);
 }
@@ -252,13 +270,13 @@ Given("{string} is a viewer", long, async function (login: string) {
 
 Given("the factory started with {word} set to {string}", function (name: string, value: string) {
   const c = ctx(this);
-  assert.ok(!c.server, "the dashboard already started");
+  assert.ok(!c.api$, "the API already started");
   c.env[name] = value;
 });
 
 Given("the factory started without {word}", function (name: string) {
   const c = ctx(this);
-  assert.ok(!c.server, "the dashboard already started");
+  assert.ok(!c.api$, "the API already started");
   delete c.env[name];
 });
 
@@ -316,34 +334,33 @@ When(/^the factory's WIP policy changes (.+) to (.+)$/, long, async function (na
 
 // ---- opening the page ----
 
-// PBI 19's "{string} opens Floor" now serves the SPA's Floor, which has no Configuration link since the SPA has no
-// Configuration page yet.
-// Until the SPA has a Configuration page linked from Floor (PBI 283's blocker), the link steps read Floor from this file's own dashboard.
-async function floorPage(world: object): Promise<string> {
-  const c = ctx(world);
-  if (c.floor !== undefined) return c.floor;
-  const f = (world as { pbi19?: { status?: number } }).pbi19;
-  assert.ok(f?.status !== undefined, "Floor didn't load");
-  assert.equal(f.status, 200, `Floor answered ${f.status}`);
-  assert.ok(c.signedIn, "no one is signed in to the dashboard");
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/`, { headers: headers(c.signedIn), redirect: "manual" });
-  const page = await r.text();
-  assert.equal(r.status, 200, `Floor answered ${r.status}: ${page.slice(0, 300)}`);
-  c.floor = page;
-  return page;
+// PBI 19's "{string} opens Floor" opens the SPA through the BFF, as the person signs in, and its page is the SPA's
+// Floor drawn from GET /v1/floor. The link steps read that Floor, and follow a link there through the same BFF.
+function floorPage(world: object): string {
+  const f = pbi19(world);
+  assert.ok(f.status !== undefined && f.page !== undefined, "Floor didn't load");
+  assert.equal(f.status, 200, `Floor answered ${f.status}: ${f.page.slice(0, 300)}`);
+  return f.page;
 }
 
-Then("Floor has a link named {string}", long, async function (name: string) {
-  const links = [...(await floorPage(this)).matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => text(m[1]));
+Then("Floor has a link named {string}", function (name: string) {
+  const links = [...floorPage(this).matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => text(m[1]));
   assert.ok(links.includes(name), `Floor has no link named "${name}": ${links.join(", ")}`);
 });
 
 When("{string} follows the {string} link", long, async function (login: string, name: string) {
-  const floor = await floorPage(this);
+  const floor = floorPage(this);
   const link = [...floor.matchAll(/<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi)].find((m) => text(m[2]) === name);
   // With no such link, the page that comes back is the one without it, and the heading's Then fails on that.
-  if (link) await get(this, decode(link[1]), login);
+  if (!link) return;
+  const dash = pbi19(this).dash;
+  assert.ok(dash, "Floor wasn't opened through the BFF");
+  const { page, route } = pageAt(decode(link[1]));
+  const opened = await openSpa(dash, await browserOf(dash, login), page, `/bff${route}`);
+  const c = ctx(this);
+  c.status = opened.status;
+  c.page = opened.page;
+  recordResponse(this, c.status, c.page);
 });
 
 Then("the page's heading is {string}", function (heading: string) {
@@ -363,9 +380,10 @@ When("{string} signs in and opens the Configuration page", long, async function 
 Then("the page shows no setting", long, async function () {
   const c = ctx(this);
   const refused = c.page ?? "";
-  // "No setting" means something only once the page shows settings to someone allowed to see them.
-  const allowed = (await pool().query<{ subject: string }>(`select subject from "user" where provider = 'microsoft' order by subject limit 1`)).rows[0]?.subject;
-  assert.ok(allowed, "no one is allowlisted to compare with");
+  // "No setting" means something only once the page shows settings to someone allowed to see them: a viewer added here,
+  // since the allowlist's own people may sign in at another issuer than the test one.
+  const allowed = "pbi-175-allowed";
+  await pool().query(`insert into "user" (issuer, subject, role) values ($1, $2, 'viewer') on conflict do nothing`, [TEST_ISSUER, allowed]);
   await get(this, "/configuration", allowed);
   const shown = [...rows(section(okPage(c), SECTIONS.runtime)), ...rows(section(okPage(c), SECTIONS.env))].map((r) => r.name);
   assert.ok(shown.length > 0, "the Configuration page shows no setting even to an allowlisted user");
@@ -491,12 +509,15 @@ Then("the queued item is in progress", long, async function () {
 
 // ---- the activity log ----
 
+/** The SPA's Activity page as `login` opens it, drawn from GET /v1/activity. */
+export async function activityPage(world: object, login: string): Promise<string> {
+  const r = await callApi((await dashboard(ctx(world))).app, pool(), login, "GET", "/v1/activity");
+  assert.equal(r.status, 200, `the activity log answered ${r.status} for ${login}: ${r.text.slice(0, 300)}`);
+  return renderPage("activity", r.json, { zone: "UTC" });
+}
+
 export async function activityRows(world: object, login: string): Promise<string[]> {
-  const c = ctx(world);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/activity`, { headers: headers(login), redirect: "manual" });
-  const page = await r.text();
-  assert.equal(r.status, 200, `the activity log answered ${r.status}`);
+  const page = await activityPage(world, login);
   return [...page.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((m) => m[1]).filter((r) => /<td\b/i.test(r)).map(text);
 }
 

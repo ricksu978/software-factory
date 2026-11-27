@@ -15,6 +15,11 @@ describe("the API at startup", () => {
     const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", PORT: "web" };
     await assert.rejects(main(env), /PORT web isn't a port/);
   });
+
+  test("refuses to start without PORT in an environment that names the cell API's address", async () => {
+    const env = { FACTORY_DB_URI: "postgres://x@127.0.0.1:1/x", FACTORY_BLOB: "b", OIDC_ISSUER: "http://i", API_AUDIENCE: "a", GITHUB_WEBHOOK_SECRET: "s", CELL_CONTROL_URL: "http://localhost:7401" };
+    await assert.rejects(main(env), /PORT is not set, and the API doesn't take its port from CELL_CONTROL_URL/);
+  });
 });
 
 describe("the API's raw-path guard", () => {
@@ -60,7 +65,7 @@ describe("the API", dbTest, () => {
     for (const [name, role] of [["vera", "viewer"], ["otto", "operator"], ["olga", "owner"]]) {
       await db.pool.query(`insert into "user" (issuer, subject, role, github_login) values ($1, $2, $3, $2)`, [issuer, name, role]);
     }
-    api = await startApi({ pool: db.pool, issuer, audience: "factory-api", webhookSecret: "s", readBlob: async () => null, env: {} }, 0);
+    api = await startApi({ pool: db.pool, issuer, audience: "factory-api", webhookSecret: "s", readBlob: async () => null, env: { GITHUB_APP_ID: "123456", GITHUB_APP_KEY: "app-key-canary" } }, 0);
     port = (api.server.address() as AddressInfo).port;
     base = `http://127.0.0.1:${port}`;
   });
@@ -159,6 +164,13 @@ describe("the API", dbTest, () => {
       const signing = await (await as("vera", `/v1/items/${itemId}`)).json();
       assert.deepEqual(signing.pending.map((f: { text: string }) => f.text), ["Feature: Search\n  @ac-1\n  Scenario: By title\n"]);
       assert.deepEqual(signing.criteria, [{ criterion: "Search finds a title", scenarios: [{ name: "By title", regression: false }] }]);
+      assert.equal(signing.scope, null, "a snapshot with no body shows no Scope");
+      // PBI 283: the snapshot's body is the Scope, and a locked file the snapshot lacks says so under its path.
+      await db.pool.query("update run set issue_body = 'Find a book by its title.', locked_files = '{features/pbi-1.feature,features/gone.feature}' where id = $1", [run]);
+      const scoped = await (await as("vera", `/v1/items/${itemId}`)).json();
+      assert.equal(scoped.scope, "Find a book by its title.");
+      assert.deepEqual(scoped.pending.map((f: { path: string; text: string }) => [f.path, f.text.slice(0, 9)]),
+        [["features/gone.feature", "(missing "], ["features/pbi-1.feature", "Feature: "]]);
     } finally {
       await db.pool.query("update item set state = 'InProgress' where id = $1", [itemId]);
       await db.pool.query("delete from stage_run where run_id = $1", [run]);
@@ -277,6 +289,31 @@ describe("the API", dbTest, () => {
     assert.equal((await post({ kind: "maybe" })).status, 400);
   });
 
+  test("only the owner approves a rule change, and only on an item that waits for it (PBI 395)", async () => {
+    const post = (sub: string, id: string, b: unknown = { ruleChangesHash: "h" }) =>
+      as(sub, `/v1/items/${id}/rule-approval`, { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post("vera", itemId)).status, 403);
+    assert.equal((await post("otto", itemId)).status, 403);
+    assert.equal((await post("olga", "00000000-0000-4000-8000-000000000999")).status, 404);
+    assert.equal((await post("olga", "nope")).status, 404);
+    assert.equal((await post("olga", itemId)).status, 409, "an item whose readiness check read no rule change doesn't wait for approval");
+    const detail = await (await as("olga", `/v1/items/${itemId}`)).json();
+    assert.equal(detail.ruleChanges, null);
+  });
+
+  test("only a product owner decides on a feature change request, and only on an item that waits on one (PBI 365)", async () => {
+    await db.pool.query(`insert into "user" (issuer, subject, role, github_login, product_owner) values ($1, 'pia', 'viewer', 'pia', true)`, [issuer]);
+    const post = (sub: string, id: string, b: unknown) => as(sub, `/v1/items/${id}/feature-change`, { method: "POST", body: JSON.stringify(b) });
+    assert.equal((await post("pia", itemId, { decision: "maybe" })).status, 400);
+    assert.equal((await post("olga", itemId, { decision: "approve" })).status, 403, "an owner who isn't a product owner can't decide");
+    assert.equal((await post("pia", "00000000-0000-4000-8000-000000000999", { decision: "approve" })).status, 404);
+    assert.equal((await post("pia", itemId, { decision: "changes", note: "no" })).status, 409, "an InProgress item waits on no request");
+    const owner = await (await as("olga", `/v1/items/${itemId}`)).json();
+    const po = await (await as("pia", `/v1/items/${itemId}`)).json();
+    assert.deepEqual([owner.canDecideFeatureChange, po.canDecideFeatureChange], [false, true]);
+    assert.equal(po.featureChangeDecision, null);
+  });
+
   test("an owner can't add a user without an http issuer, or with a login someone has", async () => {
     const post = (b: unknown) => as("olga", "/v1/users", { method: "POST", body: JSON.stringify(b) });
     assert.equal((await post({ issuer: "ftp://x", subject: "n", role: "viewer" })).status, 400);
@@ -289,5 +326,46 @@ describe("the API", dbTest, () => {
     assert.equal((await post("viewer")).status, 201);
     assert.equal((await post("operator")).status, 201);
     assert.deepEqual((await db.pool.query(`select role from "user" where subject = 'nick'`)).rows, [{ role: "operator" }]);
+  });
+
+  test("the configuration lists the runtime and env-backed settings, and never a secret's value (PBI 175)", async () => {
+    const r = await as("vera", "/v1/configuration");
+    assert.equal(r.status, 200);
+    const b = await r.json();
+    assert.equal(b.canOperate, false);
+    const capacity = b.runtime.find((s: { key: string }) => s.key === "review_capacity");
+    assert.equal(capacity.label, "review capacity");
+    assert.equal(capacity.editable, true);
+    assert.equal(b.runtime.find((s: { key: string }) => s.key === "mode").editable, false);
+    assert.deepEqual(b.env.find((s: { key: string }) => s.key === "GITHUB_APP_ID"), { key: "GITHUB_APP_ID", label: "GITHUB_APP_ID", value: "123456" });
+    assert.equal(b.env.find((s: { key: string }) => s.key === "FACTORY_KILL").value, null);
+    assert.doesNotMatch(JSON.stringify(b), /app-key-canary|GITHUB_APP_KEY/);
+    assert.equal((await (await as("otto", "/v1/configuration")).json()).canOperate, true);
+  });
+
+  test("an operator's change to a runtime setting is stored and logged, and one that breaks a rule is 400 with the rule (PBI 175)", async () => {
+    const post = (sub: string, b: unknown) => as(sub, "/v1/configuration", { method: "POST", body: JSON.stringify(b) });
+    const before = (await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity;
+    try {
+      const refused = await post("vera", { setting: "review_capacity", value: "9", reason: "r" });
+      assert.equal(refused.status, 403);
+      assert.equal((await refused.json()).error, "Only an operator can change the factory's settings.");
+      const broken = await post("otto", { setting: "review_capacity", value: "0", reason: "r" });
+      assert.equal(broken.status, 400);
+      assert.equal((await broken.json()).error, "Review capacity must be a whole number of at least 1.");
+      assert.equal((await post("otto", { setting: "review_capacity", value: "7" })).status, 400, "a change needs a reason");
+      assert.equal((await post("otto", { setting: "GITHUB_APP_ID", value: "1", reason: "r" })).status, 400, "an env-backed setting can't change");
+      const taken = await post("otto", { setting: "review_capacity", value: "7", reason: "more reviewers" });
+      assert.equal(taken.status, 200);
+      assert.deepEqual(await taken.json(), { ok: true, changed: "review_capacity", notice: "Setting saved: review capacity changed." });
+      assert.equal((await db.pool.query("select review_capacity from wip_policy")).rows[0].review_capacity, 7);
+      const logged = (await db.pool.query("select actor_id, payload from event where kind = 'setting' order by at desc limit 1")).rows[0];
+      const otto = (await db.pool.query(`select id from "user" where subject = 'otto'`)).rows[0].id;
+      assert.equal(logged.actor_id, otto);
+      assert.deepEqual(logged.payload, { setting: "review capacity", from: String(before), to: "7", reason: "more reviewers" });
+    } finally {
+      await db.pool.query("update wip_policy set review_capacity = $1", [before]);
+      await db.pool.query("delete from event where kind = 'setting'");
+    }
   });
 });

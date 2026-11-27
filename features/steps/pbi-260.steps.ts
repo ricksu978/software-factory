@@ -37,7 +37,7 @@ import { REQUEUED_FOR_ADDRESS, REQUEUED_FOR_GREEN } from "../../src/watcher/poll
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, REPO, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { runTheCell, type Ctx as CellCtx } from "./pbi-18.steps.ts";
-import { ctx as dashCtx, get, text } from "./pbi-175.steps.ts";
+import { ctx as dashCtx, escapeRe, get, text } from "./pbi-175.steps.ts";
 import { db as baseFailDb, prepare } from "./pbi-215.steps.ts";
 
 /** The kind of the event that logs a re-queue after CI passed on the base. */
@@ -505,9 +505,9 @@ Then("{string} on the dashboard doesn't list item {int}", function (section: str
   const c = dashCtx(this);
   assert.equal(c.status, 200, `the dashboard answered ${c.status}: ${String(c.page).slice(0, 300)}`);
   const page = c.page!;
-  const start = page.indexOf(`<h2>${section}</h2>`);
+  const start = page.search(new RegExp(`<h2\\b[^>]*>${escapeRe(section)}</h2>`));
   assert.ok(start >= 0, `the dashboard has no "${section}" section`);
-  const end = page.indexOf("<h2>", start + 1);
+  const end = page.indexOf("<h2", start + 1);
   const part = text(page.slice(start, end < 0 ? undefined : end));
   assert.ok(!namesItem(part, n), `"${section}" lists item ${n}: ${part}`);
 });

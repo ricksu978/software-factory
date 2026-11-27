@@ -38,12 +38,12 @@ describe("snapshot backfill (PBI 224)", dbTest, () => {
 
   const backfill = () => backfillSnapshots({ pool: db.pool, repoHost: host, backlogFor: () => board.adapter });
   const stored = async (runId: string) => ({
-    criteria: (await db.pool.query("select acceptance_criteria from run where id = $1", [runId])).rows[0].acceptance_criteria,
+    ...(await db.pool.query("select acceptance_criteria as criteria, issue_body as body from run where id = $1", [runId])).rows[0],
     files: (await db.pool.query("select sha, path, text from run_file where run_id = $1 order by path", [runId])).rows,
   });
 
   test("fills a run with a scenarios sha and no files, once, and leaves a run with no sha", async () => {
-    await board.seed({ externalId: "1", acceptanceCriteria: ["pays", "declines"] });
+    await board.seed({ externalId: "1", body: "Take card payments.", acceptanceCriteria: ["pays", "declines"] });
     await board.seed({ externalId: "2" });
     host.files.set(`${repo}@abc:features/b.feature`, "B");
     host.files.set(`${repo}@abc:features/a.feature`, "A");
@@ -53,9 +53,10 @@ describe("snapshot backfill (PBI 224)", dbTest, () => {
     assert.deepEqual(await backfill(), { filled: [filled], unfilled: [] });
     assert.deepEqual(await stored(filled), {
       criteria: ["pays", "declines"],
+      body: "Take card payments.",
       files: [{ sha: "abc", path: "features/a.feature", text: "A" }, { sha: "abc", path: "features/b.feature", text: "B" }],
     });
-    assert.deepEqual(await stored(none), { criteria: null, files: [] });
+    assert.deepEqual(await stored(none), { criteria: null, body: null, files: [] });
 
     host.files.set(`${repo}@abc:features/a.feature`, "A, edited");
     assert.deepEqual(await backfill(), { filled: [], unfilled: [] });
@@ -74,7 +75,7 @@ describe("snapshot backfill (PBI 224)", dbTest, () => {
     assert.deepEqual(report.filled, [good]);
     assert.deepEqual(report.unfilled.map((u) => u.runId).sort(), [missingFile, noItem].sort());
     assert.match(report.unfilled.find((u) => u.runId === missingFile)!.reason, /holds no features\/gone\.feature at abc/);
-    assert.deepEqual(await stored(missingFile), { criteria: null, files: [] });
-    assert.deepEqual(await stored(noItem), { criteria: null, files: [] });
+    assert.deepEqual(await stored(missingFile), { criteria: null, body: null, files: [] });
+    assert.deepEqual(await stored(noItem), { criteria: null, body: null, files: [] });
   });
 });

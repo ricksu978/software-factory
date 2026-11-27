@@ -20,12 +20,14 @@
 //   it in SQL, read the cell API's GET context as a new cell would, then put the item back as it was. That context's
 //   nextStage is the stage that asked, and a /changes note reaches that stage as one of the findings in its `retry`:
 //   `retry.stageId` is the stage, and one finding holds the note, whole.
-// - On the item page, a product owner gets the decision as a form next to the Feature change request section. Its
-//   buttons read "Approve the change" and "Ask for changes", and it has a <textarea> for the note. Pressing a button
-//   posts that form with its fields, the note in the textarea and the button's own name and value. The API and the
-//   SPA don't offer that form yet, so until they do the item page and its form are today's dashboard's. A decision sent
-//   from any other login goes to the orchestrator API's POST /v1/items/<id>/decisions, built in-process through
-//   features/support/split-services.ts, with `kind` "approve" or "changes" and the note as `text`, and gets 403.
+// - The item page is the SPA's Run detail, rendered from what the orchestrator API's GET /v1/items/<id> answers the
+//   signed-in login, with the API built in-process through features/support/split-services.ts and these steps' repo
+//   host. A product owner gets the decision as a form next to the Feature change request section. Its buttons read
+//   "Approve the change" and "Ask for changes", and it has a <textarea> named "note". Pressing a button sends that
+//   form as the SPA does, through web/src/forms.ts: the form's label names its handler, which posts the button's
+//   decision and the note to /bff/v1/items/<id>/feature-change, which goes to the API's /v1 path as the BFF forwards
+//   it. A decision sent from any other login goes to the API's POST /v1/items/<id>/feature-change, with `decision`
+//   "approve" or "changes" and the note as `note`, and gets 403.
 // - "The cell runs the green stage again" runs PBI 18's engine from the context GET context gave, in a checkout reset
 //   to the origin's branch, with PBI 152's scripted agent.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
@@ -41,17 +43,15 @@ import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { applyComment } from "../../src/control/decisions.ts";
 import type { FeatureChangeFile } from "../../src/core/feature-change.ts";
 import { apiApp } from "../../src/api/main.ts";
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page steps drive today's dashboard.
-import { createAuth } from "../../src/http/auth.ts";
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page steps drive today's dashboard.
-import { dashboardRoutes } from "../../src/http/routes.ts";
 import { withTx } from "../../src/store/db.ts";
 import { requestFeatureChange } from "../../src/store/feature-change.ts";
 import { runTheCell, setUp, type Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { at, commit, ensure, featureText, mine as pbi152, pushedHead, ranClean } from "./pbi-152.steps.ts";
 import { text } from "./pbi-189.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
-import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
+import { readItem, type Call, type FormName, type ItemData, type Submitted } from "../../web/src/api.ts";
+import { submitFeatureChange } from "../../web/src/forms.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, underTestIssuer } from "../support/split-services.ts";
 
 const BRANCH = "factory/pbi-482-r1";
 const REPO = "acme/app";
@@ -87,8 +87,6 @@ type Ctx = {
   /** The button a press looked for and didn't find, so the Thens can say so. */
   missing: string | null;
   cellApi?: { server: Server; origin: string };
-  /** Today's dashboard, for the item page steps the API and the SPA don't offer yet. */
-  dashboard?: { server: Server; origin: string; close?: () => Promise<void> };
   /** What GET context gave the run's next claim, or why no claim could happen. */
   context?: Record<string, any> | { notResumed: string };
   ran: boolean;
@@ -121,8 +119,7 @@ After({ tags: "@pbi-365", ...long }, async function () {
   const x = (this as { pbi365?: Ctx }).pbi365;
   if (!x) return;
   await x.api?.close();
-  await x.dashboard?.close?.();
-  for (const s of [x.cellApi?.server, x.dashboard?.server]) {
+  for (const s of [x.cellApi?.server]) {
     if (!s) continue;
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
@@ -648,6 +645,7 @@ async function api(world: object): Promise<NonNullable<Ctx["api"]>> {
   const x = await built(world);
   x.api ??= apiApp({
     pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-365", readBlob: async () => null, env: {}, verify: testBearer,
+    repoHost: repoHost(world) as never,
   });
   return x.api;
 }
@@ -657,29 +655,11 @@ Given("{string} is signed in", long, async function (login: string) {
   mine(this).signedIn = login;
 });
 
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), these steps drive today's dashboard.
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
-
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), these steps drive today's dashboard.
-async function dashboard(world: object): Promise<NonNullable<Ctx["dashboard"]>> {
-  const x = await built(world);
-  if (x.dashboard) return x.dashboard;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  const server = await serve((req, res) => handler!(req, res));
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({
-    pool: pool(), auth: createAuth({ mode: "azure" }), origin, adapter: x.board.adapter, sourceId: x.sourceId, repoHost: repoHost(world) as never,
-  });
-  x.dashboard = { server, origin, close: handler.close };
-  return x.dashboard;
-}
-
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page is today's dashboard's.
+/** The item page as `login` opens it: the SPA's Run detail, drawn from what the API answers them. */
 export async function openPage(world: object, login: string): Promise<void> {
   const x = await built(world);
-  const d = await dashboard(world);
-  const r = await fetch(`${d.origin}/items/${x.itemId}`, { headers: { ...headers(login), cookie: "tz=UTC" }, redirect: "manual" });
-  x.page = { status: r.status, html: await r.text() };
+  const r = await callApi((await api(world)).app, pool(), login, "GET", `/v1/items/${x.itemId}`);
+  x.page = { status: r.status, html: r.status === 200 ? await renderPage("item", r.json) : r.text };
 }
 
 function page(world: object): string {
@@ -689,8 +669,8 @@ function page(world: object): string {
   return p.html;
 }
 
-type Button = { label: string; index: number; name: string | null; value: string | null };
-type Form = { action: string; html: string; index: number; buttons: Button[] };
+type Button = { label: string; index: number };
+type Form = { label: string | null; html: string; index: number; buttons: Button[] };
 
 const attr = (tag: string, name: string): string | null => {
   const m = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, "i").exec(tag);
@@ -698,13 +678,12 @@ const attr = (tag: string, name: string): string | null => {
 };
 
 function buttons(html: string, offset = 0): Button[] {
-  return [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/gi)]
-    .map((m) => ({ label: text(m[2]), index: offset + m.index!, name: attr(m[1], "name"), value: attr(m[1], "value") }));
+  return [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/gi)].map((m) => ({ label: text(m[2]), index: offset + m.index! }));
 }
 
 function forms(html: string): Form[] {
   return [...html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)]
-    .map((m) => ({ action: attr(m[1], "action") ?? "", html: m[2], index: m.index!, buttons: buttons(m[2], m.index!) }));
+    .map((m) => ({ label: attr(m[1], "aria-label"), html: m[2], index: m.index!, buttons: buttons(m[2], m.index!) }));
 }
 
 Then("the page shows the {string} button and the {string} button", function (a: string, b: string) {
@@ -753,31 +732,42 @@ Then("the page says {string} approved the feature change request", function (log
   assert.ok(said, `the page doesn't say "${login}" approved the feature change request: ${all.slice(0, 600)}`);
 });
 
-/** Sends a decision on item 482 to the API as `login`, as the SPA's decision forms send theirs. */
-async function decide(world: object, login: string, kind: "approve" | "changes", note: string): Promise<Answer> {
+/** Sends a decision on item 482 to the API as `login`, as the SPA's feature change form sends its own. */
+async function decide(world: object, login: string, decision: "approve" | "changes", note: string): Promise<Answer> {
   const x = await built(world);
-  const r = await callApi((await api(world)).app, pool(), login, "POST", `/v1/items/${x.itemId}/decisions`, { kind, text: note });
+  const r = await callApi((await api(world)).app, pool(), login, "POST", `/v1/items/${x.itemId}/feature-change`, { decision, note });
   const answer = { status: r.status, html: r.text };
   x.sent = answer;
   x.context = undefined;
   return answer;
 }
 
-// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), pressing a button posts today's
-// dashboard's form.
-async function post(world: object, login: string, action: string, fields: Record<string, string>): Promise<Answer> {
-  const d = await dashboard(world);
-  const r = await fetch(`${d.origin}${action}`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams(fields).toString(),
-    headers: { ...headers(login), origin: d.origin, cookie: "tz=UTC", "content-type": "application/x-www-form-urlencoded" },
-  });
-  const answer = { status: r.status, html: await r.text() };
-  mine(world).sent = answer;
-  mine(world).context = undefined;
-  return answer;
+/**
+ * The SPA's call as `login` makes it: each /bff/v1 path goes to the API's /v1 path with their bearer token, as the
+ * BFF forwards it. A POST's answer is kept as what was sent.
+ */
+async function callAs(world: object, login: string): Promise<Call> {
+  const app = (await api(world)).app;
+  await underTestIssuer(pool(), login);
+  return async (path, init) => {
+    assert.match(path, /^\/bff\/v1\//, `the SPA calls ${path}, which the BFF doesn't forward`);
+    const headers = new Headers(init?.headers);
+    headers.set("authorization", `Bearer ${encodeURIComponent(login)}`);
+    const r = await app.request(path.slice("/bff".length), { ...init, headers });
+    if (init?.method === "POST") {
+      mine(world).sent = { status: r.status, html: await r.clone().text() };
+      mine(world).context = undefined;
+    }
+    return r;
+  };
 }
 
-/** Presses the button on the page the login has open: posts its form, the note in the form's textarea. */
+/** What each of Run detail's forms that these steps press sends, by the form's label, as the SPA's App wires them. */
+const FORMS: Partial<Record<FormName, (call: Call, item: ItemData, button: string, value: string) => Promise<Submitted<ItemData>>>> = {
+  "Feature change": submitFeatureChange,
+};
+
+/** Presses the button on the page the login has open: the SPA sends its form, the note in the form's textarea. */
 async function press(world: object, login: string, label: string, note: string | null) {
   await openPage(world, login);
   const x = mine(world);
@@ -786,18 +776,10 @@ async function press(world: object, login: string, label: string, note: string |
     x.missing = label;
     return;
   }
-  const fields: Record<string, string> = {};
-  for (const m of f.html.matchAll(/<input\b([^>]*)>/gi)) {
-    const name = attr(m[1], "name");
-    if (name && (attr(m[1], "type") ?? "text").toLowerCase() === "hidden") fields[name] = attr(m[1], "value") ?? "";
-  }
-  for (const m of f.html.matchAll(/<textarea\b([^>]*)>/gi)) {
-    const name = attr(m[1], "name");
-    if (name) fields[name] = note ?? "";
-  }
-  const b = f.buttons.find((y) => y.label === label)!;
-  if (b.name) fields[b.name] = b.value ?? "";
-  await post(world, login, f.action, fields);
+  const send = f.label ? FORMS[f.label as FormName] : undefined;
+  assert.ok(send, `the form with the "${label}" button, labelled ${f.label ?? "nothing"}, isn't one these steps send`);
+  const call = await callAs(world, login);
+  await send(call, await readItem(call, x.itemId), label, note ?? "");
 }
 
 /**

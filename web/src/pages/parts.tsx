@@ -50,9 +50,9 @@ export function Standing({ k }: { k: ClaimKey | undefined }) {
 }
 
 /** A banner: the factory's state, or something that needs attention. Its whole text is what it says. */
-export function Banner({ children }: { children: ReactNode }) {
+export function Banner({ children, id }: { children: ReactNode; id?: string }) {
   return (
-    <Alert className="mb-3 border-amber-500/50">
+    <Alert id={id} className="mb-3 border-amber-500/50">
       <AlertDescription className="text-foreground">{children}</AlertDescription>
     </Alert>
   );
