@@ -8,7 +8,9 @@
 //
 // The control-plane scenarios run PBI 89's "control plane is running with a fake board" on a Postgres of their own,
 // which they end connections on, stop and start. Its pool is made with createPool, as the control plane's start
-// makes it. The scheduler's tick and the board poll run through main.ts's `attempt`, as `every` runs them.
+// makes it. The scheduler's tick and the board poll run through src/worker/main.ts's `attempt`, as `every` runs them.
+// The dashboard's reads go to the orchestrator API, the Floor's to /v1/floor and its live events to /v1/events, with a
+// bearer token PBI 89's test sign-in provider issues.
 import { After, AfterAll, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -27,7 +29,7 @@ import { pollOnce } from "../../src/watcher/poller.ts";
 import type { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { Server } from "node:http";
 import { long } from "./pbi-8.steps.ts";
-import { usePool } from "./pbi-89.steps.ts";
+import { headers, usePool } from "./pbi-89.steps.ts";
 
 const run = promisify(execFile);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -374,8 +376,6 @@ Then("the log says a database connection was lost", function () {
   assert.ok(lostLines(ctx(this)).length > 0, "nothing in the log says a database connection was lost");
 });
 
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
-
 Then("the dashboard's Floor still answers 200 with the factory's items", long, async function () {
   const d = p89(this);
   // Seeded beside the control plane's pool, so the Floor's own queries are the first it runs after the ends.
@@ -383,10 +383,11 @@ Then("the dashboard's Floor still answers 200 with the factory's items", long, a
     await a.query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer133', 'viewer133', 'viewer') on conflict do nothing`);
     await a.query("insert into item (source_id, external_id, title, state) values ($1, '133-floor', 'an item on the Floor', 'Queued') on conflict do nothing", [d.sourceId]);
   });
-  const r = await fetch(`${d.origin}/`, { headers: headers("viewer133") });
-  const html = await r.text();
-  assert.equal(r.status, 200, html.slice(0, 300));
-  assert.ok(html.includes("an item on the Floor"), "the Floor doesn't list the factory's item");
+  // The SPA's Floor reads the API's /v1/floor, as the viewer, with a token the test sign-in provider issued them.
+  const r = await fetch(`${d.origin}/v1/floor`, { headers: headers("viewer133") });
+  const body = await r.text();
+  assert.equal(r.status, 200, body.slice(0, 300));
+  assert.ok(body.includes("an item on the Floor"), "the Floor doesn't list the factory's item");
 });
 
 Then("the query ran on a connection Postgres opened after it ended the others", async function () {
@@ -509,12 +510,12 @@ async function viewer(world: object, login: string): Promise<void> {
   await control(ctx(world)).pool.query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict do nothing`, [login]);
 }
 
-/** Opens /events and keeps reading it into `text` until it ends. */
+/** Opens the API's /v1/events, which the SPA's Floor follows through the BFF, and keeps reading it into `text` until it ends. */
 async function openStream(world: object, login: string): Promise<Stream> {
   const abort = new AbortController();
   const s: Stream = { status: 0, text: "", done: false, abort };
   try {
-    const r = await fetch(`${p89(world).origin}/events`, { headers: headers(login), signal: abort.signal });
+    const r = await fetch(`${p89(world).origin}/v1/events`, { headers: headers(login), signal: abort.signal });
     s.status = r.status;
     if (!r.body) {
       s.done = true;

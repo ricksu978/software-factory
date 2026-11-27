@@ -1,16 +1,18 @@
 // Step definitions for features/pbi-300-prepare-restart-stops-nothing.feature. They build on PBI 17's scheduler steps,
 // PBI 140's restart steps and PBI 177's live WIP steps, on PBI 4's test database. One clock, PBI 140's, drives the
 // scheduler, the leases and the cell API, so "N minutes ago" means the same to each. A cell renews its lease through
-// the real cell API. "The control plane starts" runs src/main.ts's serveControl and "the worker starts" runs
-// src/worker/main.ts's startWorker, in process, each with PBI 156's fakes, and stops it again once it has started. The
-// worker stands by, because the step holds the worker lock, so it runs no tick of its own: the scenario's scheduler
-// tick is the one that starts the cells, on PBI 140's clock.
+// the real cell API. "The worker starts" runs src/worker/main.ts's startWorker in process, with PBI 156's fakes, and
+// stops it again once it has started. The combined control plane is retired (PBI 283), so "the control plane starts"
+// starts the services it split into, as `aspire run` restarts them: the orchestrator API from src/api/main.ts and the
+// cell API, through PBI 156's startServices, and the worker, then stops them again. Of those the worker is the one
+// that clears a prepared restart as it starts. The worker stands by, because the step holds the worker lock, so it
+// runs no tick of its own: the scenario's scheduler tick is the one that starts the cells, on PBI 140's clock.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { WORKER_LOCK_KEY } from "../../src/worker/main.ts";
 import { ctx as p140, prepare, renew } from "./pbi-140.steps.ts";
 import { ctx as p17, freshDb, newItem, tick } from "./pbi-17.steps.ts";
-import { fakes } from "./pbi-156.steps.ts";
+import { fakes, startServices } from "./pbi-156.steps.ts";
 import { ctx as p175 } from "./pbi-175.steps.ts";
 import { load, long, need } from "./pbi-8.steps.ts";
 
@@ -40,12 +42,15 @@ Before({ tags: "@pbi-300" }, function () {
 type Started = { stop(): Promise<void> };
 const quiet = { log() {}, error() {} };
 
-/** Starts the control plane through serveControl, the start src/main.ts runs once its settings are read, then stops it. */
+/** Starts the split services, the API, the cell API and the worker, then stops them. */
 async function startControl(world: object): Promise<void> {
-  const mod = await load<{ serveControl(d: object, port: number): Promise<Started> }>("src/main.ts");
-  assert.ok(mod, "src/main.ts doesn't load");
-  const control = await mod.serveControl({ ...(await fakes(world)), pool: need().pool }, 0);
-  await control.stop();
+  const services = await startServices({ ...(await fakes(world)), pool: need().pool });
+  assert.ok(typeof services !== "string", services as string);
+  try {
+    await startWorker(world);
+  } finally {
+    await services.stop();
+  }
 }
 
 /**
@@ -69,12 +74,13 @@ async function startWorker(world: object): Promise<void> {
 
 After({ tags: "@pbi-300", ...long }, async function () {
   for (const r of ctx(this).restore.reverse()) r();
-  // PBI 140's cell API and PBI 175's dashboard, which their own After hooks close only for their own tags.
-  for (const s of [p140(this).cellServer, p175(this).server]) {
-    if (!s) continue;
+  // PBI 140's cell API and PBI 175's API, which their own After hooks close only for their own tags.
+  const s = p140(this).cellServer;
+  if (s) {
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
   }
+  await p175(this).close?.();
 });
 
 function ticked(world: object) {

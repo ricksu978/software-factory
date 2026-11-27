@@ -5,6 +5,9 @@
 // PBI 289 adds the refresh_token grant: a refresh token the provider issued, sent back by the client it was issued to,
 // gets a new access token and a new refresh token, unless a "next refresh" setting says otherwise. A refresh token it
 // never issued, or one it has since replaced, is refused with invalid_grant.
+// PBI 283 signs several people in at one provider: signInAs changes who /authorize signs in next, a subject function
+// given at start names each person's subject, and accessToken issues a person's access token with no browser, as a
+// direct grant would.
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -32,6 +35,10 @@ export type Provider = {
   tokenEndpoint: string;
   /** The subject the provider gives `user` in its tokens. */
   subjectOf(user: string): string;
+  /** Makes /authorize sign `user` in from now on. */
+  signInAs(user: string): void;
+  /** An access token for `user`, for the "factory-api" audience, good for five minutes. */
+  accessToken(user: string): string;
   /** A code for `user` the BFF never asked for, with no PKCE challenge and no nonce. */
   mintCode(user: string, redirectUri: string, clientId: string): string;
   authorizations: URLSearchParams[];
@@ -78,11 +85,11 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-export async function startProvider(user: string): Promise<Provider> {
+export async function startProvider(user: string, o: { subjectOf?: (user: string) => string } = {}): Promise<Provider> {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const kid = randomBytes(8).toString("hex");
   const grants = new Map<string, Grant>();
-  const subjectOf = (u: string) => `subject-${u}`;
+  const subjectOf = o.subjectOf ?? ((u: string) => `subject-${u}`);
   let base = "";
 
   const p: Provider = {
@@ -90,6 +97,13 @@ export async function startProvider(user: string): Promise<Provider> {
     authorizationEndpoint: "",
     tokenEndpoint: "",
     subjectOf,
+    signInAs(u) {
+      user = u;
+    },
+    accessToken(u) {
+      const now = Math.floor(Date.now() / 1000);
+      return accessJwt(subjectOf(u), "e2e", now, 300);
+    },
     mintCode(u, redirectUri, clientId) {
       const code = randomBytes(16).toString("hex");
       grants.set(code, { user: u, clientId, redirectUri });

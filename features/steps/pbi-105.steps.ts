@@ -1,23 +1,21 @@
-// Step definitions for features/pbi-105-activity-log.feature. The dashboard runs as the real node:http server on a
-// free port, in Azure mode, on PBI 4's shared test database, and people sign in with the headers Container Apps adds.
+// Step definitions for features/pbi-105-activity-log.feature. The activity log and Floor are read from the orchestrator
+// API, built in-process on PBI 4's shared test database with features/support/split-services.ts, as the person a step
+// names. What a page shows is the SPA's own page, rendered from what the API answered.
 // Events are written through src/store where a scenario names a real move, and with plain SQL where it fixes a time.
 // The console scenarios read what reaches console.*, where transitionItem writes each committed transition's line.
 //
 // The page's contract these steps read: each listed event is one <tr> of <td> cells, newest first, and a row's time
 // shows as HH:MM in UTC (in its text or in a <time datetime> attribute).
+// A request without a sign-in gets the API's own answer to no token, the same for the activity log as for Floor.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { format } from "node:util";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
+import { apiApp } from "../../src/api/main.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
 import { withTx } from "../../src/store/db.ts";
 import { appendEvent, type Actor } from "../../src/store/events.ts";
 import { overrideItem, transitionItem } from "../../src/store/items.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, type Page } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { recordResponse } from "./pbi-19.steps.ts";
 import { isPbi173, openActivityLog } from "./pbi-173.steps.ts";
@@ -28,9 +26,7 @@ const system: Actor = { actor: "system", actorId: "pbi-105" };
 const human: Actor = { actor: "human", actorId: "pbi-105-operator" };
 
 type Ctx = {
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
+  api$?: ReturnType<typeof apiApp>;
   sourceId?: string;
   items: Map<string, string>;
   status?: number;
@@ -50,7 +46,6 @@ function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 const decode = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 const text = (html: string) => decode(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ");
 
@@ -62,11 +57,8 @@ Before({ tags: "@pbi-105 and @db", ...long }, async function () {
 After({ tags: "@pbi-105", ...long }, async function () {
   const c = ctx(this);
   c.restoreConsole?.();
-  await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
+  await c.api$?.close();
+  c.api$ = undefined;
 });
 
 async function source(c: Ctx): Promise<string> {
@@ -74,16 +66,19 @@ async function source(c: Ctx): Promise<string> {
   return c.sourceId;
 }
 
-/** The dashboard's handlers on a free port, started once per scenario. */
-async function dashboard(c: Ctx): Promise<void> {
-  if (c.server) return;
-  const sourceId = await source(c);
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId });
-  c.close = handler.close;
+/** The orchestrator API, built once per scenario. */
+function api(c: Ctx): ReturnType<typeof apiApp> {
+  c.api$ ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-105", readBlob: async () => null, env: {}, verify: testBearer,
+  });
+  return c.api$;
 }
+
+/** The page each address the old steps opened is, and the API route it reads. */
+const PAGES: Record<string, { page: Page; route: string }> = {
+  "/activity": { page: "activity", route: "/v1/activity" },
+  "/": { page: "floor", route: "/v1/floor" },
+};
 
 /** The item with external id `ext`, made on first use. */
 async function item(c: Ctx, ext: string, opts: { title?: string; state?: ItemState } = {}): Promise<string> {
@@ -103,6 +98,7 @@ async function eventAt(itemId: string, kind: string, payload: object, hhmm: stri
 }
 
 async function user(login: string, role: string): Promise<void> {
+  // Keyed by a provider as the steps that share these users key them. callApi puts them under the test issuer.
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2)
      on conflict (provider, subject) do update set role = excluded.role`,
@@ -112,10 +108,10 @@ async function user(login: string, role: string): Promise<void> {
 
 async function get(world: object, path: string, login: string | null): Promise<void> {
   const c = ctx(world);
-  await dashboard(c);
-  const r = await fetch(`${c.origin}${path}`, { headers: login ? headers(login) : {}, redirect: "manual" });
+  const { page, route } = PAGES[path];
+  const r = await callApi(api(c).app, pool(), login, "GET", route);
   c.status = r.status;
-  c.page = await r.text();
+  c.page = r.status === 200 ? await renderPage(page, r.json, { zone: "UTC" }) : r.text;
   recordResponse(world, c.status, c.page);
 }
 
@@ -276,7 +272,7 @@ Given("the factory has recorded no events", async function () {
 Then("the page is the activity log", function () {
   const c = ctx(this);
   assert.equal(c.status, 200, `/activity answered ${c.status}`);
-  assert.match(c.page ?? "", /<title>[^<]*activity[^<]*<\/title>/i, "the page's title doesn't name the activity log");
+  assert.match(c.page ?? "", /<h1\b[^>]*>\s*Activity\s*<\/h1>/i, "the page's heading doesn't name the activity log");
 });
 
 Then("the log lists no events", function () {
@@ -312,9 +308,10 @@ When("a request without a sign-in opens the activity log", long, async function 
 
 Then("the response is the same sign-in page a signed-out request for Floor gets", async function () {
   const c = ctx(this);
-  const floor = await fetch(`${c.origin}/`, { redirect: "manual" });
+  const floor = await callApi(api(c).app, pool(), null, "GET", "/v1/floor");
+  assert.notEqual(c.status, 200, "the activity log answered a request without a sign-in");
   assert.equal(c.status, floor.status);
-  assert.equal(c.page, await floor.text());
+  assert.equal(c.page, floor.text);
 });
 
 When("{string} signs in and opens the activity log again", long, async function (login: string) {

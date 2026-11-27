@@ -1,35 +1,36 @@
-// Step definitions for features/pbi-146-signoff-scope.feature. The dashboard runs as the real node:http server on a
-// free port, in Azure mode, on PBI 4's shared test database, with a fake board and a fake repo host. The product owner
-// signs in with the headers Container Apps adds.
+// Step definitions for features/pbi-146-signoff-scope.feature. Run detail is the orchestrator API's GET /v1/items/:id,
+// called as the product owner on PBI 4's shared test database, and the SPA's own Run detail rendered from what it
+// answers, through features/support/split-services.ts. The board and the repo host are fakes.
 //
 // The item is seeded on the fake board as issue "146" in octo/repo, with its body and acceptance criteria, and in the
 // database with a run whose scenarios_sha and locked_files name the commit and the feature files up for sign-off. A
-// file "at <sha>" is the fake repo host's content of octo/repo at that ref.
+// file "at <sha>" is the fake repo host's content of octo/repo at that ref. The API reads only the factory's database,
+// so before Run detail opens, the worker's snapshot backfill stores the run's criteria from the board and its locked
+// files from the repo host at the scenarios sha, as the cell API stores them when it records that sha.
 //
 // The page's contract these steps read:
 // - The Scope section is an <h2>Scope</h2> and the content after it up to the next <h2>. Its text is that content with
 //   <br> and the ends of block elements read as line breaks, the other tags dropped and entities decoded.
 // - A feature file shows under a heading (<h2> to <h4>) whose text is its path. Its section runs to the next heading of
 //   any level, and the file's text shows in that section as written, line for line.
-// - The criteria list is the <h2>Criteria and their scenarios</h2> section. The sign-off form is the form posting to
-//   /items/<id>/signoff, and a button is a <button> whose text is its label.
-import { After, Before, Given, Then, When } from "@cucumber/cucumber";
+// - The criteria list is the <h2>Criteria and their scenarios</h2> section. The sign-off form is the form labelled
+//   "Sign off", and a button is a <button> whose text is its label.
+import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
+import { withTx } from "../../src/store/db.ts";
+import { storeSnapshot } from "../../src/store/run-snapshot.ts";
+import { backfillSnapshots } from "../../src/worker/snapshot-backfill.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 const REPO = "octo/repo";
 const OWNER = "owner-146";
 
 type Ctx = {
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
+  /** Whether a step took a feature file away at the scenarios sha. */
+  missing?: boolean;
   board: ReturnType<typeof fakeBacklog>;
   host: ReturnType<typeof fakeRepoHost>;
   sourceId?: string;
@@ -51,21 +52,10 @@ function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 Before({ tags: "@pbi-146 and @db", ...long }, async function () {
   const d = await testDb();
   if (d) await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
-});
-
-After({ tags: "@pbi-146", ...long }, async function () {
-  const c = (this as { pbi146?: Ctx }).pbi146;
-  if (!c) return;
-  await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
 });
 
 // ---- the feature files ----
@@ -116,28 +106,19 @@ async function lockFile(c: Ctx, path: string): Promise<void> {
 
 // ---- the item ----
 
-async function dashboard(c: Ctx): Promise<void> {
-  if (c.server) return;
-  assert.ok(c.sourceId, "no board was set up");
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: c.board.adapter, sourceId: c.sourceId, repoHost: c.host });
-  c.close = handler.close;
-}
-
 /** Seeds issue `ext` on the fake board and the database, in `state`, with a run at `sha` over `files`. */
 async function item(c: Ctx, ext: string, state: string, run: { scenariosSha: string; lockSha?: string; nextStage: string; files: string[] }): Promise<void> {
   c.ext = ext;
   await c.board.seed({ externalId: ext, title: "Show the scope at sign-off", body: c.body, acceptanceCriteria: c.criteria, labels: ["factory"], repo: REPO });
   c.sourceId = (await pool().query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-146:' || gen_random_uuid()) returning id")).rows[0].id;
+  const repoId = (await pool().query<{ id: string }>("insert into repo (host_adapter, url) values ('github', $1) returning id", [`https://github.com/${REPO}`])).rows[0].id;
   c.itemId = (await pool().query<{ id: string }>(
     "insert into item (source_id, external_id, title, state) values ($1, $2, 'Show the scope at sign-off', $3) returning id",
     [c.sourceId, ext, state],
   )).rows[0].id;
   c.runId = (await pool().query<{ id: string }>(
-    "insert into run (item_id, run_number, next_stage, scenarios_sha, features_lock_sha, locked_files, branch) values ($1, 1, $2, $3, $4, $5, $6) returning id",
-    [c.itemId, run.nextStage, run.scenariosSha, run.lockSha ?? null, [], `factory/pbi-${ext}-r1`],
+    "insert into run (item_id, repo_id, run_number, next_stage, scenarios_sha, features_lock_sha, locked_files, branch) values ($1, $2, 1, $3, $4, $5, $6, $7) returning id",
+    [c.itemId, repoId, run.nextStage, run.scenariosSha, run.lockSha ?? null, [], `factory/pbi-${ext}-r1`],
   )).rows[0].id;
   for (const path of run.files) {
     putFile(c, run.scenariosSha, path, featureText(path));
@@ -145,8 +126,12 @@ async function item(c: Ctx, ext: string, state: string, run: { scenariosSha: str
   }
 }
 
+/**
+ * Seeds issue `ext` waiting for sign-off at `sha` on `files`. The cell API takes no sign-off that locks no file, so a
+ * step that names none locks features/pbi-<ext>-scope.feature, the file the later steps name.
+ */
 async function waitingForSignOff(c: Ctx, ext: string, sha: string, files: string[]): Promise<void> {
-  await item(c, ext, "SignOff", { scenariosSha: sha, nextStage: "sign-off", files });
+  await item(c, ext, "SignOff", { scenariosSha: sha, nextStage: "sign-off", files: files.length ? files : [`features/pbi-${ext}-scope.feature`] });
   await pool().query("insert into question (item_id, kind, body) values ($1, 'sign_off', 'Please sign off the scenarios')", [c.itemId]);
 }
 
@@ -229,6 +214,7 @@ Given("at {string} the file {string} has a step that reads {string}", long, asyn
 
 Given("at {string} there is no file {string}", function (sha: string, path: string) {
   ctx(this).host.files.delete(key(sha, path));
+  ctx(this).missing = true;
 });
 
 Given("the item waited for sign-off on scenarios at {string} in the file {string}", long, async function (sha: string, path: string) {
@@ -260,17 +246,46 @@ Given("the item is in flight at green", long, async function () {
   await pool().query("update run set next_stage = 'green' where id = $1", [c.runId]);
 });
 
+/**
+ * Neither the cell API nor the backfill stores a snapshot that lacks a locked file, so for a file missing at the
+ * scenarios sha these steps store the run's snapshot themselves: the board's criteria and body, and the files the repo
+ * holds at that sha.
+ */
+async function storeWithout(c: Ctx): Promise<void> {
+  const run = (await pool().query<{ sha: string; locked_files: string[] }>("select scenarios_sha as sha, locked_files from run where id = $1", [c.runId])).rows[0];
+  const issue = await c.board.adapter.getItem(c.ext ?? "146");
+  assert.ok(issue, "the board holds no item");
+  const files = run.locked_files.flatMap((path) => {
+    const text = c.host.files.get(key(run.sha, path));
+    return text === undefined ? [] : [{ path, text }];
+  });
+  await withTx(pool(), (tx) => storeSnapshot(tx, c.runId!, { sha: run.sha, criteria: [...issue.acceptanceCriteria], body: issue.body, files }));
+}
+
 When("the owner opens the item's Run detail", long, async function () {
   const c = ctx(this);
   assert.ok(c.itemId, "no item was set up");
+  // The run's snapshot, as the cell API stores it with the scenarios sha, read from the board and the repo host.
+  if (c.missing) await storeWithout(c);
+  else {
+    const filled = await backfillSnapshots({ pool: pool(), repoHost: c.host, backlogFor: () => c.board.adapter });
+    // A run that locked no files has no snapshot to store, and Run detail then shows no file.
+    const unfilled = filled.unfilled.filter((u) => !/locked no files/.test(u.reason));
+    assert.deepEqual(unfilled, [], "the run's snapshot couldn't be stored");
+  }
   await pool().query(
-    `insert into "user" (provider, subject, github_login, role, product_owner) values ('microsoft', $1, $1, 'operator', true) on conflict (provider, subject) do nothing`,
-    [OWNER],
+    `insert into "user" (issuer, subject, github_login, role, product_owner) values ($1, $2, $2, 'operator', true)
+     on conflict on constraint user_issuer_subject do nothing`,
+    [TEST_ISSUER, OWNER],
   );
-  await dashboard(c);
-  const r = await fetch(`${c.origin}/items/${c.itemId}`, { headers: headers(OWNER), redirect: "manual" });
-  c.status = r.status;
-  c.page = await r.text();
+  const api = apiApp({ pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-146", readBlob: async () => null, env: {}, verify: testBearer });
+  try {
+    const r = await callApi(api.app, pool(), OWNER, "GET", `/v1/items/${c.itemId}`);
+    c.status = r.status;
+    c.page = r.status === 200 ? await renderPage("item", r.json) : r.text;
+  } finally {
+    await api.close();
+  }
 });
 
 // ---- reading the page ----
@@ -450,7 +465,7 @@ Then("Run detail shows {string} under the heading {string}", function (want: str
 
 Then("Run detail shows the sign-off form", function () {
   const c = ctx(this);
-  assert.ok(page(c).includes(`action="/items/${c.itemId}/signoff"`), "Run detail doesn't show the sign-off form");
+  assert.ok(/<form\b[^>]*aria-label="Sign off"/.test(page(c)), "Run detail doesn't show the sign-off form");
 });
 
 Then("Run detail shows the {string} button", function (label: string) {

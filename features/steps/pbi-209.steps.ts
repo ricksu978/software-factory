@@ -1,8 +1,9 @@
 // Step definitions for features/pbi-209-running-stage-transcript.feature.
 //
 // PBI 131's steps make the item in its GitHub repo ("item ... is an issue in the repo ..."), on PBI 4's shared test
-// database, and its "a viewer opens the item's Run detail" opens the dashboard this file's Before starts, with a
-// readBlob that reads this scenario's blob store, so Run detail links stored transcripts.
+// database, and its "a viewer opens the item's Run detail" renders the SPA's Run detail from the orchestrator API this
+// file's Before builds for it, with a readBlob that reads this scenario's blob store, so Run detail links stored
+// transcripts and a viewer can follow each link to the API's /v1/blobs route, as the BFF forwards /bff/v1/blobs.
 //
 // Each scenario runs a cell of its own, made of the parts a real cell is made of:
 // - the engine's stageMeter, which every cell agent call goes through. Given a TranscriptUploads, it uploads the open
@@ -39,13 +40,12 @@ import { foldMessages, type AgentArgs, type AgentResult } from "../../src/agent/
 import { httpCellApi, type HttpCellApi } from "../../src/cell/api-client.ts";
 import { stageMeter } from "../../src/cell/engine.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import { withTx } from "../../src/store/db.ts";
 import { expireLeases, transitionItem } from "../../src/store/items.ts";
 import { ctx as itemCtx, open } from "./pbi-131.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 
 const SECRET = "pbi-209-cell-secret";
 const MODEL = "claude-opus-5-5";
@@ -143,25 +143,26 @@ Before({ tags: "@pbi-209", ...long }, async function () {
   c.blobOrigin = await listen(blobs);
   c.servers.push(blobs);
 
-  const cells = await startServer([cellApi({
+  const handler = cellApi({
     pool: d.pool, secret: SECRET, repoHost: fakeRepoHost() as never, backlogFor: () => fakeBacklog().adapter as never,
     stageAfter: () => null, uploadUrl: async (path) => `${c.blobOrigin}/${encodeURIComponent(path)}`,
     gateway: { upstream: "http://model.test", ownerToken: () => "unused" }, webToolsOf: () => [],
-  })], { port: 0 });
-  c.cellOrigin = `http://127.0.0.1:${(cells.address() as AddressInfo).port}`;
+  });
+  const cells = createServer((req, res) => {
+    handler(req, res).then(
+      (took) => { if (!took && !res.headersSent) res.writeHead(404).end(); },
+      (e) => { if (!res.headersSent) res.writeHead(500).end(String(e)); },
+    );
+  });
+  c.cellOrigin = await listen(cells);
   c.servers.push(cells);
 
-  // PBI 131's dashboard, started here with a readBlob over this scenario's blob store, so Run detail links transcripts.
-  const ic = itemCtx(this);
-  const sourceId = (await d.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-209:' || gen_random_uuid()) returning id")).rows[0].id;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  ic.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  ic.origin = `http://127.0.0.1:${(ic.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({
-    pool: d.pool, auth: createAuth({ mode: "azure" }), origin: ic.origin, adapter: fakeBacklog().adapter, sourceId,
+  // PBI 131's orchestrator API, built here with a readBlob over this scenario's blob store, so Run detail links
+  // transcripts and serves them.
+  itemCtx(this).api = apiApp({
+    pool: d.pool, issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-209", env: {}, verify: testBearer,
     readBlob: async (path) => c.blobs.get(path) ?? null,
   });
-  ic.close = handler.close;
 
   mock.timers.enable({ apis: ["setInterval"] });
 });
@@ -173,8 +174,9 @@ After({ tags: "@pbi-209", ...long }, async function () {
   for (const a of c.attempts) for (const call of a.calls) if (!call.ended) call.stream.end();
   for (const r of c.restore.reverse()) r();
   const ic = itemCtx(this);
-  await ic.close?.();
-  for (const s of [...c.servers, ...(ic.server ? [ic.server] : [])]) {
+  await ic.api?.close();
+  ic.api = undefined;
+  for (const s of c.servers) {
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
   }
@@ -480,9 +482,12 @@ function link(html: string, stage: string, n: number): string | null {
 }
 
 async function blob(world: object, href: string): Promise<{ status: number; text: string }> {
-  const ic = itemCtx(world);
-  const r = await fetch(new URL(href, ic.origin), { headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "viewer", "x-ms-client-principal-name": "viewer" } });
-  return { status: r.status, text: await r.text() };
+  // The SPA links each transcript under the BFF's /bff/v1/blobs, which the BFF forwards to the API's /v1/blobs.
+  const api = itemCtx(world).api;
+  assert.ok(api, "no orchestrator API was built");
+  assert.ok(href.startsWith("/bff/v1/"), `the transcript link isn't the BFF's: ${href}`);
+  const r = await callApi(api.app, pool(), "viewer", "GET", href.slice("/bff".length));
+  return { status: r.status, text: r.text };
 }
 
 /** Follows the attempt's transcript link. A missing link or file is kept as the reason, for the Then to report. */
@@ -840,7 +845,7 @@ Then("the transcript stored at {string} holds the first call's {int} messages fo
 Then("Run detail links that transcript for {string} attempt {int}", long, async function (stage: string, n: number) {
   const c = ctx(this);
   const href = link(await runDetail(this), stage, n);
-  assert.equal(href, `/blobs/transcripts/${c.runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/bff/v1/blobs/transcripts/${c.runId}/${stage}-${n}.jsonl`);
   const got = await blob(this, href);
   assert.equal(got.status, 200);
   assert.equal(got.text, c.blobs.get(`transcripts/${c.runId}/${stage}-${n}.jsonl`));
@@ -939,7 +944,7 @@ Then("the Stages table shows {string} attempt {int} as still running", function 
 
 Then("the Stages table links the transcript for {string} attempt {int}", function (stage: string, n: number) {
   const href = link(itemCtx(this).page!, stage, n);
-  assert.equal(href, `/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/bff/v1/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
 });
 
 When("a viewer follows the transcript link for {string} attempt {int} on Run detail", long, async function (stage: string, n: number) {
@@ -1000,7 +1005,7 @@ Then("the Stages table links a transcript for {string} attempt {int} showing tho
 
 Then("the Stages table links a separate transcript for {string} attempt {int}", long, async function (stage: string, n: number) {
   const href = link(itemCtx(this).page!, stage, n);
-  assert.equal(href, `/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/bff/v1/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
   const got = await blob(this, href);
   assert.deepEqual(ids(got.text), attemptOf(this, stage, n).messages);
 });

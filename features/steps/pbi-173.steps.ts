@@ -4,13 +4,14 @@
 // scope, so a stage that "passes" is reported passed straight away.
 //
 // The @db scenarios run on PBI 4's shared test database: the real scheduler tick claims and pins, with a recording
-// launcher, and the cell reaches the real cell API over HTTP with the RUN_TOKEN the tick handed it. The dashboard is
-// the real one on a free port. The other scenarios need no Postgres: their claim and cell API are an in-memory run,
+// launcher, and the cell reaches the real cell API over HTTP with the RUN_TOKEN the tick handed it. Run detail and the
+// activity log are the orchestrator API's GET /v1/items/:id and GET /v1/activity, called as a viewer, and the SPA's
+// own pages rendered from what it answers, through features/support/split-services.ts. The other scenarios need no Postgres: their claim and cell API are an in-memory run,
 // whose SOP lookup knows only the image's SOP, as a cell image does.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
@@ -21,9 +22,8 @@ import { loadSop, stageAfter, type Sop } from "../../src/config/sop.ts";
 import { isPbi319, runsTheStage } from "./pbi-319.steps.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { decide } from "../../src/control/decisions.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, type Page } from "../support/split-services.ts";
 import { tick } from "../../src/scheduler/scheduler.ts";
 import { withTx } from "../../src/store/db.ts";
 import { transitionItem } from "../../src/store/items.ts";
@@ -169,13 +169,25 @@ async function dbSide(): Promise<Side & { itemId(): string; dashboard(path: stri
   let answeredAt: Date | null = null;
   const servers: Server[] = [];
   const closers: (() => Promise<void>)[] = [];
-  const serve = async (handler: Parameters<typeof startServer>[0][number]) => {
-    const s = await startServer([handler], { port: 0 });
+  // The cell API serves on a free port, and a request no route takes, or one that fails, is answered as the cell API's
+  // own service answers it.
+  const serve = async (handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>) => {
+    const s = createServer(async (req, res) => {
+      try {
+        if (await handler(req, res)) return;
+        res.writeHead(404, { "content-type": "application/json" }).end("{}");
+      } catch (e) {
+        const status = typeof (e as { status?: unknown }).status === "number" ? (e as { status: number }).status : 500;
+        if (!res.headersSent) res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ error: String(e) }));
+        else res.destroy();
+      }
+    });
+    await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", () => resolve()));
     servers.push(s);
     return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
   };
   let cellBase: string | undefined;
-  let dashBase: string | undefined;
+  let api: ReturnType<typeof apiApp> | undefined;
 
   return {
     itemId: () => itemId,
@@ -252,21 +264,20 @@ async function dbSide(): Promise<Side & { itemId(): string; dashboard(path: stri
       };
     },
     async dashboard(path) {
-      if (!dashBase) {
-        let handler: ReturnType<typeof dashboardRoutes> | undefined;
-        dashBase = await serve((req, res) => handler!(req, res));
-        handler = dashboardRoutes({ pool, auth: createAuth({ mode: "azure" }), origin: dashBase, adapter: backlog.adapter, sourceId });
-        closers.push(() => handler!.close());
+      if (!api) {
+        api = apiApp({ pool, issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: SECRET, readBlob: async () => null, env: {}, verify: testBearer });
+        closers.push(() => api!.close());
       }
       await pool.query(
-        `insert into "user" (provider, subject, github_login, role) values ('microsoft', 'pbi-173-viewer', 'pbi-173-viewer', 'viewer')
-         on conflict (provider, subject) do nothing`,
+        `insert into "user" (issuer, subject, github_login, role) values ($1, 'pbi-173-viewer', 'pbi-173-viewer', 'viewer')
+         on conflict on constraint user_issuer_subject do nothing`,
+        [TEST_ISSUER],
       );
-      const r = await fetch(`${dashBase}${path}`, {
-        headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "pbi-173-viewer", "x-ms-client-principal-name": "pbi-173-viewer" },
-        redirect: "manual",
-      });
-      return { status: r.status, page: await r.text() };
+      const item = /^\/items\/([^/]+)$/.exec(path)?.[1];
+      assert.ok(item || path === "/activity", `these steps open only Run detail and the activity log, not ${path}`);
+      const [route, page]: [string, Page] = item ? [`/v1/items/${item}`, "item"] : ["/v1/activity", "activity"];
+      const r = await callApi(api.app, pool, "pbi-173-viewer", "GET", route);
+      return { status: r.status, page: r.status === 200 ? await renderPage(page, r.json) : r.text };
     },
     async close() {
       for (const c of closers) await c();
@@ -463,7 +474,7 @@ Then("the run is still pinned to config commit {string}", long, async function (
 /** The value of the run detail's "SOP version" entry. */
 function shownSop(c: Ctx): string {
   assert.equal(c.status, 200, `run detail answered ${c.status}: ${c.page?.slice(0, 300)}`);
-  const m = /<dt>\s*SOP version\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i.exec(c.page ?? "");
+  const m = /<dt\b[^>]*>\s*SOP version\s*<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/i.exec(c.page ?? "");
   assert.ok(m, "run detail shows no SOP version");
   return text(m[1]);
 }

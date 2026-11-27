@@ -11,5 +11,6 @@ test("each page has its address, and any other is none", () => {
   assert.deepEqual(routeOf("/runs/a%2Fb"), { page: "item", id: "a/b" });
   assert.deepEqual(routeOf("/runs/%E2"), { page: "none" });
   assert.deepEqual(routeOf("/runs/"), { page: "none" });
-  assert.deepEqual(routeOf("/configuration"), { page: "none" });
+  assert.deepEqual(routeOf("/configuration"), { page: "configuration" });
+  assert.deepEqual(routeOf("/settings"), { page: "none" });
 });

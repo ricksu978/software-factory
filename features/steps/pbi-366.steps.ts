@@ -5,7 +5,7 @@
 //   {string} is queued", the sign-off and review items, and its tick, which runs src/scheduler/scheduler.ts's tick with
 //   PBI 17's fake board as every item's board and a launcher that records what it starts. Every PBI 17 step here runs on
 //   this scenario's clock, which is the real time when the scenario starts, so a page and the scheduler agree on it.
-// - PBI 131's dashboard, the real one on a free port, for "the dashboard", and its items in a GitHub repo, so "#482"
+// - PBI 131's dashboard for "the dashboard": the SPA's own pages rendered from what its API answers, and its items in a GitHub repo, so "#482"
 //   links to https://github.com/acme/widgets/issues/482. Its "a viewer opens Floor" opens the dashboard's Floor.
 // - PBI 279's SPA, for "the SPA": the real pages, rendered by react-dom/server, through the real shell, whose reads of
 //   /bff/v1/floor and /bff/v1/items/{id} are answered by src/api/main.ts's apiApp, the API itself, on this database.
@@ -25,7 +25,7 @@
 //   request". One that says the item will be abandoned holds "abandon".
 // - "Got its day-2 reminder" is a scheduler tick at 2 days and a minute after the move, on the board the scenario reads.
 // - Floor's "Waiting on you" row of an item is the <li> under the <h2>Waiting on you</h2> that holds the link to the
-//   item's Run detail: /items/<id> on the dashboard, /runs/<id> in the SPA. It shows the item as waiting on the Product
+//   item's Run detail, /runs/<id>, on the dashboard and in the SPA alike. It shows the item as waiting on the Product
 //   Owner when its text says "waiting on the Product Owner", and how long with "waiting <n> <unit>", where "d" also reads
 //   as "days" and "h" as "hours".
 // - A "Feature change request" link is an <a href> whose text is just "Feature change request". One that goes to the
@@ -299,7 +299,8 @@ When("the scheduler ticks and a viewer opens Floor", long, async function () {
 // ---- opening the pages ----
 
 const whereOf = (text: string): Where => (text === "the SPA" ? "spa" : "dashboard");
-const detailPath = (where: Where, id: string) => (where === "spa" ? `/runs/${encodeURIComponent(id)}` : `/items/${id}`);
+// PBI 131's dashboard renders the SPA's own pages too, so both link an item's Run detail at /runs/<id>.
+const detailPath = (_where: Where, id: string) => `/runs/${encodeURIComponent(id)}`;
 
 /** The id of item `name`, made by these steps or another feature's. */
 function idOf(world: object, name: string): string {

@@ -5,8 +5,12 @@
 //   GET  /bff/v1/items/{id}            ItemData: /v1/items/{id}, everything today's Run detail shows, as JSON
 //   GET  /bff/v1/phase0                Phase0Data: /v1/phase0
 //   GET  /bff/v1/activity              ActivityData: /v1/activity
+//   GET  /bff/v1/configuration         ConfigurationData: /v1/configuration, the runtime and env-backed settings (PBI 175)
+//   POST /bff/v1/configuration         SettingSent, answered 200 { ok, changed, notice }, or 4xx { error }
 //   POST /bff/v1/overrides             OverrideSent, answered 201 { ok: true }, or 4xx { error }
 //   POST /bff/v1/items/{id}/decisions  DecisionSent, answered 200 { outcome }, or 4xx { error }
+//   POST /bff/v1/items/{id}/feature-change  FeatureChangeSent, answered 200 { outcome }, or 4xx { error }
+//   POST /bff/v1/items/{id}/rule-approval   RuleApprovalSent, answered 200 { outcome }, or 4xx { error }
 // The shapes follow src/http/views.ts's inputs, with each time as an ISO string and each Map as an object.
 // Run detail's address in the SPA is /runs/{id}, Activity's /activity and the Phase 0 report's /phase0. Floor is /.
 // This file is free of React and of the "@/" alias, so the BFF's and the tests' Node code can import its types.
@@ -129,6 +133,33 @@ export type ItemData = {
   recheck?: { last: string | null } | null;
   /** PBI 366: the feature change request the item waits on in FeatureChangeRequest, or null. */
   featureChange?: { path: string; reason: string; before: string; after: string }[] | null;
+  /** PBI 365: whether the viewer is a product owner, who decides on a feature change request. */
+  canDecideFeatureChange?: boolean;
+  /** PBI 365: the latest decision on a feature change request of the item, with who made it and when, or null. */
+  featureChangeDecision?: { kind: "approve" | "changes"; by: string; at: string } | null;
+  /** PBI 395: the rule changes the item's last readiness check read, or null when it read none. */
+  ruleChanges?: RuleChanges | null;
+};
+
+/** A word of a rule's Before or After, marked when it changes. */
+export type DiffWord = { text: string; changed: boolean };
+
+/**
+ * PBI 395: an item's changes to the factory's own rules. Each names its place, its `key` ("§6" or the policy file's
+ * path) and `name` ("spec section §6"), its Before and After, what's wrong with it, and, when it has both sides, its
+ * words. `waiting` says the item waits for the owner's approval, `canApprove` that this viewer may give it, `approval`
+ * who gave it for the changes as they read now, and `hash` what the approval sends back.
+ */
+export type RuleChanges = {
+  changes: {
+    place: { kind: "spec"; section: string } | { kind: "policy"; path: string };
+    key: string; name: string; before: string | null; after: string | null; problem?: string;
+    words: { before: DiffWord[]; after: DiffWord[] } | null;
+  }[];
+  waiting: boolean;
+  canApprove: boolean;
+  approval: { by: string; at: string } | null;
+  hash: string;
 };
 
 export type Phase0Data = {
@@ -141,10 +172,28 @@ export type ActivityData = {
     actor?: string | null; setting?: string | null; reason?: string | null }[];
 };
 
+/** One setting as the Configuration page lists it: its value is null when it has none. */
+export type ConfigSetting = { key: string; label: string; value: string | null; editable?: boolean; clearable?: boolean; note?: string | null };
+
+export type ConfigurationData = {
+  runtime: ConfigSetting[];
+  env: ConfigSetting[];
+  canOperate: boolean;
+  /** The API's time when it read the settings, against which a usage pause counts as active. */
+  at?: string;
+};
+
+/** What POST /bff/v1/configuration takes: a runtime setting's key, its new value, empty to clear it, and why. */
+export type SettingSent = { setting: string; value: string; reason: string };
+
 /** What POST /bff/v1/overrides takes: a factory-wide override has no itemId. */
 export type OverrideSent = { kind: string; reason: string; itemId?: string };
 /** What POST /bff/v1/items/{id}/decisions takes: the sign-off note or the answer is its text. */
 export type DecisionSent = { kind: "approve" | "changes" | "answer"; text: string };
+/** What POST /bff/v1/items/{id}/feature-change takes: the Product Owner's decision and their note, which may be empty. */
+export type FeatureChangeSent = { decision: "approve" | "changes"; note: string };
+/** What POST /bff/v1/items/{id}/rule-approval takes: the hash of the rule changes the page showed. */
+export type RuleApprovalSent = { ruleChangesHash: string };
 
 /**
  * What a form's submit handler did:
@@ -161,7 +210,7 @@ export type Submitted<T> =
 /** What each page draws with. `zone` is the viewer's IANA time zone, and `now` the time ages and running attempts count to. */
 /** `onSubmit` takes a form's submit, with the button pressed by its text and the form's field as typed. Without it, as
  * when react-dom/server renders the page, a submit does nothing. */
-export type FormName = "Controls" | "Sign off" | "Answer";
+export type FormName = "Controls" | "Sign off" | "Answer" | "Feature change" | "Rule approval";
 export type OnSubmit = (form: FormName, button: string, value: string) => void;
 export type FloorProps = {
   data: FloorData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit;
@@ -173,6 +222,11 @@ export type FloorProps = {
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
 export type ActivityProps = { data: ActivityData };
+/** `notice` says which setting the last change saved. `onChange` takes a setting's key, its new value and the reason. */
+export type ConfigurationProps = {
+  data: ConfigurationData; message?: string | null; notice?: string | null;
+  onChange?: (setting: string, value: string, reason: string) => void;
+};
 
 /**
  * The pages' modules, web/src/pages/*.tsx, export these beside their components. A submit handler takes the button
@@ -185,6 +239,8 @@ export type RunDetailModule = {
   submitItemControls(call: Call, item: ItemData, button: string, reason: string): Promise<Submitted<ItemData>>;
   submitSignOff(call: Call, item: ItemData, button: string, note: string): Promise<Submitted<ItemData>>;
   submitAnswer(call: Call, item: ItemData, button: string, answer: string): Promise<Submitted<ItemData>>;
+  submitFeatureChange(call: Call, item: ItemData, button: string, note: string): Promise<Submitted<ItemData>>;
+  submitRuleApproval(call: Call, item: ItemData, button: string, value: string): Promise<Submitted<ItemData>>;
 };
 
 /** Reads `path` from the BFF as JSON. Any answer but a 2xx rejects, naming the status and the API's error. */
@@ -208,3 +264,6 @@ export const readPhase0 = (call: Call) => read<Phase0Data>(call, "/bff/v1/phase0
 
 /** Activity's one read of the factory. */
 export const readActivity = (call: Call) => read<ActivityData>(call, "/bff/v1/activity");
+
+/** The Configuration page's one read of the factory. */
+export const readConfiguration = (call: Call) => read<ConfigurationData>(call, "/bff/v1/configuration");

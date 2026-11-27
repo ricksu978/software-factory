@@ -1,14 +1,15 @@
 // Step definitions for features/pbi-219-worker-runs-outbox.feature. The scenarios share PBI 8's database and PBI 156's
 // two fake boards, with PBI 17's fake repo host, and PBI 218's steps add the items and people. Each change goes
 // through the code that makes it in the factory: transitionItem for the scheduler, the cell API on a real server,
-// handleWebhook for GitHub, decide, and the dashboard on a real server. Nothing here registers a hook, so the board
-// changes only when "the worker works through the outbox" runs src/worker/outbox.ts's workOutbox, once.
+// handleWebhook for GitHub, decide, and the dashboard's forms as the SPA sends them to the orchestrator API, built in
+// process with features/support/split-services.ts. Nothing here registers a hook, so the board changes only when
+// "the worker works through the outbox" runs src/worker/outbox.ts's workOutbox, once.
 // The worker's board for each source refuses the calls a scenario says it refuses, item by item.
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { CLAIM_MARKER } from "../../src/adapters/contract.ts";
@@ -17,14 +18,16 @@ import type { BacklogAdapter, FactoryWebhookEvent } from "../../src/adapters/typ
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { decide } from "../../src/control/decisions.ts";
 import type { ItemEvent, ItemState } from "../../src/core/states.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import { withTx } from "../../src/store/db.ts";
 import * as items from "../../src/store/items.ts";
 import { CONSUMER, type Consumer } from "../../src/store/outbox.ts";
 import { handleWebhook } from "../../src/watcher/webhook.ts";
 import { runRowEffects, workOutbox, type OutboxDeps } from "../../src/worker/outbox.ts";
+import { readItem, type Call, type ItemData, type Submitted } from "../../web/src/api.ts";
+import { submitAnswer, submitSignOff } from "../../web/src/forms.ts";
+import { runPath } from "../../web/src/routes.ts";
+import { TEST_AUDIENCE, TEST_ISSUER, testBearer, underTestIssuer } from "../support/split-services.ts";
 import { ctx as p156, type Board } from "./pbi-156.steps.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
 import { item, newItem, outbox, REPO, user as userByLogin } from "./pbi-218.steps.ts";
@@ -39,12 +42,13 @@ type Ctx = {
   users: Map<string, string>;
   /** What stops each server a scenario started. */
   closers: (() => Promise<void>)[];
-  dashboard?: string;
+  /** The orchestrator API the dashboard's forms go to, built on first use. */
+  api?: ReturnType<typeof apiApp>;
   cellApi?: string;
   /** The running cell of each item, by item id. */
   cells: Map<string, { runId: string; generation: number }>;
-  /** The dashboard's last response. */
-  response?: { status: number; location: string | null };
+  /** What the dashboard's last form came to, and the item it was sent from. */
+  response?: { itemId: string; submitted: Submitted<ItemData> };
   /** The source search's findings: each file that names onTransition. */
   hookFiles?: string[];
   /** Further refusals a scenario sets up (PBI 221). Each returns why it refuses a call, or null to let it through. */
@@ -336,7 +340,13 @@ async function cellApiUrl(world: object): Promise<string> {
     gateway: { upstream: "http://127.0.0.1:9", ownerToken: () => "unused" },
     webToolsOf: () => [],
   });
-  const server = await startServer([api], { port: 0 });
+  const server = createServer((req, res) => {
+    api(req, res).then(
+      (took) => { if (!took && !res.headersSent) res.writeHead(404).end(); },
+      (e) => { if (!res.headersSent) res.writeHead(500).end(String(e)); },
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   c.closers.push(() => stop(server));
   c.cellApi = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return c.cellApi;
@@ -413,48 +423,56 @@ When("{string} approves the scenarios of item {string} and the decision commits"
 
 // ---- the dashboard ----
 
-async function dashboardUrl(world: object): Promise<string> {
+/**
+ * The SPA's call as `login` makes it: each /bff/v1 path goes to the API's /v1 path with their bearer token, as the
+ * BFF forwards it.
+ */
+async function callAs(world: object, login: string): Promise<Call> {
   const c = ctx(world);
-  if (c.dashboard) return c.dashboard;
-  const main = boardNamed(world, MAIN);
-  let handler: ReturnType<typeof dashboardRoutes> | null = null;
-  const server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.closers.push(() => stop(server));
-  c.dashboard = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({
-    pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.dashboard, adapter: refusing(world, main), sourceId: main.id, repoHost: host(world),
-  });
-  c.closers.push(handler.close);
-  return c.dashboard;
+  if (!c.api) {
+    const api = apiApp({
+      pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: WEBHOOK_SECRET, repoHost: host(world),
+      readBlob: async () => null, env: {}, verify: testBearer,
+    });
+    c.api = api;
+    c.closers.push(() => api.close());
+  }
+  const app = c.api.app;
+  await underTestIssuer(pool(), login);
+  return async (path, init) => {
+    assert.match(path, /^\/bff\/v1\//, `the SPA calls ${path}, which the BFF doesn't forward`);
+    const headers = new Headers(init?.headers);
+    headers.set("authorization", `Bearer ${encodeURIComponent(login)}`);
+    return await app.request(path.slice("/bff".length), { ...init, headers });
+  };
 }
 
-async function post(world: object, login: string, path: string, form: Record<string, string>): Promise<void> {
-  const origin = await dashboardUrl(world);
-  const r = await fetch(`${origin}${path}`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams(form).toString(),
-    headers: {
-      "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login,
-      "content-type": "application/x-www-form-urlencoded", origin,
-    },
-  });
-  await r.text();
-  ctx(world).response = { status: r.status, location: r.headers.get("location") };
+/** Opens the item's Run detail as `login` and sends its form as the SPA does, keeping what it came to. */
+async function sendForm(world: object, login: string, issue: string, send: (call: Call, item: ItemData) => Promise<Submitted<ItemData>>): Promise<void> {
+  const itemId = await item(world, issue, MAIN);
+  const call = await callAs(world, login);
+  ctx(world).response = { itemId, submitted: await send(call, await readItem(call, itemId)) };
 }
 
 When("{string} approves the scenarios of item {string} on the dashboard", long, async function (name: string, issue: string) {
-  await post(this, name, `/items/${await item(this, issue, MAIN)}/signoff`, { decision: "approve", note: "" });
+  await sendForm(this, name, issue, (call, it) => submitSignOff(call, it, "Approve the scenarios", ""));
 });
 
 When("{string} answers item {string} on the dashboard with {string}", long, async function (name: string, issue: string, text: string) {
-  await post(this, name, `/items/${await item(this, issue, MAIN)}/answer`, { answer: text });
-  assert.equal(ctx(this).response?.status, 303, `the dashboard answered ${ctx(this).response?.status}`);
+  await sendForm(this, name, issue, (call, it) => submitAnswer(call, it, "Send the answer", text));
+  const r = ctx(this).response!.submitted;
+  assert.equal(r.outcome, "accepted", `the dashboard's answer came to ${JSON.stringify(r)}`);
 });
 
+// The SPA stays on the item's Run detail once the factory accepts a form, drawing it from the item read again.
 Then("the dashboard takes {string} back to item {string}", long, async function (_name: string, issue: string) {
   const r = ctx(this).response;
-  assert.ok(r, "nothing was posted to the dashboard");
-  assert.equal(r.status, 303, `the dashboard answered ${r.status}`);
-  assert.equal(r.location, `/items/${await item(this, issue, MAIN)}`);
+  assert.ok(r, "nothing was sent from the dashboard");
+  assert.equal(r.submitted.outcome, "accepted", `the dashboard's form came to ${JSON.stringify(r.submitted)}`);
+  const shown = r.submitted.outcome === "accepted" ? r.submitted.data.item.id : null;
+  const id = await item(this, issue, MAIN);
+  assert.equal(shown, id, `the dashboard shows item ${shown} at ${shown && runPath(shown)}, not ${runPath(id)}`);
+  assert.equal(r.itemId, id, "the form wasn't sent from the item's Run detail");
 });
 
 // ---- the worker ----

@@ -6,8 +6,11 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { readActivity, readFloor, readItem, readPhase0, type Call, type FormName, type ItemData, type Submitted } from "./api.ts";
-import { submitAnswer, submitFloorControls, submitItemControls, submitSignOff } from "./forms.ts";
+import { submitAnswer, submitFeatureChange, submitFloorControls, submitItemControls, submitRuleApproval, submitSignOff } from "./forms.ts";
+import { readConfiguration } from "./api.ts";
+import { submitSetting } from "./forms.ts";
 import { Activity } from "./pages/Activity.tsx";
+import { Configuration } from "./pages/Configuration.tsx";
 import { emptiedOnAccept, startLiveFloor, type LiveClock, type LiveFloor } from "./live.ts";
 import { Floor } from "./pages/Floor.tsx";
 import { Phase0 } from "./pages/Phase0.tsx";
@@ -93,7 +96,7 @@ function FloorPage({ call }: { call: Call }) {
 }
 
 const ITEM_FORMS: Record<FormName, (call: Call, item: ItemData, button: string, value: string) => Promise<Submitted<ItemData>>> = {
-  Controls: submitItemControls, "Sign off": submitSignOff, Answer: submitAnswer,
+  Controls: submitItemControls, "Sign off": submitSignOff, Answer: submitAnswer, "Feature change": submitFeatureChange, "Rule approval": submitRuleApproval,
 };
 
 function RunDetailPage({ call, id }: { call: Call; id: string }) {
@@ -115,12 +118,35 @@ function ActivityPage({ call }: { call: Call }) {
   return <Shown state={state} what="activity log">{(data) => <Activity data={data} />}</Shown>;
 }
 
+/** The Configuration page (PBI 175): a change the factory saves draws the settings read again, with which one it saved. */
+function ConfigurationPage({ call }: { call: Call }) {
+  const [state, , setState] = useRead(() => readConfiguration(call), "configuration");
+  const [notice, setNotice] = useState<string | null>(null);
+  const onChange = (setting: string, value: string, reason: string) => {
+    submitSetting(call, setting, value, reason).then((r) => {
+      if (r.outcome === "accepted") {
+        setState({ data: r.data.data, message: null });
+        setNotice(r.data.notice);
+      } else {
+        setNotice(null);
+        setState((s) => ({ ...s, message: r.outcome === "failed" ? r.message : `${r.field} can't be empty.` }));
+      }
+    }, (e: unknown) => setState((s) => ({ ...s, message: `It wasn't sent: ${e instanceof Error ? e.message : String(e)}` })));
+  };
+  return (
+    <Shown state={state} what="configuration">
+      {(data) => <Configuration data={data} message={state.message} notice={notice} onChange={onChange} />}
+    </Shown>
+  );
+}
+
 function Page({ call, path }: { call: Call; path: string }) {
   const route = routeOf(path);
   if (route.page === "floor") return <FloorPage call={call} />;
   if (route.page === "item") return <RunDetailPage call={call} id={route.id} />;
   if (route.page === "phase0") return <Phase0Page call={call} />;
   if (route.page === "activity") return <ActivityPage call={call} />;
+  if (route.page === "configuration") return <ConfigurationPage call={call} />;
   return (
     <Alert>
       <AlertTitle>No such page</AlertTitle>

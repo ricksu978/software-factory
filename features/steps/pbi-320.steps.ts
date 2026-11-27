@@ -26,9 +26,9 @@
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { ctx as p17 } from "./pbi-17.steps.ts";
-import { ctx as p89 } from "./pbi-89.steps.ts";
+import { open, ctx as p89 } from "./pbi-89.steps.ts";
 import { text } from "./pbi-175.steps.ts";
-import { ctx as p265, fetchPage, inState, itemOf, newItem, openItem, orderBoard, poll } from "./pbi-265.steps.ts";
+import { ctx as p265, inState, itemOf, newItem, openItem, orderBoard, poll } from "./pbi-265.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 const REPO = "octo/repo";
@@ -410,14 +410,18 @@ Then(re(`item "([^"]+)"'s page doesn't show it as final-stage`), async function 
 
 // ---- Floor ----
 
-function floorHtml(world: object): Promise<string> {
-  return fetchPage(world, "/", p89(world).login!);
+/** Floor as the signed-in operator sees it: the SPA's own page, rendered from what the API answered. */
+async function floorHtml(world: object): Promise<string> {
+  const c = p89(world);
+  await open(c, "/");
+  assert.equal(c.status, 200, `Floor answered ${c.status}: ${c.html?.slice(0, 300)}`);
+  return c.html!;
 }
 
 /** The text of each list entry and table row on Floor that links to the item's page. */
 async function floorEntries(world: object, name: string, page?: string): Promise<string[]> {
   const html = page ?? (await floorHtml(world));
-  const link = `href="/items/${itemOf(world, name).id}"`;
+  const link = `href="/runs/${encodeURIComponent(itemOf(world, name).id)}"`;
   return [...html.matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)].filter((m) => m[2].includes(link)).map((m) => text(m[2]));
 }
 

@@ -5,14 +5,19 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Steps record what they observe and assert only in Then, so a missing AppHost or image shows as red, not as a crash.
-// The AppHost runs with `--isolated` and FACTORY_FLOAT_PORTS=1, so Aspire picks control's and Azurite's ports, and
-// sessions in different worktrees never clash on 7400 or 7410. Two runs from the SAME worktree still share its named
+// The AppHost runs with `--isolated` and FACTORY_FLOAT_PORTS=1, so Aspire picks the services' and Azurite's ports, and
+// sessions in different worktrees never clash on pinned ports. Two runs from the SAME worktree still share its named
 // data volumes, so run these scenarios once per worktree at a time. Every aspire command names this AppHost with
-// --apphost, and control's URLs come from `aspire describe` once it's up.
+// --apphost. Since PBI 283 the scenarios look up the split services, not one combined control plane: a scenario goes
+// on only once the BFF, the API, the cell API and the worker are up, and the cell API's URL comes from
+// `aspire describe` then. Under FACTORY_ENV=local the cell API serves the probes and the cell routes cells reach.
 const repo = process.cwd();
 export const APPHOST = "--apphost . --non-interactive --nologo";
-let control = "";
-let cellControl = "";
+/** The split services every scenario waits for, by their AppHost resource names. */
+const SERVICES = ["bff", "api", "cell-api", "worker"];
+/** The cell API's URL on this machine, and as a cell container names it, once the AppHost is up. */
+let cellApi = "";
+let cellApiFromCell = "";
 const long = { timeout: 600_000 };
 
 export type Ctx = {
@@ -38,11 +43,11 @@ export function sh(command: string, input?: string): { status: number | null; ou
 }
 
 // Retries because a restart leaves fetch holding a dead keep-alive socket to the old process.
-async function get(path: string): Promise<{ status: number; body: string } | null> {
-  if (!control) return null;
+async function get(base: string, path: string): Promise<{ status: number; body: string } | null> {
+  if (!base) return null;
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
-      const r = await fetch(`${control}${path}`, { signal: AbortSignal.timeout(5_000) });
+      const r = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(5_000) });
       return { status: r.status, body: await r.text() };
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -66,16 +71,16 @@ export function describe(resource = ""): { status: number | null; stderr: string
 
 export async function startAspire(c: Ctx): Promise<void> {
   c.started = true;
-  control = "";
-  cellControl = "";
+  cellApi = "";
+  cellApiFromCell = "";
   sh(`aspire start --isolated ${APPHOST}`);
-  const waited = sh(`aspire wait control --status up --timeout 300 ${APPHOST}`);
-  const url = describe("control").doc?.resources[0]?.urls?.[0]?.url;
-  if (waited.status === 0 && typeof url === "string") {
-    control = url.replace(/\/$/, "");
-    cellControl = control.replace("localhost", "host.docker.internal");
+  const down = SERVICES.filter((name) => sh(`aspire wait ${name} --status up --timeout 300 ${APPHOST}`).status !== 0);
+  const url = describe("cell-api").doc?.resources[0]?.urls?.[0]?.url;
+  if (down.length === 0 && typeof url === "string") {
+    cellApi = url.replace(/\/$/, "");
+    cellApiFromCell = cellApi.replace(/\/\/(localhost|127\.0\.0\.1)(?=[:/])/, "//host.docker.internal");
   }
-  c.up = (await get("/")) !== null;
+  c.up = (await get(cellApi, "/probe/runs")) !== null;
 }
 
 export function stopAspire(): void {
@@ -83,7 +88,7 @@ export function stopAspire(): void {
 }
 
 async function runCount(): Promise<number | null> {
-  const r = await get("/probe/runs");
+  const r = await get(cellApi, "/probe/runs");
   if (!r || r.status !== 200) return null;
   const n = (JSON.parse(r.body) as { count?: unknown }).count;
   return typeof n === "number" ? n : null;
@@ -111,19 +116,19 @@ When("I start {string} and wait until the control resource answers", long, async
   await startAspire(ctx(this));
 });
 
-// CELL_CONTROL_URL is what the launcher hands each cell, so it must name the port cells really reach, pinned or floated.
-// Since PBI 222 the cell routes live on the cell API, so that is the cell-api resource's port, not control's. Read from
-// `aspire describe`, which shows the resource's environment values and URLs.
+// CELL_CONTROL_URL is what the worker hands each cell, so it must name the port cells really reach, pinned or floated.
+// Under the split services that is the cell API's port (7401 when pinned), the resource that serves the cell routes.
+// Read from `aspire describe`, which shows the resource's environment values and URLs.
 Then("the control resource tells cells the port it answers on", function () {
   assert.ok(ctx(this).up, "the AppHost never came up");
-  const res = describe("control").doc?.resources[0];
+  const res = describe("worker").doc?.resources[0];
   const told = res?.environment?.CELL_CONTROL_URL;
   // Names only: describe shows values, and FACTORY_DB_URI carries the database password.
-  assert.ok(typeof told === "string", `control has no CELL_CONTROL_URL among ${JSON.stringify(Object.keys(res?.environment ?? {}))}`);
+  assert.ok(typeof told === "string", `the worker has no CELL_CONTROL_URL among ${JSON.stringify(Object.keys(res?.environment ?? {}))}`);
   assert.equal(new URL(told).hostname, "host.docker.internal");
-  const cellApi = describe("cell-api").doc?.resources[0]?.urls?.[0]?.url;
-  assert.ok(typeof cellApi === "string", "aspire describe gave no URL for the cell-api resource");
-  assert.equal(new URL(told).port, new URL(cellApi).port, `CELL_CONTROL_URL ${told} doesn't name the cell API's port, ${cellApi}`);
+  const cellApiUrl = describe("cell-api").doc?.resources[0]?.urls?.[0]?.url;
+  assert.ok(typeof cellApiUrl === "string", "aspire describe gave no URL for the cell-api resource");
+  assert.equal(new URL(told).port, new URL(cellApiUrl).port, `CELL_CONTROL_URL ${told} doesn't name the cell API's port, ${cellApiUrl}`);
 });
 
 // Asks Aspire which container and named volume belong to this AppHost's resource, then checks that exact
@@ -185,13 +190,13 @@ Given("{string} is up", long, async function (_cmd: string) {
 });
 
 When("I ask the control resource for the names of its environment variables", long, async function () {
-  const r = await get("/probe/env");
+  const r = await get(cellApi, "/probe/env");
   ctx(this).envNames = r && r.status === 200 ? (JSON.parse(r.body) as string[]) : null;
 });
 
 Then("the names include {string}, {string}, {string}, {string}, {string} and {string}", function (a: string, b: string, c: string, d: string, e: string, f: string) {
   const names = ctx(this).envNames;
-  assert.ok(names, "the control resource gave no variable names");
+  assert.ok(names, "the cell API gave no variable names");
   for (const n of [a, b, c, d, e, f]) assert.ok(names.includes(n), `"${n}" is missing from ${JSON.stringify(names)}`);
 });
 
@@ -225,13 +230,13 @@ When("a {string} container posts to {string} on the control plane", long, functi
     c.status = null;
     return;
   }
-  const r = inCell(`${image} curl -s -o /dev/null -w "%{http_code}" -X POST ${cellControl}${path}`);
+  const r = inCell(`${image} curl -s -o /dev/null -w "%{http_code}" -X POST ${cellApiFromCell}${path}`);
   c.status = Number.parseInt(r.out.trim(), 10) || null;
 });
 
 When("the container PUTs a blob to an upload URL from {string}", long, async function (path: string) {
   const c = ctx(this);
-  const r = await get(path);
+  const r = await get(cellApi, path);
   if (!c.imageBuilt || !r || r.status !== 200) {
     c.status = null;
     return;

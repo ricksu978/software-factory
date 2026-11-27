@@ -1,10 +1,10 @@
 import { After, Given, Then, When, type DataTable } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import pg from "pg";
+import { apiApp } from "../../src/api/main.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 
 // PBI 117. Each scenario gets its own database inside the shared test server, so a scenario can start from today's
@@ -29,14 +29,13 @@ type Ctx = {
   criteria?: string[];
   seeded?: Record<string, string>[];
   heartbeat?: Outcome;
-  server?: Server;
-  routes?: { close(): Promise<void> };
-  origin?: string;
-  devToken?: string;
-  auth?: { identify(path: string, headers: Record<string, string | undefined>): unknown };
+  /** The orchestrator API on the scenario's database, and the person who opens the dashboard. */
+  api?: ReturnType<typeof apiApp>;
+  login?: string;
+  /** The user the last request was signed in as, by the provider and subject they had before the migration. */
+  identity?: { provider: string | null; subject: string } | null;
   status?: number;
   page?: string;
-  cookie?: string | null;
 };
 
 function ctx(world: object): Ctx {
@@ -155,8 +154,7 @@ async function storeCriteria(c: Ctx, role: string | null): Promise<void> {
 
 After({ tags: "@pbi-117", ...long }, async function () {
   const c = ctx(this);
-  if (c.server) await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  await c.routes?.close().catch(() => undefined);
+  await c.api?.close().catch(() => undefined);
   await c.pool?.end().catch(() => undefined);
   if (c.name) await (await testDb())?.pool.query(`drop database if exists ${c.name} with (force)`);
 });
@@ -274,44 +272,35 @@ Given("a database at today's schema whose owner is {string}", long, async functi
   await p.query(`insert into "user" (provider, subject, github_login, role, product_owner) values ('dev', $1, $1, 'owner', true)`, [login]);
 });
 
-type AuthT = { devToken: string; identify(path: string, headers: Record<string, string | undefined>): unknown };
-type RoutesModule = { dashboardRoutes: (deps: Record<string, unknown>) => ((req: unknown, res: unknown) => Promise<boolean>) & { close(): Promise<void> } };
-
+// The owner from before the migration opens the dashboard through the orchestrator API. They sign in at the sign-in
+// provider, which keys them by their subject, so callApi puts their row from before the migration under the test issuer.
 Given("the dashboard runs locally for {string} on that database", long, async function (login: string) {
   const c = ctx(this);
-  const authMod = await load<{ createAuth: (cfg: { mode: "local"; devLogin: string }) => AuthT }>("src/http/auth.ts");
-  const routesMod = await load<RoutesModule>("src/http/routes.ts");
-  const serverMod = await load<{ startServer: (h: unknown[], o: { port: number }) => Promise<Server> }>("src/http/server.ts");
-  const fakeMod = await load<{ fakeBacklog: () => { adapter: unknown } }>("src/adapters/fake.ts");
-  assert.ok(authMod && routesMod && serverMod && fakeMod, "the dashboard's modules don't exist");
-  const p = pool(c);
-  const sourceId = (await p.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'test:dashboard') returning id")).rows[0].id;
-  const auth = authMod.createAuth({ mode: "local", devLogin: login });
-  c.auth = auth;
-  c.devToken = auth.devToken;
-  let handler: (req: unknown, res: unknown) => Promise<boolean> = async () => false;
-  c.server = await serverMod.startServer([(req: unknown, res: unknown) => handler(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  const routes = routesMod.dashboardRoutes({ pool: p, auth, origin: c.origin, adapter: fakeMod.fakeBacklog().adapter, sourceId, env: {} });
-  c.routes = routes;
-  handler = routes;
+  c.login = login;
+  c.api = apiApp({
+    pool: pool(c), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-117", readBlob: async () => null, env: {}, verify: testBearer,
+  });
 });
 
 When("someone opens this start's sign-in link and opens Floor", long, async function () {
   const c = ctx(this);
-  if (!c.origin) return;
-  const login = await fetch(`${c.origin}/dev-login?token=${c.devToken}`, { redirect: "manual" });
-  await login.text();
-  c.cookie = login.headers.get("set-cookie");
-  const sent = c.cookie ? c.cookie.split(";")[0] : undefined;
-  const floor = await fetch(`${c.origin}/`, { headers: sent ? { cookie: sent } : {}, redirect: "manual" });
-  c.status = floor.status;
-  c.page = await floor.text();
-  // Shares PBI 19's "the request is signed in as {string}" step, which reads the identity this request carried.
-  const w = this as { pbi19?: { identity?: unknown; identified?: boolean } };
-  w.pbi19 ??= {};
-  w.pbi19.identity = c.auth?.identify("/", { cookie: sent });
-  w.pbi19.identified = true;
+  if (!c.api || !c.login) return;
+  const p = pool(c);
+  const r = await callApi(c.api.app, p, c.login, "GET", "/v1/floor");
+  c.status = r.status;
+  c.page = r.status === 200 ? await renderPage("floor", r.json) : r.text;
+  // The identity this request carried is the user row the API let in, read by the issuer and subject the token named.
+  const row = r.status === 200
+    ? (await p.query<{ provider: string | null; subject: string }>(`select provider, subject from "user" where issuer = $1 and subject = $2`, [TEST_ISSUER, c.login])).rows[0]
+    : undefined;
+  c.identity = row ? { provider: row.provider, subject: row.subject } : null;
+});
+
+// PBI 19's steps once defined this step. Since they moved to the sign-in provider, only this feature asks it.
+Then("the request is signed in as {string}", function (login: string) {
+  const c = ctx(this);
+  assert.ok(c.identity !== undefined, "no request was made");
+  assert.deepEqual(c.identity, { provider: "dev", subject: login }, "the request isn't signed in as the owner from before the migration");
 });
 
 Then("Floor opens for {string} rather than the no-access page", function (_login: string) {
@@ -319,7 +308,7 @@ Then("Floor opens for {string} rather than the no-access page", function (_login
   assert.ok(c.page !== undefined, "Floor was never opened");
   assert.ok(!c.page.includes("No access"), "the no-access page opened");
   assert.equal(c.status, 200, c.page);
-  assert.ok(c.page.includes("<h1>Floor</h1>"), "Floor didn't open");
+  assert.match(c.page, /<h1\b[^>]*>Floor<\/h1>/, "Floor didn't open");
 });
 
 // AC-3

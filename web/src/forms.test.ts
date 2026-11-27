@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFloor, readItem, type Call, type ItemData } from "./api.ts";
-import { buttonsFor, submitAnswer, submitFloorControls, submitItemControls, submitSignOff } from "./forms.ts";
+import { buttonsFor, submitAnswer, submitFeatureChange, submitFloorControls, submitItemControls, submitRuleApproval, submitSetting, submitSignOff } from "./forms.ts";
 
 type Sent = { path: string; method: string; body: unknown };
 
@@ -96,4 +96,39 @@ test("an override the factory accepts whose re-read fails says it was accepted, 
   assert.equal(r.outcome, "failed");
   assert.match((r as { message: string }).message, /^The factory accepted it, but the page couldn't be read again .*502.*Reload the page before sending it again\.$/);
   assert.deepEqual(sent, ["POST /bff/v1/overrides", "GET /bff/v1/items/i-1"]);
+});
+
+test("a feature change decision sends the button's decision with the note, then reads the item again (PBI 365)", async () => {
+  const { call, sent } = stub({ post: [200, { outcome: "applied" }] });
+  assert.equal((await submitFeatureChange(call, item, "Approve the change", "")).outcome, "accepted");
+  assert.deepEqual(sent.map((s) => [s.method, s.path]), [["POST", "/bff/v1/items/i-1/feature-change"], ["GET", "/bff/v1/items/i-1"]]);
+  assert.deepEqual(sent[0].body, { decision: "approve", note: "" });
+  await submitFeatureChange(call, item, "Ask for changes", "Keep it\nas it was ");
+  assert.deepEqual(sent[2].body, { decision: "changes", note: "Keep it\nas it was" });
+  await assert.rejects(submitFeatureChange(call, item, "Approve the scenarios", ""), /no "Approve the scenarios" button/);
+});
+
+test("a rule change approval sends the hash of the rule changes the page shows (PBI 395)", async () => {
+  const { call, sent } = stub({ post: [403, { error: "only an owner can approve a change to the factory's rules" }] });
+  const shown = { ...item, ruleChanges: { changes: [], waiting: true, canApprove: true, approval: null, hash: "h-1" } } as ItemData;
+  const r = await submitRuleApproval(call, shown, "Approve rule change", "");
+  assert.deepEqual(r, { outcome: "failed", message: "Only an owner can approve a change to the factory's rules." });
+  assert.deepEqual(sent, [{ path: "/bff/v1/items/i-1/rule-approval", method: "POST", body: { ruleChangesHash: "h-1" } }]);
+  await assert.rejects(submitRuleApproval(call, item, "Approve rule change", ""), /no rule changes/);
+});
+
+test("a setting change sends its key, value and reason, then reads the settings again with the factory's notice (PBI 175)", async () => {
+  const { call, sent } = stub({ post: [200, { ok: true, changed: "review_capacity", notice: "Setting saved: review capacity changed." }], read: { runtime: [] } });
+  const r = await submitSetting(call, "review_capacity", " 5 ", " more reviewers ");
+  assert.deepEqual(r, { outcome: "accepted", data: { data: { runtime: [] }, notice: "Setting saved: review capacity changed." } });
+  assert.deepEqual(sent.map((s) => [s.method, s.path]), [["POST", "/bff/v1/configuration"], ["GET", "/bff/v1/configuration"]]);
+  assert.deepEqual(sent[0].body, { setting: "review_capacity", value: "5", reason: "more reviewers" });
+});
+
+test("a setting change with no reason sends nothing, and one the factory turns down says why", async () => {
+  const { call, sent } = stub({ post: [400, { error: "Review capacity must be a whole number of at least 1." }] });
+  assert.deepEqual(await submitSetting(call, "review_capacity", "5", "  "), { outcome: "refused", field: "Reason" });
+  assert.equal(sent.length, 0);
+  assert.deepEqual(await submitSetting(call, "review_capacity", "0", "r"), { outcome: "failed", message: "Review capacity must be a whole number of at least 1." });
+  assert.equal(sent.length, 1, "a refused change reads nothing again");
 });

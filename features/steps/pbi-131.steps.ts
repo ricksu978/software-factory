@@ -1,30 +1,34 @@
-// Step definitions for features/pbi-131-issue-links.feature. The dashboard runs as the real node:http server on a
-// free port, in Azure mode, on PBI 4's shared test database, and a viewer signs in with the headers Container Apps adds.
+// Step definitions for features/pbi-131-issue-links.feature. A viewer opens each page as the SPA's own page, rendered
+// from what the orchestrator API answers, built in-process on PBI 4's shared test database with
+// features/support/split-services.ts. The viewer calls the API with the test bearer token.
 //
 // An item's repo is set up the way migrate-cli seeds it: a `repo` row whose url is https://github.com/<owner>/<repo>,
 // and a board (backlog_source) whose repo_map names that repo. An item with a run also points its run at the repo.
 // A board mapping to no repo has an empty repo_map; a repo not on GitHub has another host_adapter and url.
 //
 // "a viewer opens the activity log" is PBI 105's step. It records its page through PBI 19's recordResponse, which
-// these steps read back, and its server is closed here, since PBI 105's After only runs for its own scenarios.
+// these steps read back, and its API is closed here, since PBI 105's After only runs for its own scenarios.
 //
 // The page's contract these steps read: a place is a Floor section (the content after its <h2> up to the next <h2>),
-// the Run detail <h1>, or <main> for the Phase 0 report and the activity log. The issue number shows in the page's
-// text as "#N", with only spaces, markup and punctuation characters between it and the title, and a link is an <a href>.
+// the Run detail <h1>, or <main> for the Phase 0 report and the activity log, or the whole page when it has no <main>,
+// as the SPA's pages don't. The issue number shows in the page's text as "#N", with only spaces, markup and
+// punctuation characters between it and the title, and a link is an <a href>. An item's Run detail is the SPA's
+// /runs/<id>, and open sets the world's `runDetailPath` to it, so PBI 145's steps read the same address.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import type { ItemState } from "../../src/core/states.ts";
+import { runPath } from "../../web/src/routes.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer, type Page } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { recordResponse } from "./pbi-19.steps.ts";
 
 export type Item = { id: string; ext: string; title: string; sourceId: string; repoId: string | null };
 export type Ctx = {
+  /** The orchestrator API these steps open pages through, built on first use. */
+  api?: ReturnType<typeof apiApp>;
+  /** Kept for the step files that still set them. These steps neither set nor read them. */
   server?: Server;
   close?: () => Promise<void>;
   origin?: string;
@@ -35,7 +39,7 @@ export type Ctx = {
   page?: string;
   /** The place and title the last "shows ... before ..." step checked, for a following "is not a link". */
   last?: { scope: string; n: string; title: string };
-  /** The viewer's IANA time zone, sent as their browser's `tz` cookie (PBI 189). Unset sends no cookie. */
+  /** The viewer's IANA time zone, which the page is rendered in (PBI 189). Unset is UTC. */
   viewerZone?: string;
   /** The dashboard's clock (PBI 189). Unset is the real time. */
   now?: () => Date;
@@ -50,7 +54,6 @@ export function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 const GITHUB_ISSUE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\//;
 
 Before({ tags: "@pbi-131 and @db", ...long }, async function () {
@@ -59,16 +62,12 @@ Before({ tags: "@pbi-131 and @db", ...long }, async function () {
 });
 
 After({ tags: "@pbi-131", ...long }, async function () {
-  // This feature's own server, and PBI 105's when its activity log step opened one.
-  const w = this as { pbi131?: Ctx; pbi105?: { server?: Server; close?: () => Promise<void> } };
-  for (const s of [w.pbi131, w.pbi105]) {
-    if (!s) continue;
-    await s.close?.();
-    if (s.server) {
-      s.server.closeAllConnections();
-      await new Promise<void>((resolve) => s.server!.close(() => resolve()));
-    }
-  }
+  // This feature's own API, and PBI 105's when its activity log step built one.
+  const w = this as { pbi131?: Ctx; pbi105?: { api$?: { close(): Promise<void> } } };
+  await w.pbi131?.api?.close();
+  if (w.pbi131) w.pbi131.api = undefined;
+  await w.pbi105?.api$?.close();
+  if (w.pbi105) w.pbi105.api$ = undefined;
 });
 
 // ---- the boards, repos and items ----
@@ -257,24 +256,40 @@ Given("an item whose issue number is {string} and whose title is {string}", long
 
 // ---- opening the pages ----
 
-async function dashboard(c: Ctx): Promise<void> {
-  if (c.server) return;
-  const sourceId = c.items[0]?.sourceId ?? (await pool().query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-131:' || gen_random_uuid()) returning id")).rows[0].id;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId, now: () => c.now?.() ?? new Date() });
-  c.close = handler.close;
+function api(c: Ctx): ReturnType<typeof apiApp> {
+  c.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-131", readBlob: async () => null, env: {},
+    verify: testBearer, now: () => c.now?.() ?? new Date(),
+  });
+  return c.api;
 }
 
+/** The SPA's page at a path the dashboard served, and the API route it reads. */
+function pageAt(path: string): { page: Page; route: string } {
+  if (path === "/") return { page: "floor", route: "/v1/floor" };
+  if (path === "/phase0") return { page: "phase0", route: "/v1/phase0" };
+  if (path === "/activity") return { page: "activity", route: "/v1/activity" };
+  const item = /^\/(?:items|runs)\/([^/?]+)$/.exec(path);
+  if (item) return { page: "item", route: `/v1/items/${item[1]}` };
+  throw new Error(`no SPA page is at ${path}`);
+}
+
+/**
+ * Opens the page at `path` as a viewer: "/" is Floor, "/phase0" the Phase 0 report, "/activity" the activity log, and
+ * "/items/<id>" or "/runs/<id>" the item's Run detail. The page is the SPA's own, rendered from the API's answer in the
+ * viewer's zone. Any answer but 200 is kept as the API's text.
+ */
 export async function open(world: object, path: string): Promise<void> {
   const c = ctx(world);
-  await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer', 'viewer', 'viewer') on conflict (provider, subject) do nothing`);
-  await dashboard(c);
-  const zone: Record<string, string> = c.viewerZone ? { cookie: `tz=${encodeURIComponent(c.viewerZone)}` } : {};
-  const r = await fetch(`${c.origin}${path}`, { headers: { ...headers("viewer"), ...zone }, redirect: "manual" });
+  await pool().query(
+    `insert into "user" (issuer, subject, github_login, role) values ($1, 'viewer', 'viewer', 'viewer') on conflict on constraint user_issuer_subject do nothing`,
+    [TEST_ISSUER],
+  );
+  const { page: name, route } = pageAt(path);
+  const r = await callApi(api(c).app, pool(), "viewer", "GET", route);
   c.status = r.status;
-  c.page = await r.text();
+  c.page = r.status === 200 ? await renderPage(name, r.json, { zone: c.viewerZone ?? "UTC", now: c.now?.() ?? new Date() }) : r.text;
+  (world as { runDetailPath?: (id: string) => string }).runDetailPath = runPath;
   recordResponse(world, c.status, c.page);
 }
 
@@ -474,7 +489,7 @@ Then(new RegExp(`^"([^"]*)" on ${PLACE} links to the item's Run detail$`), funct
   const at = r.text.indexOf(title);
   assert.ok(at >= 0, `${place} doesn't show "${title}": ${placeText(r)}`);
   const hs = new Set(r.hrefs.slice(at, at + title.length));
-  assert.deepEqual([...hs], [`/items/${it.id}`], `"${title}" on ${place} doesn't link to /items/${it.id}`);
+  assert.deepEqual([...hs], [runPath(it.id)], `"${title}" on ${place} doesn't link to ${runPath(it.id)}`);
 });
 
 Then("{string} in {string} is its own link, to the issue on GitHub", function (n: string, section: string) {
@@ -488,8 +503,8 @@ Then("{string} in {string} is its own link, to the issue on GitHub", function (n
 Then("the link to the item's Run detail holds {string} and not {string}", function (title: string, n: string) {
   const it = lastItem(ctx(this));
   const r = render(scope(page(this), "the page"));
-  const detail = r.links.filter((l) => l.href === `/items/${it.id}`);
-  assert.ok(detail.length > 0, `the page has no link to /items/${it.id}`);
+  const detail = r.links.filter((l) => l.href === runPath(it.id));
+  assert.ok(detail.length > 0, `the page has no link to ${runPath(it.id)}`);
   for (const l of detail) {
     assert.ok(l.text.includes(title), `the Run detail link holds "${l.text}"`);
     assert.ok(!l.text.includes(n), `the Run detail link holds "${n}": "${l.text}"`);

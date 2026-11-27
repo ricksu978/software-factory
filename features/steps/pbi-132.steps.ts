@@ -4,9 +4,10 @@
 // the item", with the real haikuJudge over a scripted agent run. Each scripted run reports its model, tokens and cost
 // the way runAgent does. The gate hands each call it records to `recordCheck`, which these steps keep in memory.
 //
-// Run detail and the Phase 0 report (@ac-3, @ac-4) run the real dashboard on a free port, on PBI 4's shared test
-// database, and an operator signs in with the headers Container Apps adds. Readiness checks go in through the store's
-// recordReadinessCheck, and stages, runs and merges are plain SQL.
+// Run detail and the Phase 0 report (@ac-3, @ac-4) are the SPA's own pages, rendered in UTC from what the orchestrator
+// API answers an operator, with the API built in-process on PBI 4's shared test database through
+// features/support/split-services.ts. Readiness checks go in through the store's recordReadinessCheck, and stages,
+// runs and merges are plain SQL.
 //
 // The page's contract these steps read: a section is an <h2> and what follows it up to the next <h2>. Run detail's
 // "Readiness checks" section is next to its "Stages" section, with one table row per check, oldest first, each
@@ -18,21 +19,16 @@
 // model that records each prompt it is asked.
 import { After, Before, Given, Then, When, type DataTable } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import { haikuJudge, type AgentArgs, type AgentResult } from "../../src/agent/run.ts";
+import { apiApp } from "../../src/api/main.ts";
 import { stageMeter } from "../../src/cell/engine.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
 import { recordReadinessCheck } from "../../src/store/readiness-checks.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { checkItem, ctx as gateCtx, item as seedItem, type Judge } from "./pbi-13.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 const MODEL = "claude-haiku-4-5";
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 type Recorded = { title: string; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: Date };
 type DbItem = { id: string; ext: string };
@@ -43,9 +39,8 @@ type Ctx = {
   items: Map<string, DbItem>;
   sourceId?: string;
   dbReady?: boolean;
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
+  /** The orchestrator API the pages are read from, built on first use. */
+  api?: ReturnType<typeof apiApp>;
   status?: number;
   page?: string;
   /** The cell's script and what the scripted model was asked. */
@@ -71,11 +66,8 @@ Before({ tags: "@pbi-132" }, function () {
 
 After({ tags: "@pbi-132", ...long }, async function () {
   const c = ctx(this);
-  await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
+  await c.api?.close();
+  c.api = undefined;
 });
 
 // ---- the judge ----
@@ -346,17 +338,17 @@ Given("no readiness check has run for any item", long, async function () {
 async function open(world: object, path: string): Promise<void> {
   const c = ctx(world);
   await db(c);
-  await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'operator', 'operator', 'operator') on conflict (provider, subject) do nothing`);
-  if (!c.server) {
-    let handler: ReturnType<typeof dashboardRoutes> | undefined;
-    c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-    c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-    handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId: c.sourceId! });
-    c.close = handler.close;
-  }
-  const r = await fetch(`${c.origin}${path}`, { headers: headers("operator"), redirect: "manual" });
+  await pool().query(
+    `insert into "user" (issuer, subject, github_login, role) values ($1, 'operator', 'operator', 'operator') on conflict on constraint user_issuer_subject do nothing`,
+    [TEST_ISSUER],
+  );
+  c.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-132", readBlob: async () => null, env: {}, verify: testBearer,
+  });
+  const item = /^\/items\/([^/]+)$/.exec(path)?.[1];
+  const r = await callApi(c.api.app, pool(), "operator", "GET", item ? `/v1/items/${item}` : "/v1/phase0");
   c.status = r.status;
-  c.page = await r.text();
+  c.page = r.status === 200 ? await renderPage(item ? "item" : "phase0", r.json, { zone: "UTC" }) : r.text;
 }
 
 When("an operator opens Run detail for {string}", long, async function (title: string) {

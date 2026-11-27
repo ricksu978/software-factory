@@ -569,7 +569,7 @@ function floorRow(world: object, n: number): { row: string; stage: string } {
   const heads = rows.map(cells).find((r) => r.some((x) => text(x) === "Stage"));
   assert.ok(heads, `the Floor has no table with a Stage column: ${text(html).slice(0, 500)}`);
   const col = heads.findIndex((x) => text(x) === "Stage");
-  const row = rows.find((r) => r.includes(`href="/items/${id}"`));
+  const row = rows.find((r) => r.includes(`href="/runs/${id}"`));
   assert.ok(row, `the Floor has no row for item ${n}: ${text(html).slice(0, 500)}`);
   return { row, stage: text(cells(row)[col] ?? "") };
 }

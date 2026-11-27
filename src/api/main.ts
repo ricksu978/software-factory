@@ -4,20 +4,26 @@
 // points at, and so are its issuer, audience and expiry. The caller is looked up in "user" on every request, so
 // removing someone ends their access on their next request.
 import { createAdaptorServer, type HttpBindings } from "@hono/node-server";
+import { App } from "@octokit/app";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Server } from "node:http";
 import type pg from "pg";
+import { loadAppKey } from "../adapters/github/app-key.ts";
+import { githubRepoHost } from "../adapters/github/repo-host.ts";
+import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { RepoHost } from "../adapters/types.ts";
-import { decide, type DecisionKind } from "../control/decisions.ts";
+import { decide, decideFeatureChange, type DecisionKind } from "../control/decisions.ts";
 import { requireRole, type Role } from "../http/auth.ts";
+import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "../http/configuration.ts";
 import { activity, BLOB_PATH, floor, phase0, selectable, tokenBanner } from "../http/routes.ts";
-import { blobReader } from "../main.ts";
+import { blobReader, githubSources, missing } from "../main.ts";
 import { createPool, withTx } from "../store/db.ts";
 import { moveInQueue } from "../store/items.ts";
 import { setOverride, type OverrideKind } from "../store/overrides.ts";
 import { readinessSpend } from "../store/readiness-checks.ts";
+import { approveRuleChange } from "../store/rule-changes.ts";
 import { activityLog } from "./activity.ts";
 import { bearerVerifier, discoverJwks, type VerifyBearer } from "./auth.ts";
 import { eventFeed, STREAM_MS } from "./events.ts";
@@ -35,7 +41,10 @@ export type ApiDeps = {
   audience: string;
   /** GITHUB_WEBHOOK_SECRET, which signs GitHub's deliveries to /webhooks/github. */
   webhookSecret: string;
-  /** Where a check suite's delivery reads CI on a PR's head (PBI 235). Unset, the poller reads it on its next pass. */
+  /**
+   * Where a check suite's delivery reads CI on a PR's head (PBI 235), and where an approved feature change request's
+   * files are committed (PBI 365). Unset, the poller reads CI on its next pass, and such an approval fails.
+   */
   repoHost?: RepoHost;
   /** Reads a stored transcript or report by its blob path, or null when it's missing. */
   readBlob: (path: string) => Promise<string | null>;
@@ -106,6 +115,8 @@ function only(c: Context<Env>, role: Role, what: string): User {
 export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>; close(): Promise<void> } {
   const now = d.now ?? (() => new Date());
   const feed = eventFeed(d.pool);
+  // A copy taken now, so the Configuration page shows the env the API started with.
+  const startEnv = { ...d.env };
   const app = new Hono<Env>();
 
   app.onError((e, c) => {
@@ -173,7 +184,9 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
 
   app.get("/v1/items/:id", async (c) => {
     const id = c.req.param("id");
-    const detail = UUID.test(id) ? await itemDetail(d.pool, id, requireRole(c.get("user"), "operator"), now(), d.readBlob) : null;
+    const detail = UUID.test(id) ? await itemDetail(d.pool, id, requireRole(c.get("user"), "operator"), now(), d.readBlob, {
+      owner: requireRole(c.get("user"), "owner"), productOwner: c.get("user").product_owner,
+    }) : null;
     if (!detail) throw new Refused(404, "no such item");
     return c.json(detail);
   });
@@ -187,6 +200,31 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
 
   // The activity log: the 100 newest events, newest first, with only what today's /activity page shows (PBI 286).
   app.get("/v1/activity", async (c) => c.json({ events: activityLog(await activity(d.pool)) }));
+
+  // The Configuration page's settings (PBI 175): the runtime ones as the wip_policy row holds them now, and the
+  // env-backed ones as the API started with them. Only the names in ENV_SETTINGS are listed, so no secret's value leaves.
+  app.get("/v1/configuration", async (c) => {
+    const values = await runtimeValues(d.pool);
+    return c.json({
+      runtime: RUNTIME_SETTINGS.map((s) => ({ key: s.key, label: s.label, value: values[s.key], editable: s.editable, clearable: s.clearable ?? false, note: s.note ?? null })),
+      env: envSettings(startEnv),
+      canOperate: requireRole(c.get("user"), "operator"),
+      at: now().toISOString(),
+    });
+  });
+
+  // A change to one runtime setting, `{ setting, value, reason }`, checked and logged by PBI 175's and PBI 176's rules.
+  // An env-backed setting's name isn't a runtime key, so it's turned down like any setting the page can't change.
+  app.post("/v1/configuration", async (c) => {
+    const user = c.get("user");
+    if (!requireRole(user, "operator")) throw new Refused(403, "Only an operator can change the factory's settings.");
+    const b = await body(c);
+    const str = (v: unknown) => (typeof v === "string" ? v : "");
+    const outcome = await changeSetting(d.pool, user.id, str(b.setting), str(b.value), str(b.reason), now());
+    if (!outcome.ok) throw new Refused(400, outcome.message);
+    const changed = RUNTIME_SETTINGS.find((s) => s.key === outcome.updates[0].key)!;
+    return c.json({ ok: true, changed: changed.key, notice: `Setting saved: ${changed.label} ${changed.clearable ? "cleared" : "changed"}.` });
+  });
 
   // Server-sent events, each stream ended after five minutes.
   app.get("/v1/events", async (c) => {
@@ -216,6 +254,38 @@ export function apiApp(d: ApiDeps & { verify: VerifyBearer }): { app: Hono<Env>;
     const outcome = await withTx(d.pool, (tx) => decide(tx, { itemId: id, userId: c.get("user").id, kind, text: text(b.text), via: "dashboard" }));
     if (outcome === "forbidden") throw new Refused(403, "you can't make that decision");
     if (outcome === "ignored") throw new Refused(409, "that item isn't waiting for this decision");
+    return c.json({ outcome });
+  });
+
+  // PBI 395: only the owner approves an item's change to the factory's own rules, and only while the item waits for it.
+  // The body carries the hash of the rule changes Run detail showed, so the owner approves only what they saw.
+  app.post("/v1/items/:id/rule-approval", async (c) => {
+    const user = only(c, "owner", "approve a change to the factory's rules");
+    const id = c.req.param("id");
+    const shownHash = text((await body(c)).ruleChangesHash);
+    if (!UUID.test(id)) throw new Refused(404, "no such item");
+    const outcome = await withTx(d.pool, (tx) => approveRuleChange(tx, { itemId: id, userId: user.id, at: now(), shownHash }));
+    if (outcome === "unknown") throw new Refused(404, "no such item");
+    if (outcome === "not_waiting") throw new Refused(409, "that item isn't waiting for the owner's approval of a rule change");
+    if (outcome === "stale") throw new Refused(409, "the item's rule changes changed since the page was shown, so reload it and review them again");
+    console.log(`rule change: user ${user.id} approved the rule changes of item ${id}`);
+    return c.json({ outcome });
+  });
+
+  // PBI 365: a product owner approves or turns down a feature change request, with the same effect as the comment.
+  // Approve commits the proposed files through the repo host.
+  app.post("/v1/items/:id/feature-change", async (c) => {
+    const id = c.req.param("id");
+    const b = await body(c);
+    const kind = b.decision === "approve" || b.decision === "changes" ? b.decision : null;
+    if (!kind) throw new Refused(400, "a feature change decision is approve or changes");
+    const user = c.get("user");
+    if (!user.product_owner) throw new Refused(403, "only a product owner can approve or turn down a feature change request");
+    if (!UUID.test(id) || !(await d.pool.query("select 1 from item where id = $1", [id])).rowCount) throw new Refused(404, "no such item");
+    const outcome = await decideFeatureChange({ pool: d.pool, repoHost: d.repoHost },
+      { itemId: id, userId: user.id, kind, text: typeof b.note === "string" ? b.note : "", via: "dashboard" });
+    if (outcome === "forbidden") throw new Refused(403, "only a product owner can approve or turn down a feature change request");
+    if (outcome === "ignored") throw new Refused(409, "that item isn't waiting on a feature change request");
     return c.json({ outcome });
   });
 
@@ -299,20 +369,29 @@ export async function startApi(d: ApiDeps, port: number = API_PORT): Promise<Api
 }
 
 /**
- * Reads the API's settings from `env` and serves it on PORT, or 7402 when PORT isn't set. Every setting is checked
- * before anything connects or listens, so a missing one stops it with nothing started.
+ * Reads the API's settings from `env` and serves it on PORT, or 7402 when PORT isn't set, unless CELL_CONTROL_URL is.
+ * Every setting is checked before anything connects or listens, so a missing one stops it with nothing started.
  */
 export async function main(env: Record<string, string | undefined>): Promise<{ stop(): Promise<void> }> {
-  const names = ["FACTORY_DB_URI", "FACTORY_BLOB", "OIDC_ISSUER", "API_AUDIENCE", "GITHUB_WEBHOOK_SECRET"];
+  loadAppKey(env);
+  // The GitHub App's settings build the repo host, which reads CI on a check suite's delivery and commits an approved
+  // feature change request's files (PBI 365), as the cell API and the worker build theirs.
+  const names = ["FACTORY_DB_URI", "FACTORY_BLOB", "OIDC_ISSUER", "API_AUDIENCE", "GITHUB_WEBHOOK_SECRET", "GITHUB_APP_ID", "GITHUB_APP_KEY"];
   const unset = names.filter((name) => !env[name]);
   if (unset.length) throw new Error(`refusing to start the API: ${unset.join(", ")} ${unset.length === 1 ? "is" : "are"} not set`);
-  const [dbUri, blob, issuer, audience, webhookSecret] = names.map((name) => env[name]!);
+  const [dbUri, blob, issuer, audience, webhookSecret, appId, appKey] = names.map((name) => env[name]!);
+  // An environment that names the cell API's address but no PORT was written for today's combined control plane, which
+  // took its port from PORT alone. The API refuses it rather than guess a port, theirs or its own (PBI 222, PBI 283).
+  if (!env.PORT && env.CELL_CONTROL_URL) throw new Error("refusing to start the API: PORT is not set, and the API doesn't take its port from CELL_CONTROL_URL");
   const port = env.PORT ? Number(env.PORT) : API_PORT;
   if (!Number.isInteger(port) || port <= 0) throw new Error(`refusing to start the API: PORT ${env.PORT} isn't a port`);
 
   const pool = createPool(dbUri);
   try {
-    const api = await startApi({ pool, issuer, audience, webhookSecret, readBlob: blobReader(blob), env: { ...env } }, port);
+    const app = new App({ appId, privateKey: appKey, Octokit: TimedOctokit });
+    const { installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
+    const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
+    const api = await startApi({ pool, issuer, audience, webhookSecret, repoHost, readBlob: blobReader(blob), env: { ...env } }, port);
     console.log(`The orchestrator API answers on port ${port}.`);
     return {
       async stop() {

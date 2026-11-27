@@ -18,7 +18,8 @@
 // An item held Failed after "dod_failed" already has the comment the factory left when it failed. A new comment is one
 // on the board item after that. "The comment" is the one new comment the last "has exactly one new comment" found.
 //
-// Floor and Run detail are the real control plane, PBI 89's, opened by an operator with no `tz` cookie, so in UTC.
+// Floor and Run detail are the SPA's own pages, rendered from what PBI 89's control plane's API answered, opened by an
+// operator with no `tz` cookie, so in UTC.
 // Floor's row for an item is an <li> or <tr> whose text names it as "#<n>". It shows when the item was last re-checked
 // with "re-checked" and the time, as "YYYY-MM-DD HH:MM", in that row; one not yet re-checked says "not yet re-checked"
 // (or "never re-checked", "hasn't been re-checked") there. Run detail says "last re-checked" followed by the time, or
@@ -30,7 +31,7 @@ import { pollMergedCi, recheckFailed } from "../../src/scheduler/scheduler.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { ctx as ctx255 } from "./pbi-255.steps.ts";
-import { ctx as p89, headers, startControlPlane } from "./pbi-89.steps.ts";
+import { ctx as p89, headers, open, startControlPlane } from "./pbi-89.steps.ts";
 import { escapeRe, text } from "./pbi-175.steps.ts";
 
 const MAIN = "main";
@@ -453,14 +454,18 @@ Given("an operator whose time zone is UTC is signed in", long, async function ()
 When("the operator opens item {int}'s Run detail", long, async function (n: number) {
   const c = p89(this);
   assert.ok(c.origin && c.login, "no operator is signed in");
-  const r = await fetch(`${c.origin}/items/${held(this, n).id}`, { headers: headers(c.login) });
-  ctx(this).runDetail = { status: r.status, html: await r.text() };
+  // Run detail is kept apart from the page PBI 89's open() last read, so a Floor opened before it still reads as Floor.
+  const floor = { status: c.status, html: c.html, json: c.json };
+  await open(c, `/items/${held(this, n).id}`);
+  ctx(this).runDetail = { status: c.status!, html: c.html! };
+  Object.assign(c, floor);
 });
 
 function floorRows(world: object, n: number): string[] {
   const c = p89(world);
   assert.equal(c.status, 200, `Floor answered ${c.status}`);
-  const rows = [...c.html!.matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((m) => text(m[2]));
+  // React marks where two pieces of text meet with an empty comment, which isn't text.
+  const rows = [...c.html!.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map((m) => text(m[2]));
   const mine = rows.filter((r) => new RegExp(`#${n}\\b`).test(r));
   assert.ok(mine.length > 0, `Floor doesn't show item ${n}`);
   return mine;
@@ -483,7 +488,7 @@ function runDetail(world: object): string {
   const page = ctx(world).runDetail;
   assert.ok(page, "Run detail wasn't opened");
   assert.equal(page.status, 200, `Run detail answered ${page.status}: ${page.html.slice(0, 300)}`);
-  return text(page.html);
+  return text(page.html.replace(/<!--[\s\S]*?-->/g, ""));
 }
 
 Then("Run detail shows the item was last re-checked at {string}", function (t: string) {

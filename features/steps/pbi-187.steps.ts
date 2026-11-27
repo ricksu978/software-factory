@@ -1,7 +1,9 @@
 // Step definitions for features/pbi-187-run-detail-durations.feature. They build on PBI 131's steps: its Background
-// step makes the item in a GitHub repo, and its "a viewer opens the item's Run detail" serves the real dashboard on
-// PBI 4's shared test database. PBI 145's "the item is InReview" sets the item's state. This feature's Before starts
-// that dashboard itself, before any step opens it, so the dashboard reads the scenario's clock through `now`.
+// step makes the item in a GitHub repo, and its "a viewer opens the item's Run detail" opens the page on PBI 4's shared
+// test database. PBI 145's "the item is InReview" sets the item's state. This feature's Before builds the orchestrator
+// API itself, with the scenario's clock, and hands it and the clock to PBI 131's steps before any step opens a page, so
+// Run detail is the API's GET /v1/items/:id as the viewer, and the SPA's own Run detail rendered from what it answers
+// at that time, through features/support/split-services.ts.
 //
 // The history is set up the way the factory writes it: the issue's creation time in item.issue_created_at, each move
 // between states as a `transition` event (payload from, to, event) at its time, each stage attempt as a stage_run row
@@ -14,12 +16,9 @@
 // that section with one <tr> of <td> cells per stage that ran: the stage, its time and its attempt count.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import type { ItemState } from "../../src/core/states.ts";
+import { TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as issueCtx, open, page, placeText, render, scope } from "./pbi-131.steps.ts";
 
@@ -45,28 +44,17 @@ Before({ tags: "@pbi-187 and @db", ...long }, async function () {
   const d = await testDb();
   if (!d) return;
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
-  // PBI 131's dashboard, started here with this scenario's clock, so its "opens the item's Run detail" uses it.
   const c = issueCtx(this);
-  const sourceId = (await d.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-187:' || gen_random_uuid()) returning id")).rows[0].id;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
   const world = this;
-  handler = dashboardRoutes({
-    pool: d.pool, auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId,
-    now: () => ctx(world).now ?? new Date(),
-  });
-  c.close = handler.close;
+  const now = () => ctx(world).now ?? new Date();
+  c.now = now;
+  c.api = apiApp({ pool: d.pool, issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-187", readBlob: async () => null, env: {}, verify: testBearer, now });
 });
 
 After({ tags: "@pbi-187", ...long }, async function () {
   const s = (this as { pbi131?: ReturnType<typeof issueCtx> }).pbi131;
-  if (!s) return;
-  await s.close?.();
-  if (s.server) {
-    s.server.closeAllConnections();
-    await new Promise<void>((resolve) => s.server!.close(() => resolve()));
-  }
+  await s?.api?.close();
+  if (s) s.api = undefined;
 });
 
 // ---- times ----
