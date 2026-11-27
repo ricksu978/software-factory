@@ -1,24 +1,24 @@
 @pbi-168
 Feature: An Eligible or NotReady item that leaves the backlog is withdrawn
   The poller withdraws an item that loses its "factory" label or closes, but only once the item is
-  Queued or further along. An Eligible or NotReady item that leaves the backlog stays held: it sits on
-  the dashboard's "Not ready" list for good, as #118 does today. With this item, the poller withdraws
+  Queued or further along. An Eligible or NotReady item that leaves the backlog stays held: it sits
+  among the dashboard's Not ready items for good, as #118 does today. With this item, the poller withdraws
   it too, to Abandoned, and logs the move as a system event, as it does for the other withdrawals.
   An item withdrawn this way that gets its label back comes back as Eligible and meets the readiness
   gate again, so it never reaches Queued without passing it.
   Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them.
   The board, the repo and the readiness judge are fakes.
 
-  Rule: A NotReady item that loses its label is withdrawn and leaves the "Not ready" list
+  Rule: A NotReady item that loses its label is withdrawn and leaves the dashboard's Not ready items
 
     @ac-1 @db
     Scenario: A NotReady item whose label a person removes moves to Abandoned on the next poll
       Given the factory holds an item in state "NotReady"
-      And the dashboard's "Not ready" list shows the item
+      And the dashboard's "Waiting on you" list shows the item as Not ready
       When a person removes the item's "factory" label on the board
       And the poller runs once
       Then the factory holds the item in state "Abandoned"
-      And the dashboard's "Not ready" list doesn't show the item
+      And the dashboard's "Waiting on you" list doesn't show the item as Not ready
 
     @ac-1 @db
     Scenario: A second poll after the withdrawal leaves the item where the first one put it
@@ -62,7 +62,7 @@ Feature: An Eligible or NotReady item that leaves the backlog is withdrawn
       And item 118's "factory" label was removed on the board while earlier polls left it NotReady
       When the poller runs once
       Then the factory holds item 118 in state "Abandoned"
-      And the dashboard's "Not ready" list doesn't show item 118
+      And the dashboard's "Waiting on you" list doesn't show item 118 as Not ready
 
   Rule: A withdrawn item that gets its label back returns to Eligible and meets the readiness gate again
 

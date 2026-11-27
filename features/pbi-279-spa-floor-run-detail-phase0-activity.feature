@@ -23,74 +23,72 @@ Feature: Floor, Run detail, Phase 0 and Activity in the SPA, with their forms
   # AC-1: Floor
   # ---------------------------------------------------------------------------------------------------------------
 
-  Rule: Floor lists each kind of work as today's Floor does
+  Rule: Floor lists the factory's work in its two lists, "Waiting on you" and "Production Line", as today's Floor does (PBI 430)
 
     @ac-1
-    Scenario: Floor shows what waits on you, what's next, final-stage items, and what isn't ready
+    Scenario: Floor shows what waits on you, what isn't ready among it, and what's in production
       Given the factory's floor holds:
-        | section        | issue | title           | detail                                                         |
-        | Waiting on you | #41   | Add search      | SignOff, waiting for 3 hours                                   |
-        | Waiting on you | #42   | Fix login       | InReview, waiting for 2 days, PR #77                           |
-        | Next up        | #43   | Export CSV      |                                                                |
-        | Final stage    | #44   | Tidy the footer | InReview                                                       |
-        | Not ready      | #45   | Do the thing    | failed "Has acceptance criteria" and "Names the user it's for" |
+        | section         | issue | title           | detail                                                                    |
+        | Waiting on you  | #41   | Add search      | SignOff, waiting for 3 hours                                              |
+        | Waiting on you  | #42   | Fix login       | InReview, waiting for 2 days, PR #77                                      |
+        | Waiting on you  | #45   | Do the thing    | NotReady, failed "Has acceptance criteria" and "Names the user it's for"  |
+        | Production Line | #43   | Export CSV      | Queued                                                                    |
       When I open Floor in the SPA
       Then under "Waiting on you" Floor shows "#41 Add search" with "SignOff, waiting 3 h"
       And under "Waiting on you" Floor shows "#42 Fix login" with a link "PR #77" to that PR and "InReview, waiting 2 days"
-      And under "Next up" Floor shows "#43 Export CSV"
-      And under "Final stage" Floor shows "#44 Tidy the footer" with "InReview"
-      And under "Not ready" Floor shows "#45 Do the thing" with "Has acceptance criteria" and "Names the user it's for"
+      And under "Waiting on you" Floor shows "#45 Do the thing" with "Has acceptance criteria" and "Names the user it's for"
+      And under "Production Line" Floor shows "#43 Export CSV" with "Queued"
 
     @ac-1
     Scenario: Each item on Floor links to its issue on GitHub and to its Run detail in the SPA
-      Given the factory's floor has "#43 Export CSV" in the repo "acme/shop" under "Next up"
+      Given the factory's floor has "#43 Export CSV" in the repo "acme/shop" under "Production Line"
       When I open Floor in the SPA
       Then "#43" links to issue 43 of "acme/shop" on GitHub
       And "Export CSV" opens that item's Run detail in the SPA
 
     @ac-1
     Scenario: An item whose repo the factory can't tell shows its number without a link
-      Given the factory's floor has "#43 Export CSV" under "Next up" with no repo known
+      Given the factory's floor has "#43 Export CSV" under "Production Line" with no repo known
       When I open Floor in the SPA
       Then Floor shows "#43" as plain text, not a link
 
     @ac-1
-    Scenario: Floor shows blocked items and split parents with each child's state
+    Scenario: Floor shows an item waiting on another PBI, and a split child as part of its parent
       Given the factory's floor holds a Queued item "#50 Add filters" blocked by "#12" and "#13"
-      And it holds a Split parent "#51 Big rework" split into "#60 Part one", which is Queued, "#61 Part two", which is Done, and "#62 Part three", which the factory doesn't hold
+      And it holds a Queued item "#60 Part one", part of the split parent "#51 Big rework"
       When I open Floor in the SPA
-      Then under "Blocked" Floor shows "#50 Add filters" with "Waits on #12 and #13, which are still open. It starts once they close."
-      And under "Split" Floor shows "#51 Big rework" split into, in order, "#60 Part one" as "Queued", "#61 Part two" as "Done" and "#62 Part three" as "Not in the factory"
+      Then under "Production Line" Floor shows "#50 Add filters" with "Waits on #12 and #13, which are still open. It starts once they close."
+      And under "Production Line" Floor shows "#60 Part one" with "part of #51"
 
     @ac-1
     Scenario Outline: Floor shows each item that failed on main, and when it was last re-checked
       Given the viewer's time zone is "UTC"
       And the factory's floor has "#52 Broke main", which failed its Definition of Done on main and <rechecked>
       When I open Floor in the SPA
-      Then under "Failed on main" Floor shows "#52 Broke main" with "<shown>"
+      Then under "Waiting on you" Floor shows "#52 Broke main" with "<shown>"
 
       Examples:
-        | rechecked                                 | shown                                     |
-        | hasn't been re-checked yet                | Failed, not yet re-checked                |
-        | was last re-checked at 2026-11-20 10:00 UTC | Failed, last re-checked at 2026-11-20 10:00 |
+        | rechecked                                   | shown                                               |
+        | hasn't been re-checked yet                  | Failed on main, not yet re-checked                  |
+        | was last re-checked at 2026-11-20 10:00 UTC | Failed on main, last re-checked at 2026-11-20 10:00 |
 
     @ac-1
     Scenario: Floor shows each item's priority, and where its priority or final-stage group comes from
-      Given the factory's floor has "#43 Export CSV" under "Next up" at priority 2, taken from "#44", and final-stage because of "#44"
+      Given the factory's floor has "#43 Export CSV" under "Production Line" at priority 2, taken from "#44", and final-stage because of "#44"
       When I open Floor in the SPA
       Then Floor shows "priority 2, from #44, final-stage because of #44" beside "#43 Export CSV"
 
     @ac-1
     Scenario: Floor marks a bug item with a badge
-      Given the factory's floor has "#53 Fix crash", which carries the bug label, under "Next up" at priority 1
+      Given the factory's floor has "#53 Fix crash", which carries the bug label, under "Production Line" at priority 1
       When I open Floor in the SPA
       Then Floor shows the badge "bug" and "priority 1" beside "#53 Fix crash"
 
     @ac-1
-    Scenario: Floor's In flight table shows each running item's state, stage, time in stage, cost and last message
+    Scenario: Floor's Production Line table shows each running item's state, stage, time in stage, cost and last message
       Given the factory's floor has "#46 Add search" In progress at stage "green" for 12 minutes, costing $1.234, with badges "shadow: high" and last agent message "Running the tests"
       When I open Floor in the SPA
-      Then the "In flight" table has the columns "Item", "State", "Stage", "In stage", "Cost" and "Last agent message"
+      Then the "Production Line" table has the columns "Item", "State", "Stage", "In stage", "Cost" and "Last agent message"
       And its row for "#46 Add search" shows "InProgress", "green", "12 min", "$1.23" and "Running the tests"
       And the row shows the badge "shadow: high"
       And the row's cost has the title "$1.234"
@@ -120,15 +118,9 @@ Feature: Floor, Run detail, Phase 0 and Activity in the SPA, with their forms
       Then under "<section>" Floor shows "<empty>"
 
       Examples:
-        | section        | empty                                                                  |
-        | Waiting on you | Nothing waits on you.                                                  |
-        | Next up        | Nothing is ready to start.                                             |
-        | Final stage    | No item is in the review loop, and none is depended on by one that is. |
-        | Not ready      | Every item that entered is ready.                                      |
-        | Blocked        | No ready item waits on another.                                        |
-        | Split          | No item is split into children that are still open.                    |
-        | Failed on main | No item failed its Definition of Done on main.                         |
-        | In flight      | No item is in flight.                                                  |
+        | section         | empty                     |
+        | Waiting on you  | Nothing waits on you.     |
+        | Production Line | Nothing is in production. |
 
     @ac-1
     Scenario: Floor shows how many items wait against the limit, and links to Activity and the Phase 0 report

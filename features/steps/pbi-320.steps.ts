@@ -1,7 +1,7 @@
 // Step definitions for features/pbi-320-final-stage-and-priority-claim-order.feature.
 //
 // Every scenario runs PBI 89's control plane on PBI 4's test database, with a fake board and a fake repo host, set up
-// as PBI 265's scenarios set theirs up. PBI 265's items, pages, Next up, Start now, Move up, Hold and Done steps are
+// as PBI 265's scenarios set theirs up. PBI 265's items, pages, Production Line, Start now, Move up, Hold and Done steps are
 // reused, and so are PBI 17's "waits for an unanswered sign-off", "waits for an unanswered question", "is in review" and
 // `item "A" is "Queued"`. PBI 89's "the scheduler ticks once" keeps the WIP limit here, so a free slot claims an item.
 //

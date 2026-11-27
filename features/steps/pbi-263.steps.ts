@@ -7,8 +7,8 @@
 //
 // "The item" is the Background's item, even when a scenario makes another one after it.
 //
-// The page's contract these steps read: Floor's "In flight" section is its <h2> and what follows up to the next <h2>,
-// and it holds one table, with its column headings in <th> and one <tr> of <td> cells per item. An item's row is the
+// The page's contract these steps read: Floor's "Production Line" section (PBI 430) is its <h2> and what follows up to
+// the next <h2>, and it holds one table, with its column headings in <th> and one <tr> of <td> cells per item. An item's row is the
 // one whose "Item" cell holds its title. The "Cost" cell's text is the cost and nothing else. Hovering a Cost cell, on
 // Floor or in Run detail's Stages table, shows that <td>'s title attribute.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";

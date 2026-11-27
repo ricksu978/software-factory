@@ -22,7 +22,7 @@ SOP stages 1 to 7 plus a thin stage 8 that addresses review feedback.
 The factory merges a PR once branch protection allows it and a person has ticked every `dod.md` line left for them (PBI 181),
 and the item reaches Done once CI on main is green.
 The risk classifier runs in shadow mode,
-and the dashboard has Floor with its four strips,
+and the dashboard has Floor with its two lists,
 Run detail and five overrides:
 pause,
 drain,
@@ -3303,7 +3303,7 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     the field Task 7's adapter lists by,
     or `factory` when it's unset.
     An Eligible or NotReady item that lost the label or closed moves to Abandoned through `withdrawn` before the gate runs,
-    so it's never gated and leaves Floor's "Not ready" list.
+    so it's never gated and leaves Floor's Not ready items under "Waiting on you".
     A listed item that's Abandoned,
     whose last move there was a withdrawal from Eligible or NotReady,
     moves back to Eligible through `returned` and is gated in the same poll.
@@ -6874,9 +6874,10 @@ from spec §6 rows 1 to 7:
       since a CI failure the base shares never goes to Green.
     - `GET /items/:id` is Run detail.
     - PBI 369:
-      Floor lists under `<h2>Failed on main</h2>` each item `failedOnMain` returns,
+      Floor lists under "Waiting on you" each item `failedOnMain` returns (PBI 430),
       every Failed item whose last move to Failed was `dod_failed`,
-      with "last re-checked at" and the time of its newest `recheck` event since it failed,
+      with "Failed on main",
+      then "last re-checked at" and the time of its newest `recheck` event since it failed,
       in the viewer's `tz` zone,
       or "not yet re-checked".
       Run detail shows the same for such an item in `<p id="recheck">`,
@@ -7132,7 +7133,7 @@ from spec §6 rows 1 to 7:
       without locking them.
       Floor passes `resumeOnly` when the waiting count is at `review_capacity`,
       the same brake `tick` applies,
-      so "Next up" never shows a fresh item the scheduler wouldn't start.
+      so "Production Line" never lists a fresh item the scheduler wouldn't start among the claimable ones.
     - `dashboardRoutes(deps)` is one handler for every dashboard route,
       and leaves `/webhooks`,
       `/internal` and `/probe` to the other handlers.
@@ -7162,7 +7163,7 @@ from spec §6 rows 1 to 7:
       and `POST /users` answers 400 for a login another user holds.
     - Run detail shows the signed-off feature files at `features_lock_sha`.
     - **Issue numbers (PBI 131).**
-      Floor's four lists,
+      Floor's lists,
       the Run detail heading,
       the Phase 0 report and Activity show each item's external id as `#N` before its title.
       `issueRef` in `views.ts` renders it.
@@ -7188,7 +7189,6 @@ from spec §6 rows 1 to 7:
       and `/v1/items/{id}` carries the request as `featureChange` for its section.
     - **PR links (PBI 145).**
       An InReview item shows `PR #N` as its own link under "Waiting on you",
-      in the "In flight" table,
       and after the state on Run detail's state line.
       `prLink` in `views.ts` renders it from the open run's `pr_number` and `pr_url`,
       the run with `ended_at` null.
@@ -7252,7 +7252,11 @@ from spec §6 rows 1 to 7:
     Run detail shows:
     - for a Split parent,
       a "Split into" heading under the state line,
-      then the same list of its children as Floor's "Split" strip shows.
+      then an `<ol class="split-into">` with one `<li>` per child in order:
+      "#N" linking to the child's `url`,
+      its title as text,
+      and its state,
+      or "Not in the factory" when `splitChildren` gives none.
       An item with no filed children shows no "Split into" (PBI 227);
     - the SOP version and config sha;
     - each policy file used,
@@ -7391,45 +7395,53 @@ from spec §6 rows 1 to 7:
       with `next_stage = "red"` and the lock set.
     - `/answer` from a mapped user with only the viewer role returns `forbidden`,
       exactly as the dashboard route does for that user.
-  - **Floor strips.**
-    Floor shows:
+  - **Floor's two lists (PBI 430).**
+    Floor shows two lists,
+    under its banners and above its Controls,
+    in place of its eight sections:
     - "Waiting on you",
-      with every SignOff and NeedsInput item oldest first,
-      plus each InReview PR and how long it has waited,
-      which matches the count in Run contract 3;
-    - "Next up",
-      the first five items `claimNext` would pick;
-    - "Final stage",
-      every item in the final-stage group in claim priority order,
-      one there only because a final-stage item depends on it included,
-      wherever it is (PBI 320);
-    - beside each item in these lists and the "In flight" table,
+      every item that needs the owner,
+      oldest first by when it began waiting:
+      a SignOff or NeedsInput item from its oldest open question's `asked_at`,
+      an InReview item from its move to InReview,
+      a FeatureChangeRequest item from its move there,
+      a NotReady item from its move to NotReady,
+      and an item `failedOnMain` returns from its last move to Failed.
+      Each row says why it waits:
+      the sign-off,
+      the question's text,
+      the review of its `PR #N`,
+      the feature change request,
+      each `dor.md` line it failed,
+      or "Failed on main" with its last re-check;
+    - "Production Line",
+      a table with In flight's columns,
+      every InProgress item first,
+      then the claimable items in the order `nextUp` returns them from the claim's own query,
+      then the rest of `factoryQueue`'s queue,
+      a held item or one the brake holds back,
+      then each Queued item whose `blocked_by` isn't empty,
+      with "Waits on #N" naming every open dependency,
+      as plain `#N` since a blocker may be in another repo.
+      It holds up to 10 rows,
+      the InProgress ones included,
+      and a line under it says how many more items are queued;
+    - beside each item in both lists,
       its claim priority as `priority N`,
       or `priority N, from #E` when it comes from item `#E` that depends on it,
       and `final-stage`,
       or `final-stage because of #E`,
       when it's in the group,
-      after a `bug` badge when the item itself carries the `bug` label (PBI 378);
-    - "Not ready",
-      each NotReady item with the `dor.md` lines it failed;
-    - "Blocked",
-      each Queued item whose `blocked_by` isn't empty,
-      with the open issues it waits on,
-      as plain `#N` since a blocker may be in another repo.
-      The gate no longer fails an item for an open dependency (PBI 237),
-      so this list is where the owner sees why a ready item doesn't start;
-    - "Split",
-      each Split parent with a child that the factory doesn't hold or holds short of Done,
-      Abandoned or Split.
-      The parent shows as "#N" and its title,
-      as in the other strips,
-      then "Split into" and an `<ol class="split-into">` with one `<li>` per child in order:
-      "#N" linking to the child's `url`,
-      its title as text,
-      and its state,
-      or "Not in the factory" when `splitChildren` gives none (PBI 227);
+      after a `bug` badge when the item itself carries the `bug` label (PBI 378),
+      and "part of #N" linking to the parent's Run detail for a split child.
+      A Split parent shows in neither list,
+      since its work goes on in its children;
     - the waiting count beside the WIP number,
       as "3 of 3 waiting".
+    `twoLists` in `src/http/floor-lists.ts` puts the rows in order and lists each item once,
+    and `GET /v1/floor` carries the lists as `waitingOnYou`,
+    `productionLine` and `productionMore`,
+    which the SPA's Floor shows the same way.
   - **Sign-off view.**
     For a SignOff item,
     Run detail lists each acceptance criterion with the scenarios tagged `@ac-N` under it,

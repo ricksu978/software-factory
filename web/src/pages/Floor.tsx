@@ -1,17 +1,17 @@
-// Floor in the SPA (redesign step 8b): what waits on a person, what's next, the final-stage, not-ready, blocked, split
-// and failed items, what's in flight, the factory's banners, and an operator's Controls, as today's Floor in
-// src/http/views.ts shows them. Since step 8c (PBI 280) it also shows when the worker last ticked, with the count of
-// outbox rows set aside beside it, and a "Scheduler not ticking" banner once that heartbeat is more than a minute old.
+// Floor in the SPA (redesign step 8b): the factory's banners, its two lists, "Waiting on you" and "Production Line"
+// (PBI 430), and an operator's Controls, as today's Floor in src/http/views.ts shows them. Since step 8c (PBI 280) it
+// also shows when the worker last ticked, with the count of outbox rows set aside beside it, and a "Scheduler not
+// ticking" banner once that heartbeat is more than a minute old.
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { CiFailure, FloorData, FloorProps, MainBreak } from "../api.ts";
+import type { CiFailure, FloorData, FloorProps, MainBreak, PartOf, ProductionLineRow, WaitingOnYouRow } from "../api.ts";
 import { FLOOR_KINDS } from "../forms.ts";
 import { PATHS, runPath } from "../routes.ts";
 import { age, blockedReason, drainLine, heartbeatLine, mainRedLead, recheckLine, restartLine, schedulerBanner } from "../lines.ts";
-import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, PrLink, SplitInto, Standing, WaitsOnOwner } from "./parts.tsx";
+import { A, Banner, CostCell, Empty, H2, IssueRef, ItemName, Message, onSubmitWith, Standing, WaitsOnOwner } from "./parts.tsx";
 
 export { submitFloorControls } from "../forms.ts";
 
@@ -21,6 +21,46 @@ const short = (sha: string) => sha.slice(0, 7);
 /** A list of rows, or the note that says the list is empty. */
 function List({ rows, empty }: { rows: ReactNode[]; empty: string }) {
   return rows.length ? <ol className="ml-6 list-decimal space-y-1">{rows}</ol> : <Empty>{empty}</Empty>;
+}
+
+/** A split child's "part of #N" (PBI 430), linking to its parent's Run detail. */
+function PartOfLink({ p }: { p: PartOf | undefined }) {
+  return p ? <> <span className="text-muted-foreground">part of <A href={runPath(p.id)}>#{p.external_id}</A></span></> : null;
+}
+
+/** What a row of "Waiting on you" waits on (PBI 430), in words. */
+function WaitsOnYou({ w, zone }: { w: WaitingOnYouRow; zone: string }) {
+  switch (w.why) {
+    case "sign-off": return <>Waits on your sign-off.</>;
+    case "question": return <>Waits on your answer to the question “{w.question ?? ""}”</>;
+    case "review": return <>Waits on your review of {w.state === "InReview" && w.pr_url && w.pr_number != null ? <A href={w.pr_url}>PR #{w.pr_number}</A> : "its PR"}.</>;
+    case "feature-change": return <WaitsOnOwner path={runPath(w.id)} />;
+    case "not-ready": return <>Not ready. The readiness gate turned it down, failing:<ul className="ml-6 list-disc">{(w.failed ?? []).map((l, i) => <li key={i}>{l}</li>)}</ul></>;
+    case "failed-on-main": return <>{recheckLine(w.rechecked ?? null, zone, false)}.</>;
+  }
+}
+
+/** "1 more item is queued." or "N more items are queued.", under Production Line. */
+const moreQueued = (n: number) => `${n} more ${n === 1 ? "item is" : "items are"} queued.`;
+
+/** A row of "Production Line" (PBI 430): In flight's columns for an InProgress item, its state and badges for a queued one. */
+function LineRow({ r, now, standing }: { r: ProductionLineRow; now: Date; standing: ReactNode }) {
+  const busy = r.state === "InProgress";
+  return (
+    <TableRow>
+      <TableCell className="whitespace-normal">
+        <ItemName r={r} /><PartOfLink p={r.partOf} />
+        {r.badges.map((b) => <span key={b}> <Badge variant="secondary">{b}</Badge></span>)}
+        {standing}
+        {r.waitsOn.length > 0 && <> <span className="text-muted-foreground">{blockedReason(r.waitsOn)}</span></>}
+      </TableCell>
+      <TableCell>{r.state}</TableCell>
+      <TableCell>{busy ? (r.ci_failure ? <FixingCiStage f={r.ci_failure} /> : r.stage ?? "") : ""}</TableCell>
+      <TableCell>{busy ? age(r.since, now) : ""}</TableCell>
+      {busy ? <CostCell usd={r.cost} /> : <TableCell />}
+      <TableCell className="text-muted-foreground whitespace-normal">{busy ? r.message ?? "" : ""}</TableCell>
+    </TableRow>
+  );
 }
 
 /** A failed check's name, linked to its run when its address is https, so a link a cell sent can't run script. */
@@ -130,33 +170,14 @@ export function Floor({ data: f, now, zone, message, onSubmit, onReasonField, co
         {f.waitingCount} of {f.capacity} waiting. <A href={PATHS.activity}>Activity</A> <A href={PATHS.phase0}>Phase 0 report</A>
       </p>
       <H2>Waiting on you</H2>
-      <List empty="Nothing waits on you." rows={f.waiting.map((w) => (
-        <li key={w.id}><ItemName r={w} /><PrLink r={w} /> <span className="text-muted-foreground">{w.state}, waiting {age(w.since, now)}</span>{w.feature_change && <WaitsOnOwner path={runPath(w.id)} />}{st(w.id)}</li>
+      <List empty="Nothing waits on you." rows={f.waitingOnYou.map((w) => (
+        <li key={w.id}>
+          <ItemName r={w} /><PartOfLink p={w.partOf} /> <span className="text-muted-foreground">{w.state}{w.since ? `, waiting ${age(w.since, now)}` : ""}</span>
+          {st(w.id)} <WaitsOnYou w={w} zone={zone} />
+        </li>
       ))} />
-      <H2>Next up</H2>
-      <List empty="Nothing is ready to start." rows={f.next.map((n) => <li key={n.id}><ItemName r={n} />{st(n.id)}</li>)} />
-      <H2>Final stage</H2>
-      <List empty="No item is in the review loop, and none is depended on by one that is." rows={f.finalStage.map((n) => (
-        <li key={n.id}><ItemName r={n} /> <span className="text-muted-foreground">{n.state}</span>{st(n.id)}</li>
-      ))} />
-      <H2>Not ready</H2>
-      <List empty="Every item that entered is ready." rows={f.notReady.map((n) => (
-        <li key={n.id}><ItemName r={n} />{st(n.id)}<ul className="ml-6 list-disc">{n.failed.map((l, i) => <li key={i}>{l}</li>)}</ul></li>
-      ))} />
-      <H2>Blocked</H2>
-      <List empty="No ready item waits on another." rows={f.blocked.map((b) => (
-        <li key={b.id}><ItemName r={b} /> <span className="text-muted-foreground">{blockedReason(b.blocked_by)}</span>{st(b.id)}</li>
-      ))} />
-      <H2>Split</H2>
-      <List empty="No item is split into children that are still open." rows={f.split.map((p) => (
-        <li key={p.id}><ItemName r={p} /> <span className="text-muted-foreground">Split into</span><SplitInto children={p.children} /></li>
-      ))} />
-      <H2>Failed on main</H2>
-      <List empty="No item failed its Definition of Done on main." rows={f.failed.map((n) => (
-        <li key={n.id}><ItemName r={n} /> <span className="text-muted-foreground">{recheckLine(n.rechecked, zone, false)}</span></li>
-      ))} />
-      <H2>In flight</H2>
-      {f.active.length ? (
+      <H2>Production Line</H2>
+      {f.productionLine.length ? (
         <Table>
           <TableHeader>
             <TableRow>
@@ -164,23 +185,11 @@ export function Floor({ data: f, now, zone, message, onSubmit, onReasonField, co
             </TableRow>
           </TableHeader>
           <TableBody>
-            {f.active.map((a) => (
-              <TableRow key={a.id}>
-                <TableCell>
-                  <ItemName r={a} /><PrLink r={a} />
-                  {a.badges.map((b) => <span key={b}> <Badge variant="secondary">{b}</Badge></span>)}
-                  {st(a.id)}
-                </TableCell>
-                <TableCell>{a.state}</TableCell>
-                <TableCell>{a.ci_failure ? <FixingCiStage f={a.ci_failure} /> : a.stage ?? ""}</TableCell>
-                <TableCell>{age(a.since, now)}</TableCell>
-                <CostCell usd={a.cost} />
-                <TableCell className="text-muted-foreground whitespace-normal">{a.message ?? ""}</TableCell>
-              </TableRow>
-            ))}
+            {f.productionLine.map((r) => <LineRow key={r.id} r={r} now={now} standing={st(r.id)} />)}
           </TableBody>
         </Table>
-      ) : <Empty>No item is in flight.</Empty>}
+      ) : <Empty>Nothing is in production.</Empty>}
+      {f.productionMore > 0 && <Empty>{moreQueued(f.productionMore)}</Empty>}
       {f.canOperate && (
         <>
           <H2>Controls</H2>

@@ -10,6 +10,7 @@ import { FEATURE_CHANGE_ANCHOR, lineDiff, WAITS_ON_OWNER, type DiffLine, type Fe
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
+import type { PartOf, ProductionLineRow, WaitingOnYouRow } from "./floor-lists.ts";
 
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -60,17 +61,8 @@ export type Issue = { external_id: string; repo: string | null };
 /** The PR an item's open run holds (PBI 145). A row with no open run, or a run with no PR yet, leaves these null. */
 export type OpenPr = { pr_number?: number | null; pr_url?: string | null };
 
-export type ActiveRow = Issue & OpenPr & { id: string; title: string; state: string; stage: string | null; since: Date | null; cost: string; badges: string[]; message: string | null;
-  /** PBI 292: the CI failure the item's Green attempt is fixing, or null when it fixes none. */
-  ci_failure?: CiFailure | null };
 /** PBI 292: a CI failure on a commit one of the run's stages pushed, as the cell reported it for Green to fix. */
 export type CiFailure = { sha: string; checks: { name: string; url: string; failingTests: string[] }[] };
-export type WaitingRow = Issue & OpenPr & { id: string; title: string; state: string; since: Date | null;
-  /** PBI 366: true for an item in FeatureChangeRequest, which waits on the Product Owner's decision on its request. */
-  feature_change?: boolean };
-export type NotReadyRow = Issue & { id: string; title: string; failed: string[] };
-/** A Queued item held back by its open dependencies, as the issue numbers GitHub lists as blocking it (PBI 237). */
-export type BlockedRow = Issue & { id: string; title: string; blocked_by: string[] };
 /** An item waiting on a question that blames the base (PBI 215): the base commit and the tests that fail on it. */
 export type BaseFailRow = Issue & { id: string; title: string; sha: string; tests: string[] };
 /**
@@ -236,9 +228,6 @@ function cellImageStatus(c: CellImage): string {
   return built + restart;
 }
 
-/** A Split parent on Floor (PBI 227): the item, and the children its split filed, in order. */
-export type SplitRow = Issue & { id: string; title: string; children: SplitChildView[] };
-
 /**
  * A Split parent's children (PBI 227), in the order of the split: each child's "#N" linking to its issue, its title, and
  * the state the factory holds it in, or "Not in the factory" while it holds none: no poll has listed the child yet,
@@ -303,26 +292,45 @@ function mainRedNotice(rows: MainBreakRow[]): string {
  */
 const costCell = (usd: string | number | null) => `<td title="${escapeHtml(`$${usd ?? 0}`)}">${escapeHtml(cost(usd))}`;
 
-/** PBI 369: an item that failed its Definition of Done on main, on Floor, and when it was last re-checked, or null. */
-export type FailedRow = Issue & { id: string; title: string; rechecked: Date | null };
-
-/** When the factory last re-checked a Failed item (PBI 369), or that it hasn't yet. */
+/** When the factory last re-checked a Failed item (PBI 369), or that it hasn't yet: Floor's short form (PBI 430), or Run detail's sentence. */
 function recheckLine(at: Date | null, zone: string, sentence: boolean): string {
   const said = at ? `last re-checked at ${local(at, zone)}` : "not yet re-checked";
-  if (!sentence) return `Failed, ${said}`;
+  if (!sentence) return `Failed on main, ${said}`;
   return at
     ? `Last re-checked at ${local(at, zone)}. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.`
     : "It hasn't been re-checked yet. The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.";
 }
 
+/** A split child's "part of #N" (PBI 430), linking to its parent's Run detail. */
+const partOf = (p: PartOf) => (p ? ` <span class="muted">part of <a href="/items/${escapeHtml(p.id)}">#${escapeHtml(p.external_id)}</a></span>` : "");
+
+/** What a row of "Waiting on you" waits on (PBI 430), in words. */
+function waitsOnYou(w: WaitingOnYouRow, zone: string): string {
+  switch (w.why) {
+    case "sign-off": return "Waits on your sign-off.";
+    case "question": return `Waits on your answer to the question “${escapeHtml(w.question ?? "")}”`;
+    case "review": return `Waits on your review of ${prLink(w) || "its PR"}.`;
+    case "feature-change": return waitsOnOwner(`/items/${escapeHtml(w.id)}`);
+    case "not-ready": return `Not ready. The readiness gate turned it down, failing:<ul>${(w.failed ?? []).map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`;
+    case "failed-on-main": return `${recheckLine(w.rechecked ?? null, zone, false)}.`;
+  }
+}
+
+/** "1 more item is queued." or "N more items are queued.", under Production Line. */
+const moreQueued = (n: number) => `${n} more ${n === 1 ? "item is" : "items are"} queued.`;
+
+/**
+ * Floor: the factory's banners, its two lists (PBI 430), and an operator's Controls. "Waiting on you" holds what needs
+ * the owner, oldest first. "Production Line" is a table of the factory's own work, In flight's columns filled for an
+ * InProgress row, with a line under it for the queued items that didn't fit.
+ */
 export function floorPage(f: {
-  active: ActiveRow[];
-  waiting: WaitingRow[];
+  waitingOnYou: WaitingOnYouRow[];
+  productionLine: ProductionLineRow[];
+  /** How many queued items didn't fit in productionLine. */
+  productionMore: number;
   waitingCount: number;
   capacity: number;
-  next: (Issue & { id: string; title: string })[];
-  notReady: NotReadyRow[];
-  blocked?: BlockedRow[];
   factory: { kind: string; reason: string }[];
   canOperate: boolean;
   restart?: Restart | null;
@@ -331,18 +339,13 @@ export function floorPage(f: {
   cellImage?: CellImage | null;
   baseFails?: BaseFailRow[];
   mainBreaks?: MainBreakRow[];
-  split?: SplitRow[];
   /** PBI 320: every item's claim key by id. */
   keys?: Map<string, ClaimKey>;
-  /** PBI 320: every final-stage item, in claim order. */
-  finalStage?: (Issue & { id: string; title: string; state: string })[];
-  /** PBI 369: each item that went to Failed with dod_failed, and when it was last re-checked since, or null. */
-  failed?: FailedRow[];
   /** The viewer's IANA time zone, from their browser's `tz` cookie. Defaults to UTC. */
   zone?: string;
 }, banner: string | null): string {
+  const zone = f.zone ?? "UTC";
   const st = (id: string) => standing(f.keys?.get(id));
-  const list = (rows: string[], empty: string) => (rows.length ? `<ol>${rows.join("")}</ol>` : `<p class="muted">${empty}</p>`);
   const status = (f.mainBreaks?.length ? mainRedNotice(f.mainBreaks) : "")
     + f.factory.filter((o) => factoryState[o.kind]).map((o) => o.kind === "drain"
       ? drainStatus(o.reason, f.running)
@@ -352,26 +355,20 @@ export function floorPage(f: {
   const controls = f.canOperate
     ? `<h2>Controls</h2>${overrideForm([["pause", "Pause"], ["drain", "Drain"], ["resume", "Resume"], ["kill", "Kill switch"], ["restart", "Prepare restart"]], null)}`
     : "";
+  const waiting = f.waitingOnYou.map((w) => `<li>${named(w)}${partOf(w.partOf)} <span class="muted">${escapeHtml(w.state)}${w.since ? `, waiting ${escapeHtml(age(w.since))}` : ""}</span>${st(w.id)} ${waitsOnYou(w, zone)}</li>`);
+  const badges = (r: ProductionLineRow) => r.badges.map((b) => ` <span class="badge">${escapeHtml(b)}</span>`).join("");
+  const line = f.productionLine.map((r) => r.state === "InProgress"
+    ? `<tr><td>${named(r)}${partOf(r.partOf)}${badges(r)}${st(r.id)}</td><td>${escapeHtml(r.state)}</td><td>${r.ci_failure ? fixingCiStage(r.ci_failure) : escapeHtml(r.stage ?? "")}</td><td>${escapeHtml(age(r.since))}</td>${costCell(r.cost)}</td><td class="muted">${escapeHtml(r.message ?? "")}</td></tr>`
+    : `<tr><td>${named(r)}${partOf(r.partOf)}${badges(r)}${st(r.id)}${r.waitsOn.length ? ` <span class="muted">${escapeHtml(blockedReason(r.waitsOn))}</span>` : ""}</td><td>${escapeHtml(r.state)}</td><td></td><td></td><td></td><td></td></tr>`);
   return page("Floor", `<h1>Floor</h1>${status}
 <p>${f.waitingCount} of ${f.capacity} waiting. <a href="/activity">Activity</a> <a href="/phase0">Phase 0 report</a> <a href="/configuration">Configuration</a></p>
 <h2>Waiting on you</h2>
-${list(f.waiting.map((w) => `<li>${named(w)}${withPr(w)} <span class="muted">${escapeHtml(w.state)}, waiting ${escapeHtml(age(w.since))}</span>${w.feature_change ? ` ${waitsOnOwner(`/items/${escapeHtml(w.id)}`)}` : ""}${st(w.id)}</li>`), "Nothing waits on you.")}
-<h2>Next up</h2>
-${list(f.next.map((n) => `<li>${named(n)}${st(n.id)}</li>`), "Nothing is ready to start.")}
-<h2>Final stage</h2>
-${list((f.finalStage ?? []).map((n) => `<li>${named(n)} <span class="muted">${escapeHtml(n.state)}</span>${st(n.id)}</li>`), "No item is in the review loop, and none is depended on by one that is.")}
-<h2>Not ready</h2>
-${list(f.notReady.map((n) => `<li>${named(n)}${st(n.id)}<ul>${n.failed.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></li>`), "Every item that entered is ready.")}
-<h2>Blocked</h2>
-${list((f.blocked ?? []).map((b) => `<li>${named(b)} <span class="muted">${escapeHtml(blockedReason(b.blocked_by))}</span>${st(b.id)}</li>`), "No ready item waits on another.")}
-<h2>Split</h2>
-${list((f.split ?? []).map((p) => `<li>${named(p)} <span class="muted">Split into</span>${splitInto(p.children)}</li>`), "No item is split into children that are still open.")}
-<h2>Failed on main</h2>
-${list((f.failed ?? []).map((n) => `<li>${named(n)} <span class="muted">${recheckLine(n.rechecked, f.zone ?? "UTC", false)}</span></li>`), "No item failed its Definition of Done on main.")}
-<h2>In flight</h2>
-${f.active.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
-${f.active.map((a) => `<tr><td>${named(a)}${withPr(a)} ${a.badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(" ")}${st(a.id)}</td><td>${escapeHtml(a.state)}</td><td>${a.ci_failure ? fixingCiStage(a.ci_failure) : escapeHtml(a.stage ?? "")}</td><td>${escapeHtml(age(a.since))}</td>${costCell(a.cost)}</td><td class="muted">${escapeHtml(a.message ?? "")}</td></tr>`).join("\n")}
-</tbody></table>` : `<p class="muted">No item is in flight.</p>`}
+${waiting.length ? `<ol>${waiting.join("")}</ol>` : `<p class="muted">Nothing waits on you.</p>`}
+<h2>Production Line</h2>
+${line.length ? `<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
+${line.join("\n")}
+</tbody></table>` : `<p class="muted">Nothing is in production.</p>`}
+${f.productionMore > 0 ? `<p class="muted">${moreQueued(f.productionMore)}</p>` : ""}
 ${controls}
 <script>
 // Floor updates live from the event log: reload a second after the last event, so a burst reloads once. While an

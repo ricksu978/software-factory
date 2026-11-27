@@ -25,7 +25,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       When a new issue "X" lands on the board, which then orders the items "A", "B", "X", "C"
       And the poller reads the board
       And the readiness gate passes item "X"
-      Then Floor's "Next up" lists "A", "C", "B", "X", in that order
+      Then Floor's "Production Line" lists "A", "C", "B", "X" to claim, in that order
       And item "C" has an active "Move up" override
 
     @ac-1
@@ -35,7 +35,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       When new issues "X" and "Y" land on the board, which then orders the items "A", "B", "X", "Y", "C"
       And the poller reads the board
       And the readiness gate passes items "X" and "Y"
-      Then Floor's "Next up" lists "A", "C", "B", "X", "Y", in that order
+      Then Floor's "Production Line" lists "A", "C", "B", "X", "Y" to claim, in that order
       And item "C" has an active "Move up" override
 
     @ac-1
@@ -46,7 +46,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the poller reads the board
       And the readiness gate passes item "X"
       And the poller reads the board, still ordered "A", "B", "X", "C"
-      Then Floor's "Next up" lists "A", "C", "B", "X", in that order
+      Then Floor's "Production Line" lists "A", "C", "B", "X" to claim, in that order
 
     @ac-1
     Scenario: A person moving another item on the board to between the two leaves the move in place
@@ -54,7 +54,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move up" on item "E" with the reason "smaller, so it goes first"
       When a person reorders the board to "B", "C", "D", "A", "E"
       And the poller reads the board
-      Then Floor's "Next up" lists "E" ahead of "D"
+      Then Floor's "Production Line" lists "E" to claim ahead of "D"
       And item "E" has an active "Move up" override
       And the board still orders the items "B", "C", "D", "A", "E"
 
@@ -67,7 +67,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       When a new issue "X" lands on the board, which then orders the items "A", "X", "B", "C"
       And the poller reads the board
       And the readiness gate passes item "X"
-      Then Floor's "Next up" lists "X", "B", "A", "C", in that order
+      Then Floor's "Production Line" lists "X", "B", "A", "C" to claim, in that order
       And item "A" has an active "Move down" override
 
     @ac-2
@@ -77,7 +77,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       When new issues "X" and "Y" land on the board, which then orders the items "A", "X", "Y", "B", "C"
       And the poller reads the board
       And the readiness gate passes items "X" and "Y"
-      Then Floor's "Next up" lists "X", "Y", "B", "A", "C", in that order
+      Then Floor's "Production Line" lists "X", "Y", "B", "A", "C" to claim, in that order
       And item "A" has an active "Move down" override
 
     @ac-2
@@ -86,7 +86,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move down" on item "A" with the reason "waiting on a design review"
       When a person reorders the board to "A", "E", "B", "C", "D"
       And the poller reads the board
-      Then Floor's "Next up" lists "A" behind "B"
+      Then Floor's "Production Line" lists "A" to claim behind "B"
       And item "A" has an active "Move down" override
       And the board still orders the items "A", "E", "B", "C", "D"
 
@@ -100,7 +100,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       When a new issue "X" lands on the board, which then orders the items "X", "A", "B", "C", "D", "E"
       And the poller reads the board
       And the readiness gate passes item "X"
-      Then Floor's "Next up" lists "X", "B", "A", "C", "E", "D", in that order
+      Then Floor's "Production Line" lists "X", "B", "A", "C", "E", "D" to claim, in that order
       And item "A" has an active "Move down" override
       And item "E" has an active "Move up" override
 
@@ -110,7 +110,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "<control>" on item "<moved>" with the reason "<reason>"
       When a person takes issue "<gone>" off the board
       And the poller reads the board
-      Then Floor's "Next up" lists <order>, in that order
+      Then Floor's "Production Line" lists <order> to claim, in that order
       And item "<moved>" has an active "<control>" override
 
       Examples:
@@ -128,7 +128,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move up" on item "D" with the reason "smaller, so it goes first"
       When a person reorders the board to "A", "D", "B", "C"
       And the poller reads the board
-      Then Floor's "Next up" lists "A", "D", "B", "C", in that order
+      Then Floor's "Production Line" lists "A", "D", "B", "C" to claim, in that order
       And item "D" has no active "Move up" override
       And the override records when it ended
       And item "D"'s page says its "Move up" was ended by a change to the board's order
@@ -140,7 +140,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move up" on item "D" with the reason "smaller, so it goes first"
       When a person reorders the board to "A", "B", "D", "C"
       And the poller reads the board
-      Then Floor's "Next up" lists "A", "B", "D", "C", in that order
+      Then Floor's "Production Line" lists "A", "B", "D", "C" to claim, in that order
       And item "D" has no active "Move up" override
       And item "D"'s page says its "Move up" was ended by a change to the board's order
 
@@ -150,7 +150,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move down" on item "A" with the reason "waiting on a design review"
       When a person reorders the board to "B", "C", "A", "D"
       And the poller reads the board
-      Then Floor's "Next up" lists "B", "C", "A", "D", in that order
+      Then Floor's "Production Line" lists "B", "C", "A", "D" to claim, in that order
       And item "A" has no active "Move down" override
       And the override records when it ended
       And item "A"'s page says its "Move down" was ended by a change to the board's order
@@ -162,7 +162,7 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the operator pressed "Move down" on item "A" with the reason "waiting on a design review"
       When a person reorders the board to "B", "A", "C", "D"
       And the poller reads the board
-      Then Floor's "Next up" lists "B", "A", "C", "D", in that order
+      Then Floor's "Production Line" lists "B", "A", "C", "D" to claim, in that order
       And item "A" has no active "Move down" override
       And item "A"'s page says its "Move down" was ended by a change to the board's order
 
@@ -174,5 +174,5 @@ Feature: A queue move stays in place when a new issue lands on the board between
       And the poller reads the board
       And a person reorders the board to "A", "B", "C", "D"
       And the poller reads the board
-      Then Floor's "Next up" lists "A", "B", "C", "D", in that order
+      Then Floor's "Production Line" lists "A", "B", "C", "D" to claim, in that order
       And item "D" has no active "Move up" override

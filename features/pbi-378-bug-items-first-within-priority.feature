@@ -8,7 +8,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
   before the rest. Outside that group, among the items at claim priority 1, the bug items come before the rest.
   Priorities 2 to 5 outside the group are ordered as today. After the bug items, the order is as today: answered
   items, then the factory queue's order. Only an item's own label counts: an item that takes a priority or the
-  final-stage group from an item that depends on it doesn't take that item's label. Floor's "Next up" shows the new
+  final-stage group from an item that depends on it doesn't take that item's label. Floor's "Production Line" shows the new
   order, and Floor and Run detail mark a bug item.
   Every scenario needs Postgres, which each test starts for itself, so cells and CI both run them. The board,
   GitHub and the cells are fakes. The factory has one free WIP slot and a review capacity of 3 unless a scenario
@@ -95,7 +95,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "A", "C", "B"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "A", "B", "C", in that order
+      Then Floor's "Production Line" lists "A", "B", "C" to claim, in that order
 
     @ac-2
     Scenario: Among the bug items of one priority in the final-stage group, the board order decides
@@ -104,7 +104,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "N", "B2", "B1"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "B2", "B1", "N", in that order
+      Then Floor's "Production Line" lists "B2", "B1", "N" to claim, in that order
 
     @ac-2
     Scenario: In the final-stage group, a bug item comes before an answered item, and answered bug items come first of all
@@ -116,7 +116,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "D", "E", "B"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "E", "B", "D", in that order
+      Then Floor's "Production Line" lists "E", "B", "D" to claim, in that order
 
   Rule: Outside the final-stage group, among the items at claim priority 1, the bug items come first; priorities 2 to 5 are ordered as today
 
@@ -147,7 +147,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "A", "M", "C", "B", "N"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "N", "C", "B", "M", "A", in that order
+      Then Floor's "Production Line" lists "N", "C", "B", "M", "A" to claim, in that order
 
     @ac-3
     Scenario: A bug item at claim priority 1 from an item that depends on it comes before the other priority-1 items
@@ -169,7 +169,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "Y", "X", "F"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "F", "X", "Y", in that order
+      Then Floor's "Production Line" lists "F", "X", "Y" to claim, in that order
 
     @ac-3
     Scenario: Move up doesn't take a priority-1 item past a bug item
@@ -177,7 +177,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And item "B" carries the "bug" label
       And the poller has read the board
       When the operator presses "Move up" on item "C" with the reason "smaller, so it goes first"
-      Then Floor's "Next up" lists "B", "C", in that order
+      Then Floor's "Production Line" lists "B", "C" to claim, in that order
 
     @ac-3 @regression
     Scenario Outline: At priority <p> outside the final-stage group, a bug item keeps its place in the order as today
@@ -185,7 +185,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And item "B" carries the "bug" label
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "A", "B", in that order
+      Then Floor's "Production Line" lists "A", "B" to claim, in that order
       When the scheduler ticks once
       Then item "A" is "InProgress"
       And item "B" is "Queued"
@@ -218,7 +218,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "B", "D", "C", "A"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "C", "B", "D", in that order
+      Then Floor's "Production Line" lists "C", "B", "D" to claim, in that order
 
     @ac-4
     Scenario: An item at priority 1 from a bug item doesn't come first as a bug item
@@ -230,7 +230,7 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "D", "X", "Y", "H"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "Y", "D", "X", in that order
+      Then Floor's "Production Line" lists "Y", "D", "X" to claim, in that order
 
     @ac-4
     Scenario: An item's own "bug" label counts when it joins the final-stage group from an item without it
@@ -256,10 +256,10 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       When the operator opens item "D"'s Run detail
       Then Run detail doesn't mark item "D" as a bug item
 
-  Rule: Floor's "Next up" shows the claim order with bug items first, and Floor and Run detail mark a bug item
+  Rule: Floor's "Production Line" shows the claim order with bug items first, and Floor and Run detail mark a bug item
 
     @ac-5
-    Scenario: Floor's "Next up" shows bug items first where the claim puts them, and the scheduler claims by it
+    Scenario: Floor's "Production Line" shows bug items first where the claim puts them, and the scheduler claims by it
       Given item "A" has an open PR, is Queued to address requested changes, and has priority 3
       And item "B" has an open PR, is Queued to address requested changes, has priority 3, and carries the "bug" label
       And item "C" is Queued and has priority 1
@@ -268,12 +268,12 @@ Feature: Bug-labelled items come first within a priority in the final-stage grou
       And the board orders the items "A", "B", "C", "D", "E"
       When the poller reads the board
       And the operator opens Floor before the scheduler ticks
-      Then Floor's "Next up" lists "B", "A", "D", "C", "E", in that order
+      Then Floor's "Production Line" lists "B", "A", "D", "C", "E" to claim, in that order
       When the scheduler ticks once
       Then item "B" is "InProgress"
 
     @ac-5
-    Scenario: Floor marks a bug item in "Next up" and not an item without the label
+    Scenario: Floor marks a bug item in "Production Line" and not an item without the label
       Given items "A" and "B" are Queued, in that board order, with priority 3
       And item "B" carries the "bug" label
       When the poller reads the board
