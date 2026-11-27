@@ -23,7 +23,7 @@ import type { Policy } from "../../src/policy/policy.ts";
 import { tick } from "../../src/scheduler/scheduler.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { baseFiles } from "./pbi-12.steps.ts";
-import { scope } from "./pbi-131.steps.ts";
+import { notReadyRows } from "./pbi-131.steps.ts";
 import { ctx as ctx144, polled, refuse, scriptedBoard, type Ctx as Ctx144 } from "./pbi-144.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
@@ -195,7 +195,7 @@ const sentences = (body: string) => body.split(/(?<=[.!?])\s+|\n+/).map((s) => s
 const negated = (s: string) => /\b(none|no|not|never|without|nor)\b|n't\b/i.test(s);
 const namesLabel = (s: string, label: string) => s.includes(label) && /\blabel/i.test(s);
 
-/** Floor's "Not ready" section as the dashboard renders it now. */
+/** The Not ready rows of Floor's "Waiting on you" (PBI 430), as the dashboard renders them now. */
 async function notReadyList(k: Ctx): Promise<string> {
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
@@ -212,7 +212,7 @@ async function notReadyList(k: Ctx): Promise<string> {
       });
       const html = await r.text();
       assert.equal(r.status, 200, `Floor answered ${r.status}: ${html.slice(0, 300)}`);
-      return scope(html, '"Not ready"');
+      return notReadyRows(html);
     } finally {
       await handler.close();
     }
@@ -430,9 +430,9 @@ Then("the readiness judge was asked about child {string}", function (title: stri
   assert.ok((ctx(this).asked.get(ch.externalId) ?? 0) > 0, `the readiness judge was never asked about child "${title}"`);
 });
 
-Then("the dashboard's \"Not ready\" list shows child {string}", long, async function (title: string) {
+Then("the dashboard's \"Waiting on you\" list shows child {string} as Not ready", long, async function (title: string) {
   child(this, title);
-  assert.ok((await notReadyList(ctx(this))).includes(title), `the "Not ready" list doesn't show child "${title}"`);
+  assert.ok((await notReadyList(ctx(this))).includes(title), `"Waiting on you" doesn't show child "${title}"`);
 });
 
 // Shared with PBI 264, whose scenarios poll with PBI 144's in-memory pass. Only the real scheduler has to have looked.

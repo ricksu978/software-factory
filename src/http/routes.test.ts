@@ -101,7 +101,10 @@ describe("dashboard routes", dbTest, () => {
     assert.match((await get("/", "octo")).html, /2 of 3 waiting/);
   });
 
-  test("Next up follows the scheduler's brake: at capacity, a fresh Queued item isn't next", async () => {
+  /** A Floor section's markup, from its heading to the next one. */
+  const section = (html: string, h: string) => html.slice(html.indexOf(`<h2>${h}</h2>`), html.indexOf("<h2", html.indexOf(`<h2>${h}</h2>`) + 1));
+
+  test("Production Line follows the scheduler's brake: at capacity, a fresh Queued item comes after the one it would claim (PBI 430)", async () => {
     await person("octo", "viewer");
     for (let n = 0; n < 3; n++) await item("InReview", `review ${n}`);
     const fresh = await item("Queued", "fresh item");
@@ -111,12 +114,12 @@ describe("dashboard routes", dbTest, () => {
     const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'address') returning id", [back.id])).rows[0].id;
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status) values ($1, 'green', 1, 'passed')", [run]);
     const { html } = await get("/", "octo");
-    const next = html.slice(html.indexOf(">Next up<"), html.indexOf("<h2", html.indexOf(">Next up<")));
-    assert.ok(next.includes("item back to address<"));
-    assert.ok(!next.includes("fresh item<"), "a fresh item shows as next while the brake is on");
+    const line = section(html, "Production Line");
+    assert.ok(line.includes("item back to address<"), line);
+    assert.ok(line.indexOf("item back to address<") < line.indexOf("fresh item<"), "a fresh item shows as next while the brake is on");
   });
 
-  test("Not ready shows an engine rule's reason and a dor.md line's criterion", async () => {
+  test("Waiting on you shows a Not ready item's engine rule reason and dor.md line criterion (PBI 430)", async () => {
     await person("octo", "viewer");
     const { id } = await item("NotReady", "held back");
     await db.pool.query(
@@ -125,7 +128,7 @@ describe("dashboard routes", dbTest, () => {
        ($1, 'dor', 'repo', 1, 'Has a Size of 5 or less', 'failed', 'Size is 8')`, [id],
     );
     const { html } = await get("/", "octo");
-    const view = html.slice(html.indexOf(">Not ready<"), html.indexOf("<h2", html.indexOf(">Not ready<")));
+    const view = section(html, "Waiting on you");
     assert.ok(view.includes("The item depends on #7, which is still open"), view);
     assert.ok(view.includes("Has a Size of 5 or less"), view);
     assert.ok(!view.includes("engine rule"), view);
@@ -141,17 +144,14 @@ describe("dashboard routes", dbTest, () => {
     return parent;
   };
 
-  test("Floor shows a Split parent with its children and their states while any child is still open (PBI 227)", async () => {
+  test("Floor shows a split child as part of its parent, and the parent in neither list (PBI 430)", async () => {
     await person("octo", "viewer");
-    await splitParent("Checkout redesign", [{ ext: "141", title: "Card payments", state: "InReview" }, { ext: "142", title: "Bank transfers" }]);
-    await splitParent("Search revamp", [{ ext: "151", title: "Search filters", state: "Done" }, { ext: "152", title: "Search ranking", state: "Abandoned" }]);
+    const parent = await splitParent("Checkout redesign", [{ ext: "141", title: "Card payments", state: "Queued" }, { ext: "142", title: "Bank transfers" }]);
     const { html } = await get("/", "octo");
-    const view = html.slice(html.indexOf("<h2>Split</h2>"), html.indexOf("<h2", html.indexOf("<h2>Split</h2>") + 1));
-    assert.match(view, /Checkout redesign<\/a> <span class="muted">Split into<\/span>/);
-    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/141">#141</a> Card payments <span class="muted">InReview</span>`), view);
-    assert.ok(view.includes(`<a href="https://github.com/o/r/issues/142">#142</a> Bank transfers <span class="muted">Not in the factory</span>`), view);
-    // A parent whose children have all finished has nothing left to follow on Floor. Its Run detail still shows them.
-    assert.doesNotMatch(view, /Search revamp/);
+    const ext = (await db.pool.query<{ external_id: string }>("select external_id from item where id = $1", [parent.id])).rows[0].external_id;
+    const line = section(html, "Production Line");
+    assert.match(line, new RegExp(`Card payments</a> <span class="muted">part of <a href="/items/${parent.id}">#${ext}</a></span>`));
+    assert.doesNotMatch(html, /Checkout redesign/);
   });
 
   test("Run detail shows a Split parent's children under \"Split into\", and an item with none shows no \"Split into\" (PBI 227)", async () => {
@@ -163,18 +163,17 @@ describe("dashboard routes", dbTest, () => {
     assert.doesNotMatch((await get(`/items/${plain.id}`, "octo")).html, /Split into/);
   });
 
-  test("Blocked lists a Queued item with open dependencies and names them, and Next up leaves it out (PBI 237)", async () => {
+  test("Production Line lists a Queued item with open dependencies after the claimable ones and names them (PBI 237, PBI 430)", async () => {
     await person("octo", "viewer");
     const { id } = await item("Queued", "second child");
     await db.pool.query("update item set blocked_by = '{40}' where id = $1", [id]);
     await item("Queued", "free item");
     const { html } = await get("/", "octo");
-    const view = html.slice(html.indexOf(">Blocked<"), html.indexOf("<h2", html.indexOf(">Blocked<")));
-    assert.ok(view.includes("second child<"), view);
-    assert.ok(view.includes("Waits on #40, which is still open."), view);
-    assert.ok(!view.includes("free item<"), view);
-    const next = html.slice(html.indexOf(">Next up<"), html.indexOf("<h2", html.indexOf(">Next up<")));
-    assert.ok(!next.includes("second child<"), next);
+    const line = section(html, "Production Line");
+    assert.ok(line.includes("Waits on #40, which is still open."), line);
+    assert.ok(line.indexOf("free item<") >= 0 && line.indexOf("free item<") < line.indexOf("second child<"), line);
+    const free = line.slice(line.indexOf("free item<"), line.indexOf("</tr>", line.indexOf("free item<")));
+    assert.doesNotMatch(free, /Waits on/);
   });
 
   test("an item with two open questions counts and lists once", async () => {
@@ -183,7 +182,7 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("insert into question (item_id, kind, body) values ($1, 'needs_input', 'q1'), ($1, 'needs_input', 'q2')", [id]);
     const { html } = await get("/", "octo");
     assert.match(html, /1 of 3 waiting/);
-    assert.equal(html.split("two questions<").length - 1, 2, "listed in Waiting on you and In flight only");
+    assert.equal(html.split("two questions<").length - 1, 1, "listed in Waiting on you only");
   });
 
   test("Run detail shows the run's pins, policy results, stages and tier", async () => {
@@ -210,7 +209,7 @@ describe("dashboard routes", dbTest, () => {
        values ($1, 1, now() - interval '2 days', now() - interval '1 day', 'failed', 40, 'https://github.com/o/r/pull/40')`, [id]);
     await db.pool.query("insert into run (item_id, run_number, next_stage, pr_number, pr_url) values ($1, 2, 'review', 42, 'https://github.com/o/r/pull/42')", [id]);
     const floor = (await get("/", "octo")).html;
-    assert.equal(floor.match(/<a href="https:\/\/github.com\/o\/r\/pull\/42">PR #42<\/a>/g)?.length, 2);
+    assert.equal(floor.match(/<a href="https:\/\/github.com\/o\/r\/pull\/42">PR #42<\/a>/g)?.length, 1);
     assert.doesNotMatch(floor, /pull\/40|PR #40/);
     assert.match((await get(`/items/${id}`, "octo")).html, /<p>InReview <a href="https:\/\/github.com\/o\/r\/pull\/42">PR #42<\/a>/);
     await db.pool.query("update run set pr_url = null where run_number = 2 and item_id = $1", [id]);

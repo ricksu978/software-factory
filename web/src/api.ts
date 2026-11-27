@@ -41,23 +41,20 @@ export type MainBreak = {
 };
 
 export type FloorData = {
-  active: (Named & OpenPr & { state: string; stage: string | null; since: string | null; cost: string; badges: string[]; message: string | null; ci_failure?: CiFailure | null })[];
-  /** PBI 366: `feature_change` is true for an item in FeatureChangeRequest, waiting on the Product Owner's decision. */
-  waiting: (Named & OpenPr & { state: string; since: string | null; feature_change?: boolean })[];
+  /** PBI 430: every item that waits on the owner, oldest first by when it began waiting. */
+  waitingOnYou: WaitingOnYouRow[];
+  /** PBI 430: up to 10 rows, the InProgress items, then the claimable ones in claim order, then the rest of the queue, then those waiting on another PBI. */
+  productionLine: ProductionLineRow[];
+  /** PBI 430: how many queued items didn't fit in productionLine. */
+  productionMore: number;
   waitingCount: number;
   capacity: number;
-  next: Named[];
-  notReady: (Named & { failed: string[] })[];
-  blocked: (Named & { blocked_by: string[] })[];
   /** The factory-wide overrides in force. */
   factory: { kind: string; reason: string }[];
   /** Every item's claim key, by item id. */
   keys: Record<string, ClaimKey>;
-  finalStage: (Named & { state: string })[];
   baseFails: (Named & { sha: string; tests: string[] })[];
   mainBreaks: MainBreak[];
-  split: (Named & { children: SplitChild[] })[];
-  failed: (Named & { rechecked: string | null })[];
   restart: { running: number; reason?: string } | null;
   /** The cells still running, while a drain or a restart is in force. Absent when the factory gives no count. */
   running?: number;
@@ -69,6 +66,43 @@ export type FloorData = {
   at?: string;
   /** How many outbox rows the worker set aside after their tenth failed attempt (PBI 221, PBI 280). */
   outboxSetAside?: number;
+};
+
+/** PBI 430: the split parent a split child is part of, or null for an item that isn't one. */
+export type PartOf = { id: string; external_id: string } | null;
+
+/**
+ * PBI 430: a row of "Waiting on you". `since` is when it began waiting, as an ISO time: the oldest open question's
+ * asked_at, the move to InReview, FeatureChangeRequest, NotReady or Failed. `why` says what it waits on.
+ */
+export type WaitingOnYouRow = Named & OpenPr & {
+  state: string;
+  since: string | null;
+  why: "sign-off" | "question" | "review" | "not-ready" | "failed-on-main" | "feature-change";
+  /** The open question's text, for a question. */
+  question?: string | null;
+  /** The readiness lines it failed, for an item that's Not ready. */
+  failed?: string[];
+  /** When it was last re-checked, for an item that failed on main, or null before its first re-check. */
+  rechecked?: string | null;
+  /** PBI 366: true for an item in FeatureChangeRequest, waiting on the Product Owner's decision. */
+  feature_change?: boolean;
+  partOf: PartOf;
+};
+
+/** PBI 430: a row of "Production Line", with In flight's columns for an InProgress item and null ones for a queued item. */
+export type ProductionLineRow = Named & OpenPr & {
+  state: string;
+  stage: string | null;
+  since: string | null;
+  cost: string | null;
+  message: string | null;
+  ci_failure: CiFailure | null;
+  /** "held" and "override". */
+  badges: string[];
+  /** The external id of each open dependency it waits on, with no "#". Empty for an item that waits on none. */
+  waitsOn: string[];
+  partOf: PartOf;
 };
 
 export type Stage = {

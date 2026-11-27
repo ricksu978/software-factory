@@ -54,8 +54,8 @@ test("Floor ages the worker's heartbeat against the API's time, not the viewer's
   const { createElement } = await import("react");
   const at = new Date("2026-11-20T12:00:00Z");
   const data = {
-    active: [], waiting: [], waitingCount: 0, capacity: 1, next: [], notReady: [], blocked: [], factory: [], keys: {},
-    finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
+    waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 1, factory: [], keys: {},
+    baseFails: [], mainBreaks: [], restart: null, cellImage: null, canOperate: false,
     claudeToken: null, workerHeartbeat: new Date(at.getTime() - 5_000).toISOString(), outboxSetAside: 0, at: at.toISOString(),
   };
   const render = (now: Date, d: object = data) => renderToString(createElement(Floor, { data: d, zone: "UTC", now }));
@@ -72,10 +72,13 @@ test("Floor links an item in FeatureChangeRequest to its request on Run detail, 
   const at = new Date("2026-11-20T12:00:00Z");
   const row = { external_id: "364", repo: "octo/repo", title: "t", since: new Date(at.getTime() - 3 * 3_600_000).toISOString() };
   const data = {
-    active: [], waitingCount: 2, capacity: 3, next: [], notReady: [], blocked: [], factory: [], keys: {},
-    finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
+    productionLine: [], productionMore: 0, waitingCount: 2, capacity: 3, factory: [], keys: {},
+    baseFails: [], mainBreaks: [], restart: null, cellImage: null, canOperate: false,
     claudeToken: null, workerHeartbeat: at.toISOString(), outboxSetAside: 0, at: at.toISOString(),
-    waiting: [{ ...row, id: "a", state: "FeatureChangeRequest", feature_change: true }, { ...row, id: "b", state: "SignOff" }],
+    waitingOnYou: [
+      { ...row, id: "a", state: "FeatureChangeRequest", why: "feature-change", feature_change: true, partOf: null },
+      { ...row, id: "b", state: "SignOff", why: "sign-off", partOf: null },
+    ],
   };
   const html = renderToString(createElement(Floor, { data, zone: "UTC", now: at })).replace(/<!-- -->/g, "");
   assert.match(html, /Waiting on the Product Owner&#x27;s decision on the <a [^>]*href="\/runs\/a#feature-change-request">Feature change request<\/a>/);

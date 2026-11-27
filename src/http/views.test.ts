@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { activityPage, blockedReason, claimLines, configurationPage, floorPage, issueRef, phase0Page, prLink, runDetailPage, standing, type RunDetail } from "./views.ts";
+import type { ProductionLineRow, WaitingOnYouRow } from "./floor-lists.ts";
 
 describe("activityPage", () => {
   const at = new Date("2026-11-07T09:05:00Z");
@@ -104,9 +105,19 @@ describe("configurationPage", () => {
   });
 });
 
+/** PBI 430: a row of Floor's Production Line, Queued unless `extra` says otherwise. */
+const lineRow = (extra: Partial<ProductionLineRow> & { id: string }): ProductionLineRow => ({
+  external_id: "1", repo: null, title: "Export", state: "Queued", stage: null, since: null, cost: null, message: null, ci_failure: null, badges: [], waitsOn: [], partOf: null, ...extra,
+});
+/** PBI 430: a row of Floor's Waiting on you, a question unless `extra` says otherwise. */
+const waitingRow = (extra: Partial<WaitingOnYouRow> & { id: string }): WaitingOnYouRow => ({
+  external_id: "1", repo: null, title: "Export", state: "NeedsInput", since: null, why: "question", question: "Which way?", partOf: null, ...extra,
+});
+const noLists = { waitingOnYou: [], productionLine: [], productionMore: 0 };
+
 describe("floorPage", () => {
   test("links to the activity log", () => {
-    const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false }, null);
+    const html = floorPage({ waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false }, null);
     assert.match(html, /<a href="\/activity">/);
     assert.match(html, /<a href="\/configuration">Configuration<\/a>/);
   });
@@ -114,7 +125,7 @@ describe("floorPage", () => {
   // PBI 210: the commit the cell image was built from, and a restart's commit when main changed the control plane's code.
   test("shows the cell image's commit, and asks for a restart only when main needs one", () => {
     const floor = (cellImage: { built: string | null; restart: string | null } | null) =>
-      floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false, cellImage }, null);
+      floorPage({ waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false, cellImage }, null);
     assert.doesNotMatch(floor(null), /cell image/);
     const built = floor({ built: "aaa1111222233334444", restart: null });
     assert.match(built, /cell image was built from commit <code>aaa1111<\/code>/);
@@ -125,13 +136,12 @@ describe("floorPage", () => {
 
   // PBI 292: a check URL comes from the cell, so Floor links only an https one and shows any other as plain text.
   test("links a fixing-CI check only when its URL is https", () => {
-    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
-    const row = { id: "i1", title: "Export", external_id: "1", repo: null, state: "InProgress", stage: "green", since: null, cost: "0", badges: [], message: null };
+    const empty = { waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
     const ci_failure = { sha: "abc1234def", checks: [
       { name: "ci", url: "https://github.com/acme/widgets/actions/runs/7201", failingTests: [] },
       { name: "e2e", url: "javascript:alert(1)", failingTests: [] },
     ] };
-    const html = floorPage({ ...empty, active: [{ ...row, ci_failure }] }, null);
+    const html = floorPage({ ...empty, productionLine: [lineRow({ id: "i1", state: "InProgress", stage: "green", cost: "0", ci_failure })] }, null);
     assert.ok(html.includes('<a href="https://github.com/acme/widgets/actions/runs/7201">ci</a>'));
     assert.ok(html.includes(", e2e failed on"));
     assert.doesNotMatch(html, /javascript:/);
@@ -139,7 +149,7 @@ describe("floorPage", () => {
 
   // PBI 215: while an item waits on a question that blames the base, Floor says the base fails in cells.
   test("says the base fails in cells, with each blocked item, its base commit and failing tests, only while one waits", () => {
-    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const empty = { waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
     const html = floorPage({ ...empty, baseFails: [{ id: "i1", external_id: "482", repo: null, title: "Board", sha: "b4se001ffff", tests: ["parses <the> config"] }] }, null);
     const notice = /<section id="base-fails"[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
     assert.match(notice, /base fails in cells/i);
@@ -151,7 +161,7 @@ describe("floorPage", () => {
 
   // PBI 255: a break no factory merge made, recorded when an item merged onto a main already red, has no bug item.
   test("says main is red at a commit the factory didn't merge, without promising a bug item or a fix", () => {
-    const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+    const empty = { waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
     const html = floorPage({ ...empty, mainBreaks: [{ branch: "main", sha: "p4r3nt1aaaa", repo: "acme/widgets", pr_number: null, charged: null, bug_external_id: null, bug_id: null, bug_title: null, bug_state: null }] }, null);
     const notice = /<section id="main-red"[\s\S]*?<\/section>/.exec(html)?.[0] ?? "";
     assert.match(notice, /main<\/code> is red/);
@@ -161,11 +171,49 @@ describe("floorPage", () => {
   });
 });
 
+describe("Floor's two lists (PBI 430)", () => {
+  const base = { ...noLists, waitingCount: 0, capacity: 3, factory: [], canOperate: true };
+  const section = (html: string, h: string) => html.slice(html.indexOf(`<h2>${h}</h2>`), html.indexOf("<h2>", html.indexOf(`<h2>${h}</h2>`) + 1));
+
+  test("shows the two lists, each saying when it's empty, and none of the eight old sections", () => {
+    const html = floorPage(base, null);
+    assert.deepEqual([...html.matchAll(/<h2>([^<]+)<\/h2>/g)].map((m) => m[1]), ["Waiting on you", "Production Line", "Controls"]);
+    assert.match(section(html, "Waiting on you"), /Nothing waits on you\./);
+    assert.match(section(html, "Production Line"), /Nothing is in production\./);
+  });
+
+  test("says why each row of Waiting on you waits", () => {
+    const html = floorPage({ ...base, waitingOnYou: [
+      waitingRow({ id: "a", state: "SignOff", why: "sign-off" }),
+      waitingRow({ id: "b", why: "question", question: "Include <archived> rows?" }),
+      waitingRow({ id: "c", state: "NotReady", why: "not-ready", failed: ["Has acceptance criteria", "Names the user"] }),
+    ] }, null);
+    const rows = section(html, "Waiting on you");
+    assert.match(rows, /SignOff<\/span> Waits on your sign-off\./);
+    assert.ok(rows.includes("Waits on your answer to the question “Include &lt;archived&gt; rows?”"), rows);
+    assert.match(rows, /Not ready\. The readiness gate turned it down, failing:<ul><li>Has acceptance criteria<\/li><li>Names the user<\/li><\/ul>/);
+  });
+
+  test("shows an InProgress row's columns, a queued row's state and badges, and how many more are queued", () => {
+    const html = floorPage({ ...base, productionMore: 2, productionLine: [
+      lineRow({ id: "a", state: "InProgress", stage: "green", since: new Date(Date.now() - 25 * 60_000), cost: "1.2345", message: "Writing steps", badges: ["held"] }),
+      lineRow({ id: "b", badges: ["override"] }),
+    ] }, null);
+    const rows = section(html, "Production Line");
+    assert.match(rows, /<td>InProgress<\/td><td>green<\/td><td>25 min<\/td><td title="\$1\.2345">\$1\.23<\/td><td class="muted">Writing steps<\/td>/);
+    assert.match(rows, /<span class="badge">held<\/span>/);
+    assert.match(rows, /<a href="\/items\/b">Export<\/a> <span class="badge">override<\/span><\/td><td>Queued<\/td>/);
+    assert.match(rows, /<p class="muted">2 more items are queued\.<\/p>/);
+    assert.match(section(floorPage({ ...base, productionMore: 1, productionLine: [lineRow({ id: "b" })] }, null), "Production Line"), /1 more item is queued\./);
+    assert.doesNotMatch(floorPage({ ...base, productionLine: [lineRow({ id: "b" })] }, null), /more items? (is|are) queued/);
+  });
+});
+
 describe("issueRef", () => {
   // PBI 140: Prepare restart sits among the factory's Controls, and Floor says how many cells still wrap up until none
   // does. PBI 300: the factory stops none of them, so Floor names no deadline.
   const floor = (restart: { running: number } | null, canOperate = true) =>
-    floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate, restart }, null);
+    floorPage({ waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate, restart }, null);
 
   test("offers Prepare restart among the Controls to an operator", () => {
     assert.match(floor(null), /<button name="kind" value="restart">Prepare restart<\/button>/);
@@ -185,7 +233,7 @@ describe("issueRef", () => {
   // PBI 316: while the factory drains, Floor counts the cells still running, as Prepare restart does, and says the
   // drain is done once none runs.
   const drained = (running: number | undefined) =>
-    floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [{ kind: "drain", reason: "upgrading Docker" }], canOperate: true, running }, null);
+    floorPage({ waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [{ kind: "drain", reason: "upgrading Docker" }], canOperate: true, running }, null);
 
   test("counts the cells still running while the factory drains, with the drain's reason", () => {
     assert.match(drained(2), /Draining: 2 cells still running\. Reason: upgrading Docker\./);
@@ -200,7 +248,7 @@ describe("issueRef", () => {
   });
 
   test("shows neither the drain's count nor that it's done without a drain", () => {
-    const html = floorPage({ active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: true, running: 0 }, null);
+    const html = floorPage({ waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: true, running: 0 }, null);
     assert.doesNotMatch(html, /Drain done|Draining/);
   });
 
@@ -227,14 +275,13 @@ describe("Floor's Blocked list (PBI 237)", () => {
     assert.equal(blockedReason(["12", "13", "14"]), "Waits on #12, #13 and #14, which are still open. It starts once they close.");
   });
 
-  test("lists a blocked item with its reason, and says so when none is", () => {
-    const base = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
-    const html = floorPage({ ...base, blocked: [{ id: "i2", title: "Child two", external_id: "41", repo: "acme/widgets", blocked_by: ["40"] }] }, null);
-    const view = html.slice(html.indexOf(">Blocked<"), html.indexOf("<h2", html.indexOf(">Blocked<")));
+  test("Production Line shows an item waiting on another PBI with its reason, the blocker unlinked (PBI 430)", () => {
+    const base = { ...noLists, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
+    const html = floorPage({ ...base, productionLine: [lineRow({ id: "i2", title: "Child two", external_id: "41", repo: "acme/widgets", waitsOn: ["40"] })] }, null);
+    const view = html.slice(html.indexOf(">Production Line<"), html.indexOf("</table>"));
     assert.ok(view.includes('<a href="/items/i2">Child two</a>'), view);
     assert.ok(view.includes("Waits on #40, which is still open."), view);
     assert.ok(!view.includes("issues/40"), "a blocker isn't linked, since it may be in another repo");
-    assert.ok(floorPage(base, null).includes("No ready item waits on another."));
   });
 });
 
@@ -245,11 +292,10 @@ describe("pages that name an item", () => {
   test("Floor shows #N before the title in each list", () => {
     const row = { id: "i1", title: "Export a month", ...issue };
     const html = floorPage({
-      active: [{ ...row, state: "InProgress", stage: null, since: null, cost: "0", badges: [], message: null }],
-      waiting: [{ ...row, state: "SignOff", since: null }], waitingCount: 1, capacity: 3, next: [row],
-      notReady: [{ ...row, failed: [] }], factory: [], canOperate: false,
+      ...noLists, productionLine: [lineRow({ ...row, state: "InProgress", cost: "0" }), lineRow({ ...row, id: "i1" })],
+      waitingOnYou: [waitingRow({ ...row, state: "SignOff", why: "sign-off" })], waitingCount: 1, capacity: 3, factory: [], canOperate: false,
     }, null);
-    assert.equal(html.match(/issues\/131">#131<\/a> <a href="\/items\/i1">/g)?.length, 4);
+    assert.equal(html.match(/issues\/131">#131<\/a> <a href="\/items\/i1">/g)?.length, 3);
   });
 
   test("the Phase 0 report shows #N before the title", () => {
@@ -283,14 +329,12 @@ describe("prLink", () => {
   const pr = { state: "InReview", pr_number: 42, pr_url: "https://github.com/acme/widgets/pull/42" };
   const linked = `<a href="https://github.com/acme/widgets/pull/42">PR #42</a>`;
 
-  test("Floor shows it under Waiting on you and in the In flight table", () => {
+  test("Floor shows it under Waiting on you, as the review the item waits on (PBI 430)", () => {
     const row = { id: "i1", title: "Export a month", external_id: "145", repo: "acme/widgets" };
     const html = floorPage({
-      active: [{ ...row, ...pr, stage: "review", since: null, cost: "0", badges: [], message: null }],
-      waiting: [{ ...row, ...pr, since: null }], waitingCount: 1, capacity: 3, next: [], notReady: [], factory: [], canOperate: false,
+      ...noLists, waitingOnYou: [waitingRow({ ...row, ...pr, why: "review" })], waitingCount: 1, capacity: 3, factory: [], canOperate: false,
     }, null);
-    assert.match(html, new RegExp(`<li>[^\\n]*${linked}[^\\n]*</li>`));
-    assert.match(html, new RegExp(`<tr><td>[^\\n]*${linked}[^\\n]*</tr>`));
+    assert.match(html, new RegExp(`<li>[^\\n]*Waits on your review of ${linked}[^\\n]*</li>`));
   });
 
   test("Run detail shows it on the line with the item's state", () => {
@@ -555,7 +599,7 @@ describe("a Split parent's children", () => {
     { externalId: "41", title: "Card <b>payments</b>", url: "https://github.com/acme/shop/issues/41", state: "Queued" as const },
     { externalId: "42", title: "Bank transfers", url: "https://github.com/acme/shop/issues/42", state: null },
   ];
-  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const empty = { waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
   const detail = (over: Partial<RunDetail> = {}): RunDetail => ({
     item: { id: "00000000-0000-0000-0000-000000000040", external_id: "40", repo: "acme/shop", title: "Checkout redesign", state: "Split" },
     run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
@@ -579,33 +623,18 @@ describe("a Split parent's children", () => {
     assert.doesNotMatch(runDetailPage(detail({ splitInto: [] }), null), /Split into/);
   });
 
-  test("Floor shows each Split parent, linked as any item is, then \"Split into\" and its own children", () => {
-    const html = floorPage({ ...empty, split: [
-      { id: "p1", external_id: "40", repo: "acme/shop", title: "Checkout redesign", children: kids },
-      { id: "p2", external_id: "50", repo: "acme/shop", title: "Search revamp", children: [{ externalId: "51", title: "Search filters", url: "https://github.com/acme/shop/issues/51", state: "Done" }] },
-    ] }, null);
-    const section = /<h2>Split<\/h2>([\s\S]*?)<h2>/.exec(html)![1];
-    const first = section.indexOf("Checkout redesign");
-    const second = section.indexOf("Search revamp");
-    assert.ok(first >= 0 && second > first);
-    assert.ok(section.includes(`<a href="https://github.com/acme/shop/issues/40">#40</a> <a href="/items/p1">Checkout redesign</a>`));
-    const own = section.slice(first, second);
-    assert.match(own, /Split into/);
-    assert.match(own, /#41[\s\S]*#42/);
-    assert.doesNotMatch(own, /#51/);
-    assert.match(section.slice(second), /#51<\/a> Search filters <span class="muted">Done<\/span>/);
-    assert.doesNotMatch(html, /<b>payments/);
-  });
-
-  test("Floor says when no Split parent is left to show", () => {
-    assert.match(floorPage(empty, null), /<h2>Split<\/h2>\s*<p class="muted">No item is split into children that are still open\.<\/p>/);
+  test("Floor shows a split child as part of its parent, linking to the parent's Run detail, and no Split section (PBI 430)", () => {
+    const html = floorPage({ ...empty, productionLine: [lineRow({ id: "c1", external_id: "41", partOf: { id: "p1", external_id: "40" } }), lineRow({ id: "c2", external_id: "43" })] }, null);
+    assert.match(html, /<a href="\/items\/c1">Export<\/a> <span class="muted">part of <a href="\/items\/p1">#40<\/a><\/span>/);
+    assert.equal(html.match(/part of/g)?.length, 1);
+    assert.doesNotMatch(html, /<h2>Split<\/h2>/);
   });
 });
 
 describe("Floor's Cost column (PBI 263)", () => {
   const floor = (cost: string) => floorPage({
-    active: [{ id: "i1", title: "Export a month", external_id: "263", repo: "acme/widgets", state: "InProgress", stage: "build", since: null, cost, badges: [], message: null }],
-    waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false,
+    ...noLists, productionLine: [lineRow({ id: "i1", title: "Export a month", external_id: "263", repo: "acme/widgets", state: "InProgress", stage: "build", cost })],
+    waitingCount: 0, capacity: 3, factory: [], canOperate: false,
   }, null);
 
   test("shows each item's cost to the cent through cost(), with the exact figure on hover", () => {
@@ -661,17 +690,14 @@ describe("an item's priority and group (PBI 320)", () => {
 });
 
 describe("PBI 369: when a Failed item was last re-checked", () => {
-  const empty = { active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], factory: [], canOperate: false };
+  const empty = { waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], canOperate: false };
   const item = { id: "i1", title: "Export a month", external_id: "482", repo: "acme/widgets" };
 
   test("Floor lists each item that failed its Definition of Done on main, with its last re-check in the viewer's zone", () => {
-    const html = floorPage({ ...empty, zone: "Europe/Amsterdam", failed: [{ ...item, rechecked: new Date("2026-11-20T16:00:00Z") }, { ...item, id: "i2", external_id: "483", rechecked: null }] }, null);
-    assert.match(html, /<li>[^\n]*#482[^\n]*last re-checked at <time[^>]*>2026-11-20 17:00<\/time>[^\n]*<\/li>/);
-    assert.match(html, /<li>[^\n]*#483[^\n]*not yet re-checked[^\n]*<\/li>/);
-  });
-
-  test("Floor says so when no item failed on main", () => {
-    assert.match(floorPage(empty, null), /No item failed its Definition of Done on main/);
+    const failed = (extra: Partial<WaitingOnYouRow> & { id: string }) => waitingRow({ ...item, state: "Failed", why: "failed-on-main", ...extra });
+    const html = floorPage({ ...empty, zone: "Europe/Amsterdam", waitingOnYou: [failed({ id: "i1", rechecked: new Date("2026-11-20T16:00:00Z") }), failed({ id: "i2", external_id: "483", rechecked: null })] }, null);
+    assert.match(html, /<li>[^\n]*#482[^\n]*Failed on main, last re-checked at <time[^>]*>2026-11-20 17:00<\/time>[^\n]*<\/li>/);
+    assert.match(html, /<li>[^\n]*#483[^\n]*Failed on main, not yet re-checked[^\n]*<\/li>/);
   });
 
   const detail = (recheck: { last: Date | null } | null) => runDetailPage({
@@ -745,9 +771,9 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
   test("Floor's Waiting on you links an item in FeatureChangeRequest to its request, and no other item (PBI 366)", () => {
     const at = new Date(Date.now() - 3 * 3_600_000);
     const row = { external_id: "364", repo: "octo/repo", title: "t", since: at };
-    const html = floorPage({ active: [], waitingCount: 2, capacity: 3, next: [], notReady: [], factory: [], canOperate: false, waiting: [
-      { ...row, id: "a", state: "FeatureChangeRequest", feature_change: true },
-      { ...row, id: "b", state: "SignOff" },
+    const html = floorPage({ ...noLists, waitingCount: 2, capacity: 3, factory: [], canOperate: false, waitingOnYou: [
+      waitingRow({ ...row, id: "a", state: "FeatureChangeRequest", why: "feature-change", feature_change: true }),
+      waitingRow({ ...row, id: "b", state: "SignOff", why: "sign-off" }),
     ] }, null);
     assert.match(html, /FeatureChangeRequest, waiting 3 h<\/span> Waiting on the Product Owner's decision on the <a href="\/items\/a#feature-change-request">Feature change request<\/a>\./);
     assert.equal(html.match(/#feature-change-request/g)?.length, 1);

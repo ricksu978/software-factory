@@ -287,10 +287,10 @@ Given("a SignOff item asked 3 hours ago, a NeedsInput item asked 1 hour ago, an 
   await pool.query("insert into run (item_id, run_number, next_stage, pr_number, pr_url) values ($1, 1, 'address', 7, 'https://github.com/octo/repo/pull/7')", [inReview]);
 });
 
-Given("seven Queued items ranked 1 to 7", long, async function () {
+Given("twelve Queued items ranked 1 to 12", long, async function () {
   const c = ctx(this);
   if (!(await dashboard(c))) return;
-  for (const rank of [4, 7, 1, 6, 2, 5, 3]) await item(c, `item ranked ${rank}`, "Queued", { rank });
+  for (const rank of [4, 12, 7, 1, 10, 6, 2, 11, 5, 9, 3, 8]) await item(c, `item ranked ${rank}`, "Queued", { rank });
 });
 
 Given("a NotReady item that failed the dor.md line {string}", long, async function (line: string) {
@@ -322,12 +322,12 @@ Then("{string} doesn't list the Queued item", function (title: string) {
   assert.ok(!strip(ctx(this), title).includes("the Queued item"));
 });
 
-Then("{string} lists the items ranked 1 to 5, in that order", function (title: string) {
+Then("{string} lists the items ranked 1 to 10, in that order", function (title: string) {
   const text = strip(ctx(this), title);
-  const at = [1, 2, 3, 4, 5].map((n) => text.indexOf(`item ranked ${n}<`));
+  const at = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => text.indexOf(`item ranked ${n}<`));
   assert.ok(at.every((i) => i >= 0), `"${title}" is missing an item: ${at}`);
   assert.deepEqual([...at].sort((a, b) => a - b), at, `"${title}" lists them out of order`);
-  for (const n of [6, 7]) assert.ok(!text.includes(`item ranked ${n}<`), `"${title}" lists item ranked ${n}`);
+  for (const n of [11, 12]) assert.ok(!text.includes(`item ranked ${n}<`), `"${title}" lists item ranked ${n}`);
 });
 
 Then("{string} lists the item with {string}", function (title: string, line: string) {

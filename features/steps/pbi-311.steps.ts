@@ -1,9 +1,9 @@
 // Step definitions for features/pbi-311-queue-move-survives-board-insert.feature.
 //
 // Every scenario runs PBI 89's control plane on PBI 4's test database, with a fake board and a fake repo host, set up
-// as PBI 265's scenarios set theirs up. PBI 265's items, Move up and Move down, Next up, board order, override and
-// readiness gate steps are reused, and so is its poll, whose judge is never asked: a new issue the poll reads stays
-// Eligible until "the readiness gate passes" it.
+// as PBI 265's scenarios set theirs up. PBI 265's items, Move up and Move down, the items Production Line lists to
+// claim, board order, override and readiness gate steps are reused, and so is its poll, whose judge is never asked: a
+// new issue the poll reads stays Eligible until "the readiness gate passes" it.
 //
 // The contract these steps set up, which the code reads:
 // - The board's order is each issue's `rank` on the fake board, its place from 1 down. A change to the board's order,
@@ -12,8 +12,8 @@
 // - A new issue is put on the board opted in, in the same repo as the scenario's other items, with its own external
 //   id. Once a poll has read it, the steps know it by its name.
 // - PBI 320's "the poller reads the board" is reused. It calls the world's `afterPoll`, which here learns the new issues.
-// - Floor's "Next up" shows the first five items of the claim order. Where a scenario names more, PBI 265's step checks
-//   Floor's five are the head of the store's claim order, `nextUp`, which Floor reads, and reads the rest from there.
+// - Floor's "Production Line" shows up to ten rows (PBI 430), more than any scenario here names, so PBI 265's step
+//   reads every item to claim from Floor.
 // - An issue taken off the board is closed there, and the issues left on it close up, taking places 1, 2, 3 and so on.
 // - A move ends when its override is cleared: `cleared_at` records when. When a board change ends it, the item's page
 //   says so, in a sentence naming the control: `Move up ended by a change to the board's order`, or `Move down ...`.
@@ -58,8 +58,6 @@ Before({ tags: "@pbi-311", ...long }, async function () {
   (this as { itemIs?: (name: string, state: string) => Promise<void> }).itemIs = (name, state) => inState(this, name, state);
   p17(this).ticked = true;
   (this as { afterPoll?: () => Promise<void> }).afterPoll = () => learnLanded(this);
-  // Floor's Next up shows five items, and a scenario here names six, so PBI 265's step reads the rest of the claim order.
-  (this as { nextUpBeyondFloor?: boolean }).nextUpBeyondFloor = true;
 });
 
 After({ tags: "@pbi-311", ...long }, async function () {
@@ -167,11 +165,11 @@ When(re(`the readiness gate passes items ${LIST}`), async function (list: string
 
 // ---- Floor ----
 
-Then(re(`Floor's "Next up" lists "([^"]+)" (ahead of|behind) "([^"]+)"`), async function (a: string, where: string, b: string) {
+Then(re(`Floor's "Production Line" lists "([^"]+)" to claim (ahead of|behind) "([^"]+)"`), async function (a: string, where: string, b: string) {
   const listed = await nextUpNames(this);
   const ia = listed.indexOf(a), ib = listed.indexOf(b);
-  assert.ok(ia >= 0 && ib >= 0, `Floor's Next up doesn't list both "${a}" and "${b}": ${listed.join(", ")}`);
-  assert.ok(where === "ahead of" ? ia < ib : ia > ib, `Floor's Next up doesn't list "${a}" ${where} "${b}": ${listed.join(", ")}`);
+  assert.ok(ia >= 0 && ib >= 0, `Floor's Production Line doesn't list both "${a}" and "${b}" to claim: ${listed.join(", ")}`);
+  assert.ok(where === "ahead of" ? ia < ib : ia > ib, `Floor's Production Line doesn't list "${a}" ${where} "${b}" to claim: ${listed.join(", ")}`);
 });
 
 // ---- the item's page ----

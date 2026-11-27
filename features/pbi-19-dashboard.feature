@@ -63,16 +63,16 @@ Feature: Dashboard sign-in, Floor and sign-off
     And "Waiting on you" doesn't list the Queued item
 
   @ac-3 @db
-  Scenario: Floor shows the next five items the factory would take
-    Given seven Queued items ranked 1 to 7
+  Scenario: Floor shows the next ten items the factory would take
+    Given twelve Queued items ranked 1 to 12
     When "octo" opens Floor
-    Then "Next up" lists the items ranked 1 to 5, in that order
+    Then "Production Line" lists the items ranked 1 to 10, in that order
 
   @ac-3 @db
   Scenario: Floor shows each not-ready item with the lines it failed
     Given a NotReady item that failed the dor.md line "Has a Size of 5 or less"
     When "octo" opens Floor
-    Then "Not ready" lists the item with "Has a Size of 5 or less"
+    Then "Waiting on you" lists the item with "Has a Size of 5 or less"
 
   @ac-4 @db
   Scenario Outline: A product owner's /approve comment signs off exactly as the dashboard button does

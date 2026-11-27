@@ -13,10 +13,10 @@ You stand in for the owner on two decisions. You approve every scenario sign-off
 From the repo root, run `node .claude/skills/watch-floor/watch-floor.mjs` under Monitor with the longest timeout, and re-arm it each time it expires. It signs in with the dev-login token from `aspire logs control`, polls every 30 seconds, and prints one line whenever the Floor changes:
 
 ```
-banners: Drain done. Reason: r. | waiting: #319 InReview pr=#415 item=<uuid>; #283 SignOff item=<uuid> | in flight: #280 InProgress/red; #319 InReview/open-pr | next up: #418 #419 | rule approval: #414 | usage pause until <time>
+banners: Drain done. Reason: r. | waiting: #319 InReview pr=#415 item=<uuid>; #283 SignOff item=<uuid> | in flight: #280 InProgress/red | next up: #418 #419 | rule approval: #414 | usage pause until <time>
 ```
 
-`in flight` lists every claimed or waiting item with its state and stage. It signs in again by itself after a restart rotates the token. `factory unreachable` means the factory is stopped or restarting; keep watching. `node .claude/skills/watch-floor/watch-floor.mjs --selftest` checks the parser against the markup of `floorPage` in `src/http/views.ts`; run it when that markup changes.
+`waiting` lists the rows of Floor's Waiting on you, with each item's state: a question, a sign-off, a PR to review, a NotReady or a Failed item. `in flight` lists the InProgress rows of Production Line with their stage, and `next up` the rest of its rows, the queued items in the order the factory claims them, those waiting on another PBI last. `rule approval` names each NotReady item under Waiting on you that waits for the owner to approve a rule change. It signs in again by itself after a restart rotates the token. `factory unreachable` means the factory is stopped or restarting; keep watching. `node .claude/skills/watch-floor/watch-floor.mjs --selftest` checks the parser against the markup of `floorPage` in `src/http/views.ts`; run it when that markup changes.
 
 Done when the first digest line arrives.
 

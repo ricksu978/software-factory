@@ -36,4 +36,10 @@ describe("Failed items the factory re-checks (PBI 369)", dbTest, () => {
     ].sort());
     assert.deepEqual((await failedOnMain(db.pool, fresh)).map((r) => r.id), [fresh]);
   });
+
+  test("gives each item the time of its last move to Failed", async () => {
+    const again = await item("6", "Failed", [["06:00", "Failed", "dod_failed"], ["07:00", "Accepted", "rechecked"], ["09:00", "Failed", "dod_failed"]]);
+    const row = (await failedOnMain(db.pool, again))[0];
+    assert.equal(row.failed_at.toISOString(), at("09:00").toISOString());
+  });
 });

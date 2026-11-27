@@ -54,8 +54,8 @@ test("main red names the fix first only when an item is charged", () => {
 });
 
 test("recheck lines", () => {
-  assert.equal(recheckLine(null, "UTC", false), "Failed, not yet re-checked");
-  assert.equal(recheckLine("2026-11-20T10:00:00Z", "UTC", false), "Failed, last re-checked at 2026-11-20 10:00");
+  assert.equal(recheckLine(null, "UTC", false), "Failed on main, not yet re-checked");
+  assert.equal(recheckLine("2026-11-20T10:00:00Z", "UTC", false), "Failed on main, last re-checked at 2026-11-20 10:00");
   assert.match(recheckLine(null, "UTC", true), /^It hasn't been re-checked yet\. /);
 });
 

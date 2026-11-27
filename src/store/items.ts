@@ -199,8 +199,8 @@ const BUG_FIRST = `((k.fs or k.p = 1) and k.bug)`;
 // items, the older priority column, then the queue rank.
 const ORDER = `order by ${MAIN_BREAK_BUG} desc, ${START_NOW} desc, k.fs desc, k.p asc, ${BUG_FIRST} desc, i.state = 'Queued', i.priority desc, ${QUEUE_RANK} asc nulls last, ${QUEUE_TIE} asc, i.id`;
 
-// The claim order, shared by claimNext and Floor's "Next up", so the preview can't drift from what's claimed. $1 is
-// `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
+// The claim order, shared by claimNext and Floor's "Production Line", so the preview can't drift from what's claimed.
+// $1 is `resumeOnly`, the waiting-count brake. The bug item of a break that still stands comes first, so the factory fixes
 // main before it builds anything else (PBI 255). None of the overrides above gets an item past a hold, an open blocker
 // or the readiness gate: they only order the items that are claimable anyway.
 // A priority-1 item, its own or inherited, gets past the brake (PBI 320), though never past a hold or a blocker.
@@ -411,6 +411,17 @@ export async function nextUp(
   c: pg.Pool | pg.PoolClient, limit: number, opts: { resumeOnly?: boolean } = {},
 ): Promise<{ id: string; external_id: string; title: string; state: ItemState }[]> {
   return (await c.query<{ id: string; external_id: string; title: string; state: ItemState }>(`${CLAIM_KEYS} select i.id, i.external_id, i.title, i.state ${CLAIMABLE} limit $2`, [opts.resumeOnly ?? false, limit])).rows;
+}
+
+/**
+ * PBI 430: the factory queue in the claim's order, every Queued or answered item, held ones and ones with an open
+ * dependency included, as Move up and Move down read it. Floor's "Production Line" lists the claimable items from
+ * nextUp first, then the rest of these.
+ */
+export async function factoryQueue(c: pg.Pool | pg.PoolClient): Promise<{ id: string; external_id: string; title: string; state: ItemState; held: boolean; blocked_by: string[] }[]> {
+  return (await c.query<{ id: string; external_id: string; title: string; state: ItemState; held: boolean; blocked_by: string[] }>(
+    `${CLAIM_KEYS} select i.id, i.external_id, i.title, i.state, i.held, i.blocked_by from item i join claim_key k on k.id = i.id where i.state = 'Queued' or ${ANSWERED} ${ORDER}`,
+  )).rows;
 }
 
 /**
