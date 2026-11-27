@@ -222,6 +222,14 @@ test("the judge prompt fences the item so its text can't close the fence", () =>
   assert.match(p, /## Changes the factory's rules/);
 });
 
+test("the judge prompt flags a credential, CI change or outside access only when building or testing the item needs it (PBI 433)", () => {
+  const p = judgePrompt(item, dor);
+  assert.match(p, /flag a credential or secret, a change to CI or workflows, or access outside the item's repo only when a cell would need it to build or test the item\./);
+  assert.match(p, /A feature that stores or uses credentials, or reads and writes other repos, once it runs is not a flag when the item's tests use stand-ins\./);
+  assert.match(p, /Still flag an item whose text asks a person to change a workflow, or asks a cell to use a real credential, since the stand-in exception doesn't apply to it\./);
+  assert.doesNotMatch(p, /flag for each thing the item asks for/);
+});
+
 test("the readiness logic holds the judge prompt's own words, with no item or dor.md in it, and the readiness version", () => {
   const logic = readinessLogic();
   assert.equal(logic.version, READINESS_VERSION);
