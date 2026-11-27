@@ -1,14 +1,15 @@
 // Step definitions for features/pbi-265-start-now-and-queue-moves.feature.
 //
-// Every scenario runs PBI 89's control plane, its real handlers on a free port, on PBI 4's test database, with a fake
-// board and a fake repo host. PBI 89's "the control plane is running with a fake board", "the scheduler ticks once"
+// Every scenario runs PBI 89's control plane, the split services in this process, on PBI 4's test database, with a
+// fake board and a fake repo host. The operator signs in through the BFF, and their pages and controls go through it,
+// as the SPA's do; anyone else opens a page with a token the test sign-in provider issued them. PBI 89's "the control plane is running with a fake board", "the scheduler ticks once"
 // and "the dashboard answers {int}" are reused. Its tick here keeps the WIP limit, through `runTick`, so the one free
 // slot the feature's background gives claims an item. Its launcher only records the cells it starts.
 //
 // The contract these steps set up, which the code reads:
 // - Start now, Move up and Move down are item overrides of kind `start_now`, `move_up` and `move_down`. An item's page
-//   offers each as a button of that label in its Controls, posting to /overrides with `kind`, `itemId` and a
-//   `reason`, as Hold does. Pressing one here posts that form as the signed-in person.
+//   offers each as a button of that label in its Controls, which sends the API's POST /v1/overrides `kind`, `itemId`
+//   and a `reason`, as Hold does. Pressing one here sends that, through the BFF, as the signed-in person.
 // - Each override is a row of the override table with `scope = 'item'`, its kind, the reason, and `created_by` the
 //   person who set it. Active means not cleared and not past any expiry. When one ends, `cleared_at` records when.
 // - While an item has an active `start_now` override, its page says it is "marked Start now", to anyone who opens it.
@@ -31,6 +32,8 @@ import { withTx } from "../../src/store/db.ts";
 import { nextUp, overrideItem, transitionItem } from "../../src/store/items.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { ctx as p17 } from "./pbi-17.steps.ts";
+import { renderPage } from "../support/split-services.ts";
+import { signIn, viaBff } from "./pbi-19.steps.ts";
 import { ctx as p89, headers } from "./pbi-89.steps.ts";
 import { text } from "./pbi-175.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
@@ -119,6 +122,7 @@ Given(re(`an operator "([^"]+)" is signed in`), async function (login: string) {
   const m = ctx(this);
   m.operator = await user(login, "operator");
   c.login = login;
+  await signIn(c.dash!, login);
   // Claims pin the repo, so it's configured and has a default branch head.
   await pool().query("insert into repo (host_adapter, url) values ('fake', $1) on conflict (url) do nothing", [`https://github.com/${REPO}`]);
   c.host.heads.set(REPO, "0123456789abcdef0123456789abcdef01234567");
@@ -245,7 +249,7 @@ Given(re(`item "([^"]+)" is Eligible, below item "([^"]+)" on the board`), async
 
 Given(re(`item "([^"]+)" is on Hold`), long, async function (name: string) {
   await press(this, "hold", name, "on hold for the scenario");
-  assert.equal(p89(this).status, 303, `the hold was turned down with ${p89(this).status}`);
+  assert.equal(p89(this).status, 201, `the hold was turned down with ${p89(this).status}`);
   await tickWithoutSlot(this);
   const held = (await pool().query<{ held: boolean }>("select held from item where id = $1", [itemOf(this, name).id])).rows[0].held;
   assert.equal(held, true, "the hold didn't take effect");
@@ -259,15 +263,13 @@ Given(re(`item "([^"]+)" is blocked by an open issue`), async function (name: st
 
 // ---- the operator's controls ----
 
-/** Posts an override form, as the page's Controls do, as the signed-in person. The status is PBI 89's. */
+/** Sends an override, as the page's Controls do, as the signed-in person, through the BFF. The status is PBI 89's. */
 async function press(world: object, kind: string, name: string, reason: string): Promise<void> {
   const c = p89(world);
-  const r = await fetch(`${c.origin}/overrides`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams({ kind, itemId: itemOf(world, name).id, reason }).toString(),
-    headers: { ...headers(c.login!), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
-  });
+  const b = c.dash?.browsers.get(c.login!);
+  assert.ok(c.dash && b, "the operator isn't signed in through the BFF");
+  const r = await viaBff(c.dash, b, "POST", "/bff/v1/overrides", { kind, itemId: itemOf(world, name).id, reason });
   c.status = r.status;
-  await r.text();
 }
 
 Given(re(`the operator (?:presses|pressed) "([^"]+)" on item "([^"]+)" with the reason "([^"]*)"`), async function (control: string, name: string, reason: string) {
@@ -284,12 +286,30 @@ When(re(`the operator re-queues item "([^"]+)" with the reason "([^"]*)"`), asyn
 
 // ---- pages ----
 
+/** What the API answered for the page last fetched. */
+let lastJson: unknown;
+
+/**
+ * The dashboard's page at `path`, "/" for Floor or "/items/<id>" for an item's Run detail, as `login` sees it: the API's
+ * read behind it, through the BFF when they signed in there and with a token the test provider issued them otherwise,
+ * and the SPA's own page rendered from what it answered.
+ */
 export async function fetchPage(world: object, path: string, login: string): Promise<string> {
   const c = p89(world);
-  const r = await fetch(`${c.origin}${path}`, { headers: headers(login), redirect: "manual" });
-  const page = await r.text();
-  assert.equal(r.status, 200, `${path} answered ${r.status}: ${page.slice(0, 300)}`);
-  return page;
+  assert.ok(c.dash, "the control plane isn't running");
+  const id = /^\/items\/([^/?]+)$/.exec(path)?.[1];
+  assert.ok(id || path === "/", `the SPA has no page at ${path}`);
+  const read = id ? `/v1/items/${id}` : "/v1/floor";
+  const b = c.dash.browsers.get(login);
+  let r: { status: number; body: string };
+  if (b) r = await viaBff(c.dash, b, "GET", `/bff${read}`);
+  else {
+    const got = await fetch(`${c.origin}${read}`, { headers: headers(login) });
+    r = { status: got.status, body: await got.text() };
+  }
+  assert.equal(r.status, 200, `${read} answered ${r.status}: ${r.body.slice(0, 300)}`);
+  lastJson = JSON.parse(r.body);
+  return renderPage(id ? "item" : "floor", lastJson);
 }
 
 export async function openItem(world: object, name: string, login: string): Promise<string> {
@@ -313,13 +333,16 @@ When(re(`the operator opens Floor before the scheduler ticks`), async function (
   await fetchPage(this, "/", p89(this).login!);
 });
 
-/** The page's Controls section, from its heading to the next one. */
-function controls(page: string): string {
-  const start = page.indexOf("<h2>Controls</h2>");
-  if (start < 0) return "";
-  const end = page.indexOf("<h2>", start + 1);
-  return page.slice(start, end < 0 ? undefined : end);
+/** The page's section under the heading `title`, from its heading to the next one. */
+function section(page: string, title: string): string {
+  const m = new RegExp(`<h2\\b[^>]*>${title}</h2>`).exec(page);
+  if (!m) return "";
+  const end = page.indexOf("<h2", m.index + 1);
+  return page.slice(m.index, end < 0 ? undefined : end);
 }
+
+/** The page's Controls section, from its heading to the next one. */
+const controls = (page: string) => section(page, "Controls");
 
 /** Each form on the page holding a button labelled `label`, and whether that form has a box for the reason. */
 function buttons(html: string, label: string): { reason: boolean }[] {
@@ -396,12 +419,13 @@ Then(re(`item "([^"]+)"'s page no longer shows it is marked "([^"]+)"`), async f
 
 export async function nextUpNames(world: object): Promise<string[]> {
   const page = await fetchPage(world, "/", p89(world).login!);
-  const start = page.indexOf("<h2>Next up</h2>");
-  assert.ok(start >= 0, "Floor has no Next up");
-  const end = page.indexOf("<h2>", start + 1);
-  const section = page.slice(start, end < 0 ? undefined : end);
+  const next = section(page, "Next up");
+  assert.ok(next, "Floor has no Next up");
   const byId = new Map([...ctx(world).items.entries()].map(([n, it]) => [it.id, n]));
-  const ids = [...section.matchAll(/href="\/items\/([0-9a-f-]{36})"/g)].map((h) => h[1]);
+  // Each item in the list links to its Run detail, at the SPA's /runs/<id>.
+  const ids = [...next.matchAll(/href="\/runs\/([0-9a-f-]{36})"/g)].map((h) => h[1]);
+  const listed = ((lastJson as { next?: { id: string }[] }).next ?? []).map((n) => n.id);
+  assert.deepEqual(ids, listed, "Floor's Next up doesn't list what the API's floor puts next");
   // Floor shows the first FLOOR_NEXT_UP items of the claim order. PBI 311's scenarios name more, so for them the rest
   // is read from the claim order Floor shows, once Floor's own list is found to be its head.
   if ((world as { nextUpBeyondFloor?: boolean }).nextUpBeyondFloor && ids.length === FLOOR_NEXT_UP) {

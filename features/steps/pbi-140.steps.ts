@@ -9,7 +9,7 @@ import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,13 +21,14 @@ import { runCell } from "../../src/cell/engine.ts";
 import { cloneRun, shellGit } from "../../src/cell/git.ts";
 import { loadSop, stageAfter } from "../../src/config/sop.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import { startServer } from "../../src/http/server.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../../src/policy/policy.ts";
-import { activeOverrides, clearRestartOnStart, setOverride } from "../../src/store/overrides.ts";
+import { activeOverrides, setOverride } from "../../src/store/overrides.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, freshDb, newItem, tick } from "./pbi-17.steps.ts";
 import { setUp, type Ctx as Pbi18 } from "./pbi-18.steps.ts";
-import { CELL_SECRET, ctx as p89, headers, open, startControlPlane } from "./pbi-89.steps.ts";
+import { WORKER_LOCK_KEY, startWorker } from "../../src/worker/main.ts";
+import { viaBff } from "./pbi-19.steps.ts";
+import { CELL_SECRET, ctx as p89, open, startControlPlane } from "./pbi-89.steps.ts";
 
 const REPO = "ricksu978/software-factory";
 const BRANCH = "factory/pbi-482-r1";
@@ -87,7 +88,9 @@ export function ctx(world: object): Ctx {
 
 const minutesFrom = (at: Date, n: number) => new Date(at.getTime() + n * 60_000);
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-const unescape = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+/** A page's text as the person reads it: its markup and React's text separators taken out, and its entities decoded. */
+export const pageText = (html: string) => html.replace(/<!-- -->/g, "").replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
 
 Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316 or @pbi-379 or @pbi-393" }, function ({ pickle }) {
   const c = ctx(this);
@@ -103,8 +106,9 @@ Before({ tags: "@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316 or @pbi-379 or @pbi
   const wait = process.env[WAIT];
   c.restore.push(() => (wait === undefined ? delete process.env[WAIT] : (process.env[WAIT] = wait)));
   p17(this).now = c.clock;
-  // PBI 89's "the control plane starts" runs this, the part of a start that PBI 140 adds, instead of a child process.
-  (this as { controlStart?: () => Promise<void> }).controlStart = () => clearRestartOnStart(need().pool);
+  // PBI 89's "the control plane starts" runs this. The combined control plane is retired (PBI 283), and of the services
+  // it split into the worker is the one that clears a prepared restart as it starts, so this starts the worker.
+  (this as { controlStart?: () => Promise<void> }).controlStart = () => workerStarts(this);
 });
 
 Before({ tags: "(@pbi-140 or @pbi-302 or @pbi-301 or @pbi-316 or @pbi-379 or @pbi-393) and @db", ...long }, async function () {
@@ -149,14 +153,35 @@ async function cellBase(world: object, own = false): Promise<string> {
   if (!c.cellServer) {
     const s = p17(world);
     const sop = loadSop(SOP_TEXT);
-    c.cellServer = await startServer([cellApi({
+    const handler = cellApi({
       pool: need().pool, secret: CELL_SECRET, repoHost: s.repoHost as never, backlogFor: () => (s.backlog ?? (s.backlog = fakeBacklog())).adapter as never,
       stageAfter: (_version, stageId) => stageAfter(sop, stageId), uploadUrl: async (path) => `http://blob.test/${path}`,
       gateway: { upstream: "http://model.test", ownerToken: () => "unused" }, webToolsOf: () => [],
       now: () => s.now ?? new Date(),
-    })], { port: 0 });
+    });
+    c.cellServer = await serveCells(handler);
   }
   return `http://127.0.0.1:${(c.cellServer.address() as AddressInfo).port}`;
+}
+
+/**
+ * Serves the cell API's routes, `handler`, on a free port of a server of the scenario's own, as the cell API service
+ * serves them: anything they don't answer is a 404.
+ */
+export async function serveCells(handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>): Promise<Server> {
+  const server = createServer((req, res) => {
+    handler(req, res).then((done) => {
+      if (!done && !res.headersSent) res.writeHead(404, { "content-type": "application/json" }).end('{"error":"not found"}');
+    }, (e) => {
+      console.error("the cell API failed:", e);
+      if (!res.headersSent) res.writeHead(500).end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  return server;
 }
 
 /** The run and generation of the cell with this execution name. Its run's repo is pinned, as the claim that started it did. */
@@ -222,14 +247,45 @@ export async function prepare(world: object, reason: string, minutesAgo: number)
   await pool.query("update override set created_at = $1 where kind = 'restart' and cleared_at is null", [c.preparedAt]);
 }
 
-async function postOverride(world: object, form: Record<string, string>) {
+/** The signed-in operator sends an override from Floor's Controls, through the BFF from its own origin, as the SPA does. */
+async function postOverride(world: object, body: { kind: string; reason: string }) {
   const control = p89(world);
-  assert.ok(control.origin && control.login, "the control plane isn't running, or no one is signed in");
-  const r = await fetch(`${control.origin}/overrides`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams(form).toString(),
-    headers: { ...headers(control.login), origin: control.origin, "content-type": "application/x-www-form-urlencoded" },
-  });
+  assert.ok(control.dash && control.login, "the control plane isn't running, or no one is signed in");
+  const b = control.dash.browsers.get(control.login);
+  assert.ok(b, `${control.login} isn't signed in through the BFF`);
+  const r = await viaBff(control.dash, b, "POST", "/bff/v1/overrides", body);
   control.status = r.status;
+}
+
+const quiet = { log() {}, warn() {}, error() {} };
+const refuse = async () => {
+  throw new Error("a worker standing by does no work");
+};
+
+/**
+ * Starts the worker through src/worker/main.ts's startWorker, as `aspire run` starts it after a restart, then stops it.
+ * The step holds the worker lock meanwhile, so the worker stands by and ticks nothing of its own: what it does on
+ * starting is the whole of what this tests. Exported for the features that restart the factory.
+ */
+export async function workerStarts(_world: object): Promise<void> {
+  const pool = need().pool;
+  const holder = await pool.connect();
+  try {
+    const got = await holder.query<{ locked: boolean }>("select pg_try_advisory_lock($1) as locked", [WORKER_LOCK_KEY]);
+    assert.ok(got.rows[0].locked, "another worker still holds the worker lock");
+    try {
+      const worker = await startWorker({
+        pool, sources: [], repoHost: {} as never, launcher: { start: refuse, stop: refuse } as never, egress: async () => {},
+        image: "cell:test", controlUrl: "http://control.test", blob: "http://blob.test", judge: refuse as never,
+        killFlag: false, secret: CELL_SECRET, sopVersion: "0.1.0", log: quiet,
+      });
+      await worker.stop();
+    } finally {
+      await holder.query("select pg_advisory_unlock($1)", [WORKER_LOCK_KEY]);
+    }
+  } finally {
+    holder.release();
+  }
 }
 
 const restartRows = async () =>
@@ -456,27 +512,41 @@ function floorHtml(world: object): string {
 
 Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kill switch", function () {
   const html = floorHtml(this);
-  const at = html.indexOf("<h2>Controls</h2>");
+  assert.equal((p89(this).json as { canOperate?: boolean }).canOperate, true, "the API doesn't let the operator operate the factory");
+  const at = html.indexOf('aria-label="Controls"');
   assert.ok(at >= 0, "Floor has no Controls");
   const form = html.slice(at, html.indexOf("</form>", at));
-  for (const kind of ["pause", "drain", "resume", "kill"]) assert.ok(form.includes(`value="${kind}"`), `the Controls lack ${kind}`);
-  assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
+  const buttons = [...form.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].map((m) => pageText(m[1]).trim());
+  for (const b of ["Pause", "Drain", "Resume", "Kill switch"]) assert.ok(buttons.includes(b), `the Controls lack ${b}: ${JSON.stringify(buttons)}`);
+  assert.ok(buttons.includes("Prepare restart"), `the Controls don't offer Prepare restart: ${JSON.stringify(buttons)}`);
 });
 
 Then("Floor shows {string}", long, async function (text: string) {
   // PBI 366's scenarios read Floor straight after a tick, from the dashboard as it stands, through `floorShows`.
   const own = (this as { floorShows?: (text: string) => Promise<void> }).floorShows;
   if (own) return own(text);
-  assert.ok(unescape(floorHtml(this)).includes(text), `Floor doesn't show "${text}"`);
+  assert.ok(pageText(floorHtml(this)).includes(text), `Floor doesn't show "${text}": ${pageText(floorHtml(this)).slice(0, 600)}`);
 });
 
 Then("Floor doesn't show {string}", long, async function (text: string) {
   // Opened afresh, since a scenario can reach this step straight after a POST, with no Floor page to read yet.
   await open(p89(this), "/");
-  assert.ok(!unescape(floorHtml(this)).includes(text), `Floor shows "${text}"`);
+  assert.ok(!pageText(floorHtml(this)).includes(text), `Floor shows "${text}"`);
 });
 
-const stageRows = (html: string) => [...html.matchAll(/<tr><td>([^<]*)<\/td><td>(\d+)<\/td><td>([^<]*)<\/td>/g)].map((m) => ({ stage: m[1], attempt: Number(m[2]), status: m[3] }));
+/** The Stages table's rows on Run detail as the SPA draws it: each row of its ten columns, by stage, attempt, status and notes. */
+export function stageRows(html: string): { stage: string; attempt: number; status: string; transcript: string; notes: string; row: string }[] {
+  const at = html.search(/<th\b[^>]*>Stage<\/th><th\b[^>]*>Attempt<\/th>/);
+  if (at < 0) return [];
+  const table = html.slice(at, html.indexOf("</table>", at));
+  return [...table.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => {
+    const cells = [...m[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)].map((c) => c[1]);
+    return { cells, row: m[1] };
+  }).filter((r) => r.cells.length === 10).map(({ cells, row }) => ({
+    stage: pageText(cells[0]).trim(), attempt: Number(pageText(cells[1]).trim()), status: pageText(cells[2]).trim(),
+    transcript: cells[8], notes: pageText(cells[9]).trim(), row,
+  }));
+}
 
 Then("green's attempt {int} shows as stopped", function (attempt: number) {
   const control = p89(this);
@@ -564,8 +634,8 @@ Given("cell {string} reported green passed and pushed before it stopped", long, 
 });
 
 When("the factory restarts and a cell starts for item {string}", long, async function (_name: string) {
-  // The restart: the control plane starts, and a minute later, inside the stopped cells' last leases, its scheduler ticks.
-  await clearRestartOnStart(need().pool);
+  // The restart: the worker starts, and a minute later, inside the stopped cells' last leases, its scheduler ticks.
+  await workerStarts(this);
   const s = p17(this);
   s.now = minutesFrom(ctx(this).clock, 1);
   await tick(s);

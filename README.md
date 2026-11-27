@@ -51,13 +51,15 @@ The factory reads the App's `.pem` from its path on every start, so keep the fil
 | `github-project-token` | Your `gh` token. `gh auth token \| Set-Clipboard`, then paste |
 | `cell-secret` | Any random value. `[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)) \| Set-Clipboard`, then paste |
 | `github-webhook-secret` | Any random value locally, made the same way, because GitHub sends no webhooks to your machine |
-| `dev-login` | Your GitHub login. The local dashboard signs you in as this user, and it becomes the owner |
+| `dev-login` | Your GitHub login. Migrate gives it to the factory's local owner, so your `/approve` comments and PR reviews count as the owner's |
 | `github-app-id` | `5636555` |
 | `claude-token-created-at` | The date you ran `claude setup-token`, as `yyyy-mm-dd`. It drives the token-expiry banner |
 
 ### Sign in
 
-`aspire run` prints the Aspire dashboard's URL. Open it, then the `control` resource's console, which shows the factory dashboard's sign-in link for this start. Each start makes a new link, and a sign-in from an earlier start is refused until you open this start's link.
+Open the factory dashboard at http://localhost:7400. The dashboard sends you to Keycloak to sign in, at the local `factory` realm that `aspire run` starts on port 7430. Sign in as the realm's test owner, `owner`. Its password is in [`aspire-apphost/keycloak/factory-realm.json`](aspire-apphost/keycloak/factory-realm.json), under the user's credentials. Keycloak sends you back to the dashboard signed in.
+
+Until the cut-over (#281) moves the dashboard onto port 7400, it answers on http://localhost:7403, and port 7400 still serves the old dashboard.
 
 Floor shows what the factory is doing, with Pause, Drain, Resume and the kill switch. Run detail shows one run, with Hold, Stop the run and Re-queue.
 

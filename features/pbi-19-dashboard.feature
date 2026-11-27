@@ -1,10 +1,11 @@
 @pbi-19
 Feature: Dashboard sign-in, Floor and sign-off
-  The dashboard lets only allowlisted people in. Locally there's no sign-in provider, so each start
-  prints a one-time link that sets a cookie. Floor shows what waits on the owner, what the factory
-  takes next and what isn't ready. A product owner signs off scenarios from the dashboard or with a
-  /approve comment, and both do the same thing. Scenarios tagged @db need Postgres, which each test
-  starts for itself, so cells and CI both run them.
+  The dashboard lets only allowlisted people in. People sign in at the factory's sign-in provider through the BFF,
+  which keeps their session and passes the dashboard's calls to the orchestrator API. The scenarios sign in at a test
+  sign-in provider each test starts, and under aspire run it's Keycloak. Floor shows what waits on the owner, what the
+  factory takes next and what isn't ready. A product owner signs off scenarios from the dashboard or with a /approve
+  comment, and both do the same thing. Scenarios tagged @db need Postgres, which each test starts for itself, so cells
+  and CI both run them.
 
   @ac-1 @db
   Scenario Outline: Only allowlisted people get past sign-in
@@ -18,24 +19,12 @@ Feature: Dashboard sign-in, Floor and sign-off
       | stranger | 403    | You don't have access to this factory. Ask an owner to add you. |
       | octo     | 200    | Waiting on you                                                  |
 
-  @ac-2
-  Scenario: Locally, a request without this start's sign-in cookie gets no identity
-    Given the dashboard runs locally for "octo"
-    When a request without the sign-in cookie opens Floor, carrying every Azure sign-in header
-    Then the request gets no identity
-
-  @ac-2
-  Scenario: Locally, a sign-in link with the wrong token sets no cookie
-    Given the dashboard runs locally for "octo"
-    When someone opens the sign-in link with a wrong token
-    Then no sign-in cookie is set
-
-  @ac-2
-  Scenario: Locally, this start's sign-in link signs the owner in
-    Given the dashboard runs locally for "octo"
-    When someone opens this start's sign-in link
-    And opens Floor with the cookie it set
-    Then the request is signed in as "octo"
+  @ac-2 @db
+  Scenario: A request with no session cookie gets no identity, even carrying every Azure sign-in header
+    Given the dashboard is running
+    When a request without a session cookie opens Floor, carrying every Azure sign-in header
+    Then the response is 401
+    And the BFF's session check says no one is signed in
 
   @ac-2 @db
   Scenario Outline: A dashboard POST from another origin gets 403 and changes nothing

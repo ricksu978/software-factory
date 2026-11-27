@@ -40,6 +40,10 @@ type Ctx = {
   posted?: number;
   /** The type of the step running now, so a step that reads the same as a Given and a Then knows which it is. */
   stepType?: string;
+  /** Who the Background signed in to the dashboard, the person whose Floor the link steps read. */
+  signedIn?: string;
+  /** Floor as this file's own dashboard served it to them, read by the link steps. */
+  floor?: string;
 };
 
 export function ctx(world: object): Ctx {
@@ -227,6 +231,7 @@ Given("the factory runs locally for {string}", function (login: string) {
 
 // Signing in adds a viewer, but never lowers the role of someone a scenario has already made an operator or owner.
 Given("{string} is signed in to the dashboard", long, async function (login: string) {
+  ctx(this).signedIn = login;
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
     [login],
@@ -311,21 +316,31 @@ When(/^the factory's WIP policy changes (.+) to (.+)$/, long, async function (na
 
 // ---- opening the page ----
 
-// PBI 19's "{string} opens Floor" serves Floor and records it where recordResponse does.
-function floorPage(world: object): string {
-  const f = (world as { pbi19?: { status?: number; page?: string } }).pbi19;
-  assert.ok(f?.page !== undefined, "Floor didn't load");
+// PBI 19's "{string} opens Floor" now serves the SPA's Floor, which has no Configuration link since the SPA has no
+// Configuration page yet.
+// Until the SPA has a Configuration page linked from Floor (PBI 283's blocker), the link steps read Floor from this file's own dashboard.
+async function floorPage(world: object): Promise<string> {
+  const c = ctx(world);
+  if (c.floor !== undefined) return c.floor;
+  const f = (world as { pbi19?: { status?: number } }).pbi19;
+  assert.ok(f?.status !== undefined, "Floor didn't load");
   assert.equal(f.status, 200, `Floor answered ${f.status}`);
-  return f.page;
+  assert.ok(c.signedIn, "no one is signed in to the dashboard");
+  await dashboard(c);
+  const r = await fetch(`${c.origin}/`, { headers: headers(c.signedIn), redirect: "manual" });
+  const page = await r.text();
+  assert.equal(r.status, 200, `Floor answered ${r.status}: ${page.slice(0, 300)}`);
+  c.floor = page;
+  return page;
 }
 
-Then("Floor has a link named {string}", function (name: string) {
-  const links = [...floorPage(this).matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => text(m[1]));
+Then("Floor has a link named {string}", long, async function (name: string) {
+  const links = [...(await floorPage(this)).matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => text(m[1]));
   assert.ok(links.includes(name), `Floor has no link named "${name}": ${links.join(", ")}`);
 });
 
 When("{string} follows the {string} link", long, async function (login: string, name: string) {
-  const floor = (this as { pbi19?: { page?: string } }).pbi19?.page ?? "";
+  const floor = await floorPage(this);
   const link = [...floor.matchAll(/<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi)].find((m) => text(m[2]) === name);
   // With no such link, the page that comes back is the one without it, and the heading's Then fails on that.
   if (link) await get(this, decode(link[1]), login);

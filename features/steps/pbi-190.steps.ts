@@ -15,20 +15,20 @@
 // The stage's record of a restate is the `restates` list on the PR review stage's /stage report:
 // `[{ round, reason }]`, with the reason the engine gives for the answer it couldn't read.
 //
-// Run detail runs the real cell API and the real dashboard on free ports, over PBI 4's shared test database. The
-// Given posts the PR review stage's report, with its restate, through the cell API as the run's cell would. The page
-// contract read here: a section is an <h2> and what follows it up to the next <h2>. In the "Stages" section, the
+// Run detail runs the real cell API on a free port, over PBI 4's shared test database, and reads the item from the
+// orchestrator API in process, rendering the SPA's own Run detail from its answer, through
+// features/support/split-services.ts. The Given posts the PR review stage's report, with its restate, through the cell
+// API as the run's cell would. The page contract read here: a section is an <h2> and what follows it up to the next <h2>. In the "Stages" section, the
 // row for the PR review stage's attempt 1 starts with "pr-review 1" and says it needed a "second ask", and why.
 import { After, Given, Then, When, type DataTable } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import type { Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
+import { apiApp } from "../../src/api/main.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 import {
   ctx as pr128, done, posted, question, REVIEWER, reviewerCall, stageReports, that, threadFor, threadsInBrief,
@@ -340,10 +340,16 @@ Then("that record gives why its first answer couldn't be read, naming the last l
 
 const REPO_URL = "https://github.com/acme/app";
 const SECRET = "pbi-190-cell-secret";
-const OPERATOR = { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "operator", "x-ms-client-principal-name": "operator" };
 
-async function serve(o: Ctx, handler: Parameters<typeof startServer>[0][number]): Promise<string> {
-  const s = await startServer([handler], { port: 0 });
+/** Serves the cell API's handler on a free port, answering 404 for whatever it doesn't take. */
+async function serve(o: Ctx, handler: ReturnType<typeof cellApi>): Promise<string> {
+  const s = createServer((req, res) => {
+    handler(req, res).then(
+      (took) => { if (!took && !res.headersSent) res.writeHead(404).end(); },
+      (e) => { if (!res.headersSent) res.writeHead(500).end(String(e)); },
+    );
+  });
+  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", () => resolve()));
   o.servers.push(s);
   return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
 }
@@ -401,14 +407,14 @@ When("an operator opens Run detail for item {int}", long, async function (_item:
   const o = own(this);
   assert.ok(o.itemId, "no item was set up");
   const pool = need().pool;
-  await pool.query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'operator', 'operator', 'operator') on conflict (provider, subject) do nothing`);
-  const source = (await pool.query<{ source_id: string }>("select source_id from item where id = $1", [o.itemId])).rows[0].source_id;
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  const origin = await serve(o, (req, res) => handler!(req, res));
-  handler = dashboardRoutes({ pool, auth: createAuth({ mode: "azure" }), origin, adapter: fakeBacklog().adapter, sourceId: source });
-  o.closers.push(handler.close);
-  const r = await fetch(`${origin}/items/${o.itemId}`, { headers: OPERATOR, redirect: "manual" });
-  o.page = { status: r.status, html: await r.text() };
+  await pool.query(
+    `insert into "user" (issuer, subject, github_login, role) values ($1, 'operator', 'operator', 'operator') on conflict on constraint user_issuer_subject do nothing`,
+    [TEST_ISSUER],
+  );
+  const api = apiApp({ pool, issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-190", readBlob: async () => null, env: {}, verify: testBearer });
+  o.closers.push(api.close);
+  const r = await callApi(api.app, pool, "operator", "GET", `/v1/items/${o.itemId}`);
+  o.page = { status: r.status, html: r.status === 200 ? await renderPage("item", r.json) : r.text };
 });
 
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&nbsp;": " " };

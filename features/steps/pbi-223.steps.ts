@@ -394,7 +394,9 @@ When("a {string} container on the cells' network posts to {string} on the cell A
 
 When("the same container asks today's control plane for the dashboard's home page through the egress proxy", long, function () {
   const p6 = p6ctx(this);
-  const url = describe("control").doc?.resources[0]?.urls?.[0]?.url;
+  // Under the split services the dashboard's home page is the SPA the BFF serves; the cell API, which cells may
+  // reach, serves no dashboard.
+  const url = describe("bff").doc?.resources[0]?.urls?.[0]?.url;
   setStatus(this, p6.imageBuilt && typeof url === "string" ? curlInCell("factory-cell:local", fromCell(new URL("/", url).toString())) : null);
 });
 

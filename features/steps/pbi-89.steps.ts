@@ -1,27 +1,38 @@
-// Step definitions for features/pbi-89-dashboard-wiring.feature. The @db scenarios run the control plane's real
-// handlers from src/main.ts on a free port, on PBI 4's shared test database, with a fake board. People sign in with
-// the headers Container Apps adds. The startup scenarios run src/main.ts itself as a child process.
+// Step definitions for features/pbi-89-dashboard-wiring.feature. The @db scenarios run the split services in this
+// process, on PBI 4's shared test database, with a fake board, through PBI 19's startDashboard: the orchestrator API
+// and the cell API behind one front server on a free port, and the BFF in front of them, signing people in at the test
+// sign-in provider. "{string} is signed in" signs the person in at that provider through the BFF, and the dashboard's
+// calls they make then go through the BFF, as the SPA's do. GitHub's webhook goes to the API, and the worker's tick
+// and outbox run as the worker runs them. The startup scenarios run src/api/main.ts itself as a child process. The
+// @local one starts the AppHost and signs the owner in at Keycloak's "factory" realm, reading the realm's test owner
+// from its import.
+// Other features reuse this control plane: startControlPlane starts it, `origin` is the front server, headers(login)
+// is a bearer token the test provider issues for `login`, and open() reads a page from the API and renders the SPA's
+// own page from it, through the BFF for someone signed in there.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
 import { runToken } from "../../src/control/cell-api.ts";
 import { startFactory, type Factory } from "../../src/e2e.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { startServer, type Handler } from "../../src/http/server.ts";
 import { cellApiHandler } from "../../src/cell-api/main.ts";
-import { controlHandlers } from "../../src/main.ts";
 import { fakeLauncher } from "../../src/scheduler/launcher.ts";
 import { tick, TICK_MS } from "../../src/scheduler/scheduler.ts";
 import { workOutbox } from "../../src/worker/outbox.ts";
+import { recordOpened, recordSignIn } from "../support/sign-ins.ts";
+import { renderPage, type Page } from "../support/split-services.ts";
+import { browserOf, signIn, startDashboard, viaBff, type Dashboard } from "./pbi-19.steps.ts";
+import { Browser, type Seen } from "./pbi-288.steps.ts";
+import { APPHOST, describe, startAspire, ctx as aspireCtx } from "./pbi-6.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 
 export const CELL_SECRET = "cell-secret";
+const local = { timeout: 1_200_000 };
 const WEBHOOK_SECRET = "webhook-secret";
-const APPHOST = "--apphost . --non-interactive --nologo";
 
 export type Ctx = {
   env?: Record<string, string>;
@@ -39,6 +50,12 @@ export type Ctx = {
   runId?: string;
   status?: number;
   html?: string;
+  /** What the API answered for the page last opened. */
+  json?: unknown;
+  /** The split services, while they run. */
+  dash?: Dashboard;
+  /** The BFF's address. */
+  bff?: string;
   factory?: Factory;
   /** Set by PBI 133's steps: the tick keeps the WIP limit, so it can take an item, and runs through `runTick`. */
   runTick?: (once: () => Promise<unknown>) => Promise<void>;
@@ -56,7 +73,14 @@ export function usePool(p: import("pg").Pool | null): void {
   poolOverride = p;
 }
 const pool = () => poolOverride ?? need().pool;
-export const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login });
+/** The split services the scenario last started, whose provider issues the tokens headers() sends. */
+let running: Dashboard | undefined;
+
+/** A call's headers as `login`: a bearer token the test sign-in provider issued for them, which the API checks. */
+export function headers(login: string): Record<string, string> {
+  assert.ok(running, "the control plane isn't running, so no provider issues tokens");
+  return { authorization: `Bearer ${running.provider.accessToken(login)}` };
+}
 
 Before({ tags: "@pbi-89 and @db", ...long }, async function () {
   const d = await testDb();
@@ -68,67 +92,104 @@ Before({ tags: "@pbi-89 and @db", ...long }, async function () {
 After({ tags: "@pbi-89", ...long }, async function () {
   const c = ctx(this);
   await c.close?.();
-  if (c.server) {
-    c.server.closeAllConnections();
-    await new Promise<void>((resolve) => c.server!.close(() => resolve()));
-  }
+  if (running === c.dash) running = undefined;
   await c.factory?.stop();
 });
 
 // ---- startup ----
 
-Given(/^the control plane's environment sets (.+)$/, function (vars: string) {
-  ctx(this).env = Object.fromEntries(vars.trim().split(/\s+/).map((v) => [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]));
+Given(/^the API's environment sets everything but (\S+)$/, function (missing: string) {
+  const all: Record<string, string> = {
+    FACTORY_DB_URI: "postgresql://nobody@127.0.0.1:9/none", FACTORY_BLOB: "http://127.0.0.1:9/blobs",
+    OIDC_ISSUER: "http://127.0.0.1:9/realms/factory", API_AUDIENCE: "factory-api", GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+  };
+  assert.ok(missing in all, `the API reads no ${missing}`);
+  delete all[missing];
+  ctx(this).env = all;
 });
 
-When("the control plane starts", long, async function () {
-  // PBI 140's scenarios start the control plane in process, on their own database, through `controlStart`.
-  const own = (this as { controlStart?: () => Promise<void> }).controlStart;
-  if (own) return own();
+When("the API starts", long, function () {
   const c = ctx(this);
   // Only PATH and SystemRoot from this process, so nothing else on the runner's environment changes the outcome.
-  c.started = spawnSync(process.execPath, ["src/main.ts"], {
+  c.started = spawnSync(process.execPath, ["src/api/main.ts"], {
     env: { PATH: process.env.PATH ?? "", SystemRoot: process.env.SystemRoot ?? "", ...c.env }, encoding: "utf8", timeout: 60_000,
   });
 });
 
-Then("it exits with an error naming FACTORY_ENV or FACTORY_DEV_LOGIN", function () {
+Then("the API exits with an error naming {word}", function (name: string) {
   const r = ctx(this).started!;
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /FACTORY_ENV|FACTORY_DEV_LOGIN/);
+  assert.notEqual(r.status, 0, `it exited 0: ${r.stdout}`);
+  assert.ok(r.stderr.includes(name), `its error doesn't name ${name}: ${r.stderr}`);
 });
 
-Then("it logs no sign-in link", function () {
-  assert.doesNotMatch(ctx(this).started!.stdout, /dev-login/);
-});
-
-Then("it logs a sign-in link to {word} with a 64-character token", function (origin: string) {
-  assert.match(ctx(this).started!.stdout, new RegExp(`${origin.replace(/[.:/]/g, "\\$&")}/dev-login\\?token=[0-9a-f]{64}\\b`));
+// Other features' scenarios start the control plane their own way, through `controlStart`.
+When("the control plane starts", long, async function () {
+  const own = (this as { controlStart?: () => Promise<void> }).controlStart;
+  assert.ok(own, "this scenario says nothing of how its control plane starts");
+  await own();
 });
 
 // ---- @local: the owner runs these, and the PR records the run ----
 
-Then("the control resource's console shows a dashboard sign-in link", function () {
-  // The link carries this start's token, so it is matched here and never printed.
-  const r = spawnSync(`aspire logs control --search dev-login ${APPHOST}`, { shell: true, encoding: "utf8" });
-  assert.match(r.stdout ?? "", /\/dev-login\?token=[0-9a-f]{64}/, "no sign-in link in control's console");
+When("I start {string} and wait until the BFF, the API, the cell API and the worker are up", long, async function (_cmd: string) {
+  await startAspire(aspireCtx(this));
 });
 
-Then("PBI 2's @local scenarios pass", long, function () {
+/** The realm's test user `name` and their password, from the realm import the AppHost gives Keycloak. */
+function realmUser(name: string): { username: string; password: string } {
+  const realm = JSON.parse(readFileSync(join(process.cwd(), "aspire-apphost", "keycloak", "factory-realm.json"), "utf8")) as {
+    users: { username: string; credentials?: { type: string; value: string }[] }[];
+  };
+  const user = realm.users.find((u) => u.username === name);
+  const password = user?.credentials?.find((k) => k.type === "password")?.value;
+  assert.ok(user && password, `the realm import has no user "${name}" with a password`);
+  return { username: name, password };
+}
+
+const decodeHtml = (s: string) => s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+Then("{string} signs in at Keycloak's {string} realm through the BFF and opens Floor", local, async function (name: string, realm: string) {
+  const url = describe("bff").doc?.resources[0]?.urls?.[0]?.url as string | undefined;
+  assert.ok(url, "the bff resource has no address");
+  const bff = new URL(url).origin;
+  const b = new Browser();
+  let at = await b.request(new URL("/auth/login", bff));
+  for (let hop = 0; hop < 10 && at.status >= 300 && at.status < 400; hop++) at = await b.next(at);
+  assert.ok(at.url.pathname.includes(`/realms/${realm}/`), `sign-in didn't reach Keycloak's ${realm} realm: ${at.url.href}`);
+  const action = /<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"/.exec(at.body)?.[1];
+  assert.ok(action, `Keycloak's page has no sign-in form: ${at.body.slice(0, 500)}`);
+  const user = realmUser(name);
+  at = await b.request(new URL(decodeHtml(action), at.url), {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ username: user.username, password: user.password }).toString(),
+  });
+  for (let hop = 0; hop < 10 && at.status >= 300 && at.status < 400 && !(at.url.origin === bff && at.url.pathname === "/auth/callback"); hop++) at = await b.next(at);
+  assert.equal(at.url.pathname, "/auth/callback", `Keycloak didn't send the browser back to the BFF: ${at.url.href} ${at.status}`);
+  assert.ok(at.status >= 300 && at.status < 400, `the BFF's /auth/callback answered ${at.status}: ${at.body}`);
+  recordSignIn(name, "keycloak", "bff", realm);
+  const floor = await b.request(new URL("/bff/v1/floor", bff));
+  assert.equal(floor.status, 200, `Floor answered ${floor.status}: ${floor.body.slice(0, 300)}`);
+  recordOpened(name, "Floor");
+});
+
+Then("PBI 2's @local scenarios pass", local, function () {
   // PBI 2's scenarios start their own AppHost, and two from one worktree share its data volumes, so this one stops first.
   spawnSync(`aspire stop ${APPHOST}`, { shell: true, encoding: "utf8" });
-  const r = spawnSync(`npx cucumber-js features/pbi-6-local-platform.feature --tags @local --import "features/steps/**/*.ts" --format summary`,
+  const r = spawnSync(`npx cucumber-js features/pbi-6-local-platform.feature --tags @local --import "features/support/**/*.ts" --import "features/steps/**/*.ts" --format summary`,
     { shell: true, encoding: "utf8", env: { ...process.env, FACTORY_FLOAT_PORTS: "1" } });
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`.slice(-4000));
 });
 
-// ---- the control plane's handlers ----
+// ---- the split services ----
 
 Given("the control plane is running with a fake board", long, async function () {
   await startControlPlane(this);
 });
 
-/** Starts the control plane's handlers on a free port, with a fake board. PBI 140's steps reuse it. */
+/**
+ * Starts the split services with a fake board: the API and the cell API behind one front server, at `origin`, and the
+ * BFF in front of them, signing people in at a test sign-in provider. Other features' steps reuse it.
+ */
 export async function startControlPlane(world: object): Promise<void> {
   const c = ctx(world);
   await testDb();
@@ -136,26 +197,29 @@ export async function startControlPlane(world: object): Promise<void> {
   c.host = fakeRepoHost();
   c.blobs = new Map();
   c.sourceId = (await pool().query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'pbi-89') returning id")).rows[0].id;
-  const handlers: Handler[] = [];
-  c.server = await startServer([async (req, res) => {
-    for (const h of handlers) if (await h(req, res)) return true;
-    return false;
-  }], { port: 0 });
-  c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
   const sources = [{ id: c.sourceId, adapter: c.fake.adapter }];
   const uploadUrl = async (path: string) => `http://blob.test/${path}`;
-  const control = controlHandlers({
-    pool: pool(), local: false, auth: createAuth({ mode: "azure" }), origin: c.origin, sources, repoHost: c.host,
-    webhookSecret: WEBHOOK_SECRET, uploadUrl, readBlob: async (path) => c.blobs!.get(path) ?? null,
+  const blobs = c.blobs;
+  c.dash = await startDashboard({
+    pool: pool(), webhookSecret: WEBHOOK_SECRET, repoHost: c.host, readBlob: async (path) => blobs.get(path) ?? null,
+    cell: cellApiHandler({ pool: pool(), sources, repoHost: c.host, secret: CELL_SECRET, claudeToken: "unused", modelUpstream: "http://127.0.0.1:9", uploadUrl }),
   });
-  // A cell's stage report goes to the cell API, its own service since PBI 222. This test server runs both.
-  handlers.push(cellApiHandler({ pool: pool(), sources, repoHost: c.host, secret: CELL_SECRET, claudeToken: "unused", modelUpstream: "http://127.0.0.1:9", uploadUrl }), ...control.handlers);
-  c.close = control.close;
+  running = c.dash;
+  c.server = c.dash.server;
+  c.origin = c.dash.api;
+  c.bff = c.dash.origin;
+  const dash = c.dash;
+  c.close = () => dash.stop();
 }
 
+/**
+ * Adds `login` with `role`, keyed by their name as today's other features key people, and signs them in at the test
+ * sign-in provider through the BFF when the split services run. Their first token moves them under its issuer.
+ */
 async function person(c: Ctx, login: string, role: string, productOwner = false) {
   await pool().query(`insert into "user" (provider, subject, github_login, role, product_owner) values ('microsoft', $1, $1, $2, $3)`, [login, role, productOwner]);
   c.login = login;
+  if (c.dash) await signIn(c.dash, login);
 }
 
 async function item(c: Ctx, state: string, repo: string | null = null) {
@@ -177,7 +241,7 @@ When("GitHub delivers a signed comment {string} by {string} on the item", long, 
     action: "created", repository: { full_name: "octo/repo" }, issue: { number: Number(c.ext) },
     comment: { id: 1, body: text, user: { login, type: "User" } },
   }));
-  const r = await fetch(`${c.origin}/webhooks/github`, {
+  const r = await fetch(`${c.bff}/webhooks/github`, {
     method: "POST", body,
     headers: {
       "content-type": "application/json", "x-github-event": "issue_comment", "x-github-delivery": randomUUID(),
@@ -218,11 +282,10 @@ Given("a viewer is signed in", async function () {
   await person(ctx(this), "viewer", "viewer");
 });
 
-async function postOverride(c: Ctx, form: Record<string, string>) {
-  const r = await fetch(`${c.origin}/overrides`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams(form).toString(),
-    headers: { ...headers(c.login!), origin: c.origin!, "content-type": "application/x-www-form-urlencoded" },
-  });
+/** The signed-in operator posts an override from the dashboard, through the BFF from its own origin. */
+async function postOverride(c: Ctx, body: Record<string, string>) {
+  assert.ok(c.dash && c.login, "no one is signed in to the dashboard");
+  const r = await viaBff(c.dash, await browserOf(c.dash, c.login), "POST", "/bff/v1/overrides", body);
   c.status = r.status;
 }
 
@@ -334,10 +397,34 @@ Given("an item whose red report has {string} failing, whose green report has it 
   c.blobs!.set(`transcripts/${run}/red-1.jsonl`, '{"type":"assistant"}\n');
 });
 
+/** The SPA page and the API read behind a dashboard path. */
+function apiPath(path: string): { page: Page; read: string } {
+  const item = /^\/items\/([^/?]+)$/.exec(path)?.[1];
+  if (item) return { page: "item", read: `/v1/items/${item}` };
+  if (path === "/" || path === "") return { page: "floor", read: "/v1/floor" };
+  if (path === "/phase0") return { page: "phase0", read: "/v1/phase0" };
+  if (path === "/activity") return { page: "activity", read: "/v1/activity" };
+  throw new Error(`the SPA has no page at ${path}`);
+}
+
+/**
+ * Opens the dashboard's page at `path` as the signed-in person: it reads the API, through the BFF when they signed in
+ * there and straight from the API with their token otherwise, and renders the SPA's own page from what it answered.
+ */
 export async function open(c: Ctx, path: string) {
-  const r = await fetch(`${c.origin}${path}`, { headers: headers(c.login!) });
+  assert.ok(c.dash && c.login, "the control plane isn't running, or no one is signed in");
+  const { page, read } = apiPath(path);
+  const b = c.dash.browsers.get(c.login);
+  let r: { status: number; body: string };
+  if (b) r = await viaBff(c.dash, b, "GET", `/bff${read}`);
+  else {
+    const got = await fetch(`${c.origin}${read}`, { headers: headers(c.login) });
+    r = { status: got.status, body: await got.text() };
+  }
   c.status = r.status;
-  c.html = await r.text();
+  c.json = r.status === 200 ? JSON.parse(r.body) : undefined;
+  c.html = r.status === 200 ? await renderPage(page, c.json) : r.body;
+  if (r.status === 200) recordOpened(c.login, page === "item" ? "Run detail" : page === "floor" ? "Floor" : page);
 }
 
 When("the viewer opens the item's Run detail", async function () {
@@ -349,17 +436,23 @@ When("the viewer opens {string}", async function (path: string) {
   await open(ctx(this), path);
 });
 
+const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, " ");
+
 Then("the scenario {string} shows red at Red and green at Green", function (name: string) {
-  assert.ok(ctx(this).html!.includes(`<td>${name}</td><td>red</td><td>green</td>`), "no red and green row for the scenario");
+  const c = ctx(this);
+  const verdicts = (c.json as { verdicts?: { name: string; red: string; green: string }[] } | undefined)?.verdicts ?? [];
+  assert.deepEqual(verdicts.filter((v) => v.name === name), [{ name, red: "red", green: "green" }], `the API's verdicts: ${JSON.stringify(verdicts)}`);
+  const rows = [...c.html!.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => text(m[1]).trim());
+  assert.ok(rows.some((r) => r === `${name} red green`), `Run detail has no red and green row for the scenario: ${JSON.stringify(rows)}`);
 });
 
 Then("the red stage links its transcript, and the link opens it", async function () {
   const c = ctx(this);
-  const href = `/blobs/transcripts/${c.runId}/red-1.jsonl`;
-  assert.ok(c.html!.includes(`<a href="${href}">`), "no transcript link");
-  const r = await fetch(`${c.origin}${href}`, { headers: headers(c.login!) });
-  assert.equal(r.status, 200);
-  assert.equal(await r.text(), '{"type":"assistant"}\n');
+  const href = `/bff/v1/blobs/transcripts/${c.runId}/red-1.jsonl`;
+  assert.ok(c.html!.includes(`href="${href}"`), "Run detail has no transcript link");
+  const r = await viaBff(c.dash!, await browserOf(c.dash!, c.login!), "GET", href);
+  assert.equal(r.status, 200, r.body);
+  assert.equal(r.body, '{"type":"assistant"}\n');
 });
 
 Given("an item whose first run merged at a cost of $1.50 with a Low tier, and whose second run merged at a cost of $2.50 with a High tier", async function () {
@@ -380,16 +473,16 @@ Given("an item whose first run merged at a cost of $1.50 with a Low tier, and wh
   }
 });
 
-Then("the report says {string}", function (text: string) {
-  assert.ok(ctx(this).html!.includes(text), `"${text}" isn't on the page`);
+Then("the report says {string}", function (said: string) {
+  assert.ok(text(ctx(this).html!).includes(said), `"${said}" isn't on the page: ${text(ctx(this).html!).slice(0, 500)}`);
 });
 
 Then("it lists the first run's PR before the second's, each with its own cost and tier", function () {
   const html = ctx(this).html!;
-  const rows = html.split("<tr>").slice(2);
-  assert.equal(rows.length, 2);
+  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]).filter((r) => r.includes("pull/"));
+  assert.equal(rows.length, 2, `the page lists ${rows.length} PRs`);
   for (const [i, want] of [["pull/1", "$1.50", "Low", "Low reason"], ["pull/2", "$2.50", "High", "High reason"]].entries()) {
-    for (const w of want) assert.ok(rows[i].includes(w), `row ${i + 1} lacks ${w}`);
+    for (const w of want) assert.ok(text(rows[i]).includes(w) || rows[i].includes(w), `row ${i + 1} lacks ${w}`);
   }
 });
 
@@ -407,9 +500,12 @@ Given("an item in flight whose cell sends a 600-character message as its stage p
 });
 
 Then("the item's row shows the message's first 500 characters and no more", function () {
-  const html = ctx(this).html!;
-  const row = html.slice(html.indexOf("an item"), html.indexOf("</tr>", html.indexOf("an item")));
-  assert.ok(row.includes(`>${"m".repeat(500)}<`), "the row doesn't end the message at 500 characters");
+  const c = ctx(this);
+  const active = (c.json as { active?: { id: string; message: string | null }[] } | undefined)?.active ?? [];
+  assert.equal(active.find((a) => a.id === c.itemId)?.message, "m".repeat(500), "the API doesn't send the message cut to 500 characters");
+  const html = c.html!;
+  assert.ok(html.includes("m".repeat(500)), "Floor doesn't show the message");
+  assert.ok(!html.includes("m".repeat(500) + "n"), "Floor shows more than the first 500 characters");
 });
 
 // ---- the whole factory ----

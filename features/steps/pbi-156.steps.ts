@@ -1,23 +1,27 @@
 // Step definitions for features/pbi-156-worker-main.feature. The @db scenarios run the worker from src/worker/main.ts
-// and today's control plane from src/main.ts in this process, on PBI 4's shared test database, with fakes. PBI 17's
+// and, in place of today's control plane, the services it split into beside the worker: the orchestrator API from
+// src/api/main.ts and the cell API from src/cell-api/main.ts (PBI 283). They run in this process, on PBI 4's shared
+// test database, with fakes. Neither runs a scheduler tick, a board poll or the egress proxy set-up. PBI 17's
 // steps own the items, the launcher's record and the item states, so the worker's launcher records into PBI 17's
 // context. The worker module loads lazily, so while it doesn't exist every scenario fails on a Then.
 // PBI 158's steps run this file's worker too, so its hooks run for @pbi-158. There, and under PBI 157, the worker runs
 // on a fake clock, so the steps that wait for its ticks, polls and outbox passes move that clock on as they wait
 // (features/support/worker-clocks.ts, PBI 396).
-// Each process mirrors only the transitions it commits, so the control plane gets a pool of its own on the same
-// database, as it has in its own process.
+// Each process mirrors only the transitions it commits, so the API and the cell API get a pool of their own on the same
+// database, as they have in their own processes.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import type { Server } from "node:http";
 import { format } from "node:util";
+import { createAdaptorServer } from "@hono/node-server";
 import type pg from "pg";
 import { CLAIM_MARKER, OPT_IN_LABEL } from "../../src/adapters/contract.ts";
 import { fakeBacklog, type fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
-import { createAuth } from "../../src/http/auth.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { createPool } from "../../src/store/db.ts";
+import { TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { passUntil } from "../support/worker-clocks.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, freshDb, newItem } from "./pbi-17.steps.ts";
@@ -43,7 +47,8 @@ type WorkerModule = {
   startWorker(d: object): Promise<Running>;
   main(env: Record<string, string>, egress?: (cfg: object) => Promise<void>): Promise<Running>;
 };
-type MainModule = { serveControl?: (d: object, port: number) => Promise<{ stop(): Promise<void> }> };
+type ApiModule = { apiApp?: (d: object) => { app: { fetch: (req: Request) => Response | Promise<Response> }; close(): Promise<void> } };
+type CellApiModule = { serveCellApi?: (d: object, port: number) => Promise<{ stop(): Promise<void> }> };
 
 export type Ctx = {
   /** Deps another feature's steps add to, or put in place of, the worker's, as PBI 157's steps give it a pool of its own. */
@@ -231,12 +236,15 @@ export async function fakes(world: object) {
     tickMs: TICK_MS,
     outboxMs: TICK_MS,
     pollMs: POLL_MS,
-    // The control plane's own settings.
+    // The API's and the cell API's own settings.
     local: false,
-    auth: createAuth({ mode: "azure" }),
-    origin: "http://control.test:7400",
+    issuer: TEST_ISSUER,
+    audience: TEST_AUDIENCE,
+    verify: testBearer,
+    env: {},
     webhookSecret: "webhook-secret",
     claudeToken: "unused",
+    modelUpstream: "http://model.test:9",
     uploadUrl: async (path: string) => `http://blob.test/${path}`,
     readBlob: async () => null,
   };
@@ -285,19 +293,52 @@ async function waitFor(world: object, n: number): Promise<void> {
   await learnItems(world);
 }
 
+/**
+ * Starts the orchestrator API and the cell API, each on a free port and handed every fake the worker gets, so a
+ * service that still ran a job would reach for it. Stopping it stops both. When a module or its start is missing, it
+ * gives back the reason instead.
+ */
+export async function startServices(deps: Record<string, unknown>): Promise<{ stop(): Promise<void> } | string> {
+  const api = await load<ApiModule>("src/api/main.ts");
+  if (!api?.apiApp) return "src/api/main.ts has no apiApp, the orchestrator API's app";
+  const cell = await load<CellApiModule>("src/cell-api/main.ts");
+  if (!cell?.serveCellApi) return "src/cell-api/main.ts has no serveCellApi, the cell API's start once its settings are read";
+  const { app, close } = api.apiApp(deps);
+  const server = createAdaptorServer({ fetch: app.fetch }) as Server;
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const stopApi = async () => {
+    await close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+  let cellApi: { stop(): Promise<void> };
+  try {
+    cellApi = await cell.serveCellApi(deps, 0);
+  } catch (e) {
+    await stopApi();
+    throw e;
+  }
+  return {
+    async stop() {
+      await cellApi.stop();
+      await stopApi();
+    },
+  };
+}
+
+/** Starts the services today's control plane split into beside the worker, the API and the cell API. */
 async function startControl(world: object): Promise<void> {
   const c = ctx(world);
   await rehome(world);
-  const mod = await load<MainModule>("src/main.ts");
-  if (!mod?.serveControl) {
-    c.missing = "src/main.ts has no serveControl, the control plane's start once its settings are read";
-    return;
-  }
   p17(world).ticked = true;
   const url = ((await testDb()) as unknown as { url: string }).url;
   c.controlPool = createPool(url);
-  // Handed every fake the worker gets, so a control plane that still ran a job would reach for it.
-  c.control = await mod.serveControl({ ...(await fakes(world)), pool: c.controlPool }, 0);
+  const started = await startServices({ ...(await fakes(world)), pool: c.controlPool });
+  if (typeof started === "string") c.missing = started;
+  else c.control = started;
 }
 
 function started(c: Ctx): void {
@@ -462,7 +503,7 @@ When("today's control plane starts and has run for longer than one board poll", 
 });
 
 When("today's control plane starts", long, async function () {
-  // PBI 222's scenarios start src/main.ts itself from the environment they set, through `todaysControlStart`.
+  // PBI 222's scenarios start the API itself from the environment they set, through `todaysControlStart`.
   const own = (this as { todaysControlStart?: () => Promise<void> }).todaysControlStart;
   if (own) return own();
   await startControl(this);

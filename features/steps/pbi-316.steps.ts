@@ -5,21 +5,19 @@
 import { Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { long, need } from "./pbi-8.steps.ts";
-import { ctx as p140 } from "./pbi-140.steps.ts";
-import { ctx as p89, headers } from "./pbi-89.steps.ts";
+import { ctx as p140, pageText } from "./pbi-140.steps.ts";
+import { viaBff } from "./pbi-19.steps.ts";
+import { ctx as p89 } from "./pbi-89.steps.ts";
 
-const unescape = (html: string) => html.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-
-/** Sets a factory override through the dashboard's Controls, as the signed-in operator does. */
+/** Sets a factory override through Floor's Controls, as the signed-in operator does: through the BFF, from its origin. */
 async function postOverride(world: object, kind: string, reason: string): Promise<void> {
   const control = p89(world);
-  assert.ok(control.origin && control.login, "the control plane isn't running, or no one is signed in");
-  const r = await fetch(`${control.origin}/overrides`, {
-    method: "POST", redirect: "manual", body: new URLSearchParams({ kind, reason }).toString(),
-    headers: { ...headers(control.login), origin: control.origin, "content-type": "application/x-www-form-urlencoded" },
-  });
+  assert.ok(control.dash && control.login, "the control plane isn't running, or no one is signed in");
+  const b = control.dash.browsers.get(control.login);
+  assert.ok(b, `${control.login} isn't signed in through the BFF`);
+  const r = await viaBff(control.dash, b, "POST", "/bff/v1/overrides", { kind, reason });
   control.status = r.status;
-  assert.ok(r.status < 400, `the dashboard answered ${r.status} to the ${kind}`);
+  assert.equal(r.status, 201, `the API answered ${r.status} to the ${kind}: ${r.body}`);
 }
 
 When("the operator drains the factory with the reason {string}", long, async function (reason: string) {
@@ -48,5 +46,5 @@ When("cell {string} finishes and exits", long, async function (cell: string) {
 Then("Floor shows the drain's reason {string}", function (reason: string) {
   const control = p89(this);
   assert.equal(control.status, 200, "Floor didn't open");
-  assert.ok(unescape(control.html!).includes(reason), `Floor doesn't show the drain's reason "${reason}"`);
+  assert.ok(pageText(control.html!).includes(reason), `Floor doesn't show the drain's reason "${reason}"`);
 });

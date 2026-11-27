@@ -1,6 +1,6 @@
 // Step definitions for features/pbi-237-split-children-opted-in.feature. The Background is PBI 144's: its fake board,
 // its scripted SplitBoard (sub-issues, the board's statuses, blocks and one-shot refusals) and its link-comment steps.
-// What this item adds is about the factory's own records, the item rows, their history, the dashboard and the
+// What this item adds is about the factory's own records, the item rows, their history, Floor and the
 // scheduler, so here a poll is the real poller, on the cell's database, over that same board: a Before hook gives PBI
 // 144's harness a driver, and every "the factory polls the backlog" step shared with PBI 144 runs pollOnce. The judge
 // and the coding model are scripted, the repo host is the in-memory fake, and the scheduler starts cells through a
@@ -11,21 +11,19 @@
 // same thing the Then does: a scenario can't pass on a precondition that never held.
 import { Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
-import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
+import { fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import { SPLIT_HEADING, type SplitDeps } from "../../src/gate/split.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { tick } from "../../src/scheduler/scheduler.ts";
 import { pollOnce } from "../../src/watcher/poller.ts";
 import { baseFiles } from "./pbi-12.steps.ts";
-import { scope } from "./pbi-131.steps.ts";
 import { ctx as ctx144, polled, refuse, scriptedBoard, type Ctx as Ctx144 } from "./pbi-144.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import type { FloorData } from "../../web/src/api.ts";
+import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 
 const REPO = "acme/shop";
 const HEADING = "Acceptance criteria";
@@ -195,29 +193,21 @@ const sentences = (body: string) => body.split(/(?<=[.!?])\s+|\n+/).map((s) => s
 const negated = (s: string) => /\b(none|no|not|never|without|nor)\b|n't\b/i.test(s);
 const namesLabel = (s: string, label: string) => s.includes(label) && /\blabel/i.test(s);
 
-/** Floor's "Not ready" section as the dashboard renders it now. */
-async function notReadyList(k: Ctx): Promise<string> {
+/** The titles on Floor's "Not ready" list as the orchestrator API reports it now, as a viewer reads it. */
+async function notReadyList(): Promise<string[]> {
   await pool().query(
-    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
-    [VIEWER],
+    `insert into "user" (issuer, subject, github_login, role) values ($1, $2, $2, 'viewer') on conflict do nothing`,
+    [TEST_ISSUER, VIEWER],
   );
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  const server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
+  const api = apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-237", readBlob: async () => null, env: {}, verify: testBearer,
+  });
   try {
-    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin, adapter: fakeBacklog().adapter, sourceId: k.sourceId });
-    try {
-      const r = await fetch(`${origin}/`, {
-        headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": VIEWER, "x-ms-client-principal-name": VIEWER },
-      });
-      const html = await r.text();
-      assert.equal(r.status, 200, `Floor answered ${r.status}: ${html.slice(0, 300)}`);
-      return scope(html, '"Not ready"');
-    } finally {
-      await handler.close();
-    }
+    const r = await callApi(api.app, pool(), VIEWER, "GET", "/v1/floor");
+    assert.equal(r.status, 200, `Floor answered ${r.status}: ${r.text.slice(0, 300)}`);
+    return (r.json as FloorData).notReady.map((i) => i.title);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await api.close();
   }
 }
 
@@ -432,7 +422,8 @@ Then("the readiness judge was asked about child {string}", function (title: stri
 
 Then("the dashboard's \"Not ready\" list shows child {string}", long, async function (title: string) {
   child(this, title);
-  assert.ok((await notReadyList(ctx(this))).includes(title), `the "Not ready" list doesn't show child "${title}"`);
+  const list = await notReadyList();
+  assert.ok(list.includes(title), `the "Not ready" list doesn't show child "${title}": ${JSON.stringify(list)}`);
 });
 
 // Shared with PBI 264, whose scenarios poll with PBI 144's in-memory pass. Only the real scheduler has to have looked.

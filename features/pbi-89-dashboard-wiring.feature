@@ -1,37 +1,30 @@
 @pbi-89
 Feature: Dashboard wiring, overrides and the rest of Task 15
-  src/main.ts starts the control plane: the cell API, GitHub's webhook and the dashboard on one port,
-  with the scheduler's tick and the board poller behind them. Operators steer the factory from the
-  dashboard with overrides, Run detail shows the evidence a run stored, and /phase0 counts what merged.
-  Scenarios tagged @db need Postgres, which each test starts for itself, so cells and CI both run them.
-  The @local one needs Docker, the Aspire CLI and the owner's secrets, so the owner runs it and the PR
-  records the run.
+  The control plane runs as the split services. The BFF signs people in at the factory's sign-in provider and passes
+  the dashboard's calls to the orchestrator API, and GitHub's webhook on to the API. The cell API serves the cells,
+  and the worker runs the scheduler's tick, the board poller and the outbox. Operators steer the factory from the
+  dashboard with overrides, Run detail shows the evidence a run stored, and /phase0 counts what merged. The scenarios
+  sign people in at a test sign-in provider each test starts, and under aspire run at Keycloak's "factory" realm.
+  Scenarios tagged @db need Postgres, which each test starts for itself, so cells and CI both run them. The @local one
+  needs Docker, the Aspire CLI and the owner's secrets, so the owner runs it and the PR records the run.
 
   @ac-1
-  Scenario Outline: The control plane refuses to start when the dev identity guard fails
-    Given the control plane's environment sets <variables>
-    When the control plane starts
-    Then it exits with an error naming FACTORY_ENV or FACTORY_DEV_LOGIN
-    And it logs no sign-in link
+  Scenario Outline: The API refuses to start without <variable>
+    Given the API's environment sets everything but <variable>
+    When the API starts
+    Then the API exits with an error naming <variable>
 
     Examples:
-      | variables                                                                |
-      | FACTORY_DEV_LOGIN=octo                                                   |
-      | FACTORY_ENV=local                                                        |
-      | FACTORY_ENV=local FACTORY_DEV_LOGIN=octo CONTAINER_APP_NAME=ca-factory-control |
-
-  @ac-1
-  Scenario: Locally, the control plane logs this start's sign-in link
-    Given the control plane's environment sets FACTORY_ENV=local FACTORY_DEV_LOGIN=octo CELL_CONTROL_URL=http://host.docker.internal:7999
-    When the control plane starts
-    Then it logs a sign-in link to http://localhost:7999 with a 64-character token
+      | variable      |
+      | OIDC_ISSUER   |
+      | API_AUDIENCE  |
 
   @ac-2 @local @serial
-  Scenario: aspire run starts the control plane from src/main.ts
-    # The control plane starts the egress proxy from the cell image, so the image comes first.
+  Scenario: aspire run starts the split services, and the owner signs in at Keycloak
+    # The worker starts the egress proxy from the cell image, so the image comes first.
     Given the image "factory-cell:local" is built
-    When I start "aspire run" and wait until the control resource answers
-    Then the control resource's console shows a dashboard sign-in link
+    When I start "aspire run" and wait until the BFF, the API, the cell API and the worker are up
+    Then "owner" signs in at Keycloak's "factory" realm through the BFF and opens Floor
     And PBI 2's @local scenarios pass
 
   @ac-3 @db

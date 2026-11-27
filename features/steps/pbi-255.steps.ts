@@ -265,7 +265,7 @@ Given("the log of the check {string} on commit {string} names the failing tests 
 Given("the log of the check {string} on commit {string} names no failing test", function (check: string, sha: string) {
   const host = pollCtx(this).host;
   assert.ok(host, "the fake repo host isn't set up");
-  host.logs.set(`${REPO}@${sha}:${check}`, ["> tsc --noEmit", "src/main.ts(3,1): error TS1005: ';' expected.", "npm error code 2"].join("\n"));
+  host.logs.set(`${REPO}@${sha}:${check}`, ["> tsc --noEmit", "src/cell/main.ts(3,1): error TS1005: ';' expected.", "npm error code 2"].join("\n"));
 });
 
 // ---- items already waiting, broken or queued ----

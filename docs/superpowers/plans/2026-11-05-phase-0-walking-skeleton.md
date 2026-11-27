@@ -6704,6 +6704,41 @@ from spec §6 rows 1 to 7:
   `web/src/lines.test.ts`,
   `src/bff/app.test.ts` and `src/api/main.test.ts` cover it,
   and `features/pbi-280-live-floor-events-heartbeat-outbox.feature` drives Floor on a fake clock against a stubbed event stream.
+- Since step 9c (2026-11-07 design,
+  §11 and §12,
+  PBI 283),
+  no step definition imports,
+  loads or starts `src/http/routes.ts`,
+  `src/http/views.ts` or `src/main.ts`,
+  or reads the dev token,
+  except where the split services don't yet offer what a scenario reads (below).
+  `features/pbi-19-dashboard.feature` and `features/pbi-89-dashboard-wiring.feature` sign people in through OIDC.
+  `startDashboard` in `features/steps/pbi-19.steps.ts` runs the test sign-in provider from `features/fixtures/pbi-288-provider.ts`,
+  the API from `apiApp` checking that provider's JWTs,
+  the cell API beside it on one front server,
+  and the BFF from `createBff` in front,
+  all in the test's process.
+  A scenario's browser starts at the BFF's `/auth/login`,
+  signs in at the provider and comes back with the session cookie,
+  and the shell in `web/src/shell.ts` then reads `/bff/v1/floor` as the SPA does.
+  `features/support/sign-ins.ts` records each sign-in for PBI 283's scenarios.
+  The other step files that drove today's dashboard call `apiApp` in process with `testBearer` from `features/support/split-services.ts`,
+  which reads the bearer token as the person's name,
+  and render the SPA's own pages from what the API answers with `renderPage`.
+  PBI 6's steps wait for the `bff`,
+  `api`,
+  `cell-api` and `worker` resources and send the probes to `cell-api`.
+  The README's "Sign in" section sends the owner to the dashboard,
+  which sends them to Keycloak's `factory` realm as `owner`.
+  Until the API and the SPA offer them,
+  a few steps still read today's dashboard:
+  PBI 146's Scope section and a file missing at the scenarios sha,
+  PBI 175's Configuration page,
+  PBI 365's feature-change decision,
+  PBI 395's rule-change approval,
+  and PBI 222's start without `PORT`.
+  The AppHost has no `api` resource yet,
+  so the `@local` scenarios of PBI 6 and PBI 89 wait on the cut-over (#281).
 - Modify:
   `Dockerfile`,
   which also copies `src/` for `main.ts` and `migrate-cli.ts`,

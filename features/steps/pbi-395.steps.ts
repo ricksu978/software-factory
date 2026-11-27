@@ -23,12 +23,13 @@
 //   policy_result rows the poller writes, file 'dor', no run, at the newest `at`) hold one that isn't passed and is about
 //   the owner's approval: its criterion or its reason says "approv". A finding on a dor.md line is its row there.
 // - Each item page is the dashboard's /items/<id>, opened in UTC by a signed-in user ("user" rows by login, signed in
-//   with the headers Container Apps adds). The page's "Rule changes" section (the content after its <h2> up to the next
-//   <h2>) holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy file's path,
-//   holding the rule's Before in a <blockquote data-side="before"> and its After in a <blockquote data-side="after">,
-//   each word that changes inside a <mark>. Owner approval is a <button> reading "Approve rule change" in a form that
-//   posts to /items/<id>/rule-approval with the shown changes' hash in a hidden ruleChangesHash field. A user approves by posting that form: the owner's post answers 303, anyone
-//   else's 403.
+//   with the headers Container Apps adds). The API and the SPA don't show rule changes or offer their approval yet, so
+//   until they do these steps drive today's dashboard. The page's "Rule changes" section (the content after its <h2> up
+//   to the next <h2>) holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy
+//   file's path, holding the rule's Before in a <blockquote data-side="before"> and its After in a
+//   <blockquote data-side="after">, each word that changes inside a <mark>. Owner approval is a <button> reading
+//   "Approve rule change" in a form that posts to /items/<id>/rule-approval with the shown changes' hash in a hidden
+//   ruleChangesHash field. A user approves by posting that form: the owner's post answers 303, anyone else's 403.
 // - The approval is an event of kind "rule_change_approved" whose actor is human, its actor_id the approver's user id,
 //   at the time of the approval, and the item's move to Eligible is a transition whose event is "rule_change_approved".
 //   The rest of the readiness check runs on the next poll, so an approval here is the post, then one poll.
@@ -37,11 +38,14 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fakeBacklog, fakeRepoHost } from "../../src/adapters/fake.ts";
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
 import { createAuth } from "../../src/http/auth.ts";
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
 import { dashboardRoutes } from "../../src/http/routes.ts";
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page steps drive today's dashboard.
 import { startServer } from "../../src/http/server.ts";
-import type { Policy } from "../../src/policy/policy.ts";
 import { ruleChangesHash } from "../../src/gate/rule-changes.ts";
+import type { Policy } from "../../src/policy/policy.ts";
 import { ruleChangesChecked, ruleChangesRead, type RuleChange } from "../../src/store/rule-changes.ts";
 import type { FactoryRepo } from "../../src/watcher/poller.ts";
 import { baseFiles, ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
@@ -99,7 +103,6 @@ function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 Before({ tags: "@pbi-395", ...long }, async function () {
   const d = await testDb();
@@ -355,6 +358,10 @@ Given("the readiness check has checked item {string}", long, async function (ext
 // "<login>, a viewer, is signed in" and "<login>, a operator, is signed in" are PBI 105's step, which makes the user
 // with that role. "an operator" and "the owner" are this feature's.
 
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), these steps drive today's dashboard.
+const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
+
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), these steps drive today's dashboard.
 async function dashboard(world: object): Promise<Ctx> {
   const c = ctx(world);
   if (c.server) return c;
@@ -369,20 +376,24 @@ async function dashboard(world: object): Promise<Ctx> {
   return c;
 }
 
-/** The user `login`, made with `role` unless a step made them already, such as PBI 105's "..., a viewer, is signed in". */
+/**
+ * The user `login`, made with `role` unless a step made them already, such as PBI 105's "..., a viewer, is signed in",
+ * whose row may already hold the login.
+ */
 async function user(login: string, role: Role, set = false): Promise<string> {
   await pool().query(
-    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2)
-     on conflict (provider, subject) do ${set ? "update set role = excluded.role" : "nothing"}`,
+    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, $2) on conflict do nothing`,
     [login, role],
   );
-  return (await pool().query<{ id: string }>(`select id from "user" where provider = 'microsoft' and subject = $1`, [login])).rows[0].id;
+  if (set) await pool().query(`update "user" set role = $2 where github_login = $1`, [login, role]);
+  return (await pool().query<{ id: string }>(`select id from "user" where github_login = $1`, [login])).rows[0].id;
 }
 
 function roleOf(c: Ctx, login: string): Role {
   return c.roles.get(login) ?? (login === OWNER ? "owner" : "viewer");
 }
 
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the item page is today's dashboard's.
 async function openPage(world: object, login: string): Promise<void> {
   const c = await dashboard(world);
   await user(login, roleOf(c, login));
@@ -390,6 +401,8 @@ async function openPage(world: object, login: string): Promise<void> {
   c.page = { status: r.status, html: await r.text() };
 }
 
+// Until the API and the SPA offer rule changes and their approval (PBI 283's blocker), the approval posts today's
+// dashboard's form.
 /** Posts the item page's approval form as `login`, at `at` when it names a time. */
 async function postApproval(world: object, login: string, at?: string): Promise<number> {
   const c = await dashboard(world);

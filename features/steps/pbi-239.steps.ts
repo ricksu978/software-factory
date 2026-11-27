@@ -20,7 +20,6 @@ import { runCell } from "../../src/cell/engine.ts";
 import { shellGit } from "../../src/cell/git.ts";
 import { loadSop, stageAfter } from "../../src/config/sop.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
-import { startServer } from "../../src/http/server.ts";
 import { parseCriteria, type Policy, type PolicyName } from "../../src/policy/policy.ts";
 import { withTx } from "../../src/store/db.ts";
 import { expireLeases } from "../../src/store/items.ts";
@@ -28,6 +27,7 @@ import { ctx as p8, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p17, newItem, tick } from "./pbi-17.steps.ts";
 import { setUp, type Ctx as Pbi18 } from "./pbi-18.steps.ts";
 import { CELL_SECRET, ctx as p89 } from "./pbi-89.steps.ts";
+import { pageText, serveCells, stageRows } from "./pbi-140.steps.ts";
 
 const REPO = "ricksu978/software-factory";
 const SOP_TEXT = readFileSync(join(process.cwd(), "sop/default.yml"), "utf8");
@@ -296,12 +296,12 @@ async function cellServer(world: object): Promise<Server> {
   if (!c.cellServer) {
     const s = p17(world);
     const sop = loadSop(SOP_TEXT);
-    c.cellServer = await startServer([cellApi({
+    c.cellServer = await serveCells(cellApi({
       pool: need().pool, secret: CELL_SECRET, repoHost: s.repoHost as never, backlogFor: () => s.backlog!.adapter as never,
       stageAfter: (_version, stageId) => stageAfter(sop, stageId), uploadUrl: async (path) => `http://blob.test/${path}`,
       gateway: { upstream: "http://model.test", ownerToken: () => "unused" }, webToolsOf: () => [],
       now: () => s.now ?? new Date(),
-    })], { port: 0 });
+    }));
   }
   return c.cellServer;
 }
@@ -541,25 +541,31 @@ Given("item {string}'s green attempt {int} failed with the message {string}", lo
     [await itemRun(this, name), n, minutesFrom(c.clock, -5), minutesFrom(c.clock, -2), message]);
 });
 
-/** The Stages table's row for the attempt, as its HTML. */
-function stageRow(world: object, stage: string, n: number): string {
+/** The Stages table's row for the attempt on Run detail, as the SPA draws it. */
+function stageRow(world: object, stage: string, n: number) {
   const control = p89(world);
   assert.equal(control.status, 200, "Run detail didn't open");
-  const row = control.html!.split("<tr>").find((r) => r.startsWith(`<td>${stage}</td><td>${n}</td>`));
+  const row = stageRows(control.html!).find((r) => r.stage === stage && r.attempt === n);
   assert.ok(row, `Run detail has no ${stage} attempt ${n}`);
-  return row.slice(0, row.indexOf("</tr>"));
+  return row;
 }
 
-const cells = (row: string) => [...row.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((m) => m[1]);
-const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+/** The attempt as the API's Run detail read holds it. */
+function stageJson(world: object, stage: string, n: number) {
+  const stages = (p89(world).json as { stages?: { stage_id: string; attempt: number; status: string; transcript_ref: string | null }[] }).stages ?? [];
+  const s = stages.find((x) => x.stage_id === stage && x.attempt === n);
+  assert.ok(s, `the API's Run detail has no ${stage} attempt ${n}`);
+  return s;
+}
 
 function showsStatus(world: object, stage: string, n: number, status: string) {
-  assert.equal(cells(stageRow(world, stage, n))[2], status, `${stage}'s attempt ${n} shows as ${cells(stageRow(world, stage, n))[2]}`);
+  const row = stageRow(world, stage, n);
+  assert.equal(row.status, status, `${stage}'s attempt ${n} shows as ${row.status}`);
 }
 
 function showsLeaseMessage(world: object, stage: string, n: number) {
-  const row = text(stageRow(world, stage, n));
-  assert.match(row, LEASE_RAN_OUT, `${stage}'s attempt ${n} shows no message saying the cell's lease ran out: ${row}`);
+  const row = stageRow(world, stage, n);
+  assert.match(row.notes, LEASE_RAN_OUT, `${stage}'s attempt ${n} shows no message saying the cell's lease ran out: ${row.notes}`);
 }
 
 Then("green's attempt {int} shows the message saying the cell's lease ran out", function (n: number) {
@@ -567,15 +573,16 @@ Then("green's attempt {int} shows the message saying the cell's lease ran out", 
 });
 
 Then("green's attempt {int} shows no transcript link", function (n: number) {
-  assert.doesNotMatch(stageRow(this, "green", n), /<a href="\/blobs\//, `green's attempt ${n} links a transcript`);
+  assert.equal(stageJson(this, "green", n).transcript_ref, null, `the API gives green's attempt ${n} a transcript`);
+  assert.doesNotMatch(stageRow(this, "green", n).transcript, /<a\b/, `green's attempt ${n} links a transcript`);
 });
 
 Then("green's attempt {int} doesn't show {string}", function (n: number, shown: string) {
-  assert.ok(!text(stageRow(this, "green", n)).includes(shown), `green's attempt ${n} shows "${shown}"`);
+  assert.ok(!pageText(stageRow(this, "green", n).row).includes(shown), `green's attempt ${n} shows "${shown}"`);
 });
 
 Then("green's attempt {int} links its transcript", function (n: number) {
-  assert.match(stageRow(this, "green", n), new RegExp(`<a href="/blobs/transcripts/[0-9a-f-]{36}/green-${n}\\.jsonl">`), `green's attempt ${n} doesn't link its transcript`);
+  assert.match(stageRow(this, "green", n).transcript, new RegExp(`<a\\b[^>]*href="/bff/v1/blobs/transcripts/[0-9a-f-]{36}/green-${n}\\.jsonl"`), `green's attempt ${n} doesn't link its transcript`);
 });
 
 Then("green's attempt {int} shows as stopped, with the message saying the cell's lease ran out", function (n: number) {
@@ -585,7 +592,7 @@ Then("green's attempt {int} shows as stopped, with the message saying the cell's
 
 Then("green's attempt {int} shows as failed, with the message {string}", function (n: number, message: string) {
   showsStatus(this, "green", n, "failed");
-  assert.ok(text(stageRow(this, "green", n)).includes(message), `green's attempt ${n} doesn't show the message "${message}"`);
+  assert.ok(stageRow(this, "green", n).notes.includes(message), `green's attempt ${n} doesn't show the message "${message}"`);
 });
 
 // ---- AC-5: the migration ----

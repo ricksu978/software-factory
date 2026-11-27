@@ -258,7 +258,8 @@ Given("the Claude token was created {int} days ago", function (days: number) {
 Given("the worker last sent a heartbeat a moment ago", long, async function () {
   const c = ctx(this);
   c.heartbeat = new Date(Date.now() - 2_000);
-  await pool().query("insert into worker_heartbeat (ticked_at) values ($1)", [c.heartbeat]);
+  // The table keeps one row, and a worker another scenario ran on this shared database may have left its own there.
+  await pool().query("insert into worker_heartbeat (ticked_at) values ($1) on conflict ((true)) do update set ticked_at = excluded.ticked_at", [c.heartbeat]);
 });
 
 // ---- people ----

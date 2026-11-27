@@ -3,17 +3,15 @@
 // the item in state" steps, and PBI 142's "the poller runs twice" and "the item still carries its label", read the same
 // context. Items are put in their starting state with plain SQL, since no move the factory makes today reaches them:
 // a withdrawal from NotReady or Eligible is what this item adds, so a Given can't ask the poller for one. The
-// dashboard's "Not ready" list is read from Floor as the real dashboard renders it, on a free port.
+// dashboard's "Not ready" list is read from the orchestrator API's GET /v1/floor, which the SPA's Floor renders, as a
+// viewer, through features/support/split-services.ts.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import type { FloorData } from "../../web/src/api.ts";
+import { apiApp } from "../../src/api/main.ts";
+import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, polled, REPO, setup, stateOf, type Ctx as PollCtx } from "./pbi-12.steps.ts";
-import { scope } from "./pbi-131.steps.ts";
 import { scriptedJudge } from "./pbi-132.steps.ts";
 
 type Move = { from: string; to: string };
@@ -60,34 +58,26 @@ async function unlabel(c: PollCtx): Promise<void> {
   await c.fake!.seed({ ...item, labels: item.labels.filter((l) => l !== LABEL) });
 }
 
-/** Floor's "Not ready" section as the dashboard renders it now. */
-async function notReadyList(sourceId: string): Promise<string> {
+/** The titles on Floor's "Not ready" list as the API reports it now. */
+async function notReadyList(): Promise<string[]> {
   await pool().query(
-    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'viewer') on conflict (provider, subject) do nothing`,
-    [VIEWER],
+    `insert into "user" (issuer, subject, github_login, role) values ($1, $2, $2, 'viewer') on conflict on constraint user_issuer_subject do nothing`,
+    [TEST_ISSUER, VIEWER],
   );
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  const server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
+  const api = apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-168", readBlob: async () => null, env: {}, verify: testBearer,
+  });
   try {
-    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin, adapter: fakeBacklog().adapter, sourceId });
-    try {
-      const r = await fetch(`${origin}/`, {
-        headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": VIEWER, "x-ms-client-principal-name": VIEWER },
-      });
-      const html = await r.text();
-      assert.equal(r.status, 200, `Floor answered ${r.status}: ${html.slice(0, 300)}`);
-      return scope(html, '"Not ready"');
-    } finally {
-      await handler.close();
-    }
+    const r = await callApi(api.app, pool(), VIEWER, "GET", "/v1/floor");
+    assert.equal(r.status, 200, `Floor answered ${r.status}: ${r.text.slice(0, 300)}`);
+    return (r.json as FloorData).notReady.map((i) => i.title);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await api.close();
   }
 }
 
 async function shows(c: PollCtx, ext: string): Promise<boolean> {
-  return (await notReadyList(c.sourceId!)).includes(title(ext));
+  return (await notReadyList()).includes(title(ext));
 }
 
 /** The item's moves from `from` to `to`, oldest first, transitions and overrides both. */

@@ -22,16 +22,17 @@
 //   `retry.stageId` is the stage, and one finding holds the note, whole.
 // - On the item page, a product owner gets the decision as a form next to the Feature change request section. Its
 //   buttons read "Approve the change" and "Ask for changes", and it has a <textarea> for the note. Pressing a button
-//   posts that form with its fields, the note in the textarea and the button's own name and value. A decision sent
-//   from any other login posts `decision=approve` or `decision=changes`, with `note`, to /items/<id>/feature-change,
-//   and gets 403.
+//   posts that form with its fields, the note in the textarea and the button's own name and value. The API and the
+//   SPA don't offer that form yet, so until they do the item page and its form are today's dashboard's. A decision sent
+//   from any other login goes to the orchestrator API's POST /v1/items/<id>/decisions, built in-process through
+//   features/support/split-services.ts, with `kind` "approve" or "changes" and the note as `text`, and gets 403.
 // - "The cell runs the green stage again" runs PBI 18's engine from the context GET context gave, in a checkout reset
 //   to the origin's branch, with PBI 152's scripted agent.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fakeBacklog } from "../../src/adapters/fake.ts";
@@ -39,15 +40,18 @@ import { loadSop, stageAfter } from "../../src/config/sop.ts";
 import { cellApi, runToken } from "../../src/control/cell-api.ts";
 import { applyComment } from "../../src/control/decisions.ts";
 import type { FeatureChangeFile } from "../../src/core/feature-change.ts";
+import { apiApp } from "../../src/api/main.ts";
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page steps drive today's dashboard.
 import { createAuth } from "../../src/http/auth.ts";
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page steps drive today's dashboard.
 import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
 import { withTx } from "../../src/store/db.ts";
 import { requestFeatureChange } from "../../src/store/feature-change.ts";
 import { runTheCell, setUp, type Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { at, commit, ensure, featureText, mine as pbi152, pushedHead, ranClean } from "./pbi-152.steps.ts";
 import { text } from "./pbi-189.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 
 const BRANCH = "factory/pbi-482-r1";
 const REPO = "acme/app";
@@ -75,14 +79,16 @@ type Ctx = {
   runId: string;
   board: ReturnType<typeof fakeBacklog>;
   comments: { login: string; body: string; commentId: string }[];
-  /** The dashboard, and who is signed in to it. */
-  dashboard?: { server: Server; origin: string; close?: () => Promise<void> };
+  /** The orchestrator API the item page reads and decisions go to, and who is signed in. */
+  api?: ReturnType<typeof apiApp>;
   signedIn: string | null;
   page: Answer | null;
   sent: Answer | null;
   /** The button a press looked for and didn't find, so the Thens can say so. */
   missing: string | null;
   cellApi?: { server: Server; origin: string };
+  /** Today's dashboard, for the item page steps the API and the SPA don't offer yet. */
+  dashboard?: { server: Server; origin: string; close?: () => Promise<void> };
   /** What GET context gave the run's next claim, or why no claim could happen. */
   context?: Record<string, any> | { notResumed: string };
   ran: boolean;
@@ -99,7 +105,6 @@ function mine(world: object): Ctx {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 Before({ tags: "@pbi-365", ...long }, async function () {
   const d = await testDb();
@@ -115,8 +120,9 @@ Before({ tags: "@pbi-365", ...long }, async function () {
 After({ tags: "@pbi-365", ...long }, async function () {
   const x = (this as { pbi365?: Ctx }).pbi365;
   if (!x) return;
+  await x.api?.close();
   await x.dashboard?.close?.();
-  for (const s of [x.dashboard?.server, x.cellApi?.server]) {
+  for (const s of [x.cellApi?.server, x.dashboard?.server]) {
     if (!s) continue;
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
@@ -127,7 +133,7 @@ After({ tags: "@pbi-365", ...long }, async function () {
 
 // ---- people ----
 
-/** A user known by their GitHub login, who signs in to the dashboard under the same name. */
+/** A user known by their GitHub login, who signs in under the same name. callApi puts them under the test issuer. */
 export async function person(world: object, login: string, role: string, productOwner: boolean): Promise<void> {
   mine(world);
   await pool().query(
@@ -447,14 +453,31 @@ Then("{string} on the item's branch holds the step {string}", long, async functi
 
 // ---- the next claim ----
 
+/**
+ * Serves the cell API's handler on a free port of 127.0.0.1. A request it doesn't take gets 404, and one it refuses
+ * gets the status it threw, or 500.
+ */
+function serve(handle: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>): Promise<Server> {
+  const server = createServer(async (req, res) => {
+    try {
+      if (!(await handle(req, res))) res.writeHead(404).end();
+    } catch (e) {
+      const status = typeof (e as { status?: unknown }).status === "number" ? (e as { status: number }).status : 500;
+      if (!res.headersSent) res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ error: (e as Error).message }));
+      else res.destroy();
+    }
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
 function cellApiOrigin(world: object, x: Ctx): Promise<string> | string {
   if (x.cellApi) return x.cellApi.origin;
   const sop = loadSop(readFileSync(join(process.cwd(), "sop/default.yml"), "utf8"));
-  return startServer([cellApi({
+  return serve(cellApi({
     pool: pool(), secret: SECRET, repoHost: repoHost(world) as never, backlogFor: () => x.board.adapter,
     stageAfter: (_version, stageId) => stageAfter(sop, stageId), uploadUrl: async (path) => `http://blob.test/${path}`,
     gateway: { upstream: "http://model.test", ownerToken: () => "unused" }, webToolsOf: () => [],
-  })], { port: 0 }).then((server) => {
+  })).then((server) => {
     x.cellApi = { server, origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
     return x.cellApi.origin;
   });
@@ -621,11 +644,28 @@ Then("the owner is asked no question about a locked feature file", long, async f
 
 // ---- the item page ----
 
+async function api(world: object): Promise<NonNullable<Ctx["api"]>> {
+  const x = await built(world);
+  x.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-365", readBlob: async () => null, env: {}, verify: testBearer,
+  });
+  return x.api;
+}
+
+Given("{string} is signed in", long, async function (login: string) {
+  await api(this);
+  mine(this).signedIn = login;
+});
+
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), these steps drive today's dashboard.
+const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
+
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), these steps drive today's dashboard.
 async function dashboard(world: object): Promise<NonNullable<Ctx["dashboard"]>> {
   const x = await built(world);
   if (x.dashboard) return x.dashboard;
   let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  const server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
+  const server = await serve((req, res) => handler!(req, res));
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   handler = dashboardRoutes({
     pool: pool(), auth: createAuth({ mode: "azure" }), origin, adapter: x.board.adapter, sourceId: x.sourceId, repoHost: repoHost(world) as never,
@@ -634,11 +674,7 @@ async function dashboard(world: object): Promise<NonNullable<Ctx["dashboard"]>> 
   return x.dashboard;
 }
 
-Given("{string} is signed in", long, async function (login: string) {
-  await dashboard(this);
-  mine(this).signedIn = login;
-});
-
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), the item page is today's dashboard's.
 export async function openPage(world: object, login: string): Promise<void> {
   const x = await built(world);
   const d = await dashboard(world);
@@ -717,6 +753,18 @@ Then("the page says {string} approved the feature change request", function (log
   assert.ok(said, `the page doesn't say "${login}" approved the feature change request: ${all.slice(0, 600)}`);
 });
 
+/** Sends a decision on item 482 to the API as `login`, as the SPA's decision forms send theirs. */
+async function decide(world: object, login: string, kind: "approve" | "changes", note: string): Promise<Answer> {
+  const x = await built(world);
+  const r = await callApi((await api(world)).app, pool(), login, "POST", `/v1/items/${x.itemId}/decisions`, { kind, text: note });
+  const answer = { status: r.status, html: r.text };
+  x.sent = answer;
+  x.context = undefined;
+  return answer;
+}
+
+// Until the API and the SPA offer the feature-change decision (PBI 283's blocker), pressing a button posts today's
+// dashboard's form.
 async function post(world: object, login: string, action: string, fields: Record<string, string>): Promise<Answer> {
   const d = await dashboard(world);
   const r = await fetch(`${d.origin}${action}`, {
@@ -786,13 +834,11 @@ When("{string} writes this note and presses {string} on item {int}'s page:", lon
 });
 
 When("{string} sends an Approve of the feature change request on item {int}", long, async function (login: string, _item: number) {
-  const x = await built(this);
-  await post(this, login, `/items/${x.itemId}/feature-change`, { decision: "approve", note: "" });
+  await decide(this, login, "approve", "");
 });
 
 When("{string} sends an Ask for changes with the note {string} on item {int}", long, async function (login: string, note: string, _item: number) {
-  const x = await built(this);
-  await post(this, login, `/items/${x.itemId}/feature-change`, { decision: "changes", note });
+  await decide(this, login, "changes", note);
 });
 
 Then("the decision is refused", function () {

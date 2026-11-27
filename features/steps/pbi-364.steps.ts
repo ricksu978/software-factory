@@ -23,20 +23,17 @@
 //   each line after in one with data-side="after", and the reason in an element with a data-reason attribute.
 // - The item page scenarios store the request with requestFeatureChange in src/store/feature-change.ts, on PBI 4's
 //   shared test database, for an InProgress item 482 whose run locked the feature files, as the cell API does when a
-//   cell sends the request. The page is the dashboard's /items/<id>, opened in UTC by the signed-in owner.
+//   cell sends the request. The page is the SPA's Run detail, rendered in UTC from what the orchestrator API's
+//   GET /v1/items/<id> answers the owner, the API built in-process through features/support/split-services.ts.
 import { After, Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fakeBacklog } from "../../src/adapters/fake.ts";
 import { mirrorFeatureChange } from "../../src/control/board.ts";
 import type { FeatureChangeFile } from "../../src/core/feature-change.ts";
 import { next, type ItemEvent } from "../../src/core/states.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
 import { withTx } from "../../src/store/db.ts";
 import { requestFeatureChange } from "../../src/store/feature-change.ts";
 import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
@@ -44,6 +41,7 @@ import { runTheCell } from "./pbi-18.steps.ts";
 import { at, commit, ensure, featureText, lockText, mine as pbi152, pushedHead, ranClean } from "./pbi-152.steps.ts";
 import { text } from "./pbi-189.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 
 const ORDERS = "features/pbi-482-orders.feature";
 const CODE = "export const holdEmptyOrders = true;\n";
@@ -64,8 +62,7 @@ type Ctx = {
   files: FeatureChangeFile[];
   itemId?: string;
   sourceId?: string;
-  server?: Server;
-  close?: () => Promise<void>;
+  api?: ReturnType<typeof apiApp>;
   page?: { status: number; html: string };
   /** The move a "has moved to FeatureChangeRequest" step made, without a cell. */
   moved?: FeatureChangeFile[];
@@ -337,7 +334,6 @@ Then("the comment shows the change to {string} with the reason {string}", async 
 // ---- the item page ----
 
 const pool = () => need().pool;
-const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
 Before({ tags: "@pbi-364 and @db", ...long }, async function () {
   const d = await testDb();
@@ -347,10 +343,7 @@ Before({ tags: "@pbi-364 and @db", ...long }, async function () {
 
 After({ tags: "@pbi-364 and @db", ...long }, async function () {
   const x = (this as { pbi364?: Ctx }).pbi364;
-  if (!x?.server) return;
-  await x.close?.();
-  x.server.closeAllConnections();
-  await new Promise<void>((resolve) => x.server!.close(() => resolve()));
+  await x?.api?.close();
 });
 
 /** The feature files locked at sign-off: PBI 152's step names two, and every scenario locks the orders file. */
@@ -387,15 +380,13 @@ When("the owner opens item {int}'s page", long, async function (_item: number) {
   assert.ok(x.itemId && x.sourceId, "item 482 wasn't set up");
   const runId = (await pool().query<{ id: string }>("select id from run where item_id = $1", [x.itemId])).rows[0].id;
   await withTx(pool(), (c) => requestFeatureChange(c, runId, x.files));
-  let handler: ReturnType<typeof dashboardRoutes> | undefined;
-  x.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-  const origin = `http://127.0.0.1:${(x.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin, adapter: fakeBacklog().adapter, sourceId: x.sourceId });
-  x.close = handler.close;
+  x.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-364", readBlob: async () => null, env: {}, verify: testBearer,
+  });
   await pool().query(
-    `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'owner') on conflict (provider, subject) do nothing`, [OWNER]);
-  const r = await fetch(`${origin}/items/${x.itemId}`, { headers: { ...headers(OWNER), cookie: "tz=UTC" }, redirect: "manual" });
-  x.page = { status: r.status, html: await r.text() };
+    `insert into "user" (issuer, subject, github_login, role) values ($1, $2, $2, 'owner') on conflict do nothing`, [TEST_ISSUER, OWNER]);
+  const r = await callApi(x.api.app, pool(), OWNER, "GET", `/v1/items/${x.itemId}`);
+  x.page = { status: r.status, html: r.status === 200 ? await renderPage("item", r.json, { zone: "UTC" }) : r.text };
 });
 
 function html(world: object): string {

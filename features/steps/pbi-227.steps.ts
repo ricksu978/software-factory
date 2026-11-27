@@ -7,9 +7,10 @@
 // adapter, so a parent's board status is the status its fake issue holds. Every setStatus the factory makes is logged
 // with the state it mirrored.
 //
-// A viewer opens Run detail on the real dashboard routes, served by node:http on a free port, and Floor through PBI
-// 131's "a viewer opens Floor". Both pages are recorded through PBI 19's recordResponse, where PBI 131's page() reads
-// them back. "The page doesn't show" is PBI 145's step, which reads them there too.
+// A viewer opens Run detail as the SPA's own page, rendered from what the orchestrator API's GET /v1/items/:id answers,
+// built in-process through features/support/split-services.ts, and Floor through PBI 131's "a viewer opens Floor". Both
+// pages are recorded through PBI 19's recordResponse, where PBI 131's page() reads them back. "The page doesn't show"
+// is PBI 145's step, which reads them there too.
 //
 // The page's contract these steps read. A Split parent's children are a list (<ol> or <ul>): on Run detail the first
 // list after the text "Split into", and on Floor the first list after the text "Split into" that follows the
@@ -19,15 +20,13 @@
 import { After, Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { fakeRepoHost } from "../../src/adapters/fake.ts";
 import type { BacklogAdapter, FactoryItem } from "../../src/adapters/types.ts";
 import type { ItemState } from "../../src/core/states.ts";
 import { SPLIT_HEADING } from "../../src/gate/split.ts";
 import type { Policy } from "../../src/policy/policy.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
+import { runPath } from "../../web/src/routes.ts";
 import { withTx } from "../../src/store/db.ts";
 import { overrideItem } from "../../src/store/items.ts";
 import { CONSUMER } from "../../src/store/outbox.ts";
@@ -39,6 +38,7 @@ import { recordResponse } from "./pbi-19.steps.ts";
 import { agent, ctx as ctx144, poll, refuse, replaceItem, scriptedBoard, type Ctx as Ctx144 } from "./pbi-144.steps.ts";
 import { countPass } from "./pbi-225.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
+import { callApi, renderPage, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 
 const HEADING = "Acceptance criteria";
 const SPLIT_INTO = "Split into";
@@ -58,9 +58,8 @@ type Ctx = {
   worker?: OutboxDeps;
   /** The state the transition being mirrored moved to, so each setStatus knows what it mirrors. */
   mirroring: ItemState | "?";
-  server?: Server;
-  close?: () => Promise<void>;
-  origin?: string;
+  /** The orchestrator API the viewer reads Run detail from, once a page has been opened. */
+  api?: ReturnType<typeof apiApp>;
   heads: number;
   /** How many statuses the factory had set when the owner moved the parent's board status, once the owner has. */
   ownerMovedAt?: number;
@@ -116,10 +115,11 @@ Before({ tags: "@pbi-227 and @db", ...long }, async function () {
 });
 
 After({ tags: "@pbi-227", ...long }, async function () {
-  // This feature's own server, and PBI 131's when its "a viewer opens Floor" opened one, since PBI 131's After only
-  // runs for its own scenarios.
+  // This feature's own API, and PBI 131's server when its "a viewer opens Floor" opened one, since PBI 131's After
+  // only runs for its own scenarios.
   const w = this as { pbi227?: Ctx; pbi131?: { server?: Server; close?: () => Promise<void> } };
-  for (const s of [w.pbi227, w.pbi131]) {
+  await w.pbi227?.api?.close();
+  for (const s of [w.pbi131]) {
     if (!s) continue;
     await s.close?.();
     if (s.server) {
@@ -424,27 +424,22 @@ Then("the factory never set the board status of {string} when it moved to Split"
 
 // ---- opening the pages ----
 
-async function open(world: object, path: string): Promise<void> {
+/** The viewer opens an item's Run detail: the SPA's page drawn from the API's answer for the item. */
+async function open(world: object, id: string): Promise<void> {
   const k = ctx(world);
-  const b = main(world);
-  await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer', 'viewer', 'viewer') on conflict (provider, subject) do nothing`);
-  if (!k.server) {
-    let handler: ReturnType<typeof dashboardRoutes> | undefined;
-    k.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-    k.origin = `http://127.0.0.1:${(k.server.address() as AddressInfo).port}`;
-    handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: k.origin, adapter: b.c.fake.adapter, sourceId: b.sourceId });
-    k.close = handler.close;
-  }
-  const login = "viewer";
-  const r = await fetch(`${k.origin}${path}`, {
-    headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login }, redirect: "manual",
+  await pool().query(
+    `insert into "user" (issuer, subject, github_login, role) values ($1, 'viewer', 'viewer', 'viewer') on conflict do nothing`,
+    [TEST_ISSUER],
+  );
+  k.api ??= apiApp({
+    pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-227", readBlob: async () => null, env: {}, verify: testBearer,
   });
-  const text = await r.text();
+  const r = await callApi(k.api.app, pool(), "viewer", "GET", `/v1/items/${id}`);
   // PBI 131's page() and PBI 145's "the page doesn't show" read the page from here.
-  recordResponse(world, r.status, text);
+  recordResponse(world, r.status, r.status === 200 ? await renderPage("item", r.json, { zone: "UTC" }) : r.text);
 }
 
-const parentDetail = async (world: object) => open(world, `/items/${await itemId(main(world).sourceId, main(world).c.parentId!)}`);
+const parentDetail = async (world: object) => open(world, await itemId(main(world).sourceId, main(world).c.parentId!));
 
 When("a viewer opens the parent's Run detail", long, async function () {
   await parentDetail(this);
@@ -464,7 +459,7 @@ Given("a viewer has seen child {string} show the state {string} on the parent's 
 
 When("a viewer opens the Run detail of child {string}", long, async function (child: string) {
   const { n } = named(child);
-  await open(this, `/items/${await itemId(main(this).sourceId, n)}`);
+  await open(this, await itemId(main(this).sourceId, n));
 });
 
 // ---- reading the pages ----
@@ -650,7 +645,7 @@ Then("{string} on Floor still links to {string}", function (ref: string, url: st
 
 Then("{string} on Floor still links to the parent's Run detail", long, async function (title: string) {
   const b = main(this);
-  const url = `/items/${await itemId(b.sourceId, b.c.parentId!)}`;
+  const url = runPath(await itemId(b.sourceId, b.c.parentId!));
   const r = floorOutsideSplits(this);
   assert.ok(r.links.some((l) => l.href === url && l.text.includes(title)), `no "${title}" on Floor links to ${url}: ${JSON.stringify(r.links)}`);
 });

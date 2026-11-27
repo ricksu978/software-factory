@@ -209,7 +209,7 @@ function opened(world: object): string {
 
 /** The text of each list entry and table row on Floor that links to the item's page. */
 function floorEntries(world: object, name: string): string[] {
-  const link = `href="/items/${itemOf(world, name).id}"`;
+  const link = `href="/runs/${encodeURIComponent(itemOf(world, name).id)}"`;
   return [...opened(world).matchAll(/<(li|tr)\b[^>]*>([\s\S]*?)<\/\1>/gi)].filter((m) => m[2].includes(link)).map((m) => text(m[2]));
 }
 

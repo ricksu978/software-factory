@@ -1,16 +1,14 @@
 // Step definitions for features/pbi-194-merged-pr-while-needs-input.feature. The @db scenarios reuse PBI 12's poller
-// harness and PBI 142's "the factory holds an item in state ... whose open run has PR" setup, and serve the real
-// dashboard on the same database to read Floor and the item's Run detail. The cell scenarios reuse PBI 18's engine
+// harness and PBI 142's "the factory holds an item in state ... whose open run has PR" setup, and read Floor and the
+// item's Run detail from the orchestrator API on the same database, as the SPA's pages do, through
+// features/support/split-services.ts. The cell scenarios reuse PBI 18's engine
 // harness through PBI 152's "a run for item ... that resumes at address", with the fake repo host holding the run's PR as a person merged it.
 import { After, Before, BeforeStep, Given, Then } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import type { fakeRepoHost } from "../../src/adapters/fake.ts";
-import { fakeBacklog } from "../../src/adapters/fake.ts";
-import { createAuth } from "../../src/http/auth.ts";
-import { dashboardRoutes } from "../../src/http/routes.ts";
-import { startServer } from "../../src/http/server.ts";
+import { apiApp } from "../../src/api/main.ts";
+import type { FloorData, ItemData } from "../../web/src/api.ts";
+import { callApi, TEST_AUDIENCE, TEST_ISSUER, testBearer } from "../support/split-services.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { lastAttempt } from "./pbi-142.steps.ts";
@@ -19,7 +17,7 @@ import type { Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { isPbi259, reportsNoMove } from "./pbi-259.steps.ts";
 
 type Host = ReturnType<typeof fakeRepoHost>;
-type Ctx = { replies: unknown[]; server?: Server; close?: () => Promise<void>; origin?: string; stepType?: string };
+type Ctx = { replies: unknown[]; api?: ReturnType<typeof apiApp>; stepType?: string };
 
 function ctx(world: object): Ctx {
   const w = world as { pbi194?: Ctx };
@@ -45,11 +43,8 @@ Before({ tags: "@pbi-194 and @db", ...long }, async function () {
 After({ tags: "@pbi-194 or @pbi-262", ...long }, async function () {
   const s = (this as { pbi194?: Ctx }).pbi194;
   if (!s) return;
-  await s.close?.();
-  if (s.server) {
-    s.server.closeAllConnections();
-    await new Promise<void>((resolve) => s.server!.close(() => resolve()));
-  }
+  await s.api?.close();
+  s.api = undefined;
 });
 
 // PBI 262 says "the item has no open question" as a Given too, where it sets the item up rather than checks it.
@@ -134,47 +129,41 @@ Then("the question {string} is still open", long, async function (body: string) 
 
 // ---- the dashboard ----
 
-async function openPage(world: object, path: string): Promise<string> {
+/** What the API answers a viewer for `path`, as JSON. */
+async function read<T>(world: object, path: string): Promise<T> {
   const c = ctx(world);
-  if (!c.server) {
-    const sourceId = pollCtx(world).sourceId;
-    assert.ok(sourceId, "no backlog source was set up");
-    await pool().query(`insert into "user" (provider, subject, github_login, role) values ('microsoft', 'viewer', 'viewer', 'viewer') on conflict (provider, subject) do nothing`);
-    let handler: ReturnType<typeof dashboardRoutes> | undefined;
-    c.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
-    c.origin = `http://127.0.0.1:${(c.server.address() as AddressInfo).port}`;
-    handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: c.origin, adapter: fakeBacklog().adapter, sourceId });
-    c.close = handler.close;
+  if (!c.api) {
+    await pool().query(
+      `insert into "user" (issuer, subject, github_login, role) values ($1, 'viewer', 'viewer', 'viewer') on conflict on constraint user_issuer_subject do nothing`,
+      [TEST_ISSUER],
+    );
+    c.api = apiApp({
+      pool: pool(), issuer: TEST_ISSUER, audience: TEST_AUDIENCE, webhookSecret: "pbi-194", readBlob: async () => null, env: {}, verify: testBearer,
+    });
   }
-  const r = await fetch(`${c.origin}${path}`, {
-    headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "viewer", "x-ms-client-principal-name": "viewer" }, redirect: "manual",
-  });
-  const html = await r.text();
-  assert.equal(r.status, 200, `${path} answered ${r.status}: ${html.slice(0, 300)}`);
-  return html;
+  const r = await callApi(c.api.app, pool(), "viewer", "GET", path);
+  assert.equal(r.status, 200, `${path} answered ${r.status}: ${r.text.slice(0, 300)}`);
+  return r.json as T;
 }
 
-function section(html: string, name: string): string {
-  const start = html.search(new RegExp(`<h2\\b[^>]*>\\s*${name}\\s*</h2>`, "i"));
-  assert.ok(start >= 0, `the page has no "${name}" section`);
-  const rest = html.slice(start).replace(/^<h2\b[^>]*>[\s\S]*?<\/h2>/i, "");
-  const end = rest.search(/<h2\b/i);
-  return end < 0 ? rest : rest.slice(0, end);
-}
+/** Floor's sections by the heading the SPA's Floor gives them. */
+const SECTIONS: Record<string, keyof FloorData> = { "Waiting on you": "waiting", "Next up": "next", "Not ready": "notReady" };
 
 Then("{string} on the dashboard doesn't list the item", long, async function (name: string) {
   polled(pollCtx(this));
   const id = await itemId(this);
-  const listed = section(await openPage(this, "/"), name);
-  assert.ok(!listed.includes(`/items/${id}"`), `"${name}" lists the item: ${listed.trim()}`);
+  const key = SECTIONS[name];
+  assert.ok(key, `Floor has no "${name}" section`);
+  const listed = (await read<FloorData>(this, "/v1/floor"))[key] as { id: string; title: string }[];
+  assert.ok(!listed.some((i) => i.id === id), `"${name}" lists the item: ${JSON.stringify(listed)}`);
 });
 
 Then("the item's page asks for no answer", long, async function () {
   polled(pollCtx(this));
   const id = await itemId(this);
-  const html = await openPage(this, `/items/${id}`);
-  assert.ok(!html.includes(`action="/items/${id}/answer"`), "the item's page shows a form for an answer");
-  assert.ok(!/<h2>\s*Answer\s*<\/h2>/i.test(html), "the item's page asks for an answer");
+  const detail = await read<ItemData>(this, `/v1/items/${id}`);
+  // Run detail shows its Answer form only for an open question of kind needs_input.
+  assert.notEqual(detail.question?.kind, "needs_input", `the item's page asks for an answer: ${JSON.stringify(detail.question)}`);
 });
 
 // ---- the cell ----

@@ -61,7 +61,7 @@ export type Event =
 export type Shown = { state: "Waiting" | "Running" | "Finished" | "Failed"; log: string[] };
 
 /** The files the fake Docker copies into an image from the build's context. */
-const IMAGE_FILES = ["sop/sop.yml", "src/main.ts"];
+const IMAGE_FILES = ["sop/sop.yml", "src/cell/main.ts"];
 
 export type Ctx = {
   root: string;
@@ -161,7 +161,7 @@ Before({ tags: "(@pbi-205 or @pbi-206 or @pbi-208) and not @local" }, function (
     dockerStopsAfterCheck: false, build: { ms: 30_000, failure: null }, images: new Map(), dashboard: new Map(),
     env: {}, remoteAsks: false,
   };
-  commit(c, seed, "base", ["sop/sop.yml", "src/main.ts", "cell/Dockerfile"]);
+  commit(c, seed, "base", ["sop/sop.yml", "src/cell/main.ts", "cell/Dockerfile"]);
   git(seed, "push", "-q", "-u", "origin", "main");
   git(root, "clone", "-q", origin, checkout);
   (this as { pbi205?: Ctx }).pbi205 = c;
