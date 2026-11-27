@@ -629,6 +629,14 @@ describe("gate on an item's rule changes (PBI 395)", () => {
     assert.equal(approved.ready, true);
   });
 
+  test("PBI 414: an unreadable judge reply leaves the rules line failed as unreadable, even with a valid section", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts ten minutes.") });
+    const out = await gate(s.item, s.ctx("garbage", { factoryRules }));
+    assert.equal(out.ready, false);
+    assert.deepEqual([out.results.find((r) => r.index === 2)?.status, out.results.find((r) => r.index === 2)?.reason], ["failed", "readiness check output unreadable"]);
+    assert.ok(!out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+  });
+
   test("PBI 414: an entry that's off leaves the judge's verdict on the rules line standing", async () => {
     for (const b of [body("A lease lasts eight minutes."), "Lead.\n\n## Changes the factory's rules\n\n### Spec §6\n**Before**\n> A lease lasts ten minutes.\n"]) {
       const s = await setup(DOR, { body: b });
