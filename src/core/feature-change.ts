@@ -10,6 +10,11 @@ import { fenced } from "./fence.ts";
 /** One locked feature file a feature change request asks to change. */
 export type FeatureChangeFile = { path: string; reason: string; before: string; after: string };
 
+/** PBI 366: the id of Run detail's Feature change request section, which Floor and the state line link to. */
+export const FEATURE_CHANGE_ANCHOR = "feature-change-request";
+/** PBI 366: what Floor and Run detail say of an item in FeatureChangeRequest, before the link to its request. */
+export const WAITS_ON_OWNER = "Waiting on the Product Owner's decision on the";
+
 /** The prefix of a report line that asks to change a locked feature file. */
 export const FEATURE_CHANGE = "FEATURE CHANGE:";
 

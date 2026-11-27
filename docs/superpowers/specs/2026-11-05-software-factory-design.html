@@ -939,6 +939,8 @@ stateDiagram-v2
 
     Those are items whose question or sign-off is still unanswered,
 
+    items in FeatureChangeRequest (PBI 366),
+
     plus factory PRs waiting on a reviewer.
 
     An item whose answer has arrived can always resume,
@@ -2481,6 +2483,32 @@ Feature: Export invoices to CSV
     Either way the item goes back to Queued,
 
     and the run resumes at the stage that asked.
+
+    While it waits, the item waits on a person as one in SignOff does,
+
+    with one difference: it is never abandoned for waiting (PBI 366).
+
+    It holds no WIP slot,
+
+    and it counts toward <code>review_capacity</code> (§5).
+
+    The factory comments a reminder on the PBI 2 days and 4 days after the item moved to FeatureChangeRequest,
+
+    once each,
+
+    and no reminder says the item will be abandoned.
+
+    It stays in FeatureChangeRequest until the owner decides,
+
+    or until a person merges or closes its PR, removes its label, closes the item,
+
+    changes its acceptance criteria or edits its rules section (§5).
+
+    Floor's "Waiting on you" and the state line of the item's Run detail show it as waiting on the Product Owner,
+
+    with a "Feature change request" link to that section of Run detail,
+
+    on the dashboard and in the SPA.
 
     Pr-review runs while the run stays at open-pr or address,
 

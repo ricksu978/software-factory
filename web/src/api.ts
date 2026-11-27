@@ -42,7 +42,8 @@ export type MainBreak = {
 
 export type FloorData = {
   active: (Named & OpenPr & { state: string; stage: string | null; since: string | null; cost: string; badges: string[]; message: string | null; ci_failure?: CiFailure | null })[];
-  waiting: (Named & OpenPr & { state: string; since: string | null })[];
+  /** PBI 366: `feature_change` is true for an item in FeatureChangeRequest, waiting on the Product Owner's decision. */
+  waiting: (Named & OpenPr & { state: string; since: string | null; feature_change?: boolean })[];
   waitingCount: number;
   capacity: number;
   next: Named[];
@@ -126,6 +127,8 @@ export type ItemData = {
   durations?: ItemDurations;
   splitInto?: SplitChild[];
   recheck?: { last: string | null } | null;
+  /** PBI 366: the feature change request the item waits on in FeatureChangeRequest, or null. */
+  featureChange?: { path: string; reason: string; before: string; after: string }[] | null;
 };
 
 export type Phase0Data = {

@@ -91,6 +91,8 @@ async function tickSteps(d: TickDeps, w: Watch): Promise<TickResult> {
   result.expired = await withTx(d.pool, (c) => expireLeases(c, d.now));
   w.step("chasing questions");
   await chaseQuestions(d);
+  w.step("reminding feature change requests");
+  await chaseFeatureChanges(d);
   w.step("polling merged CI");
   await pollMergedCi(d);
   w.step("re-checking Failed items");
@@ -261,6 +263,36 @@ async function chaseQuestions(d: TickDeps) {
       await d.pool.query("update question set reminders_sent = $2 where id = $1", [q.id, due]);
     });
   }
+}
+
+/**
+ * PBI 366: reminds the owner on the PBI 2 and 4 days after an item moved to FeatureChangeRequest, once each, counted on
+ * the run that holds the request. A reminder missed by a stopped worker is sent when it comes back. The item is never
+ * abandoned for waiting, so no reminder says it will be.
+ */
+async function chaseFeatureChanges(d: TickDeps) {
+  const r = await d.pool.query<{ item_id: string; run_id: string; reminders: number; moved: Date; source_id: string; external_id: string }>(
+    `select i.id as item_id, r.id as run_id, r.feature_change_reminders as reminders, i.source_id, i.external_id,
+       (select max(at) from event e where e.item_id = i.id and e.kind = 'transition' and e.payload->>'to' = 'FeatureChangeRequest') as moved
+     from item i join lateral (select id, feature_change_reminders from run where run.item_id = i.id order by run_number desc, started_at desc limit 1) r on true
+     where i.state = 'FeatureChangeRequest'`,
+  );
+  for (const row of r.rows) {
+    if (!row.moved) continue;
+    await isolated(`reminding the feature change request of item ${row.item_id}`, async () => {
+      const due = REMIND_AT_MS.filter((at) => d.now.getTime() - row.moved.getTime() >= at).length;
+      for (let n = row.reminders + 1; n <= due; n++) {
+        await d.backlogFor(row.source_id).comment(row.external_id, featureChangeReminder(n), `feature-change-reminder:${row.run_id}:${row.moved.toISOString()}:${n}`);
+        await d.pool.query("update run set feature_change_reminders = $2 where id = $1", [row.run_id, n]);
+      }
+    });
+  }
+}
+
+/** The text of the `n`th reminder on an item waiting in FeatureChangeRequest. */
+export function featureChangeReminder(n: number): string {
+  const days = REMIND_AT_MS[n - 1] / DAY_MS;
+  return `Reminder: this item has waited ${days} days on the Product Owner's decision on its feature change request. It waits until the Product Owner approves the change or asks for changes, on the item's Run detail or by replying \`/approve\` or \`/changes <note>\` here.`;
 }
 
 /** The newest commits of a branch that a green one is looked for in, so a long red stretch costs a bounded number of reads. */
@@ -631,7 +663,7 @@ async function startNext(d: TickDeps, result: TickResult) {
   const counts = (await d.pool.query<{ running: number; waiting: number; resuming: boolean }>(
     `select
        (select count(*)::int from item where state = 'InProgress') as running,
-       (select count(*)::int from item i where i.state = 'InReview'
+       (select count(*)::int from item i where i.state in ('InReview', 'FeatureChangeRequest')
           or (i.state in ('SignOff', 'NeedsInput')
             and exists (select from question q where q.item_id = i.id and q.answer is null and q.closed_at is null))) as waiting,
        exists (select from run where ended_at is null and resume_at > $1) as resuming`,
