@@ -3587,6 +3587,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     A found rule the section misses fails the `dor.md` line whose text names the factory's rules,
     its reason naming the sections to cover,
     or adds a `rule change` verdict when no line does.
+    When the section has entries,
+    none of them off,
+    and it covers every found rule,
+    the engine sets that line to passed with its own reason whatever the judge said of it (PBI 414),
+    so a judge that fails it for a missing approval leaves the item waiting for the approval instead,
+    and an approved item goes on.
     When everything else passed and the section's `ruleChangesHash` isn't `ctx.ruleApproval`,
     the latest approval's hash,
     a failed `rule change approval` verdict leaves the item waiting.
