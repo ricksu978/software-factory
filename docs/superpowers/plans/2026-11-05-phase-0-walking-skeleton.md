@@ -4164,6 +4164,15 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
   CI or workflow changes,
   and access outside the repo,
   as spec §9 requires.
+  Since PBI 433 the prompt asks for those flags only when a cell would need the thing to build or test the item.
+  A feature that stores or uses credentials,
+  or reads and writes other repos,
+  once it runs is no flag when the item's tests use stand-ins,
+  and an item that asks a person to change a workflow,
+  or asks a cell to use a real credential,
+  is still flagged.
+  The new words change the readiness logic's fingerprint,
+  so every NotReady item is checked again (PBI 149).
   That check is the engine's,
   and no `dor.md` can remove it.
   `readinessLogic()` returns the prompt's own words,
