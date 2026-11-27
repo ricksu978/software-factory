@@ -132,7 +132,10 @@ function asks(world: object, role: Role, path: string, reason: string) {
 
 // ---- the run and its agents ----
 
-Given("item {int} is InProgress", function (_item: number) {
+Given("item {int} is InProgress", async function (_item: number) {
+  // PBI 430's scenarios set up a numbered item on PBI 89's control plane instead, through `numberedIs`.
+  const own = (this as { numberedIs?: (n: number, state: string) => Promise<void> }).numberedIs;
+  if (own) return own(_item, "InProgress");
   // A cell runs only for a claimed item, so the run PBI 152's step set up is InProgress: claimed after sign-off, its
   // feature files locked, at a stage after sign-off, and not yet run.
   const { c } = harness(this);

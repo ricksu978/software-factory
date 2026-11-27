@@ -74,7 +74,7 @@ type Pages = {
   activity: { Activity: ComponentType<ActivityProps> };
 };
 const api = () => load<Api>("/src/api.ts");
-const floorModule = () => load<Pages["floor"]>("/src/pages/Floor.tsx");
+export const floorModule = () => load<Pages["floor"]>("/src/pages/Floor.tsx");
 const itemModule = () => load<Pages["item"]>("/src/pages/RunDetail.tsx");
 
 // ---- the scenario's context ----
@@ -331,7 +331,7 @@ function decode(s: string): string {
   });
 }
 
-function parse(html: string): El {
+export function parse(html: string): El {
   const root: El = { tag: "#root", attrs: {}, children: [], parent: null };
   let cur = root;
   const tags = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:\s+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/?)>|[^<]+|</g;
@@ -720,6 +720,9 @@ Given("{string} waits on a question because its tests {string} and {string} fail
 });
 
 Given("the Claude token expires in {int} days", function (days: number) {
+  // PBI 430's scenarios set the token's age in the control plane's environment.
+  const own = (this as { tokenExpiresIn?: (days: number) => void }).tokenExpiresIn;
+  if (own) return own(days);
   const c = ctx(this);
   const age = 365 - days;
   c.floor.claudeToken = {
@@ -1360,6 +1363,9 @@ Given("I submitted the {string} form with {string} and {string} left empty, and 
 // ---- Then: Floor ----
 
 export function floorRoot(world: object): El {
+  // PBI 430's scenarios read the Floor they opened, today's or the SPA's, through their own context.
+  const own = (world as { floorTree?: () => El }).floorTree;
+  if (own) return own();
   return opened(ctx(world), "floor");
 }
 

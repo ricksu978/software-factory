@@ -135,7 +135,7 @@ Given(re(`an operator "([^"]+)" is signed in`), async function (login: string) {
 
 // ---- items ----
 
-async function seedBoard(world: object, name: string, ext: string, rank: number, extra: Partial<FactoryItem> = {}): Promise<void> {
+export async function seedBoard(world: object, name: string, ext: string, rank: number, extra: Partial<FactoryItem> = {}): Promise<void> {
   await p89(world).fake!.seed({ externalId: ext, title: `Item ${name}`, repo: REPO, rank, acceptanceCriteria: ["it works"], ...extra });
 }
 
@@ -145,7 +145,8 @@ export async function newItem(world: object, name: string, state: ItemState): Pr
   const m = ctx(world);
   assert.ok(!m.items.has(name), `item "${name}" was set up twice`);
   const rank = m.nextRank++;
-  const ext = String(100 + rank);
+  // PBI 430's scenarios name their items by issue number, so an item named "41" is issue #41 on the board.
+  const ext = (world as { extByName?: boolean }).extByName && /^\d+$/.test(name) ? name : String(100 + rank);
   await seedBoard(world, name, ext, rank);
   const id = (await pool().query<{ id: string }>(
     `insert into item (source_id, external_id, title, state, backlog_rank, repo) values ($1, $2, $3, $4, $5, $6) returning id`,
@@ -260,7 +261,7 @@ Given(re(`item "([^"]+)" is blocked by an open issue`), async function (name: st
 // ---- the operator's controls ----
 
 /** Posts an override form, as the page's Controls do, as the signed-in person. The status is PBI 89's. */
-async function press(world: object, kind: string, name: string, reason: string): Promise<void> {
+export async function press(world: object, kind: string, name: string, reason: string): Promise<void> {
   const c = p89(world);
   const r = await fetch(`${c.origin}/overrides`, {
     method: "POST", redirect: "manual", body: new URLSearchParams({ kind, itemId: itemOf(world, name).id, reason }).toString(),
@@ -310,7 +311,10 @@ When(re(`"([^"]+)", a viewer, opens item "([^"]+)"'s page`), async function (log
 });
 
 When(re(`the operator opens Floor before the scheduler ticks`), async function () {
-  await fetchPage(this, "/", p89(this).login!);
+  // Kept as PBI 140's "the operator opens Floor" keeps it, for the Thens that read the page opened.
+  const c = p89(this);
+  c.html = await fetchPage(this, "/", c.login!);
+  c.status = 200;
 });
 
 /** The page's Controls section, from its heading to the next one. */

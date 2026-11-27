@@ -68,6 +68,46 @@ export type FloorData = {
   at?: string;
   /** How many outbox rows the worker set aside after their tenth failed attempt (PBI 221, PBI 280). */
   outboxSetAside?: number;
+  /** PBI 430: every item that waits on the owner, oldest first by when it began waiting. Not built yet. */
+  waitingOnYou?: WaitingOnYouRow[];
+  /** PBI 430: up to 10 rows, the InProgress items, then the claimable ones in claim order, then those waiting on another PBI. Not built yet. */
+  productionLine?: ProductionLineRow[];
+  /** PBI 430: how many queued items didn't fit in productionLine. Not built yet. */
+  productionMore?: number;
+};
+
+/** PBI 430: the split parent a split child is part of, or null for an item that isn't one. */
+export type PartOf = { id: string; external_id: string } | null;
+
+/**
+ * PBI 430: a row of "Waiting on you". `since` is when it began waiting, as an ISO time: the oldest open question's
+ * asked_at, the move to InReview, NotReady or Failed. `why` says what it waits on.
+ */
+export type WaitingOnYouRow = Named & {
+  state: string;
+  since: string | null;
+  why: "sign-off" | "question" | "review" | "not-ready" | "failed-on-main";
+  /** The open question's text, for a question. */
+  question?: string | null;
+  /** The readiness lines it failed, for an item that's Not ready. */
+  failed?: string[];
+  /** When it was last re-checked, for an item that failed on main, or null before its first re-check. */
+  rechecked?: string | null;
+  partOf?: PartOf;
+} & Partial<OpenPr>;
+
+/** PBI 430: a row of "Production Line", with In flight's columns for an InProgress item. */
+export type ProductionLineRow = Named & {
+  state: string;
+  stage?: string | null;
+  since?: string | null;
+  cost?: string;
+  message?: string | null;
+  ci_failure?: CiFailure | null;
+  badges?: string[];
+  /** The external id of each open dependency it waits on, with no "#". Empty for a claimable item. */
+  waitsOn: string[];
+  partOf?: PartOf;
 };
 
 export type Stage = {
