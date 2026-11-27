@@ -1,18 +1,20 @@
 // Run detail in the SPA (redesign step 8b): the item, where it stands and what its run is pinned to, its stages, time,
 // policies, readiness checks and scenario verdicts, the Sign off and Answer forms, and an operator's Controls, as
 // today's Run detail in src/http/views.ts shows them.
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
+import { withEffort } from "../../../src/store/effort.ts";
+import { FEATURE_CHANGE_ANCHOR, lineDiff } from "../../../src/core/feature-change.ts";
 import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
 import { CheckLink } from "./Floor.tsx";
-import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time } from "./parts.tsx";
+import { A, Banner, CostCell, Empty, H2, IssueRef, Message, onSubmitWith, PrLink, SplitInto, Time, WaitsOnOwner } from "./parts.tsx";
 
 export { submitAnswer, submitItemControls, submitSignOff } from "../forms.ts";
 
@@ -106,6 +108,26 @@ function TimeSection({ t }: { t: ItemDurations }) {
   );
 }
 
+/**
+ * PBI 366: the feature change request the item waits on, each file under its path with the stage's reason and its
+ * change from the lock commit, each line taken out and put in marked by its side, as the dashboard's item page draws it.
+ */
+function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]> }) {
+  return (
+    <>
+      <H2 id={FEATURE_CHANGE_ANCHOR}>Feature change request</H2>
+      <p>A stage after sign-off asks to change {files.length === 1 ? "this locked feature file" : "these locked feature files"}. The branch keeps {files.length === 1 ? "it" : "them"} as at the lock commit, and the item waits on the Product Owner.</p>
+      {files.map((f) => (
+        <div key={f.path}>
+          <h3 className="mt-3 font-mono text-sm font-semibold">{f.path}</h3>
+          <p data-reason>{f.reason}</p>
+          <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{lineDiff(f.before, f.after).map((l, i) => <span key={i}>{i > 0 && "\n"}{l === null ? "…" : l.side === "before" ? <del data-side="before">{l.text}</del> : l.side === "after" ? <ins data-side="after">{l.text}</ins> : <span data-side="same">{l.text}</span>}</span>)}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Feature files, each under its path with its text as written. */
 function Files({ files }: { files: { path: string; text: string }[] }) {
   return files.map((f) => (
@@ -141,7 +163,7 @@ function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
             <TableCell>{s.stage_id}</TableCell>
             <TableCell>{s.attempt}</TableCell>
             <TableCell>{status(s)}</TableCell>
-            <TableCell>{s.model ?? ""}</TableCell>
+            <TableCell>{s.model ? withEffort(s.model, s.effort) : "model not recorded"}</TableCell>
             <TableCell>{s.started_at ? <Time at={s.started_at} zone={zone} /> : ""}</TableCell>
             <TableCell>{took(s)}</TableCell>
             <TokensCell tokensIn={s.tokens_in} tokensOut={s.tokens_out} />
@@ -159,11 +181,19 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
   const r = d.run;
   const c = d.controls;
   const q = d.question;
+  const hasRequest = Boolean(d.featureChange?.length);
+  // PBI 366: the browser jumps to the address's anchor on load, before the read draws the Feature change request
+  // section, so once it is drawn this scrolls to it when the address names it, as Floor's link does.
+  useEffect(() => {
+    if (!hasRequest || window.location.hash !== `#${FEATURE_CHANGE_ANCHOR}`) return;
+    document.getElementById(FEATURE_CHANGE_ANCHOR)?.scrollIntoView();
+  }, [hasRequest]);
   return (
     <div>
       <h1 className="mb-2 text-2xl font-semibold"><IssueRef external_id={d.item.external_id} repo={d.item.repo} /> {d.item.title}</h1>
       <Message text={message} />
-      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}</p>
+      <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}{d.item.state === "FeatureChangeRequest" && d.featureChange?.length ? <>.<WaitsOnOwner path="" /></> : null}</p>
+      {d.featureChange?.length ? <FeatureChange files={d.featureChange} /> : null}
       {d.recheck && <p>{recheckLine(d.recheck.last, zone, true)}</p>}
       {d.splitInto?.length ? <><H2>Split into</H2><SplitInto children={d.splitInto} /></> : null}
       {d.claim && <p>{claimLines(d.claim)}</p>}
@@ -277,7 +307,7 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
               <TableRow key={i}>
                 <TableCell><Time at={k.ranAt} zone={zone} /></TableCell>
                 <TableCell>{k.kind === "split" ? "Split proposal" : "Judge"}</TableCell>
-                <TableCell>{k.model}</TableCell>
+                <TableCell>{withEffort(k.model, k.effort)}</TableCell>
                 <TokensCell tokensIn={k.tokensIn} tokensOut={k.tokensOut} />
                 <CostCell usd={k.costUsd} />
                 <TableCell className="whitespace-normal"><Verdict c={k} /></TableCell>

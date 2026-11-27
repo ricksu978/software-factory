@@ -7,6 +7,7 @@
 import type pg from "pg";
 import { revivable } from "../control/decisions.ts";
 import { criteriaWithScenarios, fixingCi, itemStanding, itemTime, verdicts } from "../http/routes.ts";
+import { featureChangeRequest } from "../store/feature-change.ts";
 import { issueRepos } from "../store/issues.ts";
 import { readinessChecks } from "../store/readiness-checks.ts";
 
@@ -22,7 +23,7 @@ export async function itemDetail(pool: pg.Pool, id: string, canOperate: boolean,
      from run where item_id = $1 order by run_number desc, started_at desc limit 1`, [id],
   )).rows[0] ?? null;
   const stages = run ? (await pool.query(
-    `select stage_id, attempt, status, model, tokens_in, tokens_out, started_at, ended_at, cost_usd, message, restates, ci_failure, transcript_ref, report_ref
+    `select stage_id, attempt, status, model, effort, tokens_in, tokens_out, started_at, ended_at, cost_usd, message, restates, ci_failure, transcript_ref, report_ref
      from stage_run where run_id = $1 order by started_at`, [run.id],
   )).rows : [];
   const files = run ? (await pool.query<File>("select path, sha, text from run_file where run_id = $1 order by path", [run.id])).rows : [];
@@ -52,6 +53,8 @@ export async function itemDetail(pool: pg.Pool, id: string, canOperate: boolean,
     // The API serves every stored transcript at /v1/blobs/{ref}, so each one is a link.
     linkBlobs: true,
     fixingCi: fixingCi(item.state, run, stages),
+    // PBI 366: the request the item waits on in FeatureChangeRequest, or null.
+    featureChange: await featureChangeRequest(pool, id),
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
 }

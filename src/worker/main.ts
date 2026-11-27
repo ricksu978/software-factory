@@ -15,6 +15,7 @@ import { githubRepoHost } from "../adapters/github/repo-host.ts";
 import { TimedOctokit } from "../adapters/github/timed.ts";
 import type { BacklogAdapter, RepoHost } from "../adapters/types.ts";
 import { haikuJudge, runAgent } from "../agent/run.ts";
+import { currentEffort } from "../store/effort.ts";
 import type { SplitDeps } from "../gate/split.ts";
 import { githubSources, missing, sop, type Source } from "../main.ts";
 import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launcher.ts";
@@ -349,11 +350,13 @@ export async function main(env: NodeJS.ProcessEnv, egress: Egress = ensureEgress
   const { sources, installationId } = await githubSources(pool, app, env.GITHUB_PROJECT_TOKEN || null);
   if (!sources.length) console.warn("No backlog source is configured yet, so the factory takes no item. Add config/sources.yml and restart aspire run.");
   const repoHost = installationId === null ? missing<RepoHost>("no repo is configured") : githubRepoHost(app, installationId);
+  const effort = () => currentEffort(pool);
   return startWorker({
     pool, sources, repoHost, launcher: dockerLauncher({ image }), egress, image, controlUrl, blob,
-    judge: haikuJudge(sop),
+    // Each judge and split call reads the effort setting as it runs, so a change reaches the next one (PBI 319).
+    judge: haikuJudge(sop, runAgent, effort),
     // One split cache for every poll, so a re-gate of item text already split doesn't ask the coding model again.
-    split: { sop, agent: runAgent, seen: new Map() },
+    split: { sop, agent: runAgent, seen: new Map(), effort },
     killFlag: env.FACTORY_KILL === "1", secret, sopVersion: sop.version,
     // The worker runs from the operator's checkout, which `main` is fetched into. Its working tree is never touched.
     cellImage: { checkout: join(import.meta.dirname, "..", ".."), builder: dockerBuilder(), tag: image },

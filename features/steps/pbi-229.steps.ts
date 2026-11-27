@@ -300,7 +300,7 @@ Then("the stored reason for line 1 names the check {string} and {string}", funct
 When("the address stage sets up its agent run", function () {
   const c = mine(this);
   const dir = checkout(c);
-  const args: AgentArgs = { prompt: "# Address brief", model: "claude-sonnet-4-5", cwd: dir, agent: ADDRESSER, mode: "cell", webTools: [], signal: new AbortController().signal };
+  const args: AgentArgs = { prompt: "# Address brief", model: "claude-sonnet-4-5", effort: "medium", cwd: dir, agent: ADDRESSER, mode: "cell", webTools: [], signal: new AbortController().signal };
   const def = agentOptions(args).agents?.[ADDRESSER];
   assert.ok(def, `the address stage's run gets no factory definition of ${ADDRESSER}`);
   // The engine's address brief starts with the stage's prompt.

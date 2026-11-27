@@ -42,7 +42,8 @@ export type MainBreak = {
 
 export type FloorData = {
   active: (Named & OpenPr & { state: string; stage: string | null; since: string | null; cost: string; badges: string[]; message: string | null; ci_failure?: CiFailure | null })[];
-  waiting: (Named & OpenPr & { state: string; since: string | null })[];
+  /** PBI 366: `feature_change` is true for an item in FeatureChangeRequest, waiting on the Product Owner's decision. */
+  waiting: (Named & OpenPr & { state: string; since: string | null; feature_change?: boolean })[];
   waitingCount: number;
   capacity: number;
   next: Named[];
@@ -71,7 +72,9 @@ export type FloorData = {
 };
 
 export type Stage = {
-  stage_id: string; attempt: number; model: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null;
+  stage_id: string; attempt: number; model: string | null;
+  /** The effort the attempt ran at, null on a row from before PBI 319, which ran at medium. */
+  effort?: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: string | null;
   status: string; transcript_ref: string | null; started_at?: string; ended_at?: string | null;
   restates?: { round: number; reason: string }[]; message?: string | null;
 };
@@ -83,7 +86,9 @@ export type CheckVerdict =
   | { outcome: "error" };
 
 export type ReadinessCheck = {
-  kind?: "judge" | "split"; model: string; tokensIn: number; tokensOut: number; costUsd: number; ranAt: string; verdict?: CheckVerdict; child?: string;
+  kind?: "judge" | "split"; model: string;
+  /** The effort the call ran at, null on a check from before PBI 319, which ran at medium. */
+  effort?: string | null; tokensIn: number; tokensOut: number; costUsd: number; ranAt: string; verdict?: CheckVerdict; child?: string;
 };
 
 export type ItemDurations = {
@@ -122,6 +127,8 @@ export type ItemData = {
   durations?: ItemDurations;
   splitInto?: SplitChild[];
   recheck?: { last: string | null } | null;
+  /** PBI 366: the feature change request the item waits on in FeatureChangeRequest, or null. */
+  featureChange?: { path: string; reason: string; before: string; after: string }[] | null;
 };
 
 export type Phase0Data = {

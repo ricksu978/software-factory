@@ -525,7 +525,7 @@ async function atGreen(world: object, n: number, ciFailure: Record<string, unkno
     method: "POST",
     headers: { authorization: `Bearer ${runToken(d.secret, run, 1)}`, "content-type": "application/json" },
     body: JSON.stringify({
-      stageId: "green", attempt: ciFailure ? 2 : 1, status: "started", model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0,
+      stageId: "green", attempt: ciFailure ? 2 : 1, status: "started", model: "claude-opus-5-5", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0,
       ...(ciFailure ? { ciFailure } : {}),
     }),
   });

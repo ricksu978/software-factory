@@ -63,7 +63,7 @@ function ctx(world: object): Ctx {
 }
 
 const pool = () => need().pool;
-const SPEND: JudgeSpend = { model: "claude-haiku-4-5", tokensIn: 1000, tokensOut: 50, costUsd: 0.0031 };
+const SPEND: JudgeSpend = { model: "claude-haiku-4-5", effort: "medium", tokensIn: 1000, tokensOut: 50, costUsd: 0.0031 };
 const CRITERIA = ["Exports every row of the month", "Names the file after the month"];
 
 Before({ tags: "@pbi-348", ...long }, async function () {
@@ -306,7 +306,7 @@ async function runCalls(world: object): Promise<void> {
   };
   const file = s.named ? { board: board(), optInLabel: "factory", backlogStatus: "Backlog", criteriaHeading: "Acceptance criteria" } : undefined;
   await runGate(world, (fi) => (fi.externalId === it.ext ? { ...passing(), oversized: true } : s.childReplies.get(fi.title) ?? passing()),
-    () => nextMinute(c), { split: { sop: { models: { coding: "claude-sonnet-4-6" } }, agent, file } });
+    () => nextMinute(c), { split: { sop: { models: { coding: "claude-sonnet-4-6" } }, agent, file, effort: async () => "medium" } });
 }
 
 When("a viewer opens the item page", long, async function () {

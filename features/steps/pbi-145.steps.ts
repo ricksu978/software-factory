@@ -125,12 +125,20 @@ function section(place: string): string {
   return /In flight/.test(place) ? `"In flight"` : `"Waiting on you"`;
 }
 
+/**
+ * The path of an item's Run detail on the page last opened: the dashboard's /items/<id>, or the SPA's /runs/<id> when
+ * PBI 366's steps opened the page there and set the world's `runDetailPath`.
+ */
+function runDetailPath(world: object, id: string): string {
+  return (world as { runDetailPath?: (id: string) => string }).runDetailPath?.(id) ?? `/items/${id}`;
+}
+
 /** The html of the item's row in a Floor section: the <li> or <tr> holding the link to its Run detail. */
 function row(world: object, place: string, it: Item): string {
   const html = scope(page(world), section(place));
   const tag = /In flight/.test(place) ? "tr" : "li";
   const rows = [...html.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, "gi"))].map((m) => m[1]);
-  const mine = rows.filter((r) => r.includes(`href="/items/${it.id}"`));
+  const mine = rows.filter((r) => r.includes(`href="${runDetailPath(world, it.id)}"`));
   assert.equal(mine.length, 1, `${place} has ${mine.length} rows for "${it.title}": ${placeText(render(html))}`);
   return mine[0];
 }
@@ -209,7 +217,7 @@ Then("{string} on {string} still links to the item's Run detail", function (titl
   const r = render(row(this, `"${place}"`, it));
   const own = r.links.filter((l) => l.text === title);
   assert.equal(own.length, 1, `"${place}" has ${own.length} links that hold just "${title}": ${JSON.stringify(r.links)}`);
-  assert.equal(own[0].href, `/items/${it.id}`, `"${title}" links to ${own[0].href}`);
+  assert.equal(own[0].href, runDetailPath(this, it.id), `"${title}" links to ${own[0].href}`);
 });
 
 /** Run detail's line with the item's state: the <p> whose text starts with it. */

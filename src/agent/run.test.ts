@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { FactoryItem } from "../adapters/types.ts";
-import { agentOptions, foldMessages, haikuJudge, judgePrompt, readinessLogic, type AgentResult } from "./run.ts";
+import { agentOptions, foldMessages, haikuJudge, judgePrompt, readinessLogic, runAgent, type AgentArgs, type AgentResult, type Send } from "./run.ts";
 import { READINESS_VERSION } from "../policy/policy.ts";
 
 const ids = { uuid: "00000000-0000-0000-0000-000000000000", session_id: "s1" };
@@ -124,7 +124,29 @@ test("onMessage hears each message's transcript line as it arrives, before the c
   assert.equal(heard.map((l) => l + "\n").join(""), r.transcript);
 });
 
-const base = { prompt: "p", model: "claude-haiku-5-5", cwd: ".", signal: new AbortController().signal };
+const base = { prompt: "p", model: "claude-haiku-5-5", effort: "medium" as const, cwd: ".", signal: new AbortController().signal };
+
+test("a call's options name its model and its effort (PBI 319)", () => {
+  for (const mode of ["judge", "cell"] as const) {
+    const o = agentOptions({ ...base, effort: "xhigh", mode });
+    assert.equal(o.model, "claude-haiku-5-5");
+    assert.equal(o.effort, "xhigh");
+  }
+});
+
+test("a call with no model or no effort, or a blank one, fails naming it, and nothing goes to the model (PBI 319)", async () => {
+  let sent = 0;
+  const send: Send = () => { sent++; return stream(result("success", false, {})) as never; };
+  for (const [missing, args] of [
+    ["model", { ...base, model: undefined }], ["model", { ...base, model: " " }],
+    ["effort", { ...base, effort: undefined }], ["effort", { ...base, effort: "" }], ["effort", { ...base, effort: "lots" }],
+  ] as const) {
+    await assert.rejects(runAgent({ ...args, mode: "judge" } as unknown as AgentArgs, send), new RegExp(`names no ${missing}|${missing} "`), missing);
+  }
+  assert.equal(sent, 0);
+  assert.equal((await runAgent({ ...base, mode: "judge" }, send)).ok, true);
+  assert.equal(sent, 1);
+});
 
 test("judge options carry none of the cell's settings", () => {
   const judge = agentOptions({ ...base, mode: "judge" });
@@ -217,37 +239,50 @@ test("the readiness logic holds the split prompt's own words, with no item in it
   assert.ok(!splitPrompt.includes(item.title));
 });
 
+const effort = async () => "high" as const;
 const reply = (r: Partial<AgentResult>): AgentResult => ({ ok: true, text: "", costUsd: 0, tokensIn: 0, tokensOut: 0,
   model: "claude-haiku-5-5", limit: null, usage: null, transcript: "", ...r });
 
 test("haikuJudge runs the triage model in judge mode for one turn and returns the raw reply", async () => {
   let seen: Parameters<typeof agentOptions>[0] | undefined;
-  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async (a) => { seen = a; return reply({ text: "raw" }); });
+  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async (a) => { seen = a; return reply({ text: "raw" }); }, effort);
   assert.equal(await judge(item, dor), "raw");
   assert.equal(seen?.mode, "judge");
   assert.equal(seen?.model, "claude-haiku-5-5");
   assert.equal(seen?.maxTurns, 1);
+  assert.equal(seen?.effort, "high");
+});
+
+test("haikuJudge reads the effort afresh for each call (PBI 319)", async () => {
+  let now: "low" | "max" = "low";
+  const seen: unknown[] = [];
+  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async (a) => { seen.push(a.effort); return reply({ text: "raw" }); }, async () => now);
+  await judge(item, dor);
+  now = "max";
+  await judge(item, dor);
+  assert.deepEqual(seen, ["low", "max"]);
 });
 
 test("haikuJudge throws when the run fails, so a usage limit never reads as the item's fault", async () => {
-  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => reply({ ok: false, text: "limit", limit: { resetsAt: 1 } }));
+  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => reply({ ok: false, text: "limit", limit: { resetsAt: 1 } }), effort);
   await assert.rejects(judge(item, dor), /readiness judge failed/);
 });
 
 test("haikuJudge reports what a call spent, whether it answers or fails (PBI 132)", async () => {
   const spend = { model: "claude-haiku-5-5", tokensIn: 900, tokensOut: 40, costUsd: 0.0012 };
+  const said = { ...spend, effort: "high" };
   for (const r of [reply({ ...spend, text: "raw" }), reply({ ...spend, ok: false, text: "API Error: 500" }), reply({ ...spend, ok: false, limit: { resetsAt: 1 } })]) {
     const heard: unknown[] = [];
-    await haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => r)(item, dor, (s) => heard.push(s)).catch(() => {});
-    assert.deepEqual(heard, [spend]);
+    await haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => r, effort)(item, dor, (s) => heard.push(s)).catch(() => {});
+    assert.deepEqual(heard, [said]);
   }
 });
 
 test("haikuJudge reports a spend of nothing when the run itself throws, then throws", async () => {
   const heard: unknown[] = [];
-  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => { throw new Error("spawn failed"); });
+  const judge = haikuJudge({ models: { triage: "claude-haiku-5-5" } }, async () => { throw new Error("spawn failed"); }, effort);
   await assert.rejects(judge(item, dor, (s) => heard.push(s)), /spawn failed/);
-  assert.deepEqual(heard, [{ model: "claude-haiku-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 }]);
+  assert.deepEqual(heard, [{ model: "claude-haiku-5-5", effort: "high", tokensIn: 0, tokensOut: 0, costUsd: 0 }]);
 });
 
 test("a run's session id comes back, so a later call can resume it (PBI 190)", async () => {

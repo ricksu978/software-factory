@@ -8,6 +8,7 @@ import type { AgentArgs, AgentResult } from "../agent/run.ts";
 import { fenced } from "../core/fence.ts";
 import type { FileSplitDeps } from "./file-split.ts";
 import { jsonLines } from "../policy/policy.ts";
+import type { Effort } from "../store/effort.ts";
 
 /** One proposed child. `criteria` holds 1-based indices of the parent's acceptance criteria, `needs` 1-based child numbers. */
 export type SplitChild = { title: string; body: string; criteria: number[]; needs: number[] };
@@ -31,6 +32,8 @@ export type SplitDor = { text: string; criteria: { index: number; text: string }
 export type SplitDeps = {
   sop: { models: { coding: string } };
   agent: (a: AgentArgs) => Promise<AgentResult>;
+  /** PBI 319: reads the effort setting as it is now, each time a split or a rewrite is asked for. */
+  effort: () => Promise<Effort>;
   seen?: Map<string, SplitOutcome>;
   /**
    * The coding model's instructions for an item and the dor.md the judge read for it (PBI 159, PBI 202). Unset, the
@@ -158,8 +161,10 @@ export function splitUnanswered(out: SplitOutcome | null | undefined): boolean {
 async function askForSplit(item: FactoryItem, deps: SplitDeps, dor: SplitDor | undefined): Promise<SplitOutcome> {
   let r: AgentResult;
   try {
-    // Judge mode: the parent's text is untrusted and this runs in the control plane, so the model gets no tool.
-    r = await deps.agent({ prompt: promptFor(item, deps, dor), model: deps.sop.models.coding, cwd: tmpdir(), maxTurns: 1, mode: "judge",
+    // Judge mode: the parent's text is untrusted and this runs in the control plane, so the model gets no tool. The
+    // effort is the setting as it is now (PBI 319); one that can't be read sends nothing, and the split stays due.
+    const effort = await deps.effort();
+    r = await deps.agent({ prompt: promptFor(item, deps, dor), model: deps.sop.models.coding, effort, cwd: tmpdir(), maxTurns: 1, mode: "judge",
       signal: AbortSignal.timeout(SPLIT_TIMEOUT_MS) });
   } catch {
     return { proposed: false, reason: NO_ANSWER };

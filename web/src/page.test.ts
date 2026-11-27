@@ -65,3 +65,19 @@ test("Floor ages the worker's heartbeat against the API's time, not the viewer's
   const slow = { ...data, workerHeartbeat: new Date(at.getTime() - 61_000).toISOString() };
   assert.match(render(new Date(at.getTime() - 90_000), slow), /Scheduler not ticking/, "nor does one running 90 s slow hide it");
 });
+
+test("Floor links an item in FeatureChangeRequest to its request on Run detail, and no other item (PBI 366)", async () => {
+  const { Floor } = await vite.ssrLoadModule("/src/pages/Floor.tsx");
+  const { createElement } = await import("react");
+  const at = new Date("2026-11-20T12:00:00Z");
+  const row = { external_id: "364", repo: "octo/repo", title: "t", since: new Date(at.getTime() - 3 * 3_600_000).toISOString() };
+  const data = {
+    active: [], waitingCount: 2, capacity: 3, next: [], notReady: [], blocked: [], factory: [], keys: {},
+    finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
+    claudeToken: null, workerHeartbeat: at.toISOString(), outboxSetAside: 0, at: at.toISOString(),
+    waiting: [{ ...row, id: "a", state: "FeatureChangeRequest", feature_change: true }, { ...row, id: "b", state: "SignOff" }],
+  };
+  const html = renderToString(createElement(Floor, { data, zone: "UTC", now: at })).replace(/<!-- -->/g, "");
+  assert.match(html, /Waiting on the Product Owner&#x27;s decision on the <a [^>]*href="\/runs\/a#feature-change-request">Feature change request<\/a>/);
+  assert.equal(html.match(/#feature-change-request/g)?.length, 1);
+});

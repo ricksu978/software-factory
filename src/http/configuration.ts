@@ -1,14 +1,15 @@
 // The Configuration page's settings (PBI 175). Runtime settings are the one wip_policy row, read fresh on every request,
-// and an operator can change six of them, each change with a reason that the logged event keeps (PBI 176). An operator can
+// and an operator can change seven of them, the effort every agent call names included (PBI 319), each change with a reason that the logged event keeps (PBI 176). An operator can
 // also clear an active usage pause, with a reason, but never set one: only a usage report sets it (PBI 178). The scheduler picks up the current WIP and review capacity on its next tick, and a
 // cell reads the usage reserve. The WIP minimum and maximum only bound the current WIP, and the daily budget is stored but
 // not enforced yet. Env-backed settings are the
 // values the control plane read from its environment at start, shown read-only. Only the names in ENV_SETTINGS ever
 // reach the page, so a secret such as GITHUB_APP_KEY or FACTORY_DB_URI can't show by being added to the environment.
 import type pg from "pg";
+import { EFFORT_RULE, isEffort } from "../store/effort.ts";
 import { appendEvent } from "../store/events.ts";
 
-export type RuntimeKey = "mode" | "wip_min" | "wip_max" | "current_wip" | "review_capacity" | "usage_reserve" | "daily_budget" | "usage_pause";
+export type RuntimeKey = "mode" | "wip_min" | "wip_max" | "current_wip" | "review_capacity" | "usage_reserve" | "daily_budget" | "usage_pause" | "effort";
 
 /**
  * Each runtime setting in the order the page lists it: its label, its wip_policy column, whether an operator can change
@@ -24,6 +25,9 @@ export const RUNTIME_SETTINGS: { key: RuntimeKey; label: string; column: string;
   { key: "usage_reserve", label: "usage reserve", column: "usage_reserve_at", editable: true },
   { key: "daily_budget", label: "daily budget", column: "daily_budget", editable: true, note: "Stored, but not enforced yet." },
   { key: "usage_pause", label: "usage pause", column: "usage_paused_until", editable: false, clearable: true },
+  // PBI 319: the effort every agent call names. A cell reads it once as it starts, and a readiness judge or split
+  // call each time it runs, so a change reaches only cells that start after it.
+  { key: "effort", label: "effort", column: "effort", editable: true, note: "Applies to cells that start after the change, and to the next readiness or split call." },
 ];
 
 /** The env names the page lists. A secret is never one of them: its value never leaves the process. */
@@ -74,7 +78,7 @@ const MAX_INT = 2_147_483_647;
 const whole = (raw: string) => (/^\d{1,10}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= MAX_INT ? Number(raw) : null);
 const decimal = (raw: string) => (/^\d{1,12}(\.\d{1,6})?$|^\.\d{1,6}$/.test(raw) ? Number(raw) : null);
 
-export type Update = { key: RuntimeKey; column: string; value: number | null };
+export type Update = { key: RuntimeKey; column: string; value: number | string | null };
 type TurnedDown = { ok: false; status: number; message: string };
 export type Checked = { ok: true; updates: Update[]; reason: string } | TurnedDown;
 
@@ -108,7 +112,7 @@ function checkValue(now: RuntimeValues, key: string, value: string, at: Date): U
   const min = Number(now.wip_min);
   const max = Number(now.wip_max);
   const current = Number(now.current_wip);
-  const one = (v: number | null): Update[] => [{ key: setting.key, column: setting.column, value: v }];
+  const one = (v: number | string | null): Update[] => [{ key: setting.key, column: setting.column, value: v }];
   const withCurrent = (k: RuntimeKey, v: number, lo: number, hi: number): Update[] => {
     const updates: Update[] = [{ key: k, column: col(k), value: v }];
     const moved = Math.min(Math.max(current, lo), hi);
@@ -149,6 +153,9 @@ function checkValue(now: RuntimeValues, key: string, value: string, at: Date): U
       if (n === null || n <= 0) return turnDown("Daily budget must be more than 0, or left empty for none.");
       return one(n);
     }
+    case "effort":
+      // Always one of the five, written as the page lists them: never empty, so it can't be cleared (PBI 319).
+      return isEffort(raw) ? one(raw) : turnDown(EFFORT_RULE);
     default:
       return turnDown("That setting can't be changed from the page.");
   }

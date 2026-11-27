@@ -113,7 +113,7 @@ export async function runGate(world: object): Promise<void> {
     assert.ok(item);
     c.outcome = await gate(item, {
       readinessSha: c.readinessSha, dor, dodExists: true, configValid: true, repoKnown: true,
-      judge: c.judge, adapter: c.fake.adapter, split: { sop: c.sop, agent: agent(c) },
+      judge: c.judge, adapter: c.fake.adapter, split: { sop: c.sop, agent: agent(c), effort: async () => "medium" },
     });
   } catch (e) {
     c.error = e;

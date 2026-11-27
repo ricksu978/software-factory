@@ -169,6 +169,53 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select reminders_sent from question where item_id = $1", [id])).rows[0].reminders_sent, 2);
   });
 
+  /** An item moved to FeatureChangeRequest `waited` before NOW, as PBI 364's cell API moves it. */
+  async function inFeatureChange(externalId: string, waited: number): Promise<{ id: string; runId: string }> {
+    const id = await item(externalId, "FeatureChangeRequest");
+    const runId = await openRun(id, `next_stage = 'green', feature_change = '[]'`);
+    await db.pool.query(
+      `insert into event (item_id, kind, actor, actor_id, payload, at) values ($1, 'transition', 'agent', $2, '{"event": "feature_change_requested", "from": "InProgress", "to": "FeatureChangeRequest"}', $3)`,
+      [id, runId, ago(waited)],
+    );
+    return { id, runId };
+  }
+
+  test("an item in FeatureChangeRequest gets a reminder at 2 days and at 4, once each, none saying it's abandoned, and is never abandoned (PBI 366)", async () => {
+    const { id, runId } = await inFeatureChange("1", 2 * DAY + 1);
+    await run();
+    await run(new Date(NOW.getTime() + 600_000));
+    assert.equal((await backlog.comments("1")).length, 1);
+    await run(new Date(NOW.getTime() + 2 * DAY));
+    await run(new Date(NOW.getTime() + 30 * DAY));
+    const comments = await backlog.comments("1");
+    assert.equal(comments.length, 2);
+    for (const c of comments) {
+      assert.match(c, /^Reminder: .*Product Owner's decision on its feature change request/);
+      assert.doesNotMatch(c, /abandon/i);
+    }
+    assert.equal((await db.pool.query("select feature_change_reminders from run where id = $1", [runId])).rows[0].feature_change_reminders, 2);
+    assert.equal((await state(id)).state, "FeatureChangeRequest");
+  });
+
+  test("an item first seen in FeatureChangeRequest past 4 days gets both reminders on one tick (PBI 366)", async () => {
+    await inFeatureChange("1", 4 * DAY + 1);
+    await run();
+    assert.equal((await backlog.comments("1")).length, 2);
+  });
+
+  test("an item in FeatureChangeRequest holds no WIP slot and counts toward review capacity (PBI 366)", async () => {
+    await db.pool.query("update wip_policy set review_capacity = 2");
+    await inFeatureChange("1", 3_600_000);
+    await item("2", "Queued");
+    await run();
+    assert.equal(started.length, 1, "the Queued item takes the slot");
+    await db.pool.query("update wip_policy set current_wip = 2");
+    await inFeatureChange("3", 3_600_000);
+    await item("4", "Queued");
+    await run();
+    assert.equal(started.length, 1, "two items in FeatureChangeRequest fill a review capacity of 2");
+  });
+
   test("a merge commit with no checks an hour after the merge fails the item, and a green one makes it Done", async () => {
     const silent = await item("1", "Accepted");
     await openRun(silent, `merge_sha = 'aaa1111', repo_id = '${repoId}'`);

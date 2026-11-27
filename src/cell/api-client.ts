@@ -1,5 +1,6 @@
 // The cell's side of the cell API (plan Task 12), over HTTP with the run token. A 409 means the lease generation
 // moved on, so the cell must stop at once (Run contract 2).
+import type { Effort } from "../store/effort.ts";
 import type { FeatureChangeFile } from "../core/feature-change.ts";
 import type { ItemEvent } from "../core/states.ts";
 import type { CiCheck, FailedCheck, RerunAnswer } from "../adapters/types.ts";
@@ -23,6 +24,8 @@ export type CheckStatus = "pending" | "success" | "failure" | "none";
 export type CheckAnswer = { status: CheckStatus; failedChecks: FailedCheck[] };
 export type StageReport = {
   stageId: string; attempt: number; status: "started" | "passed" | "failed" | "stopped"; model: string;
+  /** The effort the attempt's agent calls ran at: the one the cell started with (PBI 319). */
+  effort: Effort;
   tokensIn: number; tokensOut: number; costUsd: number; usage?: { utilization: number; resetsAt: string | null };
   /** The text of the stage's own prompted agent call, for Floor. The cell API keeps the first 500 characters. */
   message?: string;

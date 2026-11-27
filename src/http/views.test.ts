@@ -356,8 +356,24 @@ describe("readiness spend (PBI 132)", () => {
       { kind: "split", model: "claude-opus-5-5", tokensIn: 4000, tokensOut: 600, costUsd: 0.21, ranAt: at },
     ]), null);
     const rows = [.../<tbody>([\s\S]*?)<\/tbody>/.exec(html.split("<h2>Readiness checks</h2>")[1])![1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
-    assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5<\/td>/);
-    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5<\/td>.*<td title="\$0\.21">\$0\.21<\/td>/);
+    assert.match(rows[0], /<td>Judge<\/td><td>claude-haiku-4-5 \(medium\)<\/td>/);
+    assert.match(rows[1], /<td>Split proposal<\/td><td>claude-opus-5-5 \(medium\)<\/td>.*<td title="\$0\.21">\$0\.21<\/td>/);
+  });
+
+  test("Run detail shows each model with its effort after it, and a record with none stored at medium (PBI 319)", () => {
+    const at = new Date("2026-11-09T10:15:00Z");
+    const d = detail([
+      { model: "claude-haiku-4-5", effort: "xhigh", tokensIn: 1, tokensOut: 1, costUsd: 0.001, ranAt: at },
+      { kind: "split", model: "claude-opus-5-5", effort: null, tokensIn: 1, tokensOut: 1, costUsd: 0.001, ranAt: at },
+    ]);
+    d.stages = [{ ...d.stages[0], effort: "high" }, { ...d.stages[0], stage_id: "red", effort: null }, { ...d.stages[0], stage_id: "green", model: null, effort: null }];
+    const html = runDetailPage(d, null);
+    const [stages, checks] = html.split("<h2>Stages</h2>")[1].split("<h2>Readiness checks</h2>");
+    assert.match(stages, /<td>specify<\/td><td>1<\/td><td>[^<]*<\/td><td>claude-opus-5-5 \(high\)<\/td>/);
+    assert.match(stages, /<td>red<\/td><td>1<\/td><td>[^<]*<\/td><td>claude-opus-5-5 \(medium\)<\/td>/);
+    assert.match(stages, /<td>green<\/td><td>1<\/td><td>[^<]*<\/td><td>model not recorded<\/td>/);
+    assert.match(checks, /<td>Judge<\/td><td>claude-haiku-4-5 \(xhigh\)<\/td>/);
+    assert.match(checks, /<td>Split proposal<\/td><td>claude-opus-5-5 \(medium\)<\/td>/);
   });
 
   test("Run detail's stage row says when the PR reviewer needed a second ask, and why (PBI 190)", () => {
@@ -463,7 +479,7 @@ describe("Run detail's readable numbers and local times (PBI 189)", () => {
 
   test("the Readiness checks table shows readable tokens and cost, and when the check ran in the viewer's zone", () => {
     const row = rowOf(runDetailPage(detail({ zone: "Asia/Tokyo" }), null), "Readiness checks");
-    assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5<\/td><td title="1240 in, 80 out">1.2k in, 80 out<\/td><td title="\$0.055">\$0.06<\/td>/);
+    assert.match(row, /2026-11-10 08:30<\/time><\/td><td>Judge<\/td><td>claude-haiku-4-5 \(medium\)<\/td><td title="1240 in, 80 out">1.2k in, 80 out<\/td><td title="\$0.055">\$0.06<\/td>/);
   });
 
   test("no column heading says UTC, and the page says which zone its times show in", () => {
@@ -702,6 +718,7 @@ describe("runDetailPage's Rule changes (PBI 395)", () => {
 });
 
 describe("runDetailPage's Feature change request (PBI 364)", () => {
+  const request = [{ path: "features/a.feature", reason: "Held, not refused", before: "a\n", after: "b\n" }];
   const detail = (featureChange: RunDetail["featureChange"]): RunDetail => ({
     item: { id: "00000000-0000-0000-0000-000000000364", external_id: "364", repo: "octo/repo", title: "t", state: "FeatureChangeRequest" },
     run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
@@ -713,18 +730,32 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
       { path: "features/a.feature", reason: "Show <b>held</b> orders", before: "  Given x\n  Then refused\n", after: "  Given x\n  Then <script>1</script>\n" },
       { path: "features/b.feature", reason: "Needs a number", before: "a\n", after: "b\n" },
     ]), null);
-    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.match(html, /<h2 id="feature-change-request">Feature change request<\/h2>/);
     assert.match(html, /<h3>features\/a\.feature<\/h3><p data-reason>Show &lt;b&gt;held&lt;\/b&gt; orders<\/p>/);
     assert.match(html, /<span data-side="same">  Given x<\/span>\n<del data-side="before">  Then refused<\/del>\n<ins data-side="after">  Then &lt;script&gt;1&lt;\/script&gt;<\/ins>/);
     assert.match(html, /<h3>features\/b\.feature<\/h3><p data-reason>Needs a number<\/p>/);
     assert.doesNotMatch(html, /<script>1|<b>held/);
   });
 
+  test("the state line says the item waits on the Product Owner, linking to the section (PBI 366)", () => {
+    const html = runDetailPage(detail(request), null);
+    assert.match(html, /<p>FeatureChangeRequest\. Waiting on the Product Owner's decision on the <a href="#feature-change-request">Feature change request<\/a>\.<\/p>/);
+  });
+
+  test("Floor's Waiting on you links an item in FeatureChangeRequest to its request, and no other item (PBI 366)", () => {
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    const row = { external_id: "364", repo: "octo/repo", title: "t", since: at };
+    const html = floorPage({ active: [], waitingCount: 2, capacity: 3, next: [], notReady: [], factory: [], canOperate: false, waiting: [
+      { ...row, id: "a", state: "FeatureChangeRequest", feature_change: true },
+      { ...row, id: "b", state: "SignOff" },
+    ] }, null);
+    assert.match(html, /FeatureChangeRequest, waiting 3 h<\/span> Waiting on the Product Owner's decision on the <a href="\/items\/a#feature-change-request">Feature change request<\/a>\./);
+    assert.equal(html.match(/#feature-change-request/g)?.length, 1);
+  });
+
   test("an item with no open request has no such section", () => {
     assert.doesNotMatch(runDetailPage(detail(null), null), /Feature change request/);
   });
-
-  const request = [{ path: "features/a.feature", reason: "Held, not refused", before: "a\n", after: "b\n" }];
 
   test("a product owner gets Approve the change and Ask for changes with a note, after the change (PBI 365)", () => {
     const html = runDetailPage({ ...detail(request), canDecideFeatureChange: true }, null);
@@ -737,7 +768,7 @@ describe("runDetailPage's Feature change request (PBI 364)", () => {
 
   test("anyone else sees the request without the controls (PBI 365)", () => {
     const html = runDetailPage(detail(request), null);
-    assert.match(html, /<h2>Feature change request<\/h2>/);
+    assert.match(html, /<h2 id="feature-change-request">Feature change request<\/h2>/);
     assert.doesNotMatch(html, /Approve the change|feature-change"/);
   });
 

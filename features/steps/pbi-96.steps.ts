@@ -86,7 +86,7 @@ function resolve(options: Record<string, unknown>, cwd: string): Def | null {
 }
 
 function setUpRun(c: Ctx, stage: string) {
-  const args: AgentArgs = { prompt: `# ${stage} brief`, model: "claude-sonnet-4-5", cwd: c.dir, agent: STAGE_AGENT[stage], mode: "cell",
+  const args: AgentArgs = { prompt: `# ${stage} brief`, model: "claude-sonnet-4-5", effort: "medium", cwd: c.dir, agent: STAGE_AGENT[stage], mode: "cell",
     webTools: [], signal: new AbortController().signal };
   c.got.set(stage, resolve(agentOptions(args) as Record<string, unknown>, c.dir));
 }

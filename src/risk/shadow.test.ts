@@ -22,6 +22,7 @@ function ctx(over: Partial<RiskContext> & { agent: RiskContext["agent"] }, sensi
     config: { sensitivePaths: sensitive, reviewers: [], webTools: [], failedRecheckHours: 8, bdd: { parse: "", run: "", report: "" }, commands: { test: "", lint: "" } },
     risk: { name: "risk", source: "repo", sha: "s", text: riskText, criteria: [] },
     dodVerdicts: [],
+    effort: "medium",
     ...over,
   };
 }

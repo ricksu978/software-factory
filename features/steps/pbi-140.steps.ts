@@ -202,7 +202,7 @@ export async function renew(world: object, cell: string): Promise<Answer> {
 
 /** A cell reports one of its attempts, as the engine's /stage does. A cell that is wrapping up reports its open attempt stopped. */
 const report = (world: object, cell: string, stageId: string, attempt: number, status: string) =>
-  cellCall(world, cell, "POST", "stage", { stageId, attempt, status, model: "claude-opus-5-5", tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  cellCall(world, cell, "POST", "stage", { stageId, attempt, status, model: "claude-opus-5-5", effort: "medium", tokensIn: 0, tokensOut: 0, costUsd: 0 });
 
 // ---- overrides ----
 
@@ -463,7 +463,10 @@ Then("the Controls offer Prepare restart beside Pause, Drain, Resume and the kil
   assert.match(form, /<button name="kind" value="restart">Prepare restart<\/button>/, "the Controls don't offer Prepare restart");
 });
 
-Then("Floor shows {string}", function (text: string) {
+Then("Floor shows {string}", long, async function (text: string) {
+  // PBI 366's scenarios read Floor straight after a tick, from the dashboard as it stands, through `floorShows`.
+  const own = (this as { floorShows?: (text: string) => Promise<void> }).floorShows;
+  if (own) return own(text);
   assert.ok(unescape(floorHtml(this)).includes(text), `Floor doesn't show "${text}"`);
 });
 
@@ -704,7 +707,7 @@ async function runEngine(world: object): Promise<void> {
         externalId: "482", title: "Item 482", acceptanceCriteria: ["Criterion 1 holds", "Criterion 2 holds", "Criterion 3 holds"],
         nextStage: "green", decision: null, lockSha: c.lockSha, lockedFiles: c.lockedFiles, prNumber: null,
         repo: "acme/app", base: "main", branch: BRANCH, configSha: "c0ffee", sopVersion: "0.1.0",
-        dodVerdicts: [], dodCheckedSha: null, trustedComments: [], stageAttempts: attempts, resume: e.resume ?? null,
+        dodVerdicts: [], dodCheckedSha: null, effort: "medium", trustedComments: [], stageAttempts: attempts, resume: e.resume ?? null,
       },
       agent: agent as never,
       git: shellGit(c.dir, BRANCH),

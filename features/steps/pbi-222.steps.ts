@@ -17,6 +17,7 @@ import { scenarioPorts } from "../../src/bdd/ports.ts";
 import { createAuth } from "../../src/http/auth.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
 import { ctx as p16ctx, mods as p16mods, routeCall, snapshot, stageBody } from "./pbi-16.steps.ts";
+import { freshForPbi319, isPbi319 } from "./pbi-319.steps.ts";
 
 export const SECRET = "cell-secret";
 const REPO = "ricksu978/software-factory";
@@ -236,6 +237,8 @@ async function spawnControl(world: object): Promise<void> {
 // ---- Given ----
 
 Given("a fresh factory database", long, async function () {
+  // PBI 319's Before already emptied the database ahead of its Background, which signs people in to keep.
+  if (isPbi319(this)) return freshForPbi319();
   await fresh();
 });
 
