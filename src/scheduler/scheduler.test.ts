@@ -259,6 +259,16 @@ describe("scheduler", dbTest, () => {
     assert.equal((await db.pool.query("select count(*)::int as n from main_break")).rows[0].n, 0);
   });
 
+  test("a merge commit GitHub reads as cancelled, no check failed, isn't charged and waits on main (PBI 423)", async () => {
+    const id = await redMerge("1", "m1", "p1", [check("test", "cancelled"), check("lint", "success")], [check("test", "success")]);
+    repoHost.checks.set(`${REPO}@m1`, "cancelled");
+    repoHost.branches.set(`${REPO}@main`, ["p1", "m1"]);
+    await run();
+    assert.equal((await state(id)).state, "Accepted");
+    assert.match((await backlog.comments("1")).join(), /was cancelled/);
+    assert.equal((await db.pool.query("select count(*)::int as n from main_break")).rows[0].n, 0);
+  });
+
   test("a merge whose own run was cancelled by the next merge isn't charged: it waits on main and the next merge is charged with the break (PBI 255)", async () => {
     const first = await redMerge("1", "m1", "p1", [check("test", "cancelled")], [check("test", "success")]);
     const second = await redMerge("2", "m2", "m1", [check("test", "failure")], [check("test", "cancelled")], 50_000);

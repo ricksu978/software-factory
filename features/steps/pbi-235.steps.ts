@@ -32,6 +32,7 @@ import type { CiCheck } from "../../src/adapters/types.ts";
 import { ctx as pbi12, polled, setup, type Ctx as PollCtx } from "./pbi-12.steps.ts";
 import { ctx as pbi292, namesWord } from "./pbi-292.steps.ts";
 import { load, long, need, testDb } from "./pbi-8.steps.ts";
+import { hasCancelled, realReading } from "./ci-reading.ts";
 
 const REPO = "acme/widgets";
 // Made up for each run, so no fixed signing value sits in the source.
@@ -84,18 +85,29 @@ function assertHolds(world: object, sha: string, check: Rule): void {
   assert.deepEqual(latest, check, `"${sha}" doesn't hold the ${check.conclusion} check "${check.name}"`);
 }
 
-/** Puts every commit's checks into the fake repo host, the last check of each name winning. */
-function installCi(world: object): void {
+/**
+ * Puts every commit's checks into the fake repo host, the last check of each name winning. PBI 423: a commit holding a
+ * cancelled run is read as the control plane reads GitHub's check runs (ci-reading.ts), with every run of a name kept.
+ */
+async function installCi(world: object): Promise<void> {
   const host = pbi12(world).host;
   if (!host) return;
   const rules = pbi292(world).rules as unknown as Map<string, Rule[]>;
   for (const [key, list] of rules) {
     if (!key.startsWith("sha:")) continue;
     const sha = key.slice(4);
+    const at = `${REPO}@${sha}`;
+    if (hasCancelled(list)) {
+      const read = await realReading(list);
+      host.ciChecks.set(at, read.ciChecks);
+      host.checks.set(at, read.status as never);
+      host.failedChecks.set(at, read.failedChecks.map((f) => ({ ...f, log: null })));
+      host.pendingChecks.set(at, read.ciChecks.filter((x) => x.conclusion === "pending").map((x) => x.name));
+      continue;
+    }
     const byName = new Map<string, Rule>();
     for (const r of list) byName.set(r.name, r);
     const checks: CiCheck[] = [...byName.values()].map((r) => ({ name: r.name, conclusion: r.conclusion, url: r.url, failingTests: [...r.failingTests] }));
-    const at = `${REPO}@${sha}`;
     host.ciChecks.set(at, checks);
     host.checks.set(at, checks.some((x) => x.conclusion === "failure") ? "failure" : checks.some((x) => x.conclusion === "pending") ? "pending" : "success");
     host.failedChecks.set(at, checks.filter((x) => x.conclusion === "failure").map((x) => ({ name: x.name, url: x.url, log: null })));
@@ -125,7 +137,7 @@ async function holdWithPr(world: object, ext: string, state: string, n: number, 
   assert.equal(repo, REPO, `the scenarios' PRs are in "${REPO}"`);
   const c = pbi12(world);
   assert.ok(await setup(c), "the poller's fakes or database aren't available");
-  c.beforePoll = async () => installCi(world);
+  c.beforePoll = async () => { await installCi(world); };
   const repoId = (await pool().query<{ id: string }>(
     `insert into repo (host_adapter, url) values ('fake', $1) on conflict do nothing returning id`, [`https://github.com/${REPO}`],
   )).rows[0]?.id ?? (await pool().query<{ id: string }>("select id from repo where url = $1", [`https://github.com/${REPO}`])).rows[0].id;
@@ -240,10 +252,23 @@ type Webhook = {
 type Parser = { parseGitHubWebhook: (h: Record<string, string>, b: unknown) => unknown };
 
 When("GitHub delivers that a check suite completed on {string} in {string}", long, async function (sha: string, repo: string) {
-  const c = pbi12(this);
+  await deliver(this, sha, repo);
+});
+
+/** PBI 423: webhooks are on when the real webhook handler and GitHub's parser load and the factory has a webhook secret. */
+export async function webhooksOn(): Promise<void> {
+  const [hook, gh] = await Promise.all([load<Webhook>("src/watcher/webhook.ts"), load<Parser>("src/adapters/github/backlog.ts")]);
+  assert.ok(hook && typeof hook.handleWebhook === "function", "the real webhook handler isn't available");
+  assert.ok(gh && typeof gh.parseGitHubWebhook === "function", "GitHub's webhook parser isn't available");
+  assert.ok(WEBHOOK_SECRET.length >= 40, "the factory has no webhook secret");
+}
+
+/** GitHub's `check_suite` `completed` delivery for `sha` in `repo`, handed to the real webhook handler. PBI 423's steps deliver it too. */
+export async function deliver(world: object, sha: string, repo: string = REPO): Promise<void> {
+  const c = pbi12(world);
   const [hook, gh] = await Promise.all([load<Webhook>("src/watcher/webhook.ts"), load<Parser>("src/adapters/github/backlog.ts")]);
   assert.ok(hook && gh && c.host, "the webhook handler or the fakes aren't available");
-  installCi(this);
+  await installCi(world);
   const raw = Buffer.from(JSON.stringify({
     action: "completed",
     check_suite: { id: 9235, head_sha: sha, status: "completed", conclusion: c.host.checks.get(`${repo}@${sha}`) ?? null },
@@ -259,7 +284,7 @@ When("GitHub delivers that a check suite completed on {string} in {string}", lon
   });
   assert.equal(r.status, 204, "the webhook didn't take the delivery");
   c.deliveries = (c.deliveries ?? 0) + 1;
-});
+}
 
 // ---- the Thens ----
 

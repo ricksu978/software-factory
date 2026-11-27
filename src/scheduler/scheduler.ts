@@ -492,6 +492,8 @@ async function verdictOn(d: MergedCiDeps, status: Status, row: MergeRow): Promis
   const late = row.merged_at !== null && d.now.getTime() - row.merged_at.getTime() > NO_CI_AFTER_MS;
   if (state === "success") return { kind: "passed" };
   if (state === "none" && late) return { kind: "charge", body: `No CI ran on ${BASE} for the merge commit ${row.merge_sha} within an hour, so the item failed its Definition of Done.`, failed: null };
+  // PBI 423: no check failed and none still runs, and one was cancelled, as when a later merge's push cancelled it.
+  if (state === "cancelled") return { kind: "wait", why: "cancelled" };
   if (state !== "failure") return { kind: "not yet" };
 
   const parent = await d.repoHost.firstParent(repo, row.merge_sha);

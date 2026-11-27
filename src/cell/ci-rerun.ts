@@ -10,7 +10,7 @@ export function failedNames(checks: CiCheck[] | null): string[] {
 }
 
 /**
- * One sentence per re-run check: it passed, failed again, or hadn't finished on the re-run. `after` is each check as the re-run left it;
+ * One sentence per re-run check: it passed, failed again, was cancelled, or hadn't finished on the re-run. `after` is each check as the re-run left it;
  * when it couldn't be read, CI's overall answer `status` stands for every check.
  */
 export function rerunNotes(sha: string, rerun: string[], status: "success" | "failure", after: CiCheck[] | null): string[] {
@@ -21,6 +21,8 @@ export function rerunNotes(sha: string, rerun: string[], status: "success" | "fa
     if (mine.some((c) => c.conclusion === "failure")) return `${head} it failed again on the re-run.`;
     // A check whose re-run hasn't finished hasn't passed.
     if (mine.some((c) => c.conclusion === "pending")) return `${head} its re-run hadn't finished when CI was read.`;
+    // PBI 423: a cancelled re-run neither failed nor passed.
+    if (mine.some((c) => c.conclusion === "cancelled")) return `${head} its re-run was cancelled.`;
     return `${head} it passed on the re-run.`;
   });
 }

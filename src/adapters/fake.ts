@@ -1,5 +1,5 @@
 import { CLAIM_MARKER, OPT_IN_LABEL, type ContractTarget } from "./contract.ts";
-import { type ChangeCause, loginKey, type CheckRun, type FailedCheck, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
+import { type ChangeCause, loginKey, type CheckRun, type FailedCheck, type MergeState, newestCause, standingSummaries, THREAD_SETTLE_MS, withoutFactoryThreads, type FactoryItem, type CiCheck, type CiStatus, type DiffRange, type LineComment, type RepoHost, type ReviewComment } from "./types.ts";
 
 /**
  * An in-memory backlog for tests. Its cursor is a change counter, so listEligible returns only items changed since the
@@ -133,7 +133,8 @@ type FakePr = {
 };
 /** A merge mergePr was asked for, and what it answered. */
 type MergeCall = { repo: string; prNumber: number; method: string; headSha: string | null; merged: boolean };
-type Status = "pending" | "success" | "failure";
+/** CI's verdict on a commit, as checksOnSha answers it; a commit with no entry answers `none`. */
+type Status = Exclude<CiStatus, "none">;
 /** A review postReview recorded. Its event is always COMMENT, as on GitHub. */
 type PostedReview = { repo: string; prNumber: number; commitSha: string; body: string; comments: LineComment[]; event: "COMMENT" };
 

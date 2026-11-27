@@ -52,6 +52,16 @@ describe("rerunNotes", () => {
       `The check "ci" failed on c0ffee1, so the factory re-ran it once, and it passed on the re-run.`,
     ]);
   });
+
+  test("says a check whose re-run was cancelled was cancelled, not that it passed (PBI 423)", () => {
+    assert.deepEqual(rerunNotes(SHA, ["ci", "e2e"], "failure", [
+      { name: "ci", conclusion: "failure", url: "v" },
+      { name: "e2e", conclusion: "cancelled", url: "w" },
+    ]), [
+      `The check "ci" failed on c0ffee1, so the factory re-ran it once, and it failed again on the re-run.`,
+      `The check "e2e" failed on c0ffee1, so the factory re-ran it once, and its re-run was cancelled.`,
+    ]);
+  });
 });
 
 describe("refusedNotes", () => {

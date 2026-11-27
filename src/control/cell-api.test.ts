@@ -499,6 +499,46 @@ describe("cell API", dbTest, () => {
     assert.equal((await send(cell.runId, cell.token, "POST", "/upload-url", { kind: "transcript", stageId: "green", attempt: 1 })).status, 409);
   });
 
+  // PBI 423: a later push to the branch cancelled CI on the commit the attempt pushed.
+  test("a stopped attempt a later push superseded ends the claim at the same stage, counts against no retries, and isn't resumed", async () => {
+    const cell = await claimed("open-pr");
+    const post = (route: string, body: unknown) => send(cell.runId, cell.token, "POST", route, body);
+    assert.equal((await post("/stage", { stageId: "open-pr", attempt: 1, status: "started" })).status, 200);
+    assert.equal((await post("/stage", { stageId: "open-pr", attempt: 1, status: "stopped", supersededBy: "c0ffee2", message: "CI on c0ffee1 was cancelled" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    assert.equal((await runRow(cell.runId)).next_stage, "open-pr");
+    const s = (await db.pool.query("select status, retry_carry from stage_run where run_id = $1", [cell.runId])).rows[0];
+    assert.deepEqual([s.status, s.retry_carry], ["stopped", null]);
+    const e = await db.pool.query<{ payload: Record<string, unknown> }>(
+      "select payload from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'ci_superseded'", [cell.itemId]);
+    assert.deepEqual(e.rows.map((r) => [r.payload.stageId, r.payload.attempt, r.payload.head, r.payload.to]), [["open-pr", 1, "c0ffee2", "Queued"]]);
+    assert.equal((await post("/stage", { stageId: "open-pr", attempt: 1, status: "stopped", supersededBy: "c0ffee2" })).status, 409);
+    const next = await withTx(db.pool, (c) => claimNext(c, "cell-b", at));
+    assert.ok(next);
+    const ctx = (await send(next.runId, runToken(secret, next.runId, next.generation), "GET", "/context")).body;
+    assert.equal(ctx.nextStage, "open-pr");
+    assert.equal(ctx.resume, null);
+    assert.equal(ctx.retry, null);
+  });
+
+  test("a stopped attempt a later push superseded, reported while a restart is being prepared, ends the claim once, for the restart", async () => {
+    const cell = await claimed("open-pr");
+    await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'restart', 'upgrading Docker')");
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "open-pr", attempt: 1, status: "stopped", supersededBy: "c0ffee2" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "Queued");
+    const e = await db.pool.query<{ event: string }>("select payload->>'event' as event from event where item_id = $1 and kind = 'transition' and payload->>'to' = 'Queued'", [cell.itemId]);
+    assert.deepEqual(e.rows.map((r) => r.event), ["lease_expired"]);
+  });
+
+  test("a stopped attempt a later push superseded, reported under an operator's stop_run, keeps the claim for the stop", async () => {
+    const cell = await claimed("open-pr");
+    await db.pool.query("insert into override (scope, kind, target_id, reason) values ('item', 'stop_run', $1, 'wrong item')", [cell.itemId]);
+    assert.equal((await send(cell.runId, cell.token, "POST", "/stage", { stageId: "open-pr", attempt: 1, status: "stopped", supersededBy: "c0ffee2" })).status, 200);
+    assert.equal((await item(cell.itemId)).state, "InProgress");
+    const e = await db.pool.query("select 1 from event where item_id = $1 and kind = 'transition' and payload->>'event' = 'ci_superseded'", [cell.itemId]);
+    assert.equal(e.rowCount, 0);
+  });
+
   test("a stopped attempt reported under a pause keeps the claim, so the lease runs out as before", async () => {
     const cell = await claimed("green");
     await db.pool.query("insert into override (scope, kind, reason) values ('factory', 'pause', 'looking')");

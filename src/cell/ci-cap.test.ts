@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { LeaseLost, type CellApi } from "./api-client.ts";
-import { PENDING_CI_CAP_MS, pendingCiQuestion } from "./ci-cap.ts";
+import { cancelledCiQuestion, PENDING_CI_CAP_MS, pendingCiQuestion } from "./ci-cap.ts";
 
 const SHA = "abc1234";
 
@@ -63,5 +63,16 @@ describe("pendingCiQuestion", () => {
   test("lets LeaseLost through, so a fenced cell ends its run", async () => {
     const fenced = { pendingChecks: async () => { throw new LeaseLost("lease moved"); } } as unknown as CellApi;
     await assert.rejects(pendingCiQuestion(fenced, SHA, PENDING_CI_CAP_MS), LeaseLost);
+  });
+});
+
+describe("cancelledCiQuestion", () => {
+  test("is null under the cap, and then asks about the cancelled run, saying it neither failed nor passed (PBI 423)", () => {
+    assert.equal(cancelledCiQuestion(SHA, PENDING_CI_CAP_MS - 1), null);
+    const q = cancelledCiQuestion(SHA, PENDING_CI_CAP_MS);
+    assert.ok(q);
+    assert.match(q, /abc1234 was cancelled/);
+    assert.match(q, /neither failed nor passed/);
+    assert.match(q, /60 minutes/);
   });
 });

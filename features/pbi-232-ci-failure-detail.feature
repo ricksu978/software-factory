@@ -48,7 +48,7 @@ Feature: Cell API returns CI failure detail to the waiting stage
       Then the answer gives "unit" all 100 lines of its log
 
     @ac-1
-    Scenario Outline: A check that timed out, was cancelled or needs action counts as failed and is named
+    Scenario Outline: A check that timed out or needs action counts as failed and is named
       Given a cell waiting on CI for a commit on its branch
       And CI on that commit has these checks:
         | check | result   | url                                  | log lines |
@@ -62,7 +62,6 @@ Feature: Cell API returns CI failure detail to the waiting stage
       Examples:
         | result          |
         | timed_out       |
-        | cancelled       |
         | action_required |
 
     @ac-1

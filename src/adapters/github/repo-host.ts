@@ -3,7 +3,7 @@
 import { TimedOctokit } from "./timed.ts";
 import { matchesPath } from "../../core/glob.ts";
 import { failingTests } from "../../core/failing-tests.ts";
-import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type RerunAnswer, type Review, type ReviewComment } from "../types.ts";
+import { type ChangeCause, factoryThread, LOGGED_CHECKS, logTail, newestCause, standingSummaries, THREAD_SETTLE_MS, type CheckRun, type CiCheck, type CiStatus, type DiffRange, type FailedCheck, type MergeState, type RepoHost, type RerunAnswer, type Review, type ReviewComment } from "../types.ts";
 
 /** The slice of an Octokit client this module uses, so tests can pass a stub. */
 export type GitHubClient = {
@@ -271,7 +271,14 @@ function logText(data: unknown): string | null {
 /** The conclusions of a completed check run that pass. */
 const PASSING = ["success", "neutral", "skipped"];
 
-const failedRun = (c: GhCheckRun) => c.status === "completed" && !PASSING.includes(c.conclusion ?? "");
+/**
+ * PBI 423: a completed run that ended cancelled, as GitHub ends a push's run when a newer push to the branch starts
+ * under `concurrency: cancel-in-progress`. It proves nothing about the commit, so it neither fails nor passes.
+ */
+const cancelledRun = (c: { status: string; conclusion: string | null }) => c.status === "completed" && c.conclusion === "cancelled";
+
+/** A completed run that didn't pass and wasn't cancelled: a failure, a timeout or one that needs action. */
+const failedRun = (c: GhCheckRun) => c.status === "completed" && !PASSING.includes(c.conclusion ?? "") && !cancelledRun(c);
 
 /**
  * A failed check run's log, by its id, which for GitHub Actions is its job's id. A check from another CI, or a log
@@ -302,7 +309,12 @@ async function failedOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
   })));
 }
 
-async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<"pending" | "success" | "failure" | "none"> {
+/**
+ * CI's verdict on the sha. `failure` when a run failed. Otherwise `pending` while a run is still going, and then
+ * `cancelled` when a run was cancelled, since a cancelled run neither failed nor passed (PBI 423). `success` only when
+ * every run passed, was skipped or ended neutral.
+ */
+async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiStatus> {
   // ponytail: check runs only, one page of 100; commit statuses aren't read, since this repo's CI reports as check runs.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as GhCheckRun[];
   if (runs.some(failedRun)) return "failure";
@@ -311,7 +323,8 @@ async function checksOn(gh: GitHubClient, r: { owner: string; repo: string }, sh
     const statuses = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/status", { ...r, ref: sha })).data.total_count;
     return statuses === 0 ? "none" : "pending";
   }
-  return runs.some((c) => c.status !== "completed") ? "pending" : "success";
+  if (runs.some((c) => c.status !== "completed")) return "pending";
+  return runs.some(cancelledRun) ? "cancelled" : "success";
 }
 
 /** PBI 234: each check run not yet completed, by name, and each commit status still pending, by context. */
@@ -322,14 +335,18 @@ async function pendingChecksOn(gh: GitHubClient, r: { owner: string; repo: strin
   return [...runs.filter((c) => c.status !== "completed").map((c) => c.name), ...statuses.filter((s) => s.state === "pending").map((s) => s.context)];
 }
 
-/** Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, and any other end fails. */
+/**
+ * Each check run on the sha, by name: neutral and skipped pass, as checksOn reads them, a cancelled run is `cancelled`
+ * (PBI 423), and any other end fails.
+ */
 async function namedChecksOn(gh: GitHubClient, r: { owner: string; repo: string }, sha: string): Promise<CiCheck[] | null> {
   // ponytail: one page of 100 check runs, as checksOn reads.
   const runs = (await gh.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", { ...r, ref: sha, per_page: 100 })).data.check_runs as
     { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null; completed_at?: string | null; app?: { slug?: string } | null }[];
   if (!runs.length) return null;
   return Promise.all(runs.map(async (c) => {
-    const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending" : ["success", "neutral", "skipped"].includes(c.conclusion ?? "") ? "success" : "failure";
+    const conclusion: CiCheck["conclusion"] = c.status !== "completed" ? "pending"
+      : cancelledRun(c) ? "cancelled" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure";
     const check: CiCheck = { name: c.name, url: c.html_url ?? "", conclusion };
     if (conclusion !== "pending" && c.completed_at) check.completedAt = c.completed_at;
     if (conclusion === "failure" && c.app?.slug === "github-actions") {
@@ -580,7 +597,7 @@ export function githubRepoHost(app: AppLike, installationId: number): RepoHost {
       // check that didn't run on a first parent, and a merge whose only unpassed runs were cancelled isn't charged.
       return runs.map((c): CheckRun => ({
         name: c.name, url: c.html_url,
-        status: c.status !== "completed" ? "pending" : c.conclusion === "cancelled" ? "cancelled" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure",
+        status: c.status !== "completed" ? "pending" : cancelledRun(c) ? "cancelled" : PASSING.includes(c.conclusion ?? "") ? "success" : "failure",
       }));
     },
 

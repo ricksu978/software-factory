@@ -67,7 +67,8 @@ const repo = process.cwd();
 const ADDRESSER = "factory-pr-addresser";
 const MAX_READS = 40;
 
-type Check = { name: string; conclusion: "success" | "failure"; url: string; failingTests: string[] };
+/** PBI 423: `cancelled` is a run that ended cancelled; what it reads as is the control plane's reading (ci-reading.ts). */
+type Check = { name: string; conclusion: "success" | "failure" | "cancelled"; url: string; failingTests: string[] };
 type Role = { kind: "head" } | { kind: "address" } | { kind: "fix"; n: number } | { kind: "sha"; sha: string };
 type Ctx = {
   /** Each label's role, as the steps that named the commit gave it. */
@@ -113,7 +114,7 @@ function greenStarts(run: CellCtx): number {
 // ---- naming commits ----
 
 /** The role a commit's words give: the PR's first head, with or without a label, or a label an earlier step named. */
-function roleOf(world: object, head: string | undefined, label: string | undefined): Role {
+export function roleOf(world: object, head: string | undefined, label: string | undefined): Role {
   const c = ctx(world);
   if (head) {
     const role: Role = { kind: "head" };
@@ -149,7 +150,7 @@ function headSha(world: object): string {
   return sha;
 }
 
-function addRule(world: object, role: Role, check: Check) {
+export function addRule(world: object, role: Role, check: Check) {
   const c = ctx(world);
   const list = c.rules.get(keyOf(role)) ?? [];
   list.push(check);
@@ -285,9 +286,10 @@ Given(new RegExp(`^CI reports the check "([^"]+)" failed on ${ON} at "([^"]+)", 
 Given(new RegExp(`^these checks report on ${ON}:$`), function (head: string | undefined, headLabel: string | undefined, label: string | undefined, table: DataTable) {
   const role = roleOf(this, head, headLabel ?? label);
   for (const r of table.hashes()) {
-    assert.ok(["passed", "failed"].includes(r.status), `not a check status: ${r.status}`);
+    assert.ok(["passed", "failed", "cancelled"].includes(r.status), `not a check status: ${r.status}`);
     const tests = (r["failing tests"] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
-    addRule(this, role, { name: r.check, conclusion: r.status === "failed" ? "failure" : "success", url: r.url, failingTests: tests });
+    const conclusion = r.status === "failed" ? "failure" : r.status === "cancelled" ? "cancelled" : "success";
+    addRule(this, role, { name: r.check, conclusion, url: r.url, failingTests: tests });
   }
 });
 

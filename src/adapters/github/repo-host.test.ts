@@ -388,6 +388,13 @@ describe("githubRepoHost", () => {
       [[], 1, "pending"],
       [[], 0, "none"],
       [[run("completed", "success"), run("completed", "skipped")], 0, "success"],
+      // PBI 423: a cancelled run neither fails nor passes the commit.
+      [[run("completed", "success"), run("completed", "cancelled")], 0, "cancelled"],
+      [[run("completed", "cancelled"), run("completed", "cancelled")], 0, "cancelled"],
+      [[run("completed", "failure"), run("completed", "cancelled")], 0, "failure"],
+      [[run("in_progress", null), run("completed", "cancelled")], 0, "pending"],
+      [[run("completed", "success"), run("completed", "timed_out")], 0, "failure"],
+      [[run("completed", "success"), run("completed", "action_required")], 0, "failure"],
     ];
     for (const [runs, statuses, want] of cases) {
       const { host } = stubGitHub({
@@ -421,7 +428,6 @@ describe("githubRepoHost", () => {
     assert.deepEqual(await host.failedChecksOnSha("o/r", "abc"), [
       { name: "unit", url: "https://ci/2", log: lines(250).slice(150).join("\n") },
       { name: "lint", url: "https://ci/3", log: lines(12).join("\n") },
-      { name: "deploy", url: "https://ci/4", log: null },
       { name: "types", url: "https://ci/7", log: lines(3).join("\n") },
     ]);
   });
@@ -460,7 +466,7 @@ describe("githubRepoHost", () => {
     const { host, calls } = stubGitHub({
       "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
         run("ci", "completed", "success"), run("lint", "completed", "failure"), run("docs", "in_progress", null),
-        run("skip", "completed", "skipped"), run("slow", "completed", "timed_out"),
+        run("skip", "completed", "skipped"), run("slow", "completed", "timed_out"), run("e2e", "completed", "cancelled"),
       ] }),
     });
     assert.deepEqual(await host.ciChecksOnSha("o/r", "abc"), [
@@ -469,6 +475,8 @@ describe("githubRepoHost", () => {
       { name: "docs", conclusion: "pending", url: "https://github.com/o/r/runs/docs" },
       { name: "skip", conclusion: "success", url: "https://github.com/o/r/runs/skip" },
       { name: "slow", conclusion: "failure", url: "https://github.com/o/r/runs/slow" },
+      // PBI 423: a cancelled run neither failed nor passed.
+      { name: "e2e", conclusion: "cancelled", url: "https://github.com/o/r/runs/e2e" },
     ]);
     assert.equal(calls[0].params.ref, "abc");
     const none = stubGitHub({ "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [] }) });
@@ -540,6 +548,16 @@ describe("githubRepoHost", () => {
       ] }),
     });
     await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["ci", "lint"]), /no failed check named lint/);
+    assert.ok(!calls.some((c) => c.route.startsWith("POST")));
+  });
+
+  test("rerunChecksOnSha refuses a check that was cancelled on the sha, since a cancelled run didn't fail (PBI 423)", async () => {
+    const { host, calls } = stubGitHub({
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs": () => ({ check_runs: [
+        { id: 1, name: "e2e", status: "completed", conclusion: "cancelled" }, { id: 2, name: "ci", status: "completed", conclusion: "failure" },
+      ] }),
+    });
+    await assert.rejects(host.rerunChecksOnSha!("o/r", "abc", ["e2e"]), /no failed check named e2e/);
     assert.ok(!calls.some((c) => c.route.startsWith("POST")));
   });
 

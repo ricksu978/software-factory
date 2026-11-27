@@ -99,8 +99,8 @@ function isRefused(world: object, sha: string, check: string): boolean {
   return labelsOf(world, sha).some((l) => c.refused.get(l)?.has(check));
 }
 
-/** The checks CI reports on `sha`, with each re-run check as its re-run left it. A read moves running re-runs on. */
-function checksNow(world: object, sha: string, read: boolean): CiCheck[] {
+/** The checks CI reports on `sha`, with each re-run check as its re-run left it. A read moves running re-runs on. PBI 423's steps read it too. */
+export function checksNow(world: object, sha: string, read: boolean): CiCheck[] {
   const c = ctx(world);
   const rerun = c.rerun.get(sha) ?? new Set<string>();
   return checksAt(world, sha).map((x): CiCheck => {
@@ -118,7 +118,8 @@ function checksNow(world: object, sha: string, read: boolean): CiCheck[] {
   });
 }
 
-function install(world: object) {
+/** PBI 423's steps put these re-runs on their runs too. */
+export function install(world: object) {
   const c = ctx(world);
   const run = (world as { pbi18?: CellCtx }).pbi18;
   if (!run || c.installedOn === run) return;

@@ -12,7 +12,7 @@ export type ItemEvent =
   | "retries_exhausted" | "timed_out" | "lease_expired" | "usage_limited" | "policy_changed"
   | "requeued" | "reopened_signoff" | "reopened_question" | "criteria_changed" | "withdrawn"
   | "returned" | "split_filed" | "children_done" | "rechecked" | "rule_change_approved" | "rules_edited"
-  | "feature_change_requested" | "feature_change_decided";
+  | "feature_change_requested" | "feature_change_decided" | "ci_superseded";
 
 const edges: [ItemState, ItemEvent, ItemState][] = [
   ["Eligible", "readiness_failed", "NotReady"],
@@ -44,6 +44,9 @@ const edges: [ItemState, ItemEvent, ItemState][] = [
   ["SignOff", "timed_out", "Abandoned"],
   ["InProgress", "lease_expired", "Queued"],
   ["InProgress", "usage_limited", "Queued"],
+  // PBI 423: a stage waiting on CI for its own commit, whose run a later push to the branch cancelled, ends its claim
+  // without charging the attempt, and the item goes back to Queued at the same stage.
+  ["InProgress", "ci_superseded", "Queued"],
   ["Failed", "requeued", "Queued"],
   ["Abandoned", "requeued", "Queued"],
   ["Abandoned", "reopened_signoff", "SignOff"],
