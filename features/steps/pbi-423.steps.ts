@@ -27,7 +27,7 @@
 //   a judge that passes it, naming no check. A line "is failed (passed) by the check <c> at <url>" when its verdict
 //   failed (passed) and its reason names the check as a word and holds the URL.
 // - The InReview scenarios are PBI 235's: the real poller and webhook handler on the test database and PBI 12's fake
-//   repo host, whose CI is PBI 292's rules. "Webhooks are on" needs nothing more: the delivery goes to the real handler.
+//   repo host, whose CI is PBI 292's rules. "Webhooks are on" when the real webhook handler and parser load and the factory has its webhook secret.
 //   "The factory re-ran no check on <sha>" when the fake repo host recorded no re-run on the commit.
 // - The base scenario is PBI 260's poller on its fake repo host, whose `checksOnSha` for a base commit holding a
 //   cancelled run is the real reading. "The answer" is the factory's answer to the item's question.
@@ -47,7 +47,7 @@ import { ctx as pollCtx, polled, REPO as POLL_REPO } from "./pbi-12.steps.ts";
 import { ctx as pr128 } from "./pbi-128.steps.ts";
 import { endState, resumesFrom, runTheCell, type Ctx as CellCtx } from "./pbi-18.steps.ts";
 import { checksNow, install as install233 } from "./pbi-233.steps.ts";
-import { deliver } from "./pbi-235.steps.ts";
+import { deliver, webhooksOn } from "./pbi-235.steps.ts";
 import { ctx as ctx260 } from "./pbi-260.steps.ts";
 import { ctx as ci292, install as install292, keyOf, namesWord, settled, shaOf } from "./pbi-292.steps.ts";
 import { long, need, testDb } from "./pbi-8.steps.ts";
@@ -441,8 +441,9 @@ Then("the line {string} isn't passed by the check {string}", function (line: str
 
 // ---- InReview ----
 
-Given("webhooks are on", function () {
+Given("webhooks are on", async function () {
   // The delivery goes to the real webhook handler, which takes it on the factory's webhook secret (PBI 235's steps).
+  await webhooksOn();
 });
 
 When("GitHub delivers that a check suite completed on {string}", long, async function (sha: string) {

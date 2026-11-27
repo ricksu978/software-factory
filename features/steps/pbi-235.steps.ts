@@ -255,6 +255,14 @@ When("GitHub delivers that a check suite completed on {string} in {string}", lon
   await deliver(this, sha, repo);
 });
 
+/** PBI 423: webhooks are on when the real webhook handler and GitHub's parser load and the factory has a webhook secret. */
+export async function webhooksOn(): Promise<void> {
+  const [hook, gh] = await Promise.all([load<Webhook>("src/watcher/webhook.ts"), load<Parser>("src/adapters/github/backlog.ts")]);
+  assert.ok(hook && typeof hook.handleWebhook === "function", "the real webhook handler isn't available");
+  assert.ok(gh && typeof gh.parseGitHubWebhook === "function", "GitHub's webhook parser isn't available");
+  assert.ok(WEBHOOK_SECRET.length >= 40, "the factory has no webhook secret");
+}
+
 /** GitHub's `check_suite` `completed` delivery for `sha` in `repo`, handed to the real webhook handler. PBI 423's steps deliver it too. */
 export async function deliver(world: object, sha: string, repo: string = REPO): Promise<void> {
   const c = pbi12(world);

@@ -1283,7 +1283,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
       return [...oldRuns].some(([name, old]) => !now.some((c) => c.name === name && rerunShown(old, c)));
     };
     const again = await waitForChecks(sha, stale);
-    const status = again.status === "failure" ? "failure" : "success";
+    const status = again.status === "failure" ? "failure" : again.status === "cancelled" ? "cancelled" : "success";
     ciNotes(rerunNotes(sha, rerun, status, await orNull(api.ciChecks(sha))));
     return again;
   };
