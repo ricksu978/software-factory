@@ -3992,7 +3992,15 @@ Feature: Export invoices to CSV
 
     so a child is rewritten once.
 
-    Any other issue is only commented on.
+    For any other issue that fails only <code>dor.md</code> lines,
+
+    the factory writes one rewrite of its body and proposes it on the item page,
+
+    and the owner accepts it with one click.
+
+    Accepting a rewrite that adds or changes a <code>## Changes the factory's rules</code> section also approves that section,
+
+    since the owner has read its Before and After.
 
     A flag or a permission the App lacks is never rewritten,
 
@@ -4043,6 +4051,12 @@ Feature: Export invoices to CSV
     An item that fails a readiness flag or an engine rule gets no proposal,
 
     and its readiness comment says what the owner has to do, as before.
+
+    The SPA's Run detail shows the proposal too, read from Postgres,
+
+    but the API holds no board credentials and can't edit the issue,
+
+    so the page sends the owner to the dashboard's item page to accept it.
 
     Only the owner accepts a proposal.
 

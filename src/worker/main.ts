@@ -335,7 +335,7 @@ function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<
   // at a time, and each is counted in runs as "rechecking accepted rewrites".
   const RECHECK = "rechecking accepted rewrites";
   let rechecking: Promise<unknown> = Promise.resolve();
-  const recheck = () => (rechecking = rechecking.then(() => recheckAccepted(d.pool, polls, log)));
+  const recheck = () => (rechecking = rechecking.catch(() => undefined).then(() => recheckAccepted(d.pool, polls, log)));
   loops.push(every(clock, d.tickMs ?? TICK_MS, RECHECK, recheck, runs, log));
   const listening = onRewriteAccepted(d.pool, () => {
     void attempt(RECHECK, recheck, log).then(() => runs.set(RECHECK, (runs.get(RECHECK) ?? 0) + 1));

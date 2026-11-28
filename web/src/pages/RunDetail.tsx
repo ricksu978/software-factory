@@ -128,6 +128,29 @@ function FeatureChange({ files }: { files: NonNullable<ItemData["featureChange"]
   );
 }
 
+/**
+ * PBI 439: the rewrite proposed for the item's body beside the current body, each word that changes marked, as the
+ * dashboard's item page draws it. The API holds no board credentials and can't edit the issue, so this page sends the
+ * owner to today's dashboard to accept it.
+ */
+function ProposedRewrite({ r }: { r: NonNullable<ItemData["rewrite"]> }) {
+  const side = (which: "current" | "proposed", label: string, lines: { text: string; changed: boolean }[][]) => (
+    <div>
+      <h3 className="mt-3 text-sm font-semibold">{label}</h3>
+      <pre className="whitespace-pre-wrap rounded-md bg-muted p-3 font-sans text-sm" data-side={which}>
+        {lines.map((l, i) => <span key={i}>{i > 0 && "\n"}{l.map((w, j) => <span key={j}>{j > 0 && " "}{w.changed ? <mark>{w.text}</mark> : w.text}</span>)}</span>)}
+      </pre>
+    </div>
+  );
+  return (
+    <>
+      <H2>Proposed rewrite</H2>
+      <p>The item fails only lines of the team&apos;s dor.md, so the factory proposes this rewrite of its body. Only the owner can accept it, and any edit to the item withdraws it. This page can&apos;t edit the issue, so the owner accepts it on the item&apos;s page on today&apos;s dashboard.</p>
+      <div className="grid gap-4 md:grid-cols-2">{side("current", "Current body", r.current)}{side("proposed", "Proposed body", r.proposed)}</div>
+    </>
+  );
+}
+
 /** Feature files, each under its path with its text as written. */
 function Files({ files }: { files: { path: string; text: string }[] }) {
   return files.map((f) => (
@@ -194,6 +217,7 @@ export function RunDetail({ data: d, zone, now, message, onSubmit }: RunDetailPr
       <Message text={message} />
       <p>{d.item.state}{r?.open && <PrLink r={{ ...r, state: d.item.state }} />}{r?.next_stage ? `, resumes at ${r.next_stage}` : ""}{d.item.state === "FeatureChangeRequest" && d.featureChange?.length ? <>.<WaitsOnOwner path="" /></> : null}</p>
       {d.featureChange?.length ? <FeatureChange files={d.featureChange} /> : null}
+      {d.rewrite ? <ProposedRewrite r={d.rewrite} /> : null}
       {d.recheck && <p>{recheckLine(d.recheck.last, zone, true)}</p>}
       {d.splitInto?.length ? <><H2>Split into</H2><SplitInto children={d.splitInto} /></> : null}
       {d.claim && <p>{claimLines(d.claim)}</p>}

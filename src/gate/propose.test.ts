@@ -50,6 +50,19 @@ describe("proposedBody", () => {
     assert.equal(body, "Make the checkout page faster.\n\n## Acceptance criteria\n\n- The checkout page loads the saved card\n- Paying takes one click\n");
   });
 
+  test("keeps the criteria section's own lines, checkboxes and prose included, and drops only a moved criterion's line", () => {
+    const boxes = "Make checkout faster.\n\n## Acceptance criteria\n\nEach of these holds on a phone too.\n\n- [ ] The checkout page loads the saved card\n- [x] Paying takes one click\n";
+    assert.equal(
+      proposedBody(boxes, criteria, "Make the checkout page faster.", [screen]),
+      "Make the checkout page faster.\n\n## Acceptance criteria\n\nEach of these holds on a phone too.\n\n- [ ] The checkout page loads the saved card\n- [x] Paying takes one click\n",
+    );
+    assert.equal(
+      proposedBody(boxes, criteria, "Make the checkout page faster.", [testable]),
+      "Make the checkout page faster.\n\n## Acceptance criteria\n\nEach of these holds on a phone too.\n\n- [ ] The checkout page loads the saved card\n\n## Notes\n\n" +
+        `- "Paying takes one click" moved here from the acceptance criteria, because the readiness judge found it can't be tested: ${testable.reason}\n`,
+    );
+  });
+
   test("moves an untestable criterion to the Notes, after the model's own notes, with a line saying why", () => {
     const body = proposedBody(current, criteria, "Make the checkout page faster.\n\n## Notes\n\n- Ask design first.", [testable]);
     assert.equal(body, [

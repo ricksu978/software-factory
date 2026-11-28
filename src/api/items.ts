@@ -7,11 +7,19 @@
 import type pg from "pg";
 import { revivable } from "../control/decisions.ts";
 import { criteriaWithScenarios, fixingCi, itemStanding, itemTime, verdicts } from "../http/routes.ts";
+import { bodyDiff } from "../gate/propose.ts";
 import { featureChangeRequest } from "../store/feature-change.ts";
 import { issueRepos } from "../store/issues.ts";
 import { readinessChecks } from "../store/readiness-checks.ts";
+import { proposedRewrites } from "../store/rewrites.ts";
 
 type File = { path: string; sha: string; text: string };
+
+/** The standing proposal's current body beside its proposed body, line by line, as the item page marks them. */
+async function rewriteDiff(pool: pg.Pool, id: string) {
+  const p = (await proposedRewrites(pool, id)).at(-1);
+  return p ? bodyDiff(p.current, p.body) : null;
+}
 
 /** The item's latest run, its stages, policy results, readiness checks, open question and time, or null for no item. */
 export async function itemDetail(pool: pg.Pool, id: string, canOperate: boolean, now: Date, readBlob?: (path: string) => Promise<string | null>) {
@@ -55,6 +63,9 @@ export async function itemDetail(pool: pg.Pool, id: string, canOperate: boolean,
     fixingCi: fixingCi(item.state, run, stages),
     // PBI 366: the request the item waits on in FeatureChangeRequest, or null.
     featureChange: await featureChangeRequest(pool, id),
+    // PBI 439: the rewrite proposed for a NotReady item's body, the current body beside it, each word that changes
+    // marked, or null. The API can't edit the issue, so the SPA shows it and the owner accepts it on the dashboard.
+    rewrite: item.state === "NotReady" ? await rewriteDiff(pool, id) : null,
     ...(await itemStanding(pool, id, item.state, canOperate)),
   };
 }

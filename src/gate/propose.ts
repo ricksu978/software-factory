@@ -73,9 +73,28 @@ function sectionLines(body: string, name: string): string[] {
   return (end === -1 ? rest : rest.slice(0, end)).filter((l) => l.trim() !== "");
 }
 
+/** A bullet line's criterion text, without its bullet or checkbox. */
+const bulletText = (line: string) => line.replace(/^\s*[-*]\s+(\[[ xX]\]\s+)?/, "").trim();
+const isBullet = (line: string) => /^\s*[-*]\s+/.test(line);
+
+/**
+ * The criteria section of `current` under `heading`, its own lines word for word, checkboxes and prose included, less
+ * the bullet line of each criterion in `moved`. When `current` has no such heading, the `kept` criteria as bullets.
+ */
+function keptSection(current: string, heading: string, kept: string[], moved: string[]): string {
+  const lines = current.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.trim() === heading.trim());
+  if (at === -1) return kept.map((c) => `- ${c}`).join("\n");
+  const rest = lines.slice(at + 1);
+  const end = rest.findIndex(isHeading);
+  const section = (end === -1 ? rest : rest.slice(0, end)).filter((l) => !(isBullet(l) && moved.includes(bulletText(l))));
+  return section.join("\n").replace(/^(?:[ \t]*\r?\n)+/, "").trimEnd();
+}
+
 /**
  * The proposed issue body: `rewritten`, the coding model's body, without any criteria or Notes section of its own,
- * then the current body's criteria heading and its criteria word for word, less the untestable ones, then the Notes,
+ * then the current body's criteria section word for word, its checkboxes and any other lines kept, less the bullet
+ * of each untestable criterion, then the Notes,
  * the model's own lines first and then a line for each criterion moved there saying why.
  */
 export function proposedBody(current: string, criteria: string[], rewritten: string, failed: Verdict[]): string {
@@ -87,7 +106,7 @@ export function proposedBody(current: string, criteria: string[], rewritten: str
     ...moved.map((m) => `- "${m.criterion}" moved here from the acceptance criteria, because the readiness judge found it can't be tested: ${m.reason}`),
   ];
   const own = [headingName(heading), headingName(CRITERIA_HEADING), NOTES].reduce((b, name) => withoutSection(b, name), rewritten).trim();
-  const parts = [own, `${heading}\n\n${kept.map((c) => `- ${c}`).join("\n")}`];
+  const parts = [own, `${heading}\n\n${keptSection(current, heading, kept, moved.map((m) => m.criterion))}`];
   if (notes.length) parts.push(`## ${NOTES}\n\n${notes.join("\n")}`);
   return `${parts.filter(Boolean).join("\n\n")}\n`;
 }
