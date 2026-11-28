@@ -230,6 +230,11 @@ test("the judge prompt flags a credential, CI change or outside access only when
   assert.doesNotMatch(p, /flag for each thing the item asks for/);
 });
 
+test("the judge prompt says a rule change still needing the owner's approval is never a flag, since the engine asks for it (PBI 444)", () => {
+  const p = judgePrompt(item, dor);
+  assert.match(p, /A change to the factory's rules that still needs the owner's approval is never a flag, since the engine asks the owner for that approval itself\./);
+});
+
 test("the readiness logic holds the judge prompt's own words, with no item or dor.md in it, and the readiness version", () => {
   const logic = readinessLogic();
   assert.equal(logic.version, READINESS_VERSION);

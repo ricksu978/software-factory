@@ -426,7 +426,7 @@ Given("the owner has put the label {string} on child {string}", async function (
   await replaceItem(c, filedId(this, title), (fi) => ({ labels: fi.labels.includes(label) ? fi.labels : [...fi.labels, label] }));
 });
 
-function real(world: object): Real {
+function realOf(world: object): Real {
   const r = ctx(world).real;
   assert.ok(r, "the filed child wasn't set up");
   return r;
@@ -440,7 +440,7 @@ function polledReal(world: object): void {
 
 async function rowOf(world: object, title: string): Promise<{ id: string; state: string }> {
   const r = await pool().query<{ id: string; state: string }>("select id, state from item where source_id = $1 and external_id = $2",
-    [real(world).sourceId, filedId(world, title)]);
+    [realOf(world).sourceId, filedId(world, title)]);
   assert.ok(r.rows[0], `the factory holds no item for child "${title}"`);
   return r.rows[0];
 }
@@ -466,7 +466,7 @@ Then("child {string} has a new readiness comment saying it waits for the owner t
   const k = ctx(this);
   const c = ctx144(this);
   const ext = filedId(this, title);
-  const all = (await c.fake.comments(ext)).slice(real(this).before.get(ext) ?? 0);
+  const all = (await c.fake.comments(ext)).slice(realOf(this).before.get(ext) ?? 0);
   const found = all.find((b) => b.split("\n").some((l) => l.includes(place) && WAITS.test(l)));
   assert.ok(found, `no new readiness comment on child "${title}" says it waits for the owner to approve its change to ${place}:\n${all.join("\n---\n") || "(no new comment)"}`);
   if (k.approval !== undefined) assert.equal(k.approval, 303, `the owner's earlier approval answered ${k.approval}`);
@@ -489,7 +489,7 @@ async function dashboard(world: object): Promise<Ctx> {
   let handler: ReturnType<typeof dashboardRoutes> | undefined;
   k.server = await startServer([(req, res) => handler!(req, res)], { port: 0 });
   k.origin = `http://127.0.0.1:${(k.server.address() as AddressInfo).port}`;
-  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: k.origin, adapter: ctx144(world).fake.adapter, sourceId: real(world).sourceId });
+  handler = dashboardRoutes({ pool: pool(), auth: createAuth({ mode: "azure" }), origin: k.origin, adapter: ctx144(world).fake.adapter, sourceId: realOf(world).sourceId });
   k.close = handler.close;
   await pool().query(
     `insert into "user" (provider, subject, github_login, role) values ('microsoft', $1, $1, 'owner') on conflict (provider, subject) do nothing`, [OWNER]);
