@@ -29,7 +29,17 @@ import { discover, finishSignIn, isJwt, refresh, startSignIn, type Provider, typ
 import { serveSpa } from "./spa.ts";
 import {
   hashSessionId, newSessionId, open, REFRESH_TOKEN, seal, SESSION_COOKIE, SESSION_MAX_SECONDS, type Session, type SessionStore,
+  type Tokens,
 } from "./session.ts";
+
+/** The session store failing a lookup or a save, which the BFF answers as the store's failure, not the provider's. */
+class SessionStoreFailure extends Error {
+  readonly step: "find" | "save";
+  constructor(step: "find" | "save", cause: unknown) {
+    super(`the session store couldn't ${step === "save" ? "save" : "find"} the session`, { cause });
+    this.step = step;
+  }
+}
 
 /** An access token with this long or less left is refreshed before a call goes to the API. */
 export const REFRESH_WITHIN_MS = 60_000;
@@ -132,19 +142,59 @@ export function createBff(cfg: BffConfig): Hono {
     });
     return new Response(body, { status: r.status, statusText: r.statusText, headers: back });
   };
-  /** Refreshes in flight, by cookie hash, so calls that arrive together spend the refresh token once. */
-  const refreshing = new Map<string, Promise<Session | null>>();
+  /**
+   * Refreshed tokens the session store failed to save, by cookie hash (PBI 325). A provider that rotates refresh tokens
+   * refuses the old one once it has issued a new one, so dropping these would sign the person out at their next call.
+   * The next call for the session saves them before anything else, and the session goes on with them.
+   */
+  const unsaved = new Map<string, Tokens>();
+  /** Refreshes and saves in flight, by cookie hash, so calls that arrive together spend the refresh token once. */
+  const settling = new Map<string, Promise<Session | null>>();
 
-  /** The session with an access token good for more than a minute, refreshing it if need be, or null. */
+  /** Saves a session's tokens, keeping them in unsaved until the store takes them. Throws SessionStoreFailure. */
+  const save = async (hash: string, t: Tokens): Promise<void> => {
+    unsaved.set(hash, t);
+    try {
+      await cfg.sessions.updateTokens(hash, t);
+    } catch (e) {
+      console.error("the session store couldn't save a session's refreshed tokens, which the BFF keeps to save at the session's next call:", (e as Error).message);
+      throw new SessionStoreFailure("save", e);
+    }
+    unsaved.delete(hash);
+  };
+
+  /** The session with an access token good for more than a minute, saving kept tokens and refreshing if need be, or null. */
   const freshSession = async (hash: string): Promise<Session | null> => {
-    const s = await cfg.sessions.find(hash);
-    if (!s || s.accessTokenExpiresAt.getTime() - Date.now() > REFRESH_WITHIN_MS) return s;
-    let p = refreshing.get(hash);
+    let s: Session | null;
+    try {
+      s = await cfg.sessions.find(hash);
+    } catch (e) {
+      console.error("the session store didn't answer a session lookup:", (e as Error).message);
+      throw new SessionStoreFailure("find", e);
+    }
+    if (!s) {
+      unsaved.delete(hash);
+      return null;
+    }
+    if (!unsaved.has(hash) && s.accessTokenExpiresAt.getTime() - Date.now() > REFRESH_WITHIN_MS) return s;
+    let p = settling.get(hash);
     if (!p) {
-      p = refreshTokens(hash, s).finally(() => refreshing.delete(hash));
-      refreshing.set(hash, p);
+      p = settle(hash, s).finally(() => settling.delete(hash));
+      settling.set(hash, p);
     }
     return p;
+  };
+
+  /** Saves the session's kept tokens, if any, then refreshes its access token if it expires within a minute. */
+  const settle = async (hash: string, found: Session): Promise<Session | null> => {
+    let s = found;
+    const kept = unsaved.get(hash);
+    if (kept) {
+      await save(hash, kept);
+      s = { ...s, ...kept };
+    }
+    if (s.accessTokenExpiresAt.getTime() - Date.now() > REFRESH_WITHIN_MS) return s;
+    return refreshTokens(hash, s);
   };
 
   /** Trades the session's refresh token at the provider and stores what comes back. Null when there is none or it's refused. */
@@ -164,12 +214,12 @@ export function createBff(cfg: BffConfig): Hono {
       if (e instanceof ResponseBodyError) return null;
       throw e;
     }
-    const tokens = {
+    const tokens: Tokens = {
       accessToken: t.accessToken,
       accessTokenExpiresAt: new Date(Date.now() + (Number(t.expiresIn) || 300) * 1000),
       refreshTokenEncrypted: t.refreshToken ? seal(cfg.key, REFRESH_TOKEN, t.refreshToken) : s.refreshTokenEncrypted,
     };
-    await cfg.sessions.updateTokens(hash, tokens);
+    await save(hash, tokens);
     return { ...s, ...tokens };
   };
 
@@ -189,6 +239,9 @@ export function createBff(cfg: BffConfig): Hono {
       try {
         s = await freshSession(hashSessionId(id));
       } catch (e) {
+        if (e instanceof SessionStoreFailure) {
+          return c.json({ error: e.step === "save" ? "the session store couldn't save the session" : "the session store didn't answer" }, 503);
+        }
         console.error("the BFF couldn't refresh an access token:", (e as Error).message);
         return c.json({ error: "the sign-in provider didn't answer" }, 502);
       }
@@ -288,7 +341,11 @@ export function createBff(cfg: BffConfig): Hono {
   app.post("/auth/logout", async (c) => {
     if (c.req.header("origin") !== origin) return c.text("Sign-out needs an Origin of the BFF's own", 403);
     const id = getCookie(c, SESSION_COOKIE);
-    if (id) await cfg.sessions.remove(hashSessionId(id));
+    if (id) {
+      const hash = hashSessionId(id);
+      await cfg.sessions.remove(hash);
+      unsaved.delete(hash);
+    }
     clearSession(c);
     return c.body(null, 204);
   });

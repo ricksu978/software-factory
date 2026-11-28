@@ -12,20 +12,29 @@ import { hashSessionId, openRefreshToken, SESSION_COOKIE, type NewSession, type 
 const ORIGIN = "http://localhost:7403";
 const KEY = randomBytes(32).toString("base64");
 
-function memory(): SessionStore & { rows: Map<string, NewSession>; failing?: boolean } {
+function memory(): SessionStore & { rows: Map<string, NewSession>; failing?: boolean; failSaves: number; findFails: boolean } {
   const rows = new Map<string, NewSession>();
   const store = {
     rows,
     failing: false,
+    /** How many of the next saves of refreshed tokens fail. */
+    failSaves: 0,
+    /** Whether a lookup fails. */
+    findFails: false,
     async create(s: NewSession) {
       if (store.failing) throw new Error("permission denied for table session");
       rows.set(s.cookieHash, s);
     },
     async find(h: string): Promise<Session | null> {
+      if (store.findFails) throw new Error("connection terminated unexpectedly");
       const s = rows.get(h);
       return s ? { ...s } : null;
     },
     async updateTokens(h: string, t: Pick<Session, "accessToken" | "accessTokenExpiresAt" | "refreshTokenEncrypted">) {
+      if (store.failSaves > 0) {
+        store.failSaves--;
+        throw new Error("could not serialize access due to concurrent update");
+      }
       const s = rows.get(h);
       if (s) rows.set(h, { ...s, ...t });
     },
@@ -308,6 +317,102 @@ test("a refused refresh, or no refresh token with a token about to expire, gets 
   store.rows.get(hash)!.refreshTokenEncrypted = null;
   assert.equal((await get(jar, "/bff/v1/floor")).status, 401);
   assert.equal(api.calls.length, 0);
+});
+
+/** Runs fn with console.error collected, and hands back what it logged. */
+async function logged(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = was;
+  }
+  return lines;
+}
+
+/** Signs in and leaves the session's access token 30 seconds from expiry, with the next refresh giving at-2 and rt-2. */
+async function aboutToRefresh(): Promise<{ jar: Jar; hash: string; old: string }> {
+  const { jar, hash } = await signedIn();
+  const row = store.rows.get(hash)!;
+  row.accessTokenExpiresAt = new Date(Date.now() + 30_000);
+  provider.nextRefresh.accessToken = "at-2";
+  provider.nextRefresh.refreshToken = "rt-2";
+  provider.nextRefresh.expiresIn = 300;
+  return { jar, hash, old: openRefreshToken(KEY, row.refreshTokenEncrypted!) };
+}
+
+test("a failed save of refreshed tokens gets 503 naming the session store, is logged as the store's, and keeps the cookie", async () => {
+  const { jar } = await aboutToRefresh();
+  store.failSaves = 1;
+  let r: Response | undefined;
+  const lines = await logged(async () => {
+    r = await get(jar, "/bff/v1/floor");
+  });
+  assert.equal(r!.status, 503);
+  const body = await r!.text();
+  assert.match(body, /session store couldn't save the session/);
+  assert.doesNotMatch(body, /provider|sign-in|sign in/i);
+  assert.ok(!r!.headers.getSetCookie().some((k) => k.startsWith(`${SESSION_COOKIE}=`)));
+  const line = lines.find((x) => /session store/.test(x) && /save/.test(x));
+  assert.ok(line, JSON.stringify(lines));
+  assert.doesNotMatch(line, /provider/i);
+  assert.equal(api.calls.length, 0);
+});
+
+test("after a failed save, the next call saves the kept tokens and forwards with them, without spending a refresh token again", async () => {
+  const { jar, hash, old } = await aboutToRefresh();
+  store.failSaves = 1;
+  await logged(async () => void (await get(jar, "/bff/v1/floor")));
+  assert.equal(openRefreshToken(KEY, store.rows.get(hash)!.refreshTokenEncrypted!), old);
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+  assert.equal(api.calls.at(-1)!.headers.authorization, "Bearer at-2");
+  assert.deepEqual(refreshes().map((t) => [t.form.refresh_token, t.status]), [[old, 200]]);
+  const now = store.rows.get(hash)!;
+  assert.equal(now.accessToken, "at-2");
+  assert.equal(openRefreshToken(KEY, now.refreshTokenEncrypted!), "rt-2");
+});
+
+test("a store that fails several saves gets each call's retry, and loses nothing once it answers", async () => {
+  const { jar, hash } = await aboutToRefresh();
+  store.failSaves = 3;
+  await logged(async () => {
+    for (let i = 0; i < 3; i++) assert.equal((await get(jar, "/bff/v1/floor")).status, 503);
+  });
+  assert.equal(store.failSaves, 0);
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+  assert.equal(refreshes().length, 1);
+  assert.equal(openRefreshToken(KEY, store.rows.get(hash)!.refreshTokenEncrypted!), "rt-2");
+});
+
+test("kept tokens that have since come near expiry are saved and then refreshed with the rotated refresh token", async () => {
+  const { jar, hash } = await aboutToRefresh();
+  provider.nextRefresh.expiresIn = 30;
+  store.failSaves = 1;
+  await logged(async () => void (await get(jar, "/bff/v1/floor")));
+  provider.nextRefresh.accessToken = "at-3";
+  provider.nextRefresh.refreshToken = "rt-3";
+  provider.nextRefresh.expiresIn = 300;
+  assert.equal((await get(jar, "/bff/v1/floor")).status, 200);
+  assert.deepEqual(refreshes().map((t) => t.status), [200, 200]);
+  assert.equal(refreshes()[1].form.refresh_token, "rt-2");
+  assert.equal(api.calls.at(-1)!.headers.authorization, "Bearer at-3");
+  assert.equal(openRefreshToken(KEY, store.rows.get(hash)!.refreshTokenEncrypted!), "rt-3");
+});
+
+test("a session store that doesn't answer a lookup gets 503 naming the store, not the provider", async () => {
+  const { jar } = await signedIn();
+  store.findFails = true;
+  let r: Response | undefined;
+  const lines = await logged(async () => {
+    r = await get(jar, "/bff/v1/floor");
+  });
+  assert.equal(r!.status, 503);
+  const body = await r!.text();
+  assert.match(body, /session store/);
+  assert.doesNotMatch(body, /provider/i);
+  assert.ok(lines.some((x) => /session store/.test(x)), JSON.stringify(lines));
 });
 
 test("a call the API doesn't answer gets 502, and a BFF with no API answers 502 too", async () => {

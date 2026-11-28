@@ -5,6 +5,8 @@
 // PBI 289 adds the refresh_token grant: a refresh token the provider issued, sent back by the client it was issued to,
 // gets a new access token and a new refresh token, unless a "next refresh" setting says otherwise. A refresh token it
 // never issued, or one it has since replaced, is refused with invalid_grant.
+// PBI 325 names that rotation: `rotates`, on unless a scenario turns it off, has a refresh retire the refresh token it
+// was given, so the provider refuses it from then on.
 import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -56,6 +58,8 @@ export type Provider = {
   };
   /** When set, every access token carries a counter in its jti, so no two the provider issues are ever the same. */
   distinctAccessTokens: boolean;
+  /** When set, as it is unless a scenario turns it off, a refresh retires the refresh token it was given. */
+  rotates: boolean;
   stop(): Promise<void>;
 };
 
@@ -101,6 +105,7 @@ export async function startProvider(user: string): Promise<Provider> {
     next: {},
     nextRefresh: {},
     distinctAccessTokens: false,
+    rotates: true,
     async stop() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -132,7 +137,7 @@ export async function startProvider(user: string): Promise<Provider> {
     if (settings.refuse || !held || held.clientId !== clientOf(form, record.authorization)) {
       return json(res, 400, { error: "invalid_grant", error_description: "the refresh token isn't valid" });
     }
-    live.delete(form.refresh_token);
+    if (p.rotates) live.delete(form.refresh_token);
     const now = Math.floor(Date.now() / 1000);
     const life = settings.expiresIn ?? 300;
     const accessToken = settings.accessToken ?? accessJwt(subjectOf(held.user), held.clientId, now, life);
