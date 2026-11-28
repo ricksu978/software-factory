@@ -6,7 +6,9 @@ export const PATHS = { floor: "/", activity: "/activity", phase0: "/phase0" } as
 /** The address of an item's Run detail. */
 export const runPath = (id: string) => `/runs/${encodeURIComponent(id)}`;
 
-export type Route = { page: "floor" | "activity" | "phase0" | "none" } | { page: "item"; id: string };
+export type Route = { page: "floor" | "activity" | "phase0" | "none" } | { page: "item"; id: string }
+  /** PBI 326: a stage attempt's transcript page. Not routed yet. */
+  | { page: "transcript"; id: string; stage: string; attempt: number };
 
 export function routeOf(path: string): Route {
   const p = path.length > 1 ? path.replace(/\/+$/, "") : path;

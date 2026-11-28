@@ -211,6 +211,8 @@ export type FloorProps = {
 };
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
+/** PBI 326: the transcript page draws with its one read, readTranscript's. */
+export type TranscriptProps = { data: TranscriptData };
 export type ActivityProps = { data: ActivityData };
 
 /**
@@ -238,6 +240,24 @@ async function read<T>(call: Call, path: string): Promise<T> {
 
 /** Floor's one read of the factory. */
 export const readFloor = (call: Call) => read<FloorData>(call, "/bff/v1/floor");
+
+/**
+ * PBI 326: what the transcript page shows for one stage attempt: the item, the attempt's row as Run detail has it,
+ * whether it's still running, the raw JSON Lines file's address, and the transcript as stored, or null when it isn't.
+ */
+export type TranscriptData = {
+  item: Named & { state: string };
+  stage: Stage;
+  running: boolean;
+  /** The raw JSON Lines file, /bff/v1/blobs/{transcript_ref}, or null when the attempt has none. */
+  rawHref: string | null;
+  jsonl: string | null;
+};
+
+/** PBI 326: the transcript page's one read of the factory, for the item's `stage` attempt `attempt`. Not built yet. */
+export async function readTranscript(_call: Call, _id: string, _stage: string, _attempt: number): Promise<TranscriptData> {
+  throw new Error("the transcript page's read isn't built yet (PBI 326)");
+}
 
 /** Run detail's one read of the factory. */
 export const readItem = (call: Call, id: string) => read<ItemData>(call, `/bff/v1/items/${encodeURIComponent(id)}`);

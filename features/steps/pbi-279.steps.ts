@@ -46,7 +46,7 @@ const WEB = join(import.meta.dirname, "..", "..", "web");
 
 let vite: ViteDevServer | undefined;
 
-async function load<T>(path: string): Promise<T> {
+export async function load<T>(path: string): Promise<T> {
   vite ??= await createServer({
     configFile: join(WEB, "vite.config.ts"),
     server: { middlewareMode: true, hmr: false, ws: false },
@@ -2062,6 +2062,9 @@ function phase0Root(world: object): El {
 }
 
 Then("it shows {string}", function (want: string) {
+  // PBI 326's "it shows" reads its transcript page, which it hands this step through a hook on the world.
+  const hook = (this as { itShows?: (want: string) => void }).itShows;
+  if (hook) return hook(want);
   includes(phase0Root(this), want, "the Phase 0 report");
 });
 

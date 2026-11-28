@@ -500,6 +500,9 @@ Then("the start did not stop", function () {
 });
 
 Then("the start shows {string}", function (text: string) {
+  // PBI 326's "the start shows" is a subagent's start on its transcript page, which it hands over through the world.
+  const hook = (this as { startShows?: (text: string) => void }).startShows;
+  if (hook) return hook(text);
   const c = ctx(this);
   assert.ok(shown(c).includes(text), `the start didn't show "${text}". It showed: ${JSON.stringify(shown(c))}`);
 });
