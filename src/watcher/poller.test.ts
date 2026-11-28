@@ -447,6 +447,22 @@ describe("pollOnce", dbTest, () => {
     assert.deepEqual(events, ["readiness_failed", "item_edited", "ready"]);
   });
 
+  test("a NotReady item whose issue reads a standing proposal's body stays NotReady for the owner's retry to accept (PBI 439)", async () => {
+    verdict = "failed";
+    const ext = await seed({ body: "old" });
+    await poll();
+    const { id } = await row(ext);
+    await db.pool.query("insert into item_rewrite (item_id, text_hash, body, current) values ($1, 'h-old', 'new', 'old')", [id]);
+    // The factory's edit landed; the acceptance's transaction didn't commit.
+    await fake.seed({ externalId: ext, labels: ["factory"], repo: REPO, body: "new" });
+    verdict = "passed";
+    judged = [];
+    await poll();
+    assert.equal((await row(ext)).state, "NotReady");
+    assert.deepEqual(judged, []);
+    assert.equal((await db.pool.query("select count(*)::int as n from item_rewrite where item_id = $1 and withdrawn_at is null and accepted_at is null", [id])).rows[0].n, 1);
+  });
+
   test("the factory's own board write doesn't re-gate a NotReady item", async () => {
     verdict = "failed";
     const ext = await seed();

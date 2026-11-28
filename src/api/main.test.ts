@@ -159,8 +159,19 @@ describe("the API", dbTest, () => {
       const signing = await (await as("vera", `/v1/items/${itemId}`)).json();
       assert.deepEqual(signing.pending.map((f: { text: string }) => f.text), ["Feature: Search\n  @ac-1\n  Scenario: By title\n"]);
       assert.deepEqual(signing.criteria, [{ criterion: "Search finds a title", scenarios: [{ name: "By title", regression: false }] }]);
+      assert.equal(signing.rewrite, null, "no rewrite shows while the item isn't NotReady");
+      await db.pool.query("update item set state = 'NotReady' where id = $1", [itemId]);
+      await db.pool.query(
+        "insert into item_rewrite (item_id, text_hash, body, current) values ($1, 'h1', $2, $3)", [itemId, "Search the shelf page.\n", "Search.\n"],
+      );
+      const proposing = await (await as("vera", `/v1/items/${itemId}`)).json();
+      assert.deepEqual(proposing.rewrite, {
+        current: [[{ text: "Search.", changed: true }]],
+        proposed: [[{ text: "Search", changed: true }, { text: "the", changed: true }, { text: "shelf", changed: true }, { text: "page.", changed: true }]],
+      }, "a NotReady item carries its proposed rewrite beside its body, each changed word marked (PBI 439)");
     } finally {
       await db.pool.query("update item set state = 'InProgress' where id = $1", [itemId]);
+      await db.pool.query("delete from item_rewrite where item_id = $1", [itemId]);
       await db.pool.query("delete from stage_run where run_id = $1", [run]);
       await db.pool.query("delete from run_file where run_id = $1", [run]);
       await db.pool.query("delete from run where id = $1", [run]);

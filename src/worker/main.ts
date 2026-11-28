@@ -28,6 +28,7 @@ import { realClock, type Clock } from "../clock.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { factoryRepoAt, mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
+import { onRewriteAccepted, recheckAccepted } from "./rechecks.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
 
@@ -316,13 +317,36 @@ function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<
   const defaults = d.cellImage && mainDefaults(d.cellImage);
   // Each rule an item says it changes is held to the factory's spec and policy files on that same fetched main (PBI 395).
   const factoryRepo = d.cellImage && factoryRepoAt(d.cellImage);
-  // Each board files its splits as child issues on itself (PBI 144).
+  // Each board files its splits as child issues on itself (PBI 144). One board's polls run one at a time, so a recheck
+  // for an accepted rewrite (PBI 439) never runs beside the regular poll.
+  const polls = new Map<string, () => Promise<unknown>>();
   for (const s of d.sources) {
     const split = d.split && { ...d.split, file: s.file };
-    loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`,
-      () => pollOnce({ pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, slow, ...(defaults ? { defaults } : {}),
-        ...(factoryRepo ? { factoryRepo } : {}) }), runs, log));
+    let last: Promise<unknown> = Promise.resolve();
+    const poll = () => (last = last.catch(() => undefined).then(() => pollOnce({
+      pool: d.pool, adapter: s.adapter, repoHost: d.repoHost, judge: d.judge, sourceId: s.id, split, slow, ...(defaults ? { defaults } : {}),
+      ...(factoryRepo ? { factoryRepo } : {}),
+    })));
+    polls.set(s.id, poll);
+    loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`, poll, runs, log));
   }
+  // PBI 439: a rewrite the owner accepted on the dashboard is checked again at once: its rewrite_accepted event wakes
+  // the worker. The tick runs the same recheck too, for an acceptance whose notification was missed. Rechecks run one
+  // at a time, and each is counted in runs as "rechecking accepted rewrites".
+  const RECHECK = "rechecking accepted rewrites";
+  let rechecking: Promise<unknown> = Promise.resolve();
+  const recheck = () => (rechecking = rechecking.catch(() => undefined).then(() => recheckAccepted(d.pool, polls, log)));
+  loops.push(every(clock, d.tickMs ?? TICK_MS, RECHECK, recheck, runs, log));
+  const listening = onRewriteAccepted(d.pool, () => {
+    void attempt(RECHECK, recheck, log).then(() => runs.set(RECHECK, (runs.get(RECHECK) ?? 0) + 1));
+  }, log).catch((e: Error) => {
+    log.error("The worker couldn't listen for accepted rewrites, so they're rechecked on its tick:", e.message);
+    return async () => {};
+  });
+  loops.push(async () => {
+    await (await listening)();
+    await rechecking.catch(() => undefined);
+  });
   if (d.cellImage) {
     const cellImage = { ...d.cellImage, pool: d.pool, log };
     loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, "polling main for the cell image", () => pollCellImage(cellImage), runs, log));

@@ -258,7 +258,10 @@ Given("the Claude token was created {int} days ago", function (days: number) {
 Given("the worker last sent a heartbeat a moment ago", long, async function () {
   const c = ctx(this);
   c.heartbeat = new Date(Date.now() - 2_000);
-  await pool().query("insert into worker_heartbeat (ticked_at) values ($1)", [c.heartbeat]);
+  // The factory's one heartbeat row may be left by an earlier scenario's worker, and a fresh database keeps it, so the
+  // step writes the row as the worker does (src/store/heartbeat.ts).
+  await pool().query(
+    "insert into worker_heartbeat (ticked_at) values ($1) on conflict ((true)) do update set ticked_at = excluded.ticked_at", [c.heartbeat]);
 });
 
 // ---- people ----

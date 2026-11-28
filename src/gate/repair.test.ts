@@ -4,7 +4,7 @@ import type { FactoryItem } from "../adapters/types.ts";
 import type { Policy, Verdict } from "../policy/policy.ts";
 import { childBody, splitKey, splitMarker } from "./file-split.ts";
 import {
-  APP_PERMISSION, keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, REWRITE_HEADING, rewritePrompt,
+  APP_PERMISSION, keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, REWRITE_HEADING, REWRITE_ITEM_HEADING, rewritePrompt,
 } from "./repair.ts";
 
 const dor: Policy = {
@@ -30,6 +30,15 @@ describe("rewritePrompt", () => {
     for (const c of dor.criteria) assert.ok(p.includes(JSON.stringify(c.text)));
     assert.ok(p.includes(JSON.stringify({ index: 1, criterion: "Names the screen", reason: "No screen is named" })));
     assert.match(p, /\{"body":"\.\.\."\}/);
+  });
+  test("for an item a person wrote it opens with its own line and asks to keep the other sections (PBI 439)", () => {
+    const p = rewritePrompt(child, dor, [failed], "item");
+    assert.ok(p.startsWith(REWRITE_ITEM_HEADING));
+    assert.doesNotMatch(p, /child item|child's/);
+    assert.match(p, /"title": "Bank"/);
+    assert.ok(p.includes(dor.text.trim()));
+    assert.ok(p.includes(JSON.stringify({ index: 1, criterion: "Names the screen", reason: "No screen is named" })));
+    assert.match(p, /Keep the body's other sections/);
   });
 });
 

@@ -18,6 +18,7 @@ import { activeOverrides, setOverride, type OverrideKind } from "../store/overri
 import { readCellImage } from "../store/cell-image.ts";
 import { splitChildren } from "../store/splits.ts";
 import { approveRuleChange, latestApproval, ruleChangesChecked, waitsForApproval } from "../store/rule-changes.ts";
+import { acceptRewrite, proposedRewrites } from "../store/rewrites.ts";
 import { ruleChangesHash } from "../gate/rule-changes.ts";
 import { featureChangeRequest } from "../store/feature-change.ts";
 import { requireRole, type Auth, type Role } from "./auth.ts";
@@ -41,6 +42,17 @@ export type DashboardDeps = {
   readBlob?: (path: string) => Promise<string | null>;
   /** The time now: what Run detail's durations count open spells up to (PBI 187), and how long a running stage attempt has taken so far (PBI 189). Defaults to the system clock. */
   now?: () => Date;
+  /**
+   * PBI 439: what accepting a proposed rewrite on the item page needs. `editBody` writes the accepted text over the
+   * item's issue body as the factory, and `recheck` runs the readiness check on the item at once, without waiting for
+   * the poller. Without it, no rewrite can be accepted.
+   */
+  rewrites?: RewriteDeps;
+};
+
+export type RewriteDeps = {
+  editBody(externalId: string, body: string): Promise<void>;
+  recheck(itemId: string): Promise<void>;
 };
 
 const FACTORY_KINDS: OverrideKind[] = ["pause", "resume", "drain", "kill", "restart"];
@@ -337,6 +349,41 @@ export async function ruleChangesOf(pool: pg.Pool, id: string, isOwner: boolean)
   };
 }
 
+/** PBI 439: the rewrite proposed for the item that stands, and whether this viewer may accept it. Null when none does. */
+async function rewriteOf(pool: pg.Pool, id: string, canAccept: boolean): Promise<RunDetail["rewrite"]> {
+  const p = (await proposedRewrites(pool, id)).at(-1);
+  return p ? { id: p.id, current: p.current, body: p.body, canAccept } : null;
+}
+
+/**
+ * PBI 439: the owner accepts the rewrite proposed for the item. In one transaction the proposal is accepted, with the
+ * owner's approval of a rules section it adds or changes and the outbox row the worker posts the acceptance's comment
+ * from, retrying it until it's posted, and the issue's body is edited to it, so a failed edit accepts nothing. An edit
+ * that lands under a transaction that then fails to commit leaves the proposal standing with the issue reading its
+ * body: the poller neither withdraws it, nor moves the item out of NotReady, nor asks for a rewrite of that text, so
+ * the owner's retry accepts it without editing again. Then the readiness check runs at once.
+ */
+async function acceptance(deps: DashboardDeps, rw: RewriteDeps, a: { itemId: string; rewriteId: string; user: User; login: string }):
+  Promise<{ status: number; text: string }> {
+  const item = (await deps.pool.query<{ external_id: string }>("select external_id from item where id = $1", [a.itemId])).rows[0];
+  if (!item) return { status: 404, text: "No such item." };
+  const fi = await deps.adapter.getItem(item.external_id);
+  if (!fi) return { status: 404, text: "The item's issue isn't on the board." };
+  const at = (deps.now ?? (() => new Date()))();
+  const out = await withTx(deps.pool, async (c) => {
+    const r = await acceptRewrite(c, { itemId: a.itemId, rewriteId: a.rewriteId, userId: a.user.id, login: a.login, at, issueBody: fi.body });
+    if (r.outcome === "accepted" && r.edit) await rw.editBody(item.external_id, r.rewrite.body);
+    return r;
+  });
+  if (out.outcome === "unknown") return { status: 404, text: "No such proposed rewrite." };
+  if (out.outcome === "withdrawn") return { status: 409, text: "That proposed rewrite was withdrawn by an edit to the item." };
+  if (out.outcome === "edited") return { status: 409, text: "The item was edited since the rewrite was proposed, so the proposal is withdrawn." };
+  if (out.outcome === "accepted_already") return { status: 409, text: "That proposed rewrite was accepted already." };
+  if (out.outcome === "not_waiting") return { status: 409, text: "That item isn't waiting in NotReady, so it takes no rewrite." };
+  await rw.recheck(a.itemId);
+  return { status: 303, text: "" };
+}
+
 async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, isOwner = false, productOwner = false): Promise<RunDetail | null> {
   const { pool } = deps;
   const item = (await pool.query("select id, title, state, external_id from item where id = $1", [id])).rows[0];
@@ -368,6 +415,7 @@ async function runDetail(deps: DashboardDeps, id: string, canOperate: boolean, i
     fixingCi: fixingCi(item.state, run, stages),
     durations: await itemTime(pool, id, item.state, (deps.now ?? (() => new Date()))()),
     ruleChanges: await ruleChangesOf(pool, id, isOwner),
+    rewrite: item.state === "NotReady" ? await rewriteOf(pool, id, isOwner && !!deps.rewrites) : null,
     featureChange: await featureChangeRequest(pool, id),
     // PBI 365: only the Product Owner decides on a feature change request, as at sign-off.
     canDecideFeatureChange: productOwner,
@@ -635,7 +683,7 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       await streams.open(req, res);
       return true;
     }
-    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer|rule-approval|feature-change))?$/.exec(path);
+    const itemPath = /^\/items\/([0-9a-f-]{36})(?:\/(signoff|answer|rule-approval|feature-change|rewrite-acceptance))?$/.exec(path);
     if (itemPath && req.method === "GET" && !itemPath[2]) {
       const detail = await runDetail(deps, itemPath[1], requireRole(user, "operator"), requireRole(user, "owner"), user.product_owner);
       if (!detail) send(res, 404, "No such item.");
@@ -660,6 +708,29 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
         console.log(`rule change: ${identity.subject} approved the rule changes of item ${itemPath[1]}`);
         send(res, 303, "", { location: `/items/${itemPath[1]}` });
       }
+      return true;
+    }
+    // PBI 439: only the owner accepts a proposed rewrite, and only while it stands.
+    if (itemPath && req.method === "POST" && itemPath[2] === "rewrite-acceptance") {
+      if (!requireRole(user, "owner")) {
+        send(res, 403, "Only the owner can accept a proposed rewrite.");
+        return true;
+      }
+      if (!deps.rewrites) {
+        send(res, 503, "This dashboard can't edit the board, so no rewrite can be accepted here.");
+        return true;
+      }
+      const rewriteId = (await form(req)).rewrite ?? "";
+      if (!/^[0-9a-f-]{36}$/.test(rewriteId)) {
+        send(res, 400, "Name the proposed rewrite to accept.");
+        return true;
+      }
+      const login = user.github_login ?? identity.subject;
+      const out = await acceptance(deps, deps.rewrites, { itemId: itemPath[1], rewriteId, user, login });
+      if (out.status === 303) {
+        console.log(`rewrite: ${identity.subject} accepted the proposed rewrite of item ${itemPath[1]}`);
+        send(res, 303, "", { location: `/items/${itemPath[1]}` });
+      } else send(res, out.status, out.text);
       return true;
     }
     // PBI 365: the Product Owner approves or turns down a feature change request, with the same effect as the comment.
