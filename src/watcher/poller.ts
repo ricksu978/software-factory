@@ -22,7 +22,7 @@ import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdr
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
 import { approvedRulesHash, ruleChangesChecked } from "../store/rule-changes.ts";
-import { keepRewrite, rewriteAsked, withdrawRewrites } from "../store/rewrites.ts";
+import { acceptanceUnfinished, keepRewrite, rewriteAsked, withdrawRewrites } from "../store/rewrites.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -433,6 +433,9 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
+    // An issue that reads a standing proposal's body holds the factory's own edit for an acceptance that didn't
+    // commit. The item stays NotReady, so the owner's retry completes the acceptance (PBI 439).
+    if (await acceptanceUnfinished(pool, row.id, fi.body)) return;
     // A person's edit withdraws any rewrite proposed for the text before it (PBI 439).
     if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited", (c) => withdrawRewrites(c, row.id, itemTextHash(fi), undefined, fi.body));
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");

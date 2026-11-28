@@ -360,8 +360,8 @@ async function rewriteOf(pool: pg.Pool, id: string, canAccept: boolean): Promise
  * owner's approval of a rules section it adds or changes and the outbox row the worker posts the acceptance's comment
  * from, retrying it until it's posted, and the issue's body is edited to it, so a failed edit accepts nothing. An edit
  * that lands under a transaction that then fails to commit leaves the proposal standing with the issue reading its
- * body: the poller neither withdraws it nor asks for a rewrite of that text, and the owner's retry accepts it without
- * editing again. Then the readiness check runs at once.
+ * body: the poller neither withdraws it, nor moves the item out of NotReady, nor asks for a rewrite of that text, so
+ * the owner's retry accepts it without editing again. Then the readiness check runs at once.
  */
 async function acceptance(deps: DashboardDeps, rw: RewriteDeps, a: { itemId: string; rewriteId: string; user: User; login: string }):
   Promise<{ status: number; text: string }> {

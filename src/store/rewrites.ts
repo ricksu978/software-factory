@@ -53,6 +53,19 @@ export async function rewriteAsked(pool: pg.Pool | pg.ClientBase, itemId: string
   return !row ? null : row.standing ? "standing" : "spent";
 }
 
+/**
+ * Whether the issue's `body` is the body of one of the item's standing proposals: the factory's edit for an acceptance
+ * whose transaction didn't commit landed. The item waits in NotReady for the owner's retry, which completes the
+ * acceptance, so the poller doesn't treat that text as a person's edit and re-gate the item past it.
+ */
+export async function acceptanceUnfinished(pool: pg.Pool | pg.ClientBase, itemId: string, body: string): Promise<boolean> {
+  const r = await pool.query(
+    "select 1 from item_rewrite where item_id = $1 and body = $2 and accepted_at is null and withdrawn_at is null limit 1",
+    [itemId, body],
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
 /** Keeps the coding model's rewrite for the item's text, or null when its reply carried none. A text keeps its first. */
 export async function keepRewrite(pool: pg.Pool | pg.ClientBase, a: { itemId: string; textHash: string; body: string | null; current: string; at?: Date }): Promise<void> {
   await pool.query(
@@ -65,7 +78,8 @@ export async function keepRewrite(pool: pg.Pool | pg.ClientBase, a: { itemId: st
  * Withdraws each of the item's standing proposals made for a text other than `textHash`, after a person's edit, and
  * logs each withdrawal as `rewrite_withdrawn` with the cause "item_edited". Returns how many it withdrew. A proposal
  * whose body is the issue's `body` now stays: that text is the factory's own edit for an acceptance whose transaction
- * didn't commit, not a person's, and the owner's retry completes the acceptance.
+ * didn't commit, not a person's. The poller keeps such an item in NotReady (see acceptanceUnfinished), so the owner's
+ * retry completes the acceptance.
  */
 export async function withdrawRewrites(c: pg.ClientBase, itemId: string, textHash: string, actor: Actor = { actor: "system", actorId: "poller" }, body: string | null = null): Promise<number> {
   const r = await c.query<{ id: string }>(
