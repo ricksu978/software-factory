@@ -3608,8 +3608,10 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and step 2 doesn't merge the PR of an item whose rules section no longer reads as approved,
     so nothing built from the edited section ships.
     Holding the section's Before to `main` and holding an item that changes the rules for the owner are engine rules,
-    so `READINESS_VERSION` is 4,
-    and the raise re-checks every NotReady item under them.
+    so PBI 395 raised `READINESS_VERSION` to 4.
+    The engine passing the rules line (PBI 414) is an engine rule too,
+    so `READINESS_VERSION` is 5,
+    and each raise re-checks every NotReady item under the new rules.
   - **Oversized items (PBI 143).**
     The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
