@@ -76,6 +76,8 @@ export type Ctx = {
   deps?: Record<string, unknown>;
   /** PBI 439: the judge's whole reply, scripted per item text. Unset, the reply comes from `judge` and the fields above. */
   judgeOverride?: Judge;
+  /** PBI 444: keys the judge's last line carries for this item, read on each ask, after `lastLine`. */
+  lastLineFor?: (item: FactoryItem, dor: { criteria: { index: number; text: string }[] }) => Record<string, unknown>;
 };
 
 export function ctx(world: object): Ctx {
@@ -96,7 +98,7 @@ const judge = (c: Ctx): Judge => async (item, dor, spent) => {
     const reason = failed ? (many?.reason ?? c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
-  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine };
+  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine, ...c.lastLineFor?.(item, dor) };
   return [...dor.criteria.map(line), JSON.stringify(last)].join("\n");
 };
 

@@ -3855,6 +3855,14 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     nothing is kept or filed,
     the proposal goes up under `dedupeKey = <proposal key> + ":unfiled:" + readinessSha` with a note in each failing child's section listing its failed lines,
     and the parent's own verdicts stand.
+    Each child's judgement also goes through `ruleVerdicts`,
+    with `awaitApproval` false (PBI 444),
+    so a rules section whose Before is off `main`,
+    or that misses a rule the judge finds,
+    fails the child,
+    but no `rule change approval` verdict is added,
+    since nobody can approve a child before it's filed.
+    The filed child then waits in NotReady for that approval like any item with the section.
     A kept split passed this check before it was kept and isn't judged again.
     A gated item that fails only `dor.md` lines,
     and isn't being split,
@@ -4228,6 +4236,9 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
   is still flagged.
   The new words change the readiness logic's fingerprint,
   so every NotReady item is checked again (PBI 149).
+  Since PBI 444 the prompt also says a change to the factory's rules that still needs the owner's approval is never a flag,
+  since the engine asks the owner for that approval itself,
+  and that change to the prompt re-checks every NotReady item in the same way.
   That check is the engine's,
   and no `dor.md` can remove it.
   `readinessLogic()` returns the prompt's own words,

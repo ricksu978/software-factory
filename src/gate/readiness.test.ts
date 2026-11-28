@@ -465,6 +465,44 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     }
   });
 
+  // PBI 444: a proposed child's rules section is held to main as an item's is, but nobody can approve a child before
+  // it's filed, so its wait for the owner's approval never stops the split.
+  const SPEC6 = `<section id="sop">\n<h2><span class="n">06</span>SOP</h2>\n<p>A lease lasts ten minutes.</p>\n</section>`;
+  const mainRules = async (path: string) => (path === SPEC_PATH ? SPEC6 : null);
+  const withRules = (before: string) => JSON.stringify({ children: [
+    { title: "A", body: "a", criteria: [1], needs: [] },
+    { title: "B", body: `b\n\n## Changes the factory's rules\n\n### Spec §6\n**Before**\n> ${before}\n\n**After**\n> A lease lasts five minutes.\n`, criteria: [2], needs: [1] },
+  ] });
+  const ruleJudge = async (i: FactoryItem, d: Policy) => {
+    const lines = verdicts(d, false, i.title !== "A" && i.title !== "B").split("\n");
+    const last = { ...JSON.parse(lines.at(-1)!), rules: i.title === "B" ? ["§6"] : [] };
+    return [...lines.slice(0, -1), JSON.stringify(last)].join("\n");
+  };
+
+  test("a proposed child whose rules section holds against main doesn't stop the split, and isn't rewritten (PBI 444)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    let rewrites = 0;
+    const agent = async (a: AgentArgs) => { if (a.prompt.startsWith("Rewrite")) rewrites++; return answer(withRules("A lease lasts ten minutes.")); };
+    const b = board(new Map());
+    const out = await gate(s.item, s.ctx("", { split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file }, judge: ruleJudge, factoryRules: mainRules }));
+    assert.equal(rewrites, 0);
+    assert.deepEqual(b.created, ["A", "B"]);
+    assert.equal(out.filed, true);
+    assert.doesNotMatch((await s.fake.comments(s.id)).find((c) => c.startsWith("The factory proposes splitting"))!, /waits for the owner|Definition of Ready/);
+  });
+
+  test("a proposed child whose Before isn't on main stops the split, and the proposal names its section (PBI 444)", async () => {
+    const s = await setup("- [ ] Has a title\n", { acceptanceCriteria: ["one", "two"], repo: "o/r" });
+    const agent = async () => answer(withRules("A lease lasts eight minutes."));
+    const b = board(new Map());
+    const out = await gate(s.item, s.ctx("", { split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file }, judge: ruleJudge, factoryRules: mainRules }));
+    assert.deepEqual(b.created, []);
+    assert.equal(out.filed, undefined);
+    const proposal = (await s.fake.comments(s.id)).find((c) => c.startsWith("The factory proposes splitting"))!;
+    assert.match(proposal.split("### 2.")[1], /Before quoted for spec section §6 doesn't match main word for word/);
+    assert.doesNotMatch(proposal.split("### 2.")[0], /§6/);
+  });
+
   test("a permission the App lacks fails the item as an engine rule, and the comment says what the owner has to do", async () => {
     const s = await setup("- [ ] Has a title\n");
     const out = await gate(s.item, s.ctx(passAll(1), { missingPermissions: ["issues: write"] }));

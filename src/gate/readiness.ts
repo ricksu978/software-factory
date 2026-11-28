@@ -209,9 +209,11 @@ const named = (key: string) => (key.startsWith("§") ? `spec section ${key}` : k
  * should cover, or fails on its own when dor.md has no such line. When every entry holds and the section covers every
  * rule the judge finds, the engine passes the rules line whatever the judge said of it (PBI 414), as long as the judge's
  * reply was `readable`: an unreadable one named no rules, so the line keeps its unreadable failure. When nothing else
- * failed, a section the owner hasn't approved as it reads now leaves the item waiting for that approval.
+ * failed, a section the owner hasn't approved as it reads now leaves the item waiting for that approval, unless
+ * `awaitApproval` is false: a proposed split child can't be approved before it's filed, so its section is held to `main`
+ * and to what the judge found, and the approval is asked for once it's filed (PBI 444).
  */
-async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict[], found: string[], readable: boolean): Promise<{ results: Verdict[]; changes: RuleChangeRead[]; approved: boolean }> {
+async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict[], found: string[], readable: boolean, awaitApproval = true): Promise<{ results: Verdict[]; changes: RuleChangeRead[]; approved: boolean }> {
   const changes = await checkRuleChanges(parseRuleChanges(item.body), ctx.factoryRules);
   const results = judged.map((r) => ({ ...r }));
   for (const c of changes) if (c.problem) results.push({ ...engine(c.problem), criterion: "rule change" });
@@ -235,7 +237,7 @@ async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict
     }
   }
   const approved = changes.length > 0 && ctx.ruleApproval === ruleChangesHash(changes);
-  if (changes.length > 0 && !approved && results.every((r) => r.status === "passed")) {
+  if (awaitApproval && changes.length > 0 && !approved && results.every((r) => r.status === "passed")) {
     results.push({
       ...engine(`The item waits for the owner to approve its change to ${names(changes.map((c) => placeName(c.place)))}. The owner approves it on the item's page in the factory's dashboard.`),
       criterion: APPROVAL_CRITERION,
@@ -275,7 +277,9 @@ const rewritable = (failed: Verdict[]) => failed.length > 0 && failed.every((v) 
 /**
  * Judges each proposed child against the parent's dor.md before the split is filed (PBI 264), as the issue it would
  * be filed as. A child that fails only dor.md lines gets one rewrite of its body, given the judge's reasons, and is
- * judged again. Returns the children, rewritten where they were, and for each one that still fails, its failed lines.
+ * judged again. A child's "Changes the factory's rules" section is held to `main` and to the rules the judge finds, as
+ * an item's is, but its wait for the owner's approval doesn't fail it: that's asked for once it's filed (PBI 444).
+ * Returns the children, rewritten where they were, and for each one that still fails, its failed lines.
  */
 async function checkChildren(parent: FactoryItem, children: SplitChild[], dor: Policy, ctx: GateContext, deps: SplitDeps, heading: string):
   Promise<{ children: SplitChild[]; failing: (Verdict[] | undefined)[] }> {
@@ -285,7 +289,11 @@ async function checkChildren(parent: FactoryItem, children: SplitChild[], dor: P
     ...parent, externalId: `${parent.externalId}/split-${n}`, title: ch.title, body: childBody(parent, ch, n, heading),
     acceptanceCriteria: ch.criteria.map((c) => parent.acceptanceCriteria[c - 1]), labels: [], fields: {},
   });
-  const failedOf = async (ch: SplitChild, n: number) => (await judgement(asFiled(ch, n), parent, dor, ctx)).results.filter((r) => r.status !== "passed");
+  const failedOf = async (ch: SplitChild, n: number) => {
+    const subject = asFiled(ch, n);
+    const { results, rules, readable } = await judgement(subject, parent, dor, ctx);
+    return (await ruleVerdicts(subject, ctx, results, rules, readable, false)).results.filter((r) => r.status !== "passed");
+  };
   for (const [i, child] of children.entries()) {
     let ch = child;
     let failed = await failedOf(ch, i + 1);
