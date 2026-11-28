@@ -4,6 +4,7 @@
 import type pg from "pg";
 import { parseRuleChanges, ruleChangesHash } from "../gate/rule-changes.ts";
 import { appendEvent, type Actor } from "./events.ts";
+import { CONSUMER, writeOutboxRows } from "./outbox.ts";
 import { RULE_CHANGE_APPROVED } from "./rule-changes.ts";
 
 /**
@@ -36,13 +37,15 @@ export async function proposedRewrites(pool: pg.Pool | pg.ClientBase, itemId: st
 
 /**
  * What the factory already did for the item's text `textHash`, whose body is `body`: "standing" when a proposal for it
- * stands, "spent" when the coding model was asked for it already, or when the text is a rewrite the owner accepted, and
- * null when nothing was asked yet.
+ * stands, or when the text is the body of a proposal that stands (the factory's edit for an acceptance whose
+ * transaction didn't commit, which the owner's retry completes); "spent" when the coding model was asked for it
+ * already, or when the text is a rewrite the factory proposed and the owner accepted or a person's edit withdrew; and
+ * null when nothing was asked yet. So the factory never asks for a rewrite of a text it proposed itself.
  */
 export async function rewriteAsked(pool: pg.Pool | pg.ClientBase, itemId: string, textHash: string, body: string): Promise<"standing" | "spent" | null> {
   const r = await pool.query<{ standing: boolean }>(
     `select (body is not null and accepted_at is null and withdrawn_at is null) as standing from item_rewrite
-     where item_id = $1 and (text_hash = $2 or (accepted_at is not null and body = $3))
+     where item_id = $1 and (text_hash = $2 or body = $3)
      order by (text_hash = $2) desc limit 1`,
     [itemId, textHash, body],
   );
@@ -60,13 +63,16 @@ export async function keepRewrite(pool: pg.Pool | pg.ClientBase, a: { itemId: st
 
 /**
  * Withdraws each of the item's standing proposals made for a text other than `textHash`, after a person's edit, and
- * logs each withdrawal as `rewrite_withdrawn` with the cause "item_edited". Returns how many it withdrew.
+ * logs each withdrawal as `rewrite_withdrawn` with the cause "item_edited". Returns how many it withdrew. A proposal
+ * whose body is the issue's `body` now stays: that text is the factory's own edit for an acceptance whose transaction
+ * didn't commit, not a person's, and the owner's retry completes the acceptance.
  */
-export async function withdrawRewrites(c: pg.ClientBase, itemId: string, textHash: string, actor: Actor = { actor: "system", actorId: "poller" }): Promise<number> {
+export async function withdrawRewrites(c: pg.ClientBase, itemId: string, textHash: string, actor: Actor = { actor: "system", actorId: "poller" }, body: string | null = null): Promise<number> {
   const r = await c.query<{ id: string }>(
     `update item_rewrite set withdrawn_at = now()
-     where item_id = $1 and text_hash <> $2 and body is not null and accepted_at is null and withdrawn_at is null returning id`,
-    [itemId, textHash],
+     where item_id = $1 and text_hash <> $2 and body is not null and accepted_at is null and withdrawn_at is null
+       and body is distinct from $3 returning id`,
+    [itemId, textHash, body],
   );
   for (const { id } of r.rows) {
     await appendEvent(c, { ...actor, itemId, kind: REWRITE_WITHDRAWN, payload: { cause: "item_edited", rewriteId: id } });
@@ -74,18 +80,31 @@ export async function withdrawRewrites(c: pg.ClientBase, itemId: string, textHas
   return r.rowCount ?? 0;
 }
 
+/** The comment the factory posts on the issue when it applies the rewrite the owner accepted. */
+export function acceptedComment(login: string): string {
+  return `The factory applied the rewrite of this item's body that ${login}, the owner, accepted on the item's page in the factory's dashboard. The factory checks the item again now.`;
+}
+
+/**
+ * `edit` is true when the issue body still reads the text the proposal rewrites, so the caller writes the proposed body
+ * over it, and false when the issue already reads the proposed body: the factory's edit for an earlier acceptance of
+ * it landed, and that acceptance's transaction didn't commit.
+ */
 export type Acceptance =
-  | { outcome: "accepted"; rewrite: ProposedRewrite; rulesApproved: boolean }
+  | { outcome: "accepted"; rewrite: ProposedRewrite; rulesApproved: boolean; edit: boolean }
   | { outcome: "unknown" | "withdrawn" | "accepted_already" | "edited" | "not_waiting" };
 
 /**
  * The owner accepts the proposal `rewriteId` of the item, inside a transaction that locks it. `issueBody` is the issue
- * body as it reads now: when it isn't the body the proposal rewrites, a person edited the item since, so the proposal
- * is withdrawn as the poller would withdraw it and nothing is accepted. When the proposed body adds or changes a
+ * body as it reads now: when it is neither the body the proposal rewrites nor the proposed body, a person edited the
+ * item since, so the proposal is withdrawn as the poller would withdraw it and nothing is accepted. The
+ * `rewrite_accepted` event, which names the owner's `login`, gets a `rewrite_accepted` outbox row on the same
+ * transaction, from which the worker posts the comment saying the factory applied the rewrite, retrying it with
+ * backoff until it's posted. When the proposed body adds or changes a
  * "Changes the factory's rules" section, the owner's approval of that section as it reads is logged as PBI 395's
  * `rule_change_approved` at `at`, so the item doesn't wait for a second click.
  */
-export async function acceptRewrite(c: pg.ClientBase, a: { itemId: string; rewriteId: string; userId: string; at: Date; issueBody: string }): Promise<Acceptance> {
+export async function acceptRewrite(c: pg.ClientBase, a: { itemId: string; rewriteId: string; userId: string; login?: string; at: Date; issueBody: string }): Promise<Acceptance> {
   const row = (await c.query<Row & { accepted_at: Date | null; withdrawn_at: Date | null }>(
     `select id, item_id, body, current, proposed_at, accepted_at, withdrawn_at from item_rewrite
      where id = $1 and item_id = $2 and body is not null for update`,
@@ -98,18 +117,19 @@ export async function acceptRewrite(c: pg.ClientBase, a: { itemId: string; rewri
   const state = (await c.query<{ state: string }>("select state from item where id = $1 for update", [a.itemId])).rows[0]?.state;
   if (state !== "NotReady") return { outcome: "not_waiting" };
   const actor = { actor: "human" as const, actorId: a.userId };
-  if (row.current !== a.issueBody) {
+  if (row.current !== a.issueBody && row.body !== a.issueBody) {
     await withdrawRewrites(c, a.itemId, "", actor);
     return { outcome: "edited" };
   }
   await c.query("update item_rewrite set accepted_at = $2, accepted_by = $3 where id = $1", [row.id, a.at, a.userId]);
-  await appendEvent(c, { ...actor, itemId: a.itemId, kind: REWRITE_ACCEPTED, payload: { rewriteId: row.id }, at: a.at });
+  const accepted = await appendEvent(c, { ...actor, itemId: a.itemId, kind: REWRITE_ACCEPTED, payload: { rewriteId: row.id, login: a.login ?? null }, at: a.at });
+  await writeOutboxRows(c, CONSUMER.rewriteAccepted, accepted, [a.itemId]);
   const changes = parseRuleChanges(row.body).map((ch) => ({ place: ch.place, before: ch.before, after: ch.after }));
   const rulesApproved = changes.length > 0 && ruleChangesHash(changes) !== ruleChangesHash(parseRuleChanges(row.current));
   if (rulesApproved) {
     await appendEvent(c, { ...actor, itemId: a.itemId, kind: RULE_CHANGE_APPROVED, payload: { rulesHash: ruleChangesHash(changes), changes, via: "rewrite" }, at: a.at });
   }
-  return { outcome: "accepted", rewrite: view(row), rulesApproved };
+  return { outcome: "accepted", rewrite: view(row), rulesApproved, edit: row.current === a.issueBody && row.body !== a.issueBody };
 }
 
 /** Each board with an accepted rewrite the worker hasn't run the readiness check for yet, by source id. */

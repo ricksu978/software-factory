@@ -9,6 +9,7 @@ import type { FeatureChangeFile } from "../core/feature-change.ts";
 import { announcement, applyComment, type DecisionKind } from "../control/decisions.ts";
 import type { ItemEvent, ItemState } from "../core/states.ts";
 import { CONSUMER, type Consumer } from "../store/outbox.ts";
+import { acceptedComment } from "../store/rewrites.ts";
 
 export type OutboxDeps = BoardDeps;
 
@@ -109,6 +110,11 @@ export async function runRowEffects(deps: OutboxDeps, row: OutboxRow): Promise<v
   } else if (row.consumer === CONSUMER.decisionAnnouncement) {
     const body = announcement(p.kind as DecisionKind, typeof p.text === "string" ? p.text : "", typeof p.about === "string" ? p.about : undefined);
     await deps.backlogFor(item.source_id).comment(item.external_id, body, `decision:${row.eventId}`);
+  } else if (row.consumer === CONSUMER.rewriteAccepted) {
+    // PBI 439: the comment for the owner's accepted rewrite, keyed by the proposal, so it's posted once however often
+    // the row is tried.
+    const login = typeof p.login === "string" ? p.login : "the owner";
+    await deps.backlogFor(item.source_id).comment(item.external_id, acceptedComment(login), `rewrite-accepted:${String(p.rewriteId)}`);
   } else if (row.consumer === CONSUMER.commentCommands) {
     const e = p.event as FactoryWebhookEvent;
     if (e?.kind !== "comment") return;

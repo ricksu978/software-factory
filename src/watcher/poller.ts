@@ -434,7 +434,7 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
     // A person's edit withdraws any rewrite proposed for the text before it (PBI 439).
-    if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited", (c) => withdrawRewrites(c, row.id, itemTextHash(fi)));
+    if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited", (c) => withdrawRewrites(c, row.id, itemTextHash(fi), undefined, fi.body));
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
   // Most often a failure here is the judge, or the coding model asked for a split, on a usage limit. The item stays

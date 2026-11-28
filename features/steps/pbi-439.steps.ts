@@ -27,8 +27,9 @@
 //   rewrite" in a form that posts to /items/<id>/rewrite-acceptance, its hidden fields naming the proposal. A user
 //   accepts by posting that form: the owner's post answers 303, anyone else's 403, and one for a proposal that a
 //   person's edit withdrew 409 with a reason that says it was withdrawn.
-// - Accepting writes the proposed body over the issue with DashboardDeps.rewrites.editBody, posts its comment with the
-//   dashboard's adapter, and runs the readiness check at once with DashboardDeps.rewrites.recheck, before it answers.
+// - Accepting writes the proposed body over the issue with DashboardDeps.rewrites.editBody, queues its comment as a
+//   rewrite_accepted outbox row, and runs the readiness check at once with DashboardDeps.rewrites.recheck, before it
+//   answers. The steps then run that row's effect as the worker does, with the board's fake adapter.
 //   Here, editBody seeds the board item with that body and the criteria it lists, and recheck runs the worker's
 //   recheckAccepted with one poll. In production the acceptance's event wakes the worker, which runs the same call.
 // - A person's edit withdrawing a proposal is an event of kind "rewrite_withdrawn" whose payload's cause is
@@ -40,6 +41,8 @@ import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import type { Policy } from "../../src/policy/policy.ts";
 import { proposedRewrites, rechecksOwed, type ProposedRewrite } from "../../src/store/rewrites.ts";
+import { CONSUMER } from "../../src/store/outbox.ts";
+import { runRowEffects } from "../../src/worker/outbox.ts";
 import { recheckAccepted } from "../../src/worker/rechecks.ts";
 import { ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { ctx as commentCtx } from "./pbi-149.steps.ts";
@@ -508,8 +511,21 @@ async function postAcceptance(world: object, login: string, fields: Record<strin
       body: new URLSearchParams(fields).toString(),
     });
     k.acceptance = { status: r.status, text: await r.text() };
+    await postAcceptedComments(world);
   } finally {
     k.accepting = false;
+  }
+}
+
+/** The worker's pass over the acceptance's rewrite_accepted outbox rows, which posts its comment (src/worker/outbox.ts). */
+async function postAcceptedComments(world: object): Promise<void> {
+  const c = ctx395(world);
+  const rows = await pool().query<{ seq: string; event_id: string; item_id: string }>(
+    "select seq, event_id, item_id from outbox where consumer = $1 order by seq", [CONSUMER.rewriteAccepted],
+  );
+  for (const r of rows.rows) {
+    await runRowEffects({ pool: pool(), backlogFor: () => c.fake!.adapter, repoHost: c.host! }, { seq: r.seq, consumer: CONSUMER.rewriteAccepted, eventId: r.event_id, itemId: r.item_id });
+    await pool().query("delete from outbox where seq = $1", [r.seq]);
   }
 }
 

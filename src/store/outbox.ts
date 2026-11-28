@@ -8,6 +8,8 @@ export const CONSUMER = {
   boardMirror: "board_mirror",
   decisionAnnouncement: "decision_announcement",
   commentCommands: "comment_commands",
+  /** PBI 439: the comment saying the factory applied the rewrite the owner accepted. */
+  rewriteAccepted: "rewrite_accepted",
 } as const;
 
 export type Consumer = (typeof CONSUMER)[keyof typeof CONSUMER];

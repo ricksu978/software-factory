@@ -4086,6 +4086,8 @@ Feature: Export invoices to CSV
 
     posts one comment saying the factory applied the rewrite the owner accepted,
 
+    which the worker posts from the acceptance's outbox row and retries until it's posted,
+
     and checks the item again at once:
 
     the acceptance's <code>rewrite_accepted</code> event wakes the worker through Postgres's LISTEN/NOTIFY,

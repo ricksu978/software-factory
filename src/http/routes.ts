@@ -355,15 +355,13 @@ async function rewriteOf(pool: pg.Pool, id: string, canAccept: boolean): Promise
   return p ? { id: p.id, current: p.current, body: p.body, canAccept } : null;
 }
 
-/** The comment the factory posts on the issue when it applies the rewrite the owner accepted (PBI 439). */
-export function acceptedComment(login: string): string {
-  return `The factory applied the rewrite of this item's body that ${login}, the owner, accepted on the item's page in the factory's dashboard. The factory checks the item again now.`;
-}
-
 /**
  * PBI 439: the owner accepts the rewrite proposed for the item. In one transaction the proposal is accepted, with the
- * owner's approval of a rules section it adds or changes, and the issue's body is edited to it, so a failed edit
- * accepts nothing. Then the comment goes out and the readiness check runs at once.
+ * owner's approval of a rules section it adds or changes and the outbox row the worker posts the acceptance's comment
+ * from, retrying it until it's posted, and the issue's body is edited to it, so a failed edit accepts nothing. An edit
+ * that lands under a transaction that then fails to commit leaves the proposal standing with the issue reading its
+ * body: the poller neither withdraws it nor asks for a rewrite of that text, and the owner's retry accepts it without
+ * editing again. Then the readiness check runs at once.
  */
 async function acceptance(deps: DashboardDeps, rw: RewriteDeps, a: { itemId: string; rewriteId: string; user: User; login: string }):
   Promise<{ status: number; text: string }> {
@@ -373,8 +371,8 @@ async function acceptance(deps: DashboardDeps, rw: RewriteDeps, a: { itemId: str
   if (!fi) return { status: 404, text: "The item's issue isn't on the board." };
   const at = (deps.now ?? (() => new Date()))();
   const out = await withTx(deps.pool, async (c) => {
-    const r = await acceptRewrite(c, { itemId: a.itemId, rewriteId: a.rewriteId, userId: a.user.id, at, issueBody: fi.body });
-    if (r.outcome === "accepted") await rw.editBody(item.external_id, r.rewrite.body);
+    const r = await acceptRewrite(c, { itemId: a.itemId, rewriteId: a.rewriteId, userId: a.user.id, login: a.login, at, issueBody: fi.body });
+    if (r.outcome === "accepted" && r.edit) await rw.editBody(item.external_id, r.rewrite.body);
     return r;
   });
   if (out.outcome === "unknown") return { status: 404, text: "No such proposed rewrite." };
@@ -382,7 +380,6 @@ async function acceptance(deps: DashboardDeps, rw: RewriteDeps, a: { itemId: str
   if (out.outcome === "edited") return { status: 409, text: "The item was edited since the rewrite was proposed, so the proposal is withdrawn." };
   if (out.outcome === "accepted_already") return { status: 409, text: "That proposed rewrite was accepted already." };
   if (out.outcome === "not_waiting") return { status: 409, text: "That item isn't waiting in NotReady, so it takes no rewrite." };
-  await deps.adapter.comment(item.external_id, acceptedComment(a.login), `rewrite-accepted:${a.rewriteId}`);
   await rw.recheck(a.itemId);
   return { status: 303, text: "" };
 }

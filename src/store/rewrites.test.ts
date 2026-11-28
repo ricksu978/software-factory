@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { withTx } from "./db.ts";
-import { acceptRewrite, keepRewrite, markRechecked, proposedRewrites, rechecksOwed, REWRITE_WITHDRAWN, rewriteAsked, withdrawRewrites } from "./rewrites.ts";
+import { acceptedComment, acceptRewrite, keepRewrite, markRechecked, proposedRewrites, rechecksOwed, REWRITE_WITHDRAWN, rewriteAsked, withdrawRewrites } from "./rewrites.ts";
 import { approvedRulesHash } from "./rule-changes.ts";
 import { parseRuleChanges, ruleChangesHash } from "../gate/rule-changes.ts";
+import { CONSUMER } from "./outbox.ts";
 import { dbTest, startTestDb } from "./test-db.ts";
+import { runRowEffects } from "../worker/outbox.ts";
 
 describe("the rewrites proposed for an item a person wrote (PBI 439)", dbTest, () => {
   let db: Awaited<ReturnType<typeof startTestDb>>;
@@ -88,5 +90,34 @@ describe("the rewrites proposed for an item a person wrote (PBI 439)", dbTest, (
     assert.ok(owed.length >= 4);
     await markRechecked(db.pool, owed);
     assert.equal((await rechecksOwed(db.pool)).size, 0);
+  });
+
+  test("an acceptance queues its comment in the outbox, which the worker posts once under the proposal's key", async () => {
+    const id = await item();
+    await keepRewrite(db.pool, { itemId: id, textHash: "h1", body: "new", current: "old" });
+    const [p] = await proposedRewrites(db.pool, id);
+    const out = await withTx(db.pool, async (c) => acceptRewrite(c, { itemId: id, rewriteId: p.id, userId: await owner(), login: "olive", at, issueBody: "old" }));
+    assert.equal(out.outcome === "accepted" && out.edit, true);
+    const rows = (await db.pool.query<{ seq: string; event_id: string }>("select seq, event_id from outbox where item_id = $1 and consumer = $2", [id, CONSUMER.rewriteAccepted])).rows;
+    assert.equal(rows.length, 1);
+    const posted: [string, string, string | undefined][] = [];
+    const adapter = { comment: async (ext: string, body: string, key?: string) => void posted.push([ext, body, key]) };
+    const deps = { pool: db.pool, backlogFor: () => adapter, repoHost: {} } as unknown as Parameters<typeof runRowEffects>[0];
+    await runRowEffects(deps, { seq: rows[0].seq, consumer: CONSUMER.rewriteAccepted, eventId: rows[0].event_id, itemId: id });
+    assert.deepEqual(posted, [["1", acceptedComment("olive"), `rewrite-accepted:${p.id}`]]);
+  });
+
+  test("an issue reading a standing proposal's body, from an edit whose acceptance didn't commit, is the factory's own text", async () => {
+    const id = await item();
+    await keepRewrite(db.pool, { itemId: id, textHash: "h1", body: "new", current: "old" });
+    const [p] = await proposedRewrites(db.pool, id);
+    // The poller neither withdraws the proposal nor asks the coding model to rewrite its text.
+    assert.equal(await withTx(db.pool, (c) => withdrawRewrites(c, id, "h-new", undefined, "new")), 0);
+    assert.equal(await rewriteAsked(db.pool, id, "h-new", "new"), "standing");
+    // The owner's retry accepts it without editing the issue again.
+    const out = await withTx(db.pool, async (c) => acceptRewrite(c, { itemId: id, rewriteId: p.id, userId: await owner(), at, issueBody: "new" }));
+    assert.equal(out.outcome, "accepted");
+    assert.equal(out.outcome === "accepted" && out.edit, false);
+    assert.equal(await rewriteAsked(db.pool, id, "h-new", "new"), "spent");
   });
 });

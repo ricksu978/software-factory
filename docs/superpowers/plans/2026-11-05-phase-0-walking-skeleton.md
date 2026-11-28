@@ -6973,15 +6973,21 @@ from spec §6 rows 1 to 7:
       and needs owner (PBI 439).
       `acceptRewrite` in `src/store/rewrites.ts` locks the proposal and the item and accepts it only while it stands,
       the item is NotReady,
-      and the issue's body still reads as it did when it was proposed.
-      If the body changed, it withdraws the proposal.
+      and the issue's body still reads as it did when it was proposed,
+      or already reads the proposed body, from an earlier acceptance whose edit landed and whose transaction didn't commit,
+      which it then accepts without editing again.
+      If the body changed otherwise, it withdraws the proposal.
+      The poller withdraws no proposal whose body the issue reads, and `rewriteAsked` reads such a text as asked already,
+      so the coding model is never asked to rewrite the factory's own proposed text.
       A proposed body whose `## Changes the factory's rules` section differs from the current body's logs `rule_change_approved` too,
       by the owner at the dashboard's `now`,
       with `rulesHash` and `changes` as the section reads.
       `DashboardDeps.rewrites.editBody` writes the body over the issue in the same transaction,
       so a failed edit accepts nothing.
-      Then the dashboard's adapter posts `acceptedComment` under `rewrite-accepted:<id>`,
-      and `rewrites.recheck` runs.
+      The `rewrite_accepted` event, naming the owner's login, gets a `rewrite_accepted` outbox row in that transaction,
+      from which the worker posts `acceptedComment` under `rewrite-accepted:<id>`,
+      retrying it with backoff as it does a decision's announcement.
+      Then `rewrites.recheck` runs.
       It answers 303 to the item page,
       403 to anyone but an owner,
       409 with a reason for a proposal that was withdrawn or accepted,
