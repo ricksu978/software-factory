@@ -26,7 +26,7 @@ import { zoneFrom } from "./format.ts";
 import { failedOnMain } from "../store/rechecks.ts";
 import { BadRequest, readJson, type Handler } from "./server.ts";
 import { changeSetting, envSettings, RUNTIME_SETTINGS, runtimeValues } from "./configuration.ts";
-import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, type ActivityRow, type MainBreakRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
+import { activityPage, configurationPage, floorPage, noAccessPage, phase0Page, runDetailPage, signInPage, transcriptPage, type ActivityRow, type MainBreakRow, type Phase0Row, type Restart, type RunDetail, type Scenario } from "./views.ts";
 
 export type DashboardDeps = {
   pool: pg.Pool;
@@ -76,6 +76,8 @@ export async function selectable(pool: pg.Pool, id: string, state: string): Prom
   return { startable: movable || state === "Eligible" || state === "NotReady", movable };
 }
 // The paths the cell API hands out: transcripts/<run>/<stage>-<attempt>.jsonl and reports/<run>/<stage>-<attempt>.ndjson.
+// PBI 326: an attempt's transcript page, the blob path transcripts/<run>/<stage>-<attempt>.jsonl without its .jsonl.
+export const TRANSCRIPT_PAGE = /^\/transcripts\/([0-9a-f-]{36})\/([a-z0-9-]+)-(\d+)$/;
 export const BLOB_PATH = /^\/blobs\/((?:transcripts\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.jsonl)|(?:reports\/[0-9a-f-]{36}\/[a-z0-9-]+-\d+\.ndjson))$/;
 
 type User = { id: string; role: Role; product_owner: boolean; github_login: string | null };
@@ -621,6 +623,33 @@ export function dashboardRoutes(deps: DashboardDeps): Handler & { close(): Promi
       const outcome = await changeSetting(deps.pool, user.id, b.setting ?? "", b.value ?? "", b.reason, clock());
       if (!outcome.ok) await view(outcome.status, { error: outcome.message });
       else send(res, 303, "", { location: `/configuration?changed=${encodeURIComponent(outcome.updates[0].key)}` });
+      return true;
+    }
+    const tp = TRANSCRIPT_PAGE.exec(path);
+    if (req.method === "GET" && tp) {
+      // An attempt with no end is running only while the item is In progress on an open run, and only if it's the
+      // run's newest attempt, as Run detail has it: a row a dead cell left open is stopped (PBI 209, PBI 239).
+      const row = (await deps.pool.query(
+        `select s.stage_id, s.attempt, s.status, s.ended_at, s.transcript_ref, i.id as item_id, i.title, i.external_id, i.state,
+           r.ended_at is null as open,
+           s.started_at is not null and s.started_at = (select max(started_at) from stage_run where run_id = r.id) as newest
+         from stage_run s join run r on r.id = s.run_id join item i on i.id = r.item_id
+         where s.run_id = $1 and s.stage_id = $2 and s.attempt = $3`, [tp[1], tp[2], Number(tp[3])],
+      )).rows[0];
+      if (!row) {
+        send(res, 404, "No such stage attempt.");
+        return true;
+      }
+      const running = row.state === "InProgress" && row.open && row.newest && !row.ended_at;
+      const ref: string | null = row.transcript_ref;
+      const served = Boolean(deps.readBlob && ref && BLOB_PATH.test(`/blobs/${ref}`));
+      send(res, 200, transcriptPage({
+        item: { id: row.item_id, title: row.title, external_id: row.external_id, repo: (await issueRepos(deps.pool, [row.item_id])).get(row.item_id) ?? null },
+        stage: { stage_id: row.stage_id, attempt: row.attempt }, running,
+        stopped: !running && (row.status === "stopped" || (row.status === "started" && !row.ended_at)),
+        rawHref: served ? `/blobs/${ref}` : null,
+        jsonl: served && deps.readBlob && ref ? await deps.readBlob(ref) : null,
+      }, banner));
       return true;
     }
     const blob = BLOB_PATH.exec(path);

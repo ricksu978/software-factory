@@ -479,10 +479,20 @@ function link(html: string, stage: string, n: number): string | null {
   return /<a\b[^>]*\bhref\s*=\s*"([^"]*)"/i.exec(r.html[column(t, /^Transcript$/i)])?.[1].replace(/&amp;/g, "&") ?? null;
 }
 
+/**
+ * Follows a transcript link to the stored file. Run detail links the attempt's transcript page (PBI 326), which keeps
+ * the raw JSON Lines file one click away: this follows that click too.
+ */
 async function blob(world: object, href: string): Promise<{ status: number; text: string }> {
   const ic = itemCtx(world);
-  const r = await fetch(new URL(href, ic.origin), { headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "viewer", "x-ms-client-principal-name": "viewer" } });
-  return { status: r.status, text: await r.text() };
+  const get = async (h: string) => {
+    const r = await fetch(new URL(h, ic.origin), { headers: { "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": "viewer", "x-ms-client-principal-name": "viewer" } });
+    return { status: r.status, text: await r.text() };
+  };
+  const got = await get(href);
+  if (got.status !== 200 || !href.startsWith("/transcripts/")) return got;
+  const raw = /<a href="(\/blobs\/[^"]*)">Raw JSON Lines file<\/a>/.exec(got.text)?.[1].replace(/&amp;/g, "&");
+  return raw ? get(raw) : { status: 404, text: `${href} links no raw JSON Lines file` };
 }
 
 /** Follows the attempt's transcript link. A missing link or file is kept as the reason, for the Then to report. */
@@ -840,7 +850,7 @@ Then("the transcript stored at {string} holds the first call's {int} messages fo
 Then("Run detail links that transcript for {string} attempt {int}", long, async function (stage: string, n: number) {
   const c = ctx(this);
   const href = link(await runDetail(this), stage, n);
-  assert.equal(href, `/blobs/transcripts/${c.runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/transcripts/${c.runId}/${stage}-${n}`);
   const got = await blob(this, href);
   assert.equal(got.status, 200);
   assert.equal(got.text, c.blobs.get(`transcripts/${c.runId}/${stage}-${n}.jsonl`));
@@ -939,7 +949,7 @@ Then("the Stages table shows {string} attempt {int} as still running", function 
 
 Then("the Stages table links the transcript for {string} attempt {int}", function (stage: string, n: number) {
   const href = link(itemCtx(this).page!, stage, n);
-  assert.equal(href, `/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/transcripts/${ctx(this).runId}/${stage}-${n}`);
 });
 
 When("a viewer follows the transcript link for {string} attempt {int} on Run detail", long, async function (stage: string, n: number) {
@@ -1000,7 +1010,7 @@ Then("the Stages table links a transcript for {string} attempt {int} showing tho
 
 Then("the Stages table links a separate transcript for {string} attempt {int}", long, async function (stage: string, n: number) {
   const href = link(itemCtx(this).page!, stage, n);
-  assert.equal(href, `/blobs/transcripts/${ctx(this).runId}/${stage}-${n}.jsonl`);
+  assert.equal(href, `/transcripts/${ctx(this).runId}/${stage}-${n}`);
   const got = await blob(this, href);
   assert.deepEqual(ids(got.text), attemptOf(this, stage, n).messages);
 });

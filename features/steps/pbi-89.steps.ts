@@ -355,9 +355,14 @@ Then("the scenario {string} shows red at Red and green at Green", function (name
 
 Then("the red stage links its transcript, and the link opens it", async function () {
   const c = ctx(this);
-  const href = `/blobs/transcripts/${c.runId}/red-1.jsonl`;
+  // Run detail links the attempt's transcript page (PBI 326), and the page links the raw JSON Lines file.
+  const href = `/transcripts/${c.runId}/red-1`;
   assert.ok(c.html!.includes(`<a href="${href}">`), "no transcript link");
-  const r = await fetch(`${c.origin}${href}`, { headers: headers(c.login!) });
+  const p = await fetch(`${c.origin}${href}`, { headers: headers(c.login!) });
+  assert.equal(p.status, 200);
+  const raw = `/blobs/transcripts/${c.runId}/red-1.jsonl`;
+  assert.ok((await p.text()).includes(`<a href="${raw}">Raw JSON Lines file</a>`), "the transcript page doesn't link the raw file");
+  const r = await fetch(`${c.origin}${raw}`, { headers: headers(c.login!) });
   assert.equal(r.status, 200);
   assert.equal(await r.text(), '{"type":"assistant"}\n');
 });

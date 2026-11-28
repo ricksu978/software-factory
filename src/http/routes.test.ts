@@ -196,7 +196,7 @@ describe("dashboard routes", dbTest, () => {
     await db.pool.query("insert into stage_run (run_id, stage_id, attempt, status, model, tokens_in, tokens_out, cost_usd, transcript_ref) values ($1, 'green', 2, 'passed', 'claude-opus-5-5', 100, 50, 2.5, 'transcripts/r/green-2.jsonl')", [run]);
     const { status, html } = await get(`/items/${id}`, "octo");
     assert.equal(status, 200);
-    for (const want of ["0.1.0", "cfg123", "lock456", "Medium", "touches caching", "dod.md", "repo", "Tests pass", "npm test exited 0", "claude-opus-5-5", "100 in, 50 out", "$2.5", "transcripts/r/green-2.jsonl"]) {
+    for (const want of ["0.1.0", "cfg123", "lock456", "Medium", "touches caching", "dod.md", "repo", "Tests pass", "npm test exited 0", "claude-opus-5-5", "100 in, 50 out", "$2.5", "transcripts/r/green-2"]) {
       assert.ok(html.includes(want), `${want} missing`);
     }
   });
@@ -570,13 +570,40 @@ describe("dashboard routes", dbTest, () => {
     const { html } = await get(`/items/${id}`, "octo");
     assert.match(html, /<td>Exports one month<\/td><td>red<\/td><td>green<\/td>/);
     assert.doesNotMatch(html, /Someone else/);
-    assert.ok(html.includes(`<a href="/blobs/transcripts/${run}/red-1.jsonl">`), "transcript link");
+    assert.ok(html.includes(`<a href="/transcripts/${run}/red-1">transcript</a>`), "transcript link");
     const t = await fetch(`${origin}/blobs/transcripts/${run}/red-1.jsonl`, { headers: as("octo") });
     assert.equal(t.status, 200);
     assert.equal(await t.text(), '{"type":"assistant"}\n');
     assert.equal((await fetch(`${origin}/blobs/transcripts/${run}/missing-1.jsonl`, { headers: as("octo") })).status, 404);
     assert.equal((await fetch(`${origin}/blobs/secrets/${run}/red-1.jsonl`, { headers: as("octo") })).status, 404);
     assert.equal((await fetch(`${origin}/blobs/transcripts/${run}/red-1.jsonl`)).status, 401);
+  });
+
+  test("PBI 326: the transcript link opens the attempt as a conversation, drawn as text, with the raw file a click away", async () => {
+    await person("octo", "viewer");
+    const { id } = await item("InProgress", "Add search");
+    const run = (await db.pool.query<{ id: string }>("insert into run (item_id, run_number, next_stage) values ($1, 1, 'build') returning id", [id])).rows[0].id;
+    await db.pool.query(
+      "insert into stage_run (run_id, stage_id, attempt, status, transcript_ref, started_at) values ($1, 'build', 1, 'started', $2, now())",
+      [run, `transcripts/${run}/build-1.jsonl`],
+    );
+    blobs.set(`transcripts/${run}/build-1.jsonl`, [
+      { type: "factory_brief", prompt: "Write <b>it</b>" },
+      { type: "assistant", message: { id: "m1", content: [{ type: "thinking", thinking: "Read first" }, { type: "text", text: "<script>x</script>" }, { type: "tool_use", id: "t1", name: "Read", input: { file_path: "docs/spec.html" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "the spec" }] } },
+    ].map((m) => JSON.stringify(m) + "\n").join(""));
+    const { status, html } = await get(`/transcripts/${run}/build-1`, "octo");
+    assert.equal(status, 200);
+    assert.match(html, /Transcript of build attempt 1/);
+    assert.match(html, /The attempt is still running/);
+    assert.ok(html.includes(`<a href="/blobs/transcripts/${run}/build-1.jsonl">Raw JSON Lines file</a>`), "raw link");
+    assert.ok(html.includes("&lt;script&gt;x&lt;/script&gt;") && !html.includes("<script>x"), "text, not HTML");
+    const order = ["data-entry=\"brief\"", "Write &lt;b&gt;it&lt;/b&gt;", "Thinking", "Read first", "data-slot=\"tool-name\">Read<", "docs/spec.html", "data-part=\"tool-result\"", "the spec"].map((x) => html.indexOf(x));
+    assert.ok(order.every((at, k) => at >= 0 && (k === 0 || at > order[k - 1])), String(order));
+    blobs.clear();
+    assert.match((await get(`/transcripts/${run}/build-1`, "octo")).html, /can't be found: it's no longer stored/);
+    assert.equal((await get(`/transcripts/${run}/build-2`, "octo")).status, 404);
+    assert.equal((await fetch(`${origin}/transcripts/${run}/build-1`)).status, 401);
   });
 
   test("/phase0 lists each merged run with its own cost and tier, under the count, total and mean", async () => {
