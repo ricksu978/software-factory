@@ -38,7 +38,8 @@ const LABEL = "factory";
 const CONFIG = ".factory/config.yml";
 const BASE_CONFIG = "bdd:\n  parse: npm run bdd -- --dry-run\n  run: npm run bdd\n  report: reports/bdd.ndjson\ncommands:\n  test: npm test\n  lint: npm run lint\n";
 
-type Held = { id: string; ext: string; repo: string; failedAt: Date; seenComments: number };
+/** Exported for PBI 440's steps, which hold their items here so this file's steps read them. */
+export type Held = { id: string; ext: string; repo: string; failedAt: Date; seenComments: number };
 
 type Ctx = {
   repo: string;
@@ -56,7 +57,8 @@ type Ctx = {
   runDetail?: { status: number; html: string };
 };
 
-function ctx(world: object): Ctx {
+/** Exported for PBI 440's steps, which share this file's items, repo, clock and seeded events. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi369?: Ctx };
   w.pbi369 ??= { repo: "acme/widgets", repoIds: new Map(), items: new Map(), seeded: new Set() };
   return w.pbi369;

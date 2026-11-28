@@ -47,10 +47,14 @@ async function hold(world: object, state: string, ext?: string): Promise<PollCtx
   const c = pollCtx(world);
   assert.ok(await setup(c), "the poller's fakes or database aren't available");
   c.metered = scriptedJudge({ costUsd: 0.001 });
-  const id = await c.fake!.seed({ ...(ext ? { externalId: ext } : {}), labels: [LABEL], repo: REPO });
-  await c.fake!.seed({ externalId: id, title: title(id), labels: [LABEL], repo: REPO });
+  const repo = c.holdRepo?.() ?? REPO;
+  const id = await c.fake!.seed({ ...(ext ? { externalId: ext } : {}), labels: [LABEL], repo });
+  await c.fake!.seed({ externalId: id, title: title(id), labels: [LABEL], repo });
   c.extIds = [id];
-  await pool().query("insert into item (source_id, external_id, title, state, repo) values ($1, $2, $3, $4, $5)", [c.sourceId, id, title(id), state, REPO]);
+  const itemId = (await pool().query<{ id: string }>(
+    "insert into item (source_id, external_id, title, state, repo) values ($1, $2, $3, $4, $5) returning id", [c.sourceId, id, title(id), state, repo],
+  )).rows[0].id;
+  await c.onHold?.(id, itemId);
   return c;
 }
 

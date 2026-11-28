@@ -78,6 +78,10 @@ export type Ctx = {
   judgeOverride?: Judge;
   /** PBI 444: keys the judge's last line carries for this item, read on each ask, after `lastLine`. */
   lastLineFor?: (item: FactoryItem, dor: { criteria: { index: number; text: string }[] }) => Record<string, unknown>;
+  /** PBI 440: the repo PBI 168's "the factory holds item <n> in state" puts its item in. Unset, it's REPO. */
+  holdRepo?: () => string;
+  /** PBI 440: run once PBI 168's "the factory holds item <n> in state" has put its item in place, with its row's id. */
+  onHold?: (extId: string, itemId: string) => Promise<void>;
 };
 
 export function ctx(world: object): Ctx {
