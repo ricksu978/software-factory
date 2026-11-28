@@ -613,6 +613,46 @@ describe("gate on an item's rule changes (PBI 395)", () => {
     assert.ok(other.results.some((r) => r.index === 0 && r.status === "failed" && r.reason.includes("spec section §6")));
   });
 
+  test("PBI 414: with every entry on main and every judged rule covered, the engine passes the rules line the judge failed", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts ten minutes.") });
+    const out = await gate(s.item, s.ctx(reply(["§6"], { index: 2, reason: "The owner hasn't approved this change yet." }), { factoryRules }));
+    const line = out.results.find((r) => r.index === 2)!;
+    assert.equal(line.status, "passed");
+    assert.match(line.reason, /engine held each entry's Before to main/);
+    assert.match(line.reason, /covers every rule the judge named/);
+    assert.ok(!line.reason.includes("approved"));
+    assert.ok(out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+    const [comment] = await s.fake.comments(s.id);
+    assert.match(comment.split("\n")[0], /It passed every readiness check, and it changes the factory's own rules/);
+    const hash = ruleChangesHash(parseRuleChanges(s.item.body));
+    const approved = await gate(s.item, s.ctx(reply(["§6"], { index: 2, reason: "Not approved." }), { factoryRules, ruleApproval: hash }));
+    assert.equal(approved.ready, true);
+  });
+
+  test("PBI 414: an unreadable judge reply leaves the rules line failed as unreadable, even with a valid section", async () => {
+    const s = await setup(DOR, { body: body("A lease lasts ten minutes.") });
+    const out = await gate(s.item, s.ctx("garbage", { factoryRules }));
+    assert.equal(out.ready, false);
+    assert.deepEqual([out.results.find((r) => r.index === 2)?.status, out.results.find((r) => r.index === 2)?.reason], ["failed", "readiness check output unreadable"]);
+    assert.ok(!out.results.some((r) => r.criterion === APPROVAL_CRITERION));
+  });
+
+  test("PBI 414: an entry that's off leaves the judge's verdict on the rules line standing", async () => {
+    for (const b of [body("A lease lasts eight minutes."), "Lead.\n\n## Changes the factory's rules\n\n### Spec §6\n**Before**\n> A lease lasts ten minutes.\n"]) {
+      const s = await setup(DOR, { body: b });
+      const failed = await gate(s.item, s.ctx(reply(["§6"], { index: 2, reason: "Not approved." }), { factoryRules }));
+      assert.deepEqual([failed.results.find((r) => r.index === 2)?.status, failed.results.find((r) => r.index === 2)?.reason], ["failed", "Not approved."]);
+      const passed = await gate(s.item, s.ctx(reply(["§6"]), { factoryRules }));
+      assert.deepEqual([passed.results.find((r) => r.index === 2)?.status, passed.results.find((r) => r.index === 2)?.reason], ["passed", "ok"]);
+    }
+  });
+
+  test("PBI 414: an item with no section keeps the judge's verdict on the rules line when it names no rule", async () => {
+    const s = await setup(DOR, { body: "Lead.\n" });
+    const out = await gate(s.item, s.ctx(reply([], { index: 2, reason: "Reads like a rule change." }), { factoryRules }));
+    assert.deepEqual([out.results.find((r) => r.index === 2)?.status, out.results.find((r) => r.index === 2)?.reason], ["failed", "Reads like a rule change."]);
+  });
+
   test("an item that changes no rule and has no section is gated as before", async () => {
     const s = await setup(DOR, { body: "Lead.\n" });
     const out = await gate(s.item, s.ctx(reply([]), { factoryRules }));

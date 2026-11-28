@@ -178,10 +178,10 @@ function readJudgement(reply: string, dor: Policy): Judgement {
  * `judge` check against `owner`, the item whose row pays for it: the subject itself, or the parent of a proposed child,
  * whose check then names the child (PBI 348).
  */
-async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean; rules: string[] }> {
-  const { results, oversized, rules } = await recorded(owner, ctx, "judge", async (spent) => readJudgement(await ctx.judge(subject, dor, spent), dor),
+async function judgement(subject: FactoryItem, owner: FactoryItem, dor: Policy, ctx: GateContext): Promise<{ results: Verdict[]; oversized: boolean; rules: string[]; readable: boolean }> {
+  const { results, oversized, rules, verdict } = await recorded(owner, ctx, "judge", async (spent) => readJudgement(await ctx.judge(subject, dor, spent), dor),
     { verdict: (j) => j.verdict, child: subject === owner ? undefined : subject.title });
-  return { results, oversized, rules };
+  return { results, oversized, rules, readable: verdict.outcome !== "unreadable" };
 }
 
 /** The dor.md line about the factory's own rules, as the repo words it: the one that names "the factory's rules". */
@@ -194,10 +194,12 @@ const named = (key: string) => (key.startsWith("§") ? `spec section ${key}` : k
  * PBI 395: the item's "Changes the factory's rules" section, held to `main` and to what the judge found. An entry that
  * gives no Before or no After, or whose Before isn't on `main` word for word, fails the item, naming its section. A rule
  * the judge finds that the section doesn't cover fails dor.md's rules line, its finding naming each place the section
- * should cover, or fails on its own when dor.md has no such line. When nothing else failed, a section the owner hasn't
- * approved as it reads now leaves the item waiting for that approval.
+ * should cover, or fails on its own when dor.md has no such line. When every entry holds and the section covers every
+ * rule the judge finds, the engine passes the rules line whatever the judge said of it (PBI 414), as long as the judge's
+ * reply was `readable`: an unreadable one named no rules, so the line keeps its unreadable failure. When nothing else
+ * failed, a section the owner hasn't approved as it reads now leaves the item waiting for that approval.
  */
-async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict[], found: string[]): Promise<{ results: Verdict[]; changes: RuleChangeRead[]; approved: boolean }> {
+async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict[], found: string[], readable: boolean): Promise<{ results: Verdict[]; changes: RuleChangeRead[]; approved: boolean }> {
   const changes = await checkRuleChanges(parseRuleChanges(item.body), ctx.factoryRules);
   const results = judged.map((r) => ({ ...r }));
   for (const c of changes) if (c.problem) results.push({ ...engine(c.problem), criterion: "rule change" });
@@ -210,6 +212,15 @@ async function ruleVerdicts(item: FactoryItem, ctx: GateContext, judged: Verdict
       line.reason = line.status === "passed" ? cover : `${line.reason} ${cover}`;
       line.status = "failed";
     } else results.push({ ...engine(cover), criterion: "rule change" });
+  } else if (readable && changes.length > 0 && changes.every((c) => !c.problem)) {
+    // PBI 414: for an item with the section, the engine alone decides the rules line once every entry holds against
+    // main and the section covers every rule the judge found, whatever verdict the judge gave it. A judge that reads
+    // the line as "the owner hasn't approved this yet" would otherwise fail the item instead of leaving it to wait.
+    const line = results.find((r) => r.index > 0 && RULES_LINE.test(r.criterion));
+    if (line) {
+      line.status = "passed";
+      line.reason = `The engine held each entry's Before to main and found it there word for word, and the item's "${RULES_HEADING.slice(3)}" section covers every rule the judge named.`;
+    }
   }
   const approved = changes.length > 0 && ctx.ruleApproval === ruleChangesHash(changes);
   if (changes.length > 0 && !approved && results.every((r) => r.status === "passed")) {
@@ -319,8 +330,9 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
   let rulesApproved = false;
   if (results.length === 0 && ctx.dor) {
     let found: string[];
-    ({ results, oversized, rules: found } = await judgement(item, item, ctx.dor, ctx));
-    ({ results, changes: ruleChanges, approved: rulesApproved } = await ruleVerdicts(item, ctx, results, found));
+    let readable: boolean;
+    ({ results, oversized, rules: found, readable } = await judgement(item, item, ctx.dor, ctx));
+    ({ results, changes: ruleChanges, approved: rulesApproved } = await ruleVerdicts(item, ctx, results, found, readable));
   } else ruleChanges = await checkRuleChanges(parseRuleChanges(item.body), ctx.factoryRules);
   // PBI 143: an oversized item gets a proposed split, posted as its own comment, once per item text and split prompt.
   // PBI 144: when splits are filed, a split already kept for this text is the one filed, so the coding model isn't
