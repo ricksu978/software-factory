@@ -387,8 +387,8 @@ function filed(world: object): string[] {
   return c.fake!.filed;
 }
 
-/** The one bug item the factory filed: its labels, and its title and body together. */
-async function bugItem(world: object): Promise<{ labels: string[]; text: string }> {
+/** The one bug item the factory filed: its labels, and its title and body together. Exported for PBI 354's steps. */
+export async function bugItem(world: object): Promise<{ labels: string[]; text: string }> {
   const ids = filed(world);
   assert.ok(ids.length > 0, "the factory has filed no bug item");
   assert.equal(ids.length, 1, `the factory has filed ${ids.length} bug items`);
@@ -398,7 +398,7 @@ async function bugItem(world: object): Promise<{ labels: string[]; text: string 
 }
 
 /** The tests the bug item lists: the list items under a line that mentions "failing test", up to the next blank line. */
-function listedTests(body: string): string[] {
+export function listedTests(body: string): string[] {
   const tests: string[] = [];
   let under = false;
   for (const line of body.split("\n")) {
