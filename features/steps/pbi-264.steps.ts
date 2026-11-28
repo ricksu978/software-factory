@@ -25,7 +25,7 @@ type Script = { fails: Fail[]; credential: boolean };
 type Phase = "parent" | "proposed" | "filed" | "issue";
 type Ask = { title: string; externalId: string; phase: Phase; rewritten: boolean; criteria: string[]; filedBefore: number };
 
-type Ctx = {
+export type Ctx = {
   proposed: Map<string, Script>;
   filed: Map<string, Script>;
   /** A rewritten child's script, proposed or filed: the judge's answer once the coding model rewrote it. */
@@ -44,7 +44,8 @@ type Ctx = {
   installed: boolean;
 };
 
-function ctx(world: object): Ctx {
+/** This file's context, its scripted judge and coding model installed on PBI 144's harness. PBI 444's steps read it. */
+export function ctx(world: object): Ctx {
   const w = world as { pbi264?: Ctx };
   if (!w.pbi264) {
     w.pbi264 = {

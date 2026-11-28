@@ -10,7 +10,8 @@
 // scenario about a child that never carried the label, or that a person closed before it entered the factory, has the
 // board file that child without labels, as every child was filed before PBI 237 shipped. A Before hook reads which
 // child from the scenario's steps, since the Background files the children before the scenario's own steps run.
-// "The factory holds child X in state Y" is PBI 237's wording too. Here it sets the state; in PBI 237 it checks it.
+// "The factory holds child X in state Y" is PBI 237's and PBI 444's wording too. Here it sets the state; in PBI 237 and
+// PBI 444 it checks it.
 import { Before, DataTable, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
 import type { ItemState } from "../../src/core/states.ts";
@@ -19,6 +20,7 @@ import { upsertItem } from "../../src/store/items.ts";
 import { ctx as ctx144, polled, replaceItem, type Ctx as Ctx144 } from "./pbi-144.steps.ts";
 import { ctx as ctx225, moves, pollMore, show } from "./pbi-225.steps.ts";
 import { heldIn as pbi237HeldIn } from "./pbi-237.steps.ts";
+import { heldIn as pbi444HeldIn, realPolled as pbi444Real } from "./pbi-444.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
 
 const HEADING = "Acceptance criteria";
@@ -179,6 +181,7 @@ Given("the factory holds child {string} in state {string} with PR {int} open", l
 
 Given("the factory holds child {string} in state {string}", long, async function (title: string, state: ItemState) {
   if ((this as { pbi237?: unknown }).pbi237) return pbi237HeldIn(this, title, state);
+  if (pbi444Real(this)) return pbi444HeldIn(this, title, state);
   await hold(this, title, state);
 });
 
