@@ -3484,7 +3484,11 @@ Feature: Export invoices to CSV
 
         A feature the item builds that handles credentials or other repos once it runs isn't flagged,
 
-        as long as the item's tests use stand-ins (PBI 433).</li>
+        as long as the item's tests use stand-ins (PBI 433).
+
+        Nor is a change to the factory's rules that waits for the owner's approval,
+
+        since the engine asks for that approval once the item is filed and passes everything else.</li>
 
         <li>The readiness check reports whether an item is too big for one Sprint.
 
@@ -3966,6 +3970,24 @@ Feature: Export invoices to CSV
 
     files no child of the split.
 
+    A child with a <code>## Changes the factory's rules</code> section has it held to <code>main</code> and to the rules the judge finds,
+
+    as any item's is,
+
+    so a Before that isn't on <code>main</code> word for word,
+
+    or a rule the section misses,
+
+    fails the child.
+
+    Waiting for the owner's approval doesn't:
+
+    nobody can approve a child before it's filed,
+
+    so a child that passes every other check is filed,
+
+    and then waits in NotReady for that approval like any item with the section (PBI 444).
+
     The proposal comment then names,
 
     in that child's own section,
@@ -4128,6 +4150,12 @@ Feature: Export invoices to CSV
     An edit anywhere else in the item doesn't ask for approval again,
 
     and an item that changes no rule and has no such section is checked as before.
+
+    The judge's prompt says a rule change that still needs the owner's approval is never a flag,
+
+    since the engine asks for that approval,
+
+    so only the owner's approval holds such an item back (PBI 444).
 
     <span class="tag call">My call</span></li>
 

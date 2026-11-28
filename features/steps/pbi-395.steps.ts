@@ -69,7 +69,7 @@ const VIEWER = "vic";
 
 type Role = "viewer" | "operator" | "owner";
 type Entry = { place: string; before?: string; after?: string };
-type Ctx = {
+export type Ctx = {
   /** Each spec section's HTML body and each policy file's rule, by ref, then by place ("§6" or "policy/dor.md"). */
   rules: Map<string, Map<string, string>>;
   /** The item's rules section: the entries the steps built, or the scenario's own text, or none. */
@@ -151,7 +151,7 @@ function specHtml(sections: Map<string, string>): string {
   return `<!doctype html>\n<html><body>\n<h1>Software factory</h1>\n${body.join("\n\n")}\n</body></html>\n`;
 }
 
-function factoryRepo(c: Ctx): FactoryRepo {
+export function factoryRepo(c: Ctx): FactoryRepo {
   return {
     async readFile(ref, path) {
       const m = c.rules.get(ref);
@@ -749,7 +749,7 @@ Then("the board item's new readiness comment doesn't say the Before quoted for s
   for (const b of all) assert.ok(!linesOf(b).some(offLine(section)), `the comment says the Before for ${section} is off:\n${b}`);
 });
 
-const WAITS = /wait(s|ing)? for the owner|owner['’]s approval|owner (to )?approves?/i;
+export const WAITS = /wait(s|ing)? for the owner|owner['’]s approval|owner (to )?approves?/i;
 
 Then("the board item has a new readiness comment saying the item waits for the owner to approve its change to spec section {string}", long, async function (section: string) {
   await commentWith(this, `the item waits for the owner to approve its change to ${section}`, (l) => l.includes(section) && WAITS.test(l));
@@ -776,7 +776,7 @@ function html(world: object): string {
   return p.html;
 }
 
-function rulesPart(world: object): string {
+export function rulesPart(world: object): string {
   const page = html(world);
   for (const part of page.split(/<h2\b[^>]*>/i).slice(1)) {
     const end = part.search(/<\/h2>/i);
@@ -786,7 +786,7 @@ function rulesPart(world: object): string {
 }
 
 /** The HTML of the page's entry for `place`, from its data-rule element up to the next one. */
-function ruleEntry(world: object, place: string): string {
+export function ruleEntry(world: object, place: string): string {
   const part = rulesPart(world);
   const starts = [...part.matchAll(/<[a-z][a-z0-9]*\b[^>]*\bdata-rule="([^"]*)"[^>]*>/gi)];
   const decode = (s: string) => text(s);
@@ -795,7 +795,7 @@ function ruleEntry(world: object, place: string): string {
   return part.slice(starts[i].index, starts[i + 1]?.index ?? part.length);
 }
 
-function side(entry: string, which: "before" | "after"): string {
+export function side(entry: string, which: "before" | "after"): string {
   const m = new RegExp(`<blockquote\\b[^>]*\\bdata-side="${which}"[^>]*>([\\s\\S]*?)</blockquote>`, "i").exec(entry);
   assert.ok(m, `the entry shows no ${which === "before" ? "Before" : "After"}: ${text(entry)}`);
   return m[1];
