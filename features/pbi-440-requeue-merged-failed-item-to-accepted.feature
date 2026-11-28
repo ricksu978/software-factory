@@ -36,14 +36,14 @@ Feature: Re-queueing a Failed item whose PR merged sends it back to wait on main
     @ac-1 @regression
     Scenario: A Failed item that never opened a PR resumes at the stage that failed, on the same run and branch
       Given item 482 has no PR
-      And item 482 went to Failed with the event "retries_exhausted" after its stage "build" used up its retries
+      And item 482 went to Failed with the event "retries_exhausted" after its stage "green" used up its retries
       When an operator re-queues item 482 with the reason "the build tooling is fixed"
       And the scheduler ticks once
       Then the factory holds item 482 in state "Queued"
-      And item 482's run 1 resumes at the stage "build"
+      And item 482's run 1 resumes at the stage "green"
       And item 482's run 1 is still on the branch "factory/pbi-482-r1"
       And item 482 has no run 2
-      And the stage "build" has all of its retries available again
+      And the stage "green" has all of its retries available again
 
   Rule: Re-queueing a Failed item whose PR merged moves it to Accepted, on the same run, and starts no new run
 
