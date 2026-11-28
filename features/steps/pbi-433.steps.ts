@@ -5,6 +5,8 @@
 // reuse PBI 12's poller harness and PBI 149's steps on top of it.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import { judgePrompt, readinessLogic } from "../../src/agent/run.ts";
 import { loadPolicy, readinessSha, type ReadinessLogic, type ReadinessTexts } from "../../src/policy/policy.ts";
@@ -165,11 +167,23 @@ const EARLIER_JUDGE_PROMPT = [
   "Write nothing else.",
 ].join("\n");
 
-/** The readiness version before this item. */
+/** The readiness version before this item. This item left it there; PBI 414 later raised it to 5 for its own rule. */
 const EARLIER_VERSION = 4;
 
-/** The logic before this item: its judge's prompt and version, with the split prompt as it is now, which this item leaves alone. */
-const earlier = (): ReadinessLogic => ({ ...readinessLogic(), judgePrompt: EARLIER_JUDGE_PROMPT, version: EARLIER_VERSION });
+/**
+ * The logic before this item: its judge's prompt, with the split prompt and the version as they are now. This item changed
+ * only the prompt, and a later item may raise the version for its own reason, so the version is the current one: the
+ * fingerprint then differs from the current logic's by this item's prompt alone.
+ */
+const earlier = (): ReadinessLogic => ({ ...readinessLogic(), judgePrompt: EARLIER_JUDGE_PROMPT });
+
+/** The version history comments above READINESS_VERSION in src/policy/policy.ts: each version and the PBI that raised to it. */
+function versionHistory(): Map<number, number> {
+  const source = readFileSync(fileURLToPath(new URL("../../src/policy/policy.ts", import.meta.url)), "utf8");
+  const history = new Map<number, number>();
+  for (const m of source.matchAll(/^\/\/ (\d+) \(PBI (\d+)\):/gm)) history.set(Number(m[1]), Number(m[2]));
+  return history;
+}
 
 const files: ReadinessTexts = {
   dor: "- [ ] Has a title\n", scenarios: "Keep each scenario short.\n", "pr-review": "- [ ] The change is correct.\n",
@@ -180,7 +194,7 @@ Given("the readiness logic as it stood before this item, with the judge's prompt
   const logic = earlier();
   assert.ok(logic.judgePrompt.includes("Add a short flag for each thing the item asks for that no cell may do"),
     "the earlier logic's judge's prompt doesn't hold the old flag sentence");
-  assert.equal(logic.version, EARLIER_VERSION);
+  assert.ok(logic.version >= EARLIER_VERSION, `the readiness version ${logic.version} is below ${EARLIER_VERSION}`);
   ctx(this).earlier = logic;
 });
 
@@ -200,8 +214,15 @@ Then("the current logic's fingerprint for a set of repo files differs from the e
 
 Then("the readiness version is the same as before this item", function () {
   const c = ctx(this);
-  assert.ok(c.current, "the factory computed no current logic");
-  assert.equal(c.current.version, EARLIER_VERSION);
+  assert.ok(c.earlier && c.current, "the scenario set up no logic to compare");
+  // The two logics share a version, so the prompt alone moved the fingerprint.
+  assert.equal(c.current.version, c.earlier.version);
+  // This item left the version alone: the version history beside READINESS_VERSION gives every raise its item, version 4
+  // is PBI 395's, and no raise is PBI 433's. A raise above 4 is a later item's, which has its own entry.
+  const history = versionHistory();
+  for (let v = 2; v <= c.current.version; v++) assert.ok(history.has(v), `the readiness version history has no entry for ${v}`);
+  assert.equal(history.get(EARLIER_VERSION), 395, `readiness version ${EARLIER_VERSION} isn't PBI 395's`);
+  for (const [v, pbi] of history) assert.notEqual(pbi, 433, `readiness version ${v} is PBI 433's, so this item raised the version`);
 });
 
 // ---- the poller ----
