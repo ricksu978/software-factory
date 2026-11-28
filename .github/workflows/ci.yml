@@ -6,6 +6,13 @@ name: ci
 on:
   push:
 
+# A new push to a branch cancels that branch's run still going, since only its newest head matters. A run on main is
+# never cancelled, so every merge gets a run of its own. The factory reads a cancelled run as neither failed nor
+# passed (PBI 423).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
