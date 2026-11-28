@@ -94,9 +94,13 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
 
   // ponytail: Phase 0 has one board, so the dashboard reads items from the first source. Route by item.source_id when a second board arrives.
   const first = d.sources[0];
+  // PBI 439: the owner's accepted rewrite is written over the issue by the factory's App. The accepted proposal is the
+  // worker's cue to check the item again, on its next tick, so recheck has nothing more to do here.
+  const editBody = first?.file?.board.editBody;
+  const rewrites = editBody && { editBody: (externalId: string, body: string) => editBody.call(first.file!.board, externalId, body), recheck: async () => {} };
   const dashboard = dashboardRoutes({
     pool: d.pool, auth: d.auth, origin: d.origin, adapter: first?.adapter ?? missing<BacklogAdapter>("no backlog source is configured"),
-    sourceId: first?.id ?? "", repoHost: d.repoHost, readBlob: d.readBlob,
+    sourceId: first?.id ?? "", repoHost: d.repoHost, readBlob: d.readBlob, ...(rewrites ? { rewrites } : {}),
   });
   return { handlers: [webhook, probes, dashboard], close: dashboard.close };
 }

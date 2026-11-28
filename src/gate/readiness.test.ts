@@ -422,7 +422,7 @@ describe("gate: split children against dor.md (PBI 264)", () => {
     const b = board(new Map());
     await gate(s.item, s.ctx("", {
       split: { sop: { models: { coding: "c" } }, effort: async () => "medium" as const, agent, file: b.file },
-      judge: async (i, d) => verdicts(d, false, i.title !== "A" && i.title !== "B", i.title === "B" ? ["asks for a live API key"] : []),
+      judge: async (i, d) => verdicts(d, false, i.title !== "A" && i.title !== "B", i.title === "B" ? ["asks for a new credential"] : []),
     }));
     assert.equal(rewrites, 0);
     assert.deepEqual(b.created, []);
@@ -618,5 +618,89 @@ describe("gate on an item's rule changes (PBI 395)", () => {
     const out = await gate(s.item, s.ctx(reply([]), { factoryRules }));
     assert.equal(out.ready, true);
     assert.deepEqual(out.ruleChanges, []);
+  });
+});
+
+describe("gate: a rewrite proposed for an item a person wrote (PBI 439)", () => {
+  const DOR = "- [ ] Every acceptance criterion can be tested\n- [ ] The item names the screen it changes\n";
+  const fails = (index: number, reason: string) =>
+    [1, 2].map((i) => JSON.stringify({ index: i, status: i === index ? "failed" : "passed", reason: i === index ? reason : "ok" })).join("\n");
+  const reply = (lines: string, flags: string[] = []) => `${lines}\n${JSON.stringify({ flags })}`;
+  const coder = (text: string) => {
+    const asked: AgentArgs[] = [];
+    const deps: SplitDeps = {
+      sop: { models: { coding: "c" } } as never, effort: async () => "medium",
+      agent: async (a: AgentArgs): Promise<AgentResult> => {
+        asked.push(a);
+        // Only the reply is read here: no check is recorded, so the run's spend is left out.
+        return { ok: true, text, model: a.model } as unknown as AgentResult;
+      },
+    };
+    return { asked, deps };
+  };
+  const store = (asked: "standing" | "spent" | null = null) => {
+    const kept: (string | null)[] = [];
+    return { kept, rewrites: { fresh: true, asked: async () => asked, keep: async (_i: FactoryItem, body: string | null) => { kept.push(body); } } };
+  };
+  const item = { body: "Make checkout faster.\n\n## Acceptance criteria\n\n- Loads the card\n- Paying takes one click\n", acceptanceCriteria: ["Loads the card", "Paying takes one click"] };
+
+  test("an item failing only dor.md lines gets one proposal, kept and not applied, and the comment says so", async () => {
+    const s = await setup(DOR, item);
+    const c = coder(JSON.stringify({ body: "Make the checkout page faster." }));
+    const st = store();
+    const out = await gate(s.item, s.ctx(reply(fails(2, "No screen is named")), { split: c.deps, rewrites: st.rewrites }));
+    assert.equal(out.ready, false);
+    assert.equal(out.proposed, true);
+    assert.equal(c.asked.length, 1);
+    assert.ok(c.asked[0].prompt.startsWith("Rewrite this item's body"));
+    assert.ok(!c.asked[0].prompt.includes("- Loads the card"), "the criteria section went to the coding model");
+    assert.equal(st.kept[0], "Make the checkout page faster.\n\n## Acceptance criteria\n\n- Loads the card\n- Paying takes one click\n");
+    assert.equal((await s.fake.adapter.getItem(s.id))!.body, item.body);
+    const [comment] = await s.fake.comments(s.id);
+    assert.match(comment, /No screen is named/);
+    assert.match(comment, /proposed a rewrite .*item's page/);
+  });
+
+  test("a text asked about already asks nothing; a standing proposal is still named in the comment", async () => {
+    for (const asked of ["standing", "spent"] as const) {
+      const s = await setup(DOR, item);
+      const c = coder(JSON.stringify({ body: "x" }));
+      const out = await gate(s.item, s.ctx(reply(fails(2, "No screen is named")), { split: c.deps, rewrites: store(asked).rewrites }));
+      assert.equal(c.asked.length, 0);
+      assert.equal(out.proposed ?? false, asked === "standing");
+    }
+  });
+
+  test("a text the check judged before asks nothing, as after a policy change", async () => {
+    const s = await setup(DOR, item);
+    const c = coder(JSON.stringify({ body: "x" }));
+    const out = await gate(s.item, s.ctx(reply(fails(2, "No screen is named")), { split: c.deps, rewrites: { ...store().rewrites, fresh: false } }));
+    assert.equal(c.asked.length, 0);
+    assert.equal(out.proposed, undefined);
+  });
+
+  test("a reply with no body keeps the attempt and proposes nothing", async () => {
+    const s = await setup(DOR, item);
+    const st = store();
+    const out = await gate(s.item, s.ctx(reply(fails(2, "No screen is named")), { split: coder("I can't.").deps, rewrites: st.rewrites }));
+    assert.equal(out.proposed, undefined);
+    assert.deepEqual(st.kept, [null]);
+    assert.doesNotMatch((await s.fake.comments(s.id))[0], /proposed a rewrite/);
+  });
+
+  test("a flag, an engine rule or a split's child gets no proposal", async () => {
+    const cases: [Partial<FactoryItem>, string, Partial<GateContext>][] = [
+      [item, reply(fails(2, "No screen is named"), ["asks for a new credential"]), {}],
+      [item, reply(fails(2, "No screen is named")), { missingPermissions: ["issues: write"] }],
+      [{ ...item, body: `${item.body}\n<!-- factory-split-0123456789abcdef-1 -->` }, reply(fails(2, "No screen is named")), {}],
+    ];
+    for (const [it, judge, extra] of cases) {
+      const s = await setup(DOR, it);
+      const c = coder(JSON.stringify({ body: "x" }));
+      const out = await gate(s.item, { ...s.ctx(judge, { split: c.deps, rewrites: store().rewrites }), ...extra,
+        judge: async (i: FactoryItem, d: Policy) => (i.body.includes("factory-split-") && !it.body!.includes("factory-split-") ? passAll(d.criteria.length) : judge) });
+      assert.equal(c.asked.length, 0, judge);
+      assert.equal(out.proposed, undefined);
+    }
   });
 });

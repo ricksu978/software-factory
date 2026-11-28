@@ -4002,6 +4002,68 @@ Feature: Export invoices to CSV
 
     <span class="tag call">My call</span></li>
 
+    <li><b>Proposing a rewrite of an item a person wrote.</b>
+
+    An item a person wrote that fails only <code>dor.md</code> lines gets one rewrite of its body from the coding model,
+
+    given the lines it failed and the judge's reasons,
+
+    as a split's child does (PBI 439).
+
+    The factory doesn't apply it.
+
+    It keeps the proposal and shows it on the item page beside the current body,
+
+    and the readiness comment says a rewrite is proposed there for the owner to accept.
+
+    The proposal keeps the body's acceptance criteria word for word,
+
+    except a criterion the judge found untestable,
+
+    which moves to the Notes with a line saying why.
+
+    The factory proposes at most one rewrite per version of the item's text,
+
+    asked for when the readiness check first judges that version,
+
+    so a re-check after a policy change asks for none,
+
+    and none for a text that is a rewrite the owner accepted,
+
+    or for an item the judge finds too big for one Sprint.
+
+    A proposal nobody accepted stays until the text changes.
+
+    A person's edit withdraws it,
+
+    which the item's history logs,
+
+    and the item is checked again as edited.
+
+    An item that fails a readiness flag or an engine rule gets no proposal,
+
+    and its readiness comment says what the owner has to do, as before.
+
+    Only the owner accepts a proposal.
+
+    Accepting edits the issue's body to the proposed text,
+
+    posts one comment saying the factory applied the rewrite the owner accepted,
+
+    and checks the item again at once:
+
+    the worker runs the item's board's poll on its next tick rather than waiting for the poll interval.
+
+    When the accepted text adds or changes a <code>## Changes the factory's rules</code> section,
+
+    accepting also records the owner's approval of that section as it reads,
+
+    so the item doesn't wait for a second click.
+
+    The factory's own edit when the owner accepts is never read as a person's edit.
+
+    <span class="tag call">My call</span></li>
+
     <li><b>Changing a policy.</b>
 
     When any file the readiness check reads changes on the default branch,
@@ -5144,6 +5206,14 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
       The owner alone gets the "Approve rule change" control there,
 
       and only while the item waits for it.
+
+      An item with a proposed rewrite shows a Proposed rewrite section (PBI 439):
+
+      the current body beside the proposed one,
+
+      the words that change marked,
+
+      and for the owner alone an "Accept rewrite" button.
 
       An item in FeatureChangeRequest shows a Feature change request section (PBI 364):
 

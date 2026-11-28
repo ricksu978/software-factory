@@ -22,6 +22,7 @@ import { IllegalTransition, keepMovesInPlace, transitionItem, upsertItem, withdr
 import { recordReadinessCheck } from "../store/readiness-checks.ts";
 import { isRulesFile, parseRuleChanges, ruleChangesHash, RULES_REF } from "../gate/rule-changes.ts";
 import { approvedRulesHash, ruleChangesChecked } from "../store/rule-changes.ts";
+import { keepRewrite, rewriteAsked, withdrawRewrites } from "../store/rewrites.ts";
 
 export const POLL_INTERVAL_MS = 300_000;
 
@@ -432,7 +433,8 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
   await each(await items(pool, sourceId, ["NotReady"]), (row) => `re-gating item ${row.external_id}`, async (row) => {
     const fi = await itemOf(row.external_id);
     if (!fi || !eligible(fi)) return;
-    if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited");
+    // A person's edit withdraws any rewrite proposed for the text before it (PBI 439).
+    if (readinessItemHash(fi) !== row.readiness_item_hash) await move(pool, row.id, "item_edited", (c) => withdrawRewrites(c, row.id, itemTextHash(fi)));
     else if ((await readinessOf(fi)).sha !== row.readiness_policy_sha) await move(pool, row.id, "policy_changed");
   });
   // Most often a failure here is the judge, or the coding model asked for a split, on a usage limit. The item stays
@@ -449,6 +451,12 @@ async function pollSteps(deps: PollDeps, w: Watch, board: { name: string }): Pro
       recordCheck: (_fi, check) => recordReadinessCheck(pool, row.id, check),
       // The split being filed, kept in the database so a restart finishes the filing it started (PBI 144).
       splits: { get: (i) => keptSplit(pool, row.id, itemTextHash(i)), keep: (i, children) => keepSplit(pool, row.id, itemTextHash(i), children) },
+      // The rewrite proposed for the item's text, one per version of it, asked for when the check first judges it (PBI 439).
+      rewrites: {
+        fresh: readinessItemHash(fi) !== row.readiness_item_hash,
+        asked: (i) => rewriteAsked(pool, row.id, itemTextHash(i), i.body),
+        keep: (i, body) => keepRewrite(pool, { itemId: row.id, textHash: itemTextHash(i), body, current: i.body }),
+      },
     });
     // An oversized item whose split the coding model didn't answer (a usage limit, a timeout) still owes a proposal.
     // It stays Eligible, like a failed judge run, so the next poll gates it and asks again.
