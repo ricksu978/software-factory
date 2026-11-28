@@ -37,6 +37,7 @@ import type {
   ActivityData, ActivityProps, Call, FloorData, FloorModule, FloorProps, ItemData, Phase0Data, Phase0Props, RunDetailModule, RunDetailProps, Submitted,
 } from "../../web/src/api.ts";
 import { startShell, type ShellPage } from "../../web/src/shell.ts";
+import { transcriptPath } from "../../web/src/routes.ts";
 import { long } from "./pbi-8.steps.ts";
 
 const REPO = "acme/shop";
@@ -1708,9 +1709,12 @@ Then("its tokens have the title {string} and its cost has the title {string}", f
 Then("its Transcript is a link {string} to the stored transcript", function (want: string) {
   const t = stagesTable(this);
   const row = onlyRow(t);
-  const ref = current(ctx(this)).stages[0].transcript_ref;
+  // Since PBI 326 the link opens the stored transcript on the attempt's transcript page, which links the raw file.
+  const d = current(ctx(this));
+  const s = d.stages[0];
+  assert.ok(s.transcript_ref, "the attempt has no stored transcript");
   const ls = links(cell(t, row, "Transcript"));
-  assert.deepEqual(ls, [{ href: `/bff/v1/blobs/${ref}`, text: want }]);
+  assert.deepEqual(ls, [{ href: transcriptPath(d.item.id, s.stage_id, s.attempt), text: want }]);
 });
 
 Then("its Notes say {string}", function (want: string) {

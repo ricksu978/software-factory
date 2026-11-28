@@ -4304,6 +4304,10 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     as the message arrives,
     and `runAgent` passes `AgentArgs.onMessage` through,
     so a stage's transcript so far can be uploaded while the call runs (PBI 209).
+    Since PBI 326 `runAgent`'s transcript starts with the call's brief line,
+    `{"type":"factory_brief","prompt":...}` from `src/agent/brief.ts`,
+    which `onMessage` hears first,
+    so the transcript page shows the brief each call was given.
 - [ ] **Step 2:
   Run the tests.**
   Expected:
@@ -6808,6 +6812,35 @@ from spec §6 rows 1 to 7:
   `src/core/links.test.ts` and `src/api/main.test.ts` cover it,
   and `features/pbi-279-spa-floor-run-detail-phase0-activity.feature` renders each page with `react-dom/server` against a stubbed fetch.
   Today's dashboard keeps serving these pages on 7400 until step 9.
+- Since PBI 326,
+  Run detail's transcript link opens the attempt's transcript page at `/runs/{id}/transcripts/{stage}/{attempt}`
+  (`transcriptPath` in `web/src/routes.ts`),
+  drawn by `web/src/pages/Transcript.tsx` from one read,
+  `readTranscript` in `web/src/api.ts`,
+  which reads the item and then the stored transcript as text from `/bff/v1/blobs/{transcript_ref}`.
+  `readConversation` in `web/src/transcript.ts` reads the JSON Lines as the conversation, in the order it happened:
+  each call's brief,
+  each assistant turn as every message with its message id,
+  with its thinking labelled as thinking,
+  its text and its tool calls,
+  each call showing its tool's name and its main field as the short form of its input,
+  and followed by the result with its `tool_use_id`,
+  marked when it's an error.
+  A subagent task's `task_started` and `task_notification` show as its start and finish with its `subagent_type`,
+  and each call's final result shows how it ended,
+  its cost and its tokens as Run detail formats them.
+  A line that isn't a JSON object shows as itself,
+  and no other message shows.
+  A text longer than 10 lines or 1,000 characters shows its head and a `<details>` that opens to the rest (`clip`).
+  Everything from the transcript is drawn as React text,
+  never as HTML.
+  An attempt still running (`runningAttempt`, which Run detail's Stages table uses too) shows what the cell has uploaded so far and says it's still running,
+  leaving out a last line cut short by an upload in flight,
+  and an attempt left without an end that isn't running says it stopped before it finished.
+  The page links the raw JSON Lines file.
+  `web/src/transcript.test.ts`,
+  `web/src/routes.test.ts` and `src/agent/run.test.ts` cover it,
+  and `features/pbi-326-transcript-as-conversation.feature` renders the page with `react-dom/server`.
 - Since step 8c (2026-11-07 design,
   §05 and §07,
   PBI 280),

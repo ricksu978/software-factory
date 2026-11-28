@@ -8,6 +8,7 @@ import { fenced } from "../core/fence.ts";
 import { splitPrompt, TEMPLATE_DOR } from "../gate/split.ts";
 import { READINESS_VERSION, type ReadinessLogic } from "../policy/policy.ts";
 import { assertNamed, type Effort } from "../store/effort.ts";
+import { briefLine } from "./brief.ts";
 
 export type AgentResult = {
   ok: boolean; text: string; costUsd: number; tokensIn: number; tokensOut: number;
@@ -128,9 +129,16 @@ export async function foldMessages(msgs: AsyncIterable<SDKMessage>, onMessage?: 
 /** The SDK's `query`, which sends the call to the model. Tests pass one that records each request instead (PBI 319). */
 export type Send = (q: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
 
+/**
+ * Sends the call and folds its messages. Its transcript starts with the brief line (PBI 326), which onMessage hears
+ * first, so a running attempt's transcript so far shows the brief too.
+ */
 export async function runAgent(a: AgentArgs, send: Send = query): Promise<AgentResult> {
   assertNamed(a);
-  return { ...(await foldMessages(send({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage)), model: a.model };
+  const brief = briefLine(a.prompt);
+  a.onMessage?.(brief);
+  const r = await foldMessages(send({ prompt: a.prompt, options: agentOptions(a) }), a.onMessage);
+  return { ...r, transcript: `${brief}\n${r.transcript}`, model: a.model };
 }
 
 // Typed by the fields the judge reads, so Task 9's Sop and Policy fit without importing them.

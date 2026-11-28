@@ -5,13 +5,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { readActivity, readFloor, readItem, readPhase0, type Call, type FormName, type ItemData, type Submitted } from "./api.ts";
+import { readActivity, readFloor, readItem, readPhase0, readTranscript, type Call, type FormName, type ItemData, type Submitted } from "./api.ts";
 import { submitAnswer, submitFloorControls, submitItemControls, submitSignOff } from "./forms.ts";
 import { Activity } from "./pages/Activity.tsx";
 import { emptiedOnAccept, startLiveFloor, type LiveClock, type LiveFloor } from "./live.ts";
 import { Floor } from "./pages/Floor.tsx";
 import { Phase0 } from "./pages/Phase0.tsx";
 import { RunDetail } from "./pages/RunDetail.tsx";
+import { Transcript } from "./pages/Transcript.tsx";
 import { PATHS, routeOf } from "./routes.ts";
 
 /** The viewer's own time zone, as their browser tells it, or UTC when it can't. */
@@ -115,10 +116,17 @@ function ActivityPage({ call }: { call: Call }) {
   return <Shown state={state} what="activity log">{(data) => <Activity data={data} />}</Shown>;
 }
 
+/** PBI 326: a stage attempt's transcript, read once. Opening the page again reads what the cell has uploaded since. */
+function TranscriptPage({ call, id, stage, attempt }: { call: Call; id: string; stage: string; attempt: number }) {
+  const [state] = useRead(() => readTranscript(call, id, stage, attempt), `transcript ${id} ${stage} ${attempt}`);
+  return <Shown state={state} what="transcript">{(data) => <Transcript data={data} />}</Shown>;
+}
+
 function Page({ call, path }: { call: Call; path: string }) {
   const route = routeOf(path);
   if (route.page === "floor") return <FloorPage call={call} />;
   if (route.page === "item") return <RunDetailPage call={call} id={route.id} />;
+  if (route.page === "transcript") return <TranscriptPage call={call} id={route.id} stage={route.stage} attempt={route.attempt} />;
   if (route.page === "phase0") return <Phase0Page call={call} />;
   if (route.page === "activity") return <ActivityPage call={call} />;
   return (

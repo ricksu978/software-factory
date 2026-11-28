@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { FactoryItem } from "../adapters/types.ts";
 import { agentOptions, foldMessages, haikuJudge, judgePrompt, readinessLogic, runAgent, type AgentArgs, type AgentResult, type Send } from "./run.ts";
 import { READINESS_VERSION } from "../policy/policy.ts";
+import { BRIEF_TYPE } from "./brief.ts";
 
 const ids = { uuid: "00000000-0000-0000-0000-000000000000", session_id: "s1" };
 
@@ -306,4 +307,13 @@ test("a run's session id comes back, so a later call can resume it (PBI 190)", a
 test("a call that names a session resumes it, and one that names none starts fresh (PBI 190)", () => {
   assert.equal(agentOptions({ ...base, mode: "cell", agent: "factory-pr-reviewer", resume: "s-7" }).resume, "s-7");
   assert.equal("resume" in agentOptions({ ...base, mode: "cell" }), false);
+});
+
+test("a call's transcript starts with the brief it was given, which onMessage hears first (PBI 326)", async () => {
+  const msgs = [{ type: "assistant", n: 1 }, result("success", false, {})];
+  const heard: string[] = [];
+  const r = await runAgent({ ...base, prompt: "Write the <b>feature</b> files", mode: "cell", onMessage: (l) => heard.push(l) }, () => stream(...msgs) as never);
+  const lines = r.transcript.trimEnd().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines, [{ type: BRIEF_TYPE, prompt: "Write the <b>feature</b> files" }, ...msgs]);
+  assert.equal(heard.map((l) => l + "\n").join(""), r.transcript);
 });
