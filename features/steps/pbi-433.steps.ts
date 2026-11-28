@@ -5,6 +5,8 @@
 // reuse PBI 12's poller harness and PBI 149's steps on top of it.
 import { Before, Given, Then, When } from "@cucumber/cucumber";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import { judgePrompt, readinessLogic } from "../../src/agent/run.ts";
 import { loadPolicy, readinessSha, type ReadinessLogic, type ReadinessTexts } from "../../src/policy/policy.ts";
@@ -175,6 +177,14 @@ const EARLIER_VERSION = 4;
  */
 const earlier = (): ReadinessLogic => ({ ...readinessLogic(), judgePrompt: EARLIER_JUDGE_PROMPT });
 
+/** The version history comments above READINESS_VERSION in src/policy/policy.ts: each version and the PBI that raised to it. */
+function versionHistory(): Map<number, number> {
+  const source = readFileSync(fileURLToPath(new URL("../../src/policy/policy.ts", import.meta.url)), "utf8");
+  const history = new Map<number, number>();
+  for (const m of source.matchAll(/^\/\/ (\d+) \(PBI (\d+)\):/gm)) history.set(Number(m[1]), Number(m[2]));
+  return history;
+}
+
 const files: ReadinessTexts = {
   dor: "- [ ] Has a title\n", scenarios: "Keep each scenario short.\n", "pr-review": "- [ ] The change is correct.\n",
   risk: "Low means docs only.\n", dod: "- [ ] Tests pass\n", config: "bdd: {}\n",
@@ -205,9 +215,14 @@ Then("the current logic's fingerprint for a set of repo files differs from the e
 Then("the readiness version is the same as before this item", function () {
   const c = ctx(this);
   assert.ok(c.earlier && c.current, "the scenario set up no logic to compare");
-  // This item changed the prompt, not the version: the two logics share a version, so the prompt alone moved the fingerprint.
+  // The two logics share a version, so the prompt alone moved the fingerprint.
   assert.equal(c.current.version, c.earlier.version);
-  assert.ok(c.current.version >= EARLIER_VERSION, `the readiness version ${c.current.version} is below ${EARLIER_VERSION}`);
+  // This item left the version alone: the version history beside READINESS_VERSION gives every raise its item, version 4
+  // is PBI 395's, and no raise is PBI 433's. A raise above 4 is a later item's, which has its own entry.
+  const history = versionHistory();
+  for (let v = 2; v <= c.current.version; v++) assert.ok(history.has(v), `the readiness version history has no entry for ${v}`);
+  assert.equal(history.get(EARLIER_VERSION), 395, `readiness version ${EARLIER_VERSION} isn't PBI 395's`);
+  for (const [v, pbi] of history) assert.notEqual(pbi, 433, `readiness version ${v} is PBI 433's, so this item raised the version`);
 });
 
 // ---- the poller ----
