@@ -29,6 +29,7 @@ import {
   briefEntries, ctx as pr128, done, newPass, ordinal, raise, REVIEWER, review, reviewerCall, stageReports, that, threadFor,
   type AgentRecord, type Ctx as PrCtx,
 } from "./pbi-128.steps.ts";
+import { sameWriter } from "./pbi-328.steps.ts";
 import { ownsClaims as ownsClaims315, runFirstClaim as runFirstClaim315 } from "./pbi-315.steps.ts";
 
 const REPO = "acme/app";
@@ -513,8 +514,7 @@ Then("the PR reviewer's first brief holds {string} with this conversation, in or
   assert.equal(conv.length, want.length, `the thread's conversation in the brief is ${JSON.stringify(conv)}`);
   want.forEach((w, i) => {
     const got = conv[i];
-    const froms = w.from === "reviewer" ? ["you", "reviewer"] : [w.from];
-    assert.ok(froms.includes(String(got.from)), `reply ${i + 1} is from ${String(got.from)}, not the ${w.from}: ${JSON.stringify(conv)}`);
+    assert.ok(sameWriter(got.from, w.from), `reply ${i + 1} is from ${String(got.from)}, not ${w.from}: ${JSON.stringify(conv)}`);
     assert.equal(strip(String(got.body ?? "")), strip(w.reply), `reply ${i + 1} reads otherwise: ${JSON.stringify(conv)}`);
   });
 });
@@ -522,8 +522,10 @@ Then("the PR reviewer's first brief holds {string} with this conversation, in or
 Then(new RegExp(`^the PR reviewer's (first|second) brief doesn't hold "([^"]*)"$`), function (which: string, body: string) {
   const { c } = done(this);
   const r = reviewerCall(c, ordinal(which));
-  const id = anyThread(c, body);
-  assert.ok(!r.prompt.includes(id) && !r.prompt.includes(body), `the PR reviewer's ${which} brief holds "${body}"`);
+  // A reply inside a thread has no thread of its own (PBI 328): only its text can be in the brief.
+  const id = comments(c).some((x) => x.body === body && !c.threads.some((t) => t.threadId === x.threadId && t.body === body)
+    && !c.personThreads.some((t) => t.threadId === x.threadId && t.body === body)) ? null : anyThread(c, body);
+  assert.ok(!(id !== null && r.prompt.includes(id)) && !r.prompt.includes(body), `the PR reviewer's ${which} brief holds "${body}"`);
 });
 
 Then("the PR reviewer's first brief doesn't hold {string} as one of its own threads", function (body: string) {

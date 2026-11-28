@@ -119,9 +119,10 @@ Then("the PR reviewer's brief doesn't hold {string} as one of its own threads", 
 
 Then("the factory didn't resolve the thread {string}", function (body: string) {
   const { c } = done(this);
-  const p = c.personThreads.find((x) => x.body === body);
-  assert.ok(p, `no person's thread "${body}"`);
-  assert.ok(!c.host.resolvedThreads.some((r) => r.threadId === p.threadId), "the factory resolved the person's thread");
+  // A person's thread, or one of the factory's own (PBI 328).
+  const p = c.personThreads.find((x) => x.body === body) ?? c.threads.find((x) => x.body === body);
+  assert.ok(p, `no thread "${body}"`);
+  assert.ok(!c.host.resolvedThreads.some((r) => r.threadId === p.threadId), `the factory resolved the thread "${body}"`);
 });
 
 Then("the item never moved to InReview before the PR review stage passed", function () {
@@ -203,7 +204,13 @@ Given("the repo's trusted bot is instead stored as {string}", long, async functi
   await need().pool.query("update repo set trusted_bot = $2 where url = $1", [REPO_URL, login]);
 });
 
+/** PBI 328's cell scenarios keep the allowlist and the replies in factory threads on the cell's fakes, with no database. */
+type CellThreads = { allow(login: string): void; reply(login: string, body: string, thread: string | null): void };
+const cellThreads = (world: object) => (world as { pbi328Cell?: CellThreads }).pbi328Cell;
+
 Given("{string} is an allowlisted user", long, async function (login: string) {
+  const cellOnly = cellThreads(this);
+  if (cellOnly) return cellOnly.allow(login);
   if (!(await testDb())) return;
   await need().pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', $1, $1, 'owner')`, [login]);
 });
@@ -222,12 +229,16 @@ Given("the factory's own review left open threads {string} and {string} on the i
 });
 
 Given("{string} replied {string} inside that thread", function (login: string, body: string) {
+  const cellOnly = cellThreads(this);
+  if (cellOnly) return cellOnly.reply(login, body, null);
   const o = own(this);
   assert.ok(o.last, "no thread was named before this step");
   reply(this, login, body, o.last);
 });
 
 Given("{string} replied {string} inside the thread {string}", function (login: string, body: string, thread: string) {
+  const cellOnly = cellThreads(this);
+  if (cellOnly) return cellOnly.reply(login, body, thread);
   const threadId = own(this).threads.get(thread);
   assert.ok(threadId, `the factory left no thread "${thread}"`);
   reply(this, login, body, threadId);

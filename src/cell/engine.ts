@@ -48,6 +48,11 @@ export type CellContext = {
    * and reviews on the PR from people's (PBI 318). Absent or null when the repo names none: then none is the factory's.
    */
   trustedBot?: string | null;
+  /**
+   * PBI 328: the repo's allowlisted logins, as the allowlist stores them, so the PR review stage can keep a trusted
+   * person's reply inside one of the factory's threads, matched in any case. Absent or empty when no one is trusted.
+   */
+  trustedLogins?: string[];
   /** The highest attempt this run has recorded per stage, across every earlier claim. */
   stageAttempts: Record<string, number>;
   /**

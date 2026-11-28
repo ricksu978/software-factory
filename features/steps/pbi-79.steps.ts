@@ -8,6 +8,9 @@ const repoUrl = "https://github.com/ricksu978/software-factory";
 type Thread = { threadId: string; path: string; line: number; author: string; body: string };
 
 Given("the allowlisted user's login is stored as {string}", long, async function (login: string) {
+  // PBI 328's cell scenarios keep the allowlist on the cell's fake control plane, with no database.
+  const cellOnly = (this as { pbi328Cell?: { allow(login: string): void } }).pbi328Cell;
+  if (cellOnly) return cellOnly.allow(login);
   await need().pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', $1, $1, 'owner')`, [login]);
 });
 
