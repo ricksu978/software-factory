@@ -165,11 +165,15 @@ const EARLIER_JUDGE_PROMPT = [
   "Write nothing else.",
 ].join("\n");
 
-/** The readiness version before this item. */
+/** The readiness version before this item. This item left it there; PBI 414 later raised it to 5 for its own rule. */
 const EARLIER_VERSION = 4;
 
-/** The logic before this item: its judge's prompt and version, with the split prompt as it is now, which this item leaves alone. */
-const earlier = (): ReadinessLogic => ({ ...readinessLogic(), judgePrompt: EARLIER_JUDGE_PROMPT, version: EARLIER_VERSION });
+/**
+ * The logic before this item: its judge's prompt, with the split prompt and the version as they are now. This item changed
+ * only the prompt, and a later item may raise the version for its own reason, so the version is the current one: the
+ * fingerprint then differs from the current logic's by this item's prompt alone.
+ */
+const earlier = (): ReadinessLogic => ({ ...readinessLogic(), judgePrompt: EARLIER_JUDGE_PROMPT });
 
 const files: ReadinessTexts = {
   dor: "- [ ] Has a title\n", scenarios: "Keep each scenario short.\n", "pr-review": "- [ ] The change is correct.\n",
@@ -180,7 +184,7 @@ Given("the readiness logic as it stood before this item, with the judge's prompt
   const logic = earlier();
   assert.ok(logic.judgePrompt.includes("Add a short flag for each thing the item asks for that no cell may do"),
     "the earlier logic's judge's prompt doesn't hold the old flag sentence");
-  assert.equal(logic.version, EARLIER_VERSION);
+  assert.ok(logic.version >= EARLIER_VERSION, `the readiness version ${logic.version} is below ${EARLIER_VERSION}`);
   ctx(this).earlier = logic;
 });
 
@@ -200,8 +204,10 @@ Then("the current logic's fingerprint for a set of repo files differs from the e
 
 Then("the readiness version is the same as before this item", function () {
   const c = ctx(this);
-  assert.ok(c.current, "the factory computed no current logic");
-  assert.equal(c.current.version, EARLIER_VERSION);
+  assert.ok(c.earlier && c.current, "the scenario set up no logic to compare");
+  // This item changed the prompt, not the version: the two logics share a version, so the prompt alone moved the fingerprint.
+  assert.equal(c.current.version, c.earlier.version);
+  assert.ok(c.current.version >= EARLIER_VERSION, `the readiness version ${c.current.version} is below ${EARLIER_VERSION}`);
 });
 
 // ---- the poller ----
