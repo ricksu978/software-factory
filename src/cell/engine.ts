@@ -1678,12 +1678,28 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
   const threads: ReviewThread[] = [];
   let prRounds = 0;
   let earlierRounds: number | null = null;
-  const takeUpEarlierClaims = async (prNumber: number) => {
-    if (earlierRounds !== null) return;
+  // Returns true when it read the PR's comments, so the round that follows needn't read them again.
+  const takeUpEarlierClaims = async (prNumber: number): Promise<boolean> => {
+    if (earlierRounds !== null) return false;
     const bot = ctx.trustedBot ?? null;
     const comments = host.openReviewComments ? await host.openReviewComments(ctx.repo, prNumber) : [];
     for (const t of factoryThreadsOnPr(comments, bot, ctx.trustedLogins ?? [])) if (!threads.some((x) => x.threadId === t.threadId)) threads.push(t);
     earlierRounds = host.prReviews ? lastFactoryRound(await host.prReviews(ctx.repo, prNumber), bot) : 0;
+    return true;
+  };
+  // Before each round's reviewer call, the PR's comments are read again, so a trusted person's reply left since, in a
+  // thread this claim opened or one an earlier claim did, reaches the reviewer and the addresser (PBI 328). Each
+  // tracked line-comment thread gains the person replies it doesn't hold yet, in the order GitHub gives them. The
+  // factory's own entries are already in the conversation, and the thread's in-claim reply count stays as it is.
+  const readPersonReplies = async (prNumber: number) => {
+    if (!host.openReviewComments) return;
+    const onPr = factoryThreadsOnPr(await host.openReviewComments(ctx.repo, prNumber), ctx.trustedBot ?? null, ctx.trustedLogins ?? []);
+    for (const t of threads) {
+      const there = t.inSummary ? undefined : onPr.find((x) => x.threadId === t.threadId);
+      if (!there) continue;
+      const held = t.conversation.filter((c) => "person" in c).length;
+      t.conversation.push(...there.conversation.filter((c) => "person" in c).slice(held));
+    }
   };
   const reviews = Boolean(d.repoHost.postReview && d.repoHost.resolveThread);
   const host = d.repoHost as Required<CellDeps["repoHost"]>;
@@ -1712,7 +1728,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     const attempt = await begin("pr-review");
     // PBI 365: the Product Owner's note on a feature change request an earlier pr-review raised, for the addresser.
     const carriedNote = retryNote(carriedOver("pr-review").findings);
-    await takeUpEarlierClaims(pr.number);
+    const tookUp = await takeUpEarlierClaims(pr.number);
     // A reply on one of the factory's threads. A finding in a review's summary has no thread, so it gets a PR comment
     // that quotes it instead (PBI 266).
     const answer = async (t: ReviewThread, body: string) => {
@@ -1721,6 +1737,7 @@ export async function runCell(d: CellDeps): Promise<Outcome> {
     };
     for (let round = 1; ; round++) {
       prRounds++;
+      if (round > 1 || !tookUp) await readPersonReplies(pr.number);
       const head = await git.head();
       let r = await say("pr-review", brief(await promptOf("pr-review"),
         `The PR is #${pr.number}, ${pr.url}. Review its head \`${head}\`, and no other commit. The base is \`origin/${ctx.base}\`.`,

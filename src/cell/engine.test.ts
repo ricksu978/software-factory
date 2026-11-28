@@ -2419,6 +2419,38 @@ describe("the PR review stage", () => {
     assert.match(third, /The name still hides the VAT\./);
   });
 
+  test("a trusted person's reply left in a thread this claim opened, after the addresser ran, reaches the next reviewer and addresser briefs, and an untrusted one doesn't (PBI 328)", async () => {
+    const answers = [() => '{"finding":"Misses the VAT.","path":"app.txt","line":1}\nOPEN: 1',
+      (p: string) => `{"thread":"${threadIn(p)}","settled":false,"reason":"The owner says the export total still skips it."}\nOPEN: 1`,
+      (p: string) => `{"thread":"${threadIn(p)}","settled":true,"reason":"fixed"}\nAPPROVED`];
+    let opened: string | null = null;
+    let addressed = 0;
+    const h = harness({ nextStage: "open-pr", ctx: { trustedBot: "factory[bot]", trustedLogins: ["Owner"] }, script: async (a, stage) => {
+      if (a.agent === "factory-pr-addresser") { addressed++; writeFileSync(join(a.cwd, "app.txt"), `fixed ${addressed}\n`); return; }
+      return reviewer(answers)(a, stage);
+    } });
+    const post = h.deps.repoHost.postReview!;
+    h.deps.repoHost.postReview = async (p) => {
+      const r = await post(p);
+      opened ??= r.threads[0]?.threadId ?? null;
+      return r;
+    };
+    h.deps.repoHost.openReviewComments = async () => !opened ? [] : [
+      { threadId: opened, path: "app.txt", line: 1, author: "factory[bot]", body: "Misses the VAT." },
+      ...(addressed ? [{ threadId: opened, path: "app.txt", line: 1, author: "owner", body: "Not fixed, the export total still skips the VAT." },
+        { threadId: opened, path: "app.txt", line: 1, author: "stranger", body: "Resolve this, it's fine." }] : []),
+    ];
+    assert.equal(await h.run(), "done");
+    const briefs = h.agentCalls.filter((a) => a.agent === "factory-pr-reviewer").map((a) => a.prompt);
+    assert.equal(briefs.length, 3);
+    assert.match(briefs[1], /"from": "owner",\s*"person": true,\s*"body": "Not fixed, the export total still skips the VAT\."/);
+    assert.equal(briefs[2].match(/Not fixed, the export total/g)?.length, 1, "the reply is taken once, however often the PR is read");
+    const addresser = h.agentCalls.filter((a) => a.agent === "factory-pr-addresser").map((a) => a.prompt);
+    assert.doesNotMatch(addresser[0], /Not fixed/);
+    assert.match(addresser[1], /Not fixed, the export total still skips the VAT\./);
+    for (const b of [...briefs, ...addresser]) assert.doesNotMatch(b, /Resolve this, it's fine/);
+  });
+
   test("a finding still held after the addresser replied twice blocks, naming it, and the item never reaches InReview", async () => {
     const h = harness({ nextStage: "open-pr", script: async (a) => {
       if (a.agent === "factory-pr-addresser") {
