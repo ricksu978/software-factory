@@ -21,7 +21,8 @@ export function ciSharedWithBase(f: CiFailure, onBase: CiCheck[] | null): boolea
   return sharedWithBase(f.checks.flatMap((c) => c.failingTests), baseTests);
 }
 
-const quoted = (tests: string[]) => tests.map((t) => `"${t}"`).join(", ");
+/** Tests as a failing-tests line lists them, each in double quotes. */
+export const quoted = (tests: string[]) => tests.map((t) => `"${t}"`).join(", ");
 
 /** The failed checks CI named on `sha`, each with its URL and failing tests. A check that passed or still runs isn't one. */
 export function ciFailureOf(sha: string, checks: CiCheck[] | null): CiFailure {

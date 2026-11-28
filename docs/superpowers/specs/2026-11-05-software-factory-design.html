@@ -3250,6 +3250,18 @@ Feature: Export invoices to CSV
 
     and happens only after a line has failed.
 
+    The factory has one reader of the tests a log says failed,
+
+    and the base check, the cell's CI finding and the bug item for a red <code>main</code> all use it,
+
+    so the same log names the same tests whoever reads it.
+
+    It names node's failing tests and each scenario cucumber lists as failed, ambiguous, undefined or pending.
+
+    A failed line's reason names those tests,
+
+    so the stage's retry says which tests to fix.
+
     If every test that failed on the item's branch fails on the base too,
 
     the stage doesn't retry.
