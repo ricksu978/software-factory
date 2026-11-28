@@ -4131,6 +4131,12 @@ Feature: Export invoices to CSV
 
     and the finding names each section the item's section should cover.
 
+    For an item with the section, the engine alone decides that line:
+
+    it passes when every entry holds against <code>main</code> and the section covers every rule the judge finds,
+
+    whatever verdict the judge gave it.
+
     An item whose section covers every rule the judge finds,
 
     and that passes everything else,

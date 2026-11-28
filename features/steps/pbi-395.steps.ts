@@ -20,8 +20,10 @@
 //   "### <policy file path>" heading, then "**Before**" and "**After**", each followed by its text as a "> " quote.
 // - What the readiness check read is ruleChangesRead in src/store/rule-changes.ts.
 // - An item waits for the owner's approval while it's NotReady and its last readiness check's dor.md results (the
-//   policy_result rows the poller writes, file 'dor', no run, at the newest `at`) hold one that isn't passed and is about
-//   the owner's approval: its criterion or its reason says "approv". A finding on a dor.md line is its row there.
+//   policy_result rows the poller writes, file 'dor', no run, at the newest `at`) hold one of the engine's own (criterion
+//   index 0) that isn't passed and is about the owner's approval: its criterion or its reason says "approv". A judged
+//   dor.md line never counts, so a line that asks for the approval, or a judge's reason that mentions it, isn't the wait
+//   (PBI 414). A finding on a dor.md line is its row there.
 // - Each item page is the dashboard's /items/<id>, opened in UTC by a signed-in user ("user" rows by login, signed in
 //   with the headers Container Apps adds). The page's "Rule changes" section (the content after its <h2> up to the next
 //   <h2>) holds one element per rule with a `data-rule` attribute, the spec section ("§6") or the policy file's path,
@@ -105,13 +107,14 @@ export function ctx(world: object): Ctx {
 const pool = () => need().pool;
 const headers = (login: string) => ({ "x-ms-client-principal-idp": "aad", "x-ms-client-principal-id": login, "x-ms-client-principal-name": login });
 
-Before({ tags: "@pbi-395", ...long }, async function () {
+// PBI 414's feature runs on these steps too, with its own item.
+Before({ tags: "@pbi-395 or @pbi-414", ...long }, async function () {
   const d = await testDb();
   assert.ok(d, "src/store/test-db.ts doesn't exist");
   await d.pool.query('truncate item, event, backlog_source, repo, "user", override cascade');
 });
 
-After({ tags: "@pbi-395", ...long }, async function () {
+After({ tags: "@pbi-395 or @pbi-414", ...long }, async function () {
   // PBI 131's After only closes its own scenarios' server, and this feature opens its own.
   const c = (this as { pbi395?: Ctx }).pbi395;
   if (!c?.server) return;
@@ -126,7 +129,7 @@ export function item(world: object): Item {
   return it;
 }
 
-function named(world: object, ext: string): Item {
+export function named(world: object, ext: string): Item {
   const it = item(world);
   assert.equal(it.ext, ext, `the scenario's item is ${it.ext}, not ${ext}`);
   return it;
@@ -214,7 +217,7 @@ function setSection(world: object, ext: string, section: string | null): void {
   ctx(world).section = section;
 }
 
-function addEntry(world: object, place: string, before?: string): void {
+export function addEntry(world: object, place: string, before?: string): void {
   const c = ctx(world);
   c.section = undefined;
   c.entries.push({ place, before: before ?? onMain(c, place), after: AFTERS[place] ?? `${onMain(c, place)} Changed.` });
@@ -259,10 +262,12 @@ Given("item {string}'s rules section changes spec sections {string} and {string}
 
 // ---- the readiness judge ----
 
-function judge(world: object, rules: string[], fail?: { index: number; reason: string }): void {
+export function judge(world: object, rules: string[], fail?: { index: number; reason: string } | { index: number; reason: string }[]): void {
   const p = pollCtx(world);
-  p.judge = fail ? "fail" : "pass";
-  p.failLine = fail;
+  const many = Array.isArray(fail) ? fail : undefined;
+  p.judge = (many ? many.length > 0 : fail) ? "fail" : "pass";
+  p.failLine = many ? undefined : (fail as { index: number; reason: string } | undefined);
+  p.failLines = many;
   p.failText = undefined;
   p.lastLine = { rules };
 }
@@ -588,12 +593,12 @@ Then("the factory holds item {string} in state {string}", long, async function (
   assert.equal(await stateOf(this, ext), state);
 });
 
-type Result = { criterion: string; status: string; reason: string | null };
+export type Result = { criterion_index: number; criterion: string; status: string; reason: string | null };
 
 /** The dor.md results of the item's last readiness check. */
-async function lastResults(world: object, ext: string): Promise<Result[]> {
+export async function lastResults(world: object, ext: string): Promise<Result[]> {
   return (await pool().query<Result>(
-    `select criterion, status, reason from policy_result
+    `select criterion_index, criterion, status, reason from policy_result
      where item_id = $1 and file = 'dor' and run_id is null
        and at = (select max(at) from policy_result where item_id = $1 and file = 'dor' and run_id is null)
      order by criterion_index`,
@@ -601,12 +606,12 @@ async function lastResults(world: object, ext: string): Promise<Result[]> {
   )).rows;
 }
 
-const showResults = (rs: Result[]) => rs.map((r) => `${r.status}: ${r.criterion} (${r.reason ?? ""})`).join("\n") || "(no results)";
+export const showResults = (rs: Result[]) => rs.map((r) => `${r.status}: ${r.criterion} (${r.reason ?? ""})`).join("\n") || "(no results)";
 
 async function isWaiting(world: object, ext: string): Promise<{ waiting: boolean; why: string }> {
   const state = await stateOf(world, ext);
   const rs = await lastResults(world, ext);
-  const about = rs.filter((r) => r.status !== "passed" && /approv/i.test(`${r.criterion} ${r.reason ?? ""}`));
+  const about = rs.filter((r) => r.criterion_index === 0 && r.status !== "passed" && /approv/i.test(`${r.criterion} ${r.reason ?? ""}`));
   return { waiting: state === "NotReady" && about.length > 0, why: `the item is ${state}, and its last readiness check's results are:\n${showResults(rs)}` };
 }
 
@@ -696,7 +701,7 @@ Then("item {string} still holds the owner's approval of its change to spec secti
 
 // ---- the readiness comments ----
 
-async function fresh(world: object): Promise<string[]> {
+export async function fresh(world: object): Promise<string[]> {
   const p = pollCtx(world);
   polled(p);
   const ext = item(world).ext;
@@ -704,7 +709,7 @@ async function fresh(world: object): Promise<string[]> {
   return all.slice(commentCtx(world).commentsBefore.get(ext) ?? 0);
 }
 
-const READINESS = /can't start this item|readiness/i;
+export const READINESS = /can't start this item|readiness/i;
 const MISMATCH = /doesn['’]t match|does not match|isn['’]t what|differs/i;
 const linesOf = (comment: string) => comment.split("\n");
 

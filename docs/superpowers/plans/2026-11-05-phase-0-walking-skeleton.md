@@ -3598,6 +3598,12 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     A found rule the section misses fails the `dor.md` line whose text names the factory's rules,
     its reason naming the sections to cover,
     or adds a `rule change` verdict when no line does.
+    When the section has entries,
+    none of them off,
+    and it covers every found rule,
+    the engine sets that line to passed with its own reason whatever the judge said of it (PBI 414),
+    so a judge that fails it for a missing approval leaves the item waiting for the approval instead,
+    and an approved item goes on.
     When everything else passed and the section's `ruleChangesHash` isn't `ctx.ruleApproval`,
     the latest approval's hash,
     a failed `rule change approval` verdict leaves the item waiting.
@@ -3613,8 +3619,10 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and step 2 doesn't merge the PR of an item whose rules section no longer reads as approved,
     so nothing built from the edited section ships.
     Holding the section's Before to `main` and holding an item that changes the rules for the owner are engine rules,
-    so `READINESS_VERSION` is 4,
-    and the raise re-checks every NotReady item under them.
+    so PBI 395 raised `READINESS_VERSION` to 4.
+    The engine passing the rules line (PBI 414) is an engine rule too,
+    so `READINESS_VERSION` is 5,
+    and each raise re-checks every NotReady item under the new rules.
   - **Oversized items (PBI 143).**
     The judge's last line is `{"flags":[...],"oversized":true|false}`.
     The gate reads `oversized` from the last flags line,
