@@ -24,18 +24,14 @@ export async function recheckAccepted(pool: pg.Pool, polls: Map<string, () => Pr
 }
 
 /**
- * Calls `onAccepted` each time an event of kind `rewrite_accepted` is appended, on a pool client of its own that
- * LISTENs to factory_events. A listener whose connection drops logs it and stops: the worker's tick still runs the
- * recheck. Returns the call that releases the client.
+ * Calls `onAccepted` each time an event of kind `rewrite_accepted` is appended, on a connection of its own, with its
+ * pool's settings, that LISTENs to factory_events. The connection sits outside the pool, as the worker's lock connection
+ * does, so the pool never has a client out for it and the pool's size is the worker's work alone. A listener whose
+ * connection drops logs it and stops: the worker's tick still runs the recheck. Returns the call that closes it.
  */
 export async function onRewriteAccepted(pool: pg.Pool, onAccepted: () => void, log: Pick<Console, "error"> = console): Promise<() => Promise<void>> {
-  const c = await pool.connect();
-  let released = false;
-  const release = (destroy: boolean) => {
-    if (released) return;
-    released = true;
-    c.release(destroy);
-  };
+  const c = new pg.Client({ ...(pool.options as pg.ClientConfig), keepAlive: true });
+  let closing = false;
   c.on("notification", (m) => {
     if (m.channel !== "factory_events") return;
     try {
@@ -45,14 +41,20 @@ export async function onRewriteAccepted(pool: pg.Pool, onAccepted: () => void, l
     }
   });
   c.on("error", (e) => {
+    if (closing) return;
     log.error("The worker's listener for accepted rewrites lost its connection, so they're rechecked on its tick:", e.message);
-    release(true);
   });
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    await c.end().catch(() => {});
+  };
   try {
+    await c.connect();
     await c.query("listen factory_events");
   } catch (e) {
-    release(true);
+    await close();
     throw e;
   }
-  return async () => release(true);
+  return close;
 }
