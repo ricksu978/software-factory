@@ -3,3 +3,6 @@ reports/
 .aspire/
 /wt/
 web/dist/
+
+# Private keys, such as the GitHub App's, never belong in the repo.
+*.pem
