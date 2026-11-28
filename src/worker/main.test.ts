@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { format } from "node:util";
 import { fakeBacklog, fakeRepoHost } from "../adapters/fake.ts";
-import { createPool } from "../store/db.ts";
+import { createPool, withTx } from "../store/db.ts";
+import { acceptRewrite, keepRewrite, proposedRewrites } from "../store/rewrites.ts";
 import { dbTest, startTestDb } from "../store/test-db.ts";
 import { fakeClock } from "../clock.ts";
 import { LOCK_RETRY_MS, startWorker, type Worker, type WorkerDeps } from "./main.ts";
@@ -270,4 +271,46 @@ describe("the worker's default policies", dbTest, () => {
       await w.stop();
     }
   });
+
+  // PBI 439: an acceptance wakes the worker, which polls the item's board at once, well before its tick or poll comes
+  // round, and marks the rewrite rechecked even when that poll fails.
+  for (const fails of [false, true]) {
+    test(`an accepted rewrite is rechecked at once by the worker, and marked rechecked${fails ? " though its poll fails" : ""}`, async () => {
+      await db.pool.query('truncate item, backlog_source, repo, "user" cascade');
+      const board = fakeBacklog();
+      const id = (await db.pool.query<{ id: string }>("insert into backlog_source (adapter, url) values ('fake', 'unit') returning id")).rows[0].id;
+      let lists = 0;
+      const adapter = new Proxy(board.adapter, {
+        get: (t, k, r) => k === "listEligible"
+          ? async (...a: unknown[]) => {
+            lists++;
+            if (fails) throw new Error("the board is rate limited");
+            return (t.listEligible as (...a: unknown[]) => unknown)(...a);
+          }
+          : Reflect.get(t, k, r),
+      });
+      const lines: string[] = [];
+      const line = (...args: unknown[]) => void lines.push(format(...args));
+      const w = await startWorker({
+        pool: db.pool, sources: [{ id, adapter }], repoHost: fakeRepoHost(), launcher: { start: async () => "cell", stop: async () => {} },
+        egress: async () => {}, image: "i", controlUrl: "http://c", blob: "b", judge: async () => "", killFlag: false, secret: "s",
+        sopVersion: "default@1", tickMs: 600_000, pollMs: 600_000, lockRetryMs: 50, log: { log: line, warn: line, error: line },
+      });
+      try {
+      await until("the first poll runs", () => (w.runs.get(`polling source ${id}`) ?? 0) > 0 && (w.runs.get("rechecking accepted rewrites") ?? 0) > 0);
+      const before = lists;
+      const itemId = (await db.pool.query<{ id: string }>("insert into item (source_id, external_id, title, state) values ($1, '1', 't', 'NotReady') returning id", [id])).rows[0].id;
+      const owner = (await db.pool.query<{ id: string }>(`insert into "user" (provider, subject, github_login, role) values ('dev', 'o', 'olive', 'owner') returning id`)).rows[0].id;
+      await keepRewrite(db.pool, { itemId, textHash: "h1", body: "new", current: "old" });
+      const [p] = await proposedRewrites(db.pool, itemId);
+      await withTx(db.pool, (c) => acceptRewrite(c, { itemId, rewriteId: p.id, userId: owner, at: new Date(), issueBody: "old" }));
+      const rechecked = async () => (await db.pool.query("select 1 from item_rewrite where id = $1 and rechecked_at is not null", [p.id])).rowCount === 1;
+      await until("the accepted rewrite is rechecked", rechecked, 5_000);
+      assert.equal(lists, before + 1, "the acceptance runs one poll of its board");
+      if (fails) assert.ok(lines.some((l) => /rechecking the rewrites accepted on source/.test(l) && /rate limited/.test(l)), lines.join("\n"));
+      } finally {
+        await w.stop();
+      }
+    });
+  }
 });

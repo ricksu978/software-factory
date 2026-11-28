@@ -74,6 +74,8 @@ export type Ctx = {
   lastLine?: Record<string, unknown>;
   /** PBI 395: more dependencies each poll hands pollOnce, such as the factory's own repo. */
   deps?: Record<string, unknown>;
+  /** PBI 439: the judge's whole reply, scripted per item text. Unset, the reply comes from `judge` and the fields above. */
+  judgeOverride?: Judge;
   /** PBI 444: keys the judge's last line carries for this item, read on each ask, after `lastLine`. */
   lastLineFor?: (item: FactoryItem, dor: { criteria: { index: number; text: string }[] }) => Record<string, unknown>;
 };
@@ -89,6 +91,7 @@ const judge = (c: Ctx): Judge => async (item, dor, spent) => {
   if (c.askedLines) c.askedLines.set(item.externalId, [...(c.askedLines.get(item.externalId) ?? []), ...dor.criteria.map((cr) => cr.text)]);
   if (c.metered) await c.metered(item, dor as never, spent);
   if (c.judge === "throw") throw new Error("usage limit reached");
+  if (c.judgeOverride) return c.judgeOverride(item, dor, spent);
   const line = ({ index, text }: { index: number; text: string }) => {
     const many = c.failLines?.find((f) => f.index === index);
     const failed = c.judge === "fail" && (c.failLines ? !!many : c.failText ? c.failText.text === text : !c.failLine || c.failLine.index === index);

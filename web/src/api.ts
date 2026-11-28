@@ -163,6 +163,11 @@ export type ItemData = {
   recheck?: { last: string | null } | null;
   /** PBI 366: the feature change request the item waits on in FeatureChangeRequest, or null. */
   featureChange?: { path: string; reason: string; before: string; after: string }[] | null;
+  /**
+   * PBI 439: the rewrite the factory proposes for a NotReady item's body, each side line by line, each word marked
+   * when it changes, or null. The owner accepts it on today's dashboard, which can edit the issue.
+   */
+  rewrite?: { current: { text: string; changed: boolean }[][]; proposed: { text: string; changed: boolean }[][] } | null;
 };
 
 export type Phase0Data = {

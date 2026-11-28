@@ -4,8 +4,9 @@ import type { AgentArgs, AgentResult, JudgeSpend } from "../agent/run.ts";
 import type { CheckVerdict, ReadinessCheck, ReadinessCheckKind } from "../store/readiness-checks.ts";
 import { jsonLines, parseJudgement, type Policy, type Verdict } from "../policy/policy.ts";
 import { tmpdir } from "node:os";
-import { childBody, factoryFiled, fileSplit, priorFiling, type ChildIssue } from "./file-split.ts";
-import { keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, rewritePrompt } from "./repair.ts";
+import { childBody, factoryFiled, fileSplit, priorFiling, withoutSection, type ChildIssue } from "./file-split.ts";
+import { keepingCriteria, leadOf, mayRewrite, missingPermission, ownerAction, ownerOnly, readRewrite, rewritePrompt, type RewriteOf } from "./repair.ts";
+import { proposedBody } from "./propose.ts";
 import { checkRuleChanges, judgedRules, parseRuleChanges, placeKey, placeName, ruleChangesHash, RULES_HEADING, type RuleChangeRead } from "./rule-changes.ts";
 import { APPROVAL_CRITERION } from "../store/rule-changes.ts";
 import { itemTextHash, proposeSplit, splitComment, splitKey, splitUnanswered, type SplitChild, type SplitDeps, type SplitOutcome } from "./split.ts";
@@ -51,6 +52,15 @@ export type GateContext = {
   factoryRules?: (path: string) => Promise<string | null>;
   /** The hash of the rule changes the owner last approved on the item, or null when none were (PBI 395). */
   ruleApproval?: string | null;
+  /**
+   * Where the rewrite proposed for an item a person wrote is kept (PBI 439). `asked` reads what the factory did for the
+   * item's text: "standing" when a proposal for it stands, "spent" when the coding model was asked already or the text
+   * is a rewrite the owner accepted, null when nothing was asked. `keep` keeps the proposed body, or null when the
+   * coding model's reply carried none. `fresh` is true when the readiness check hasn't judged this version of the
+   * item's text before: only then is the coding model asked, so a re-check after a policy or logic change asks nothing.
+   * Without it, no rewrite is proposed.
+   */
+  rewrites?: { fresh: boolean; asked: (item: FactoryItem) => Promise<"standing" | "spent" | null>; keep: (item: FactoryItem, body: string | null) => Promise<void> };
 };
 
 /**
@@ -65,6 +75,8 @@ export type GateResult = {
   item?: FactoryItem;
   /** What the gate read from the item's "Changes the factory's rules" section, each entry with what's wrong with it (PBI 395). */
   ruleChanges?: RuleChangeRead[];
+  /** True when a rewrite of the item's text is proposed for the owner to accept (PBI 439). */
+  proposed?: boolean;
 };
 
 const engine = (reason: string): Verdict => ({ index: 0, criterion: "engine rule", status: "failed", reason });
@@ -241,10 +253,10 @@ const REWRITE_TIMEOUT_MS = 120_000;
  * recorded as a `split` check against `owner`. Returns the new body, or null when the reply carries none. A failed or
  * thrown run throws, so the poller leaves the item Eligible and the next poll asks again.
  */
-async function rewrite(subject: FactoryItem, owner: FactoryItem, failed: Verdict[], dor: Policy, ctx: GateContext, deps: SplitDeps): Promise<string | null> {
+async function rewrite(subject: FactoryItem, owner: FactoryItem, failed: Verdict[], dor: Policy, ctx: GateContext, deps: SplitDeps, of: RewriteOf = "child"): Promise<string | null> {
   const effort = await deps.effort();
   const r = await recorded(owner, ctx, "split", (spent) => spending(deps.agent, spent)({
-    prompt: rewritePrompt(subject, dor, failed), model: deps.sop.models.coding, effort, cwd: tmpdir(), maxTurns: 1, mode: "judge",
+    prompt: rewritePrompt(subject, dor, failed, of), model: deps.sop.models.coding, effort, cwd: tmpdir(), maxTurns: 1, mode: "judge",
     signal: AbortSignal.timeout(REWRITE_TIMEOUT_MS),
   }));
   if (!r.ok) throw new Error(`the coding model gave no answer for the rewrite of "${subject.title}"`);
@@ -321,6 +333,28 @@ async function repairChild(item: FactoryItem, failed: Verdict[], ctx: GateContex
 }
 
 /**
+ * PBI 439: proposes one rewrite of an item a person wrote that fails only dor.md lines, once per version of its text,
+ * when the readiness check judges that version first.
+ * The coding model is asked as for a split's child, given the body without its criteria section, and the proposal is
+ * kept, not applied: the owner accepts it on the item's page. Returns true when a proposal for the text stands. A
+ * failed or thrown run throws, so the poller leaves the item Eligible and the next poll asks again.
+ */
+async function proposeRewrite(item: FactoryItem, failed: Verdict[], ctx: GateContext): Promise<boolean> {
+  const deps = ctx.split;
+  if (!ctx.rewrites || !deps || !ctx.dor || !rewritable(failed) || factoryFiled(item)) return false;
+  const asked = await ctx.rewrites.asked(item);
+  if (asked !== null || !ctx.rewrites.fresh) return asked === "standing";
+  const heading = deps.file?.criteriaHeading ?? "Acceptance criteria";
+  const text = await rewrite({ ...item, body: withoutSection(item.body, heading).trim() }, item, failed, ctx.dor, ctx, deps, "item");
+  const body = text === null ? null : proposedBody(item.body, item.acceptanceCriteria, text, failed);
+  await ctx.rewrites.keep(item, body);
+  return body !== null;
+}
+
+/** The readiness comment's paragraph when a rewrite is proposed for the owner to accept (PBI 439). */
+export const PROPOSED_NOTE = "The factory proposed a rewrite of this item's body to meet these checks. The owner can read it beside the current body, and accept it, on the item's page in the factory's dashboard. Any edit to the item withdraws the proposal.";
+
+/**
  * Checks one item. It's ready only when every engine rule holds, every dor.md criterion passed and the judge raised
  * no flag. A not-ready item gets one comment naming each failed line in the repo's own words, keyed so a re-gate
  * after any readiness input changes posts a fresh one. The gate never edits the item, except that filing a split takes
@@ -385,6 +419,9 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
     const edited = await repairChild(item, failed, ctx);
     if (edited) return { ...(await gateOnce(edited, ctx, false)), item: edited };
   }
+  // PBI 439: an item a person wrote that fails only dor.md lines gets a proposed rewrite for the owner to accept. One the
+  // judge found too big for a Sprint is split instead, since a rewrite of its body can't make it smaller.
+  const proposed = failed.length > 0 && !oversized && !split && (await proposeRewrite(item, failed, ctx));
   if (failed.length > 0) {
     const lines = failedLines(failed);
     const noSplit = split && !split.proposed ? `\nThe judge found the item too big for one Sprint, but a split couldn't be proposed because ${split.reason}.\n` : "";
@@ -392,7 +429,7 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
     const waitsOnly = failed.every((r) => r.criterion === APPROVAL_CRITERION);
     const body = waitsOnly
       ? `The factory can't start this item yet. It passed every readiness check, and it changes the factory's own rules:\n\n${lines}\n${noSplit}`
-      : `The factory can't start this item yet. It failed these readiness checks:\n\n${lines}\n${noSplit}`;
+      : `The factory can't start this item yet. It failed these readiness checks:\n\n${lines}\n${noSplit}${proposed ? `\n${PROPOSED_NOTE}\n` : ""}`;
     // A comment that says the coding model gave no answer is keyed on the item text, not updatedAt: the poller keeps
     // that item Eligible and gates it again, and the comment itself bumps updatedAt on GitHub, so an updatedAt key
     // would post it again on every poll. Its own key also lets the re-gate that gets an answer post a readiness
@@ -402,5 +439,5 @@ async function gateOnce(item: FactoryItem, ctx: GateContext, mayRepair: boolean)
       : `readiness:${item.updatedAt}:${ctx.readinessSha}${rulesApproved ? ":rules-approved" : ""}`;
     await ctx.adapter.comment(item.externalId, body, key);
   }
-  return { ready: failed.length === 0, results, oversized, split, ruleChanges };
+  return { ready: failed.length === 0, results, oversized, split, ruleChanges, ...(proposed ? { proposed } : {}) };
 }

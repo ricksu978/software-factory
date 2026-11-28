@@ -2298,6 +2298,17 @@ test("answer alone does not move state", () => assert.equal(next("NeedsInput", "
     added by `db/migrations/022_feature_change_reminders.sql` (PBI 366),
     counts the reminders sent for the run's open feature change request.
     `requestFeatureChange` sets it back to 0.
+  - `item_rewrite`,
+    added by `db/migrations/023_item_rewrite.sql` (PBI 439),
+    holds each rewrite proposed for an item a person wrote,
+    one row per `(item_id, text_hash)`:
+    the proposed `body`,
+    null when the coding model's reply carried none,
+    the `current` body it rewrites,
+    `proposed_at`,
+    and `accepted_at` with `accepted_by`,
+    `withdrawn_at`,
+    and `rechecked_at` once the worker has checked an accepted one again.
   - `item.rule_changes jsonb`,
     added by `db/migrations/019_item_rule_changes.sql` (PBI 395),
     holds what the item's last readiness check read from its `## Changes the factory's rules` section:
@@ -3874,6 +3885,42 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     and each `userContentEdits` editor from GraphQL,
     with the App's own bot login,
     and `editBody` patches the issue's body.
+  - **Proposed rewrites (PBI 439).**
+    A gated item that fails only `dor.md` lines,
+    that the judge didn't find oversized,
+    and whose body carries no split marker,
+    goes to `proposeRewrite` in `src/gate/readiness.ts` when `ctx.rewrites` is set.
+    `ctx.rewrites.asked` reads `rewriteAsked` in `src/store/rewrites.ts` for the item's `itemTextHash`:
+    a text with a row already,
+    or one that is the body of a rewrite the owner accepted,
+    asks nothing,
+    and a standing proposal for it still adds `PROPOSED_NOTE` to the readiness comment.
+    Otherwise `rewritePrompt(item, dor, failed, "item")` opens with `REWRITE_ITEM_HEADING`,
+    carries the body without its criteria section,
+    and asks the coding model to keep the body's other sections,
+    run as for a split's child.
+    `proposedBody` in `src/gate/propose.ts` builds the proposal from the reply:
+    the model's body without any criteria or Notes section of its own,
+    then the current body's criteria heading and its criteria word for word,
+    less each one `untestable` finds,
+    a criterion a failed `dor.md` line about testing names in its reason:
+    a clause of the reason names the criterion in whole words,
+    the clause doesn't find it testable,
+    and the criterion isn't only part of a longer criterion the clause names,
+    then `## Notes` with the model's own notes and a line for each criterion moved there with the judge's reason.
+    `ctx.rewrites.keep` inserts it into `item_rewrite`,
+    with a null body when the reply carried none,
+    and the readiness comment gets `PROPOSED_NOTE`.
+    The issue isn't edited.
+    In step 4 the poller moves a NotReady item through `item_edited` and,
+    in the same transaction,
+    `withdrawRewrites` withdraws each standing proposal made for another text,
+    logging `rewrite_withdrawn` with `{ cause: "item_edited", rewriteId }`.
+    The poller sets `ctx.rewrites.fresh` when the item's `readinessItemHash` isn't its stored `readiness_item_hash`,
+    so the coding model is asked only when the check first judges a version of the text,
+    and a re-check after a policy or logic change asks nothing.
+    `READINESS_VERSION` stays 4,
+    so an item NotReady before PBI 439 gets a proposal once a person edits it.
   - **Readiness checks (PBI 132).**
     The gate's two AI calls,
     the judge and the split proposal for an oversized item,
@@ -6921,6 +6968,54 @@ from spec §6 rows 1 to 7:
       its Before and After in `<blockquote data-side="before">` and `data-side="after"`,
       each changed word of `wordDiff` in a `<mark>`,
       with the form for the owner while the item waits.
+    - `POST /items/:id/rewrite-acceptance` takes `{ rewrite }`,
+      the id of the proposal the page showed,
+      and needs owner (PBI 439).
+      `acceptRewrite` in `src/store/rewrites.ts` locks the proposal and the item and accepts it only while it stands,
+      the item is NotReady,
+      and the issue's body still reads as it did when it was proposed,
+      or already reads the proposed body, from an earlier acceptance whose edit landed and whose transaction didn't commit,
+      which it then accepts without editing again.
+      If the body changed otherwise, it withdraws the proposal.
+      The poller withdraws no proposal whose body the issue reads, and `rewriteAsked` reads such a text as asked already,
+      so the coding model is never asked to rewrite the factory's own proposed text.
+      A proposed body whose `## Changes the factory's rules` section differs from the current body's logs `rule_change_approved` too,
+      by the owner at the dashboard's `now`,
+      with `rulesHash` and `changes` as the section reads.
+      `DashboardDeps.rewrites.editBody` writes the body over the issue in the same transaction,
+      so a failed edit accepts nothing.
+      The `rewrite_accepted` event, naming the owner's login, gets a `rewrite_accepted` outbox row in that transaction,
+      from which the worker posts `acceptedComment` under `rewrite-accepted:<id>`,
+      retrying it with backoff as it does a decision's announcement.
+      Then `rewrites.recheck` runs.
+      It answers 303 to the item page,
+      403 to anyone but an owner,
+      409 with a reason for a proposal that was withdrawn or accepted,
+      and 503 when the dashboard has no `rewrites`.
+      The control plane's `editBody` is the first board's `splitBoard.editBody`.
+      Its `recheck` does nothing,
+      since the `rewrite_accepted` event wakes the worker.
+      `onRewriteAccepted` in `src/worker/rechecks.ts` opens a `pg.Client` with the pool's settings,
+      outside the pool as the lock connection is,
+      runs `LISTEN factory_events`,
+      and calls back on each notification whose payload's `kind` is `rewrite_accepted`.
+      The callback runs `recheckAccepted` at once,
+      which reads `rechecksOwed` and runs each such board's poll,
+      then `markRechecked` in a `finally`,
+      so an owed recheck is marked done even when its poll fails.
+      A failed poll is logged,
+      and the board's regular poll checks the item again,
+      so a failing board isn't polled on every tick.
+      The worker's "rechecking accepted rewrites" loop runs `recheckAccepted` on the tick interval too,
+      for a notification that was missed,
+      and rechecks from either run one at a time.
+      A listener that can't connect, or whose connection drops, logs it and leaves the rechecks to the tick.
+      The worker's stop closes the listener's connection and waits for a recheck in flight.
+      Run detail's `<h2>Proposed rewrite</h2>` shows the current body and the proposed one side by side, in `<pre data-side="current">` and `data-side="proposed"`,
+      each changed word of `bodyDiff` in a `<mark>`:
+      lines are matched first,
+      and a run of changed lines is matched word by word only when both sides have as many lines.
+      The owner alone gets the form with the Accept rewrite button.
     - `POST /overrides` needs operator.
     - `POST /users` needs owner.
     - `GET /activity` is the activity log (PBI 105),

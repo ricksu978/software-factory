@@ -84,3 +84,25 @@ test("Floor links an item in FeatureChangeRequest to its request on Run detail, 
   assert.match(html, /Waiting on the Product Owner&#x27;s decision on the <a [^>]*href="\/runs\/a#feature-change-request">Feature change request<\/a>/);
   assert.equal(html.match(/#feature-change-request/g)?.length, 1);
 });
+
+test("Run detail shows a proposed rewrite beside the current body, the changed words marked, and sends the owner to the dashboard (PBI 439)", async () => {
+  const { RunDetail } = await vite.ssrLoadModule("/src/pages/RunDetail.tsx");
+  const { createElement } = await import("react");
+  const at = new Date("2026-11-20T12:00:00Z");
+  const data = {
+    item: { id: "a", external_id: "512", repo: "acme/widgets", title: "Faster checkout", state: "NotReady", held: false },
+    run: null, policies: [], stages: [], readiness: [], question: null, criteria: null, scope: null, pending: [], features: [],
+    verdicts: [], linkBlobs: true, controls: null,
+    rewrite: {
+      current: [[{ text: "Make", changed: false }, { text: "checkout", changed: true }]],
+      proposed: [[{ text: "Make", changed: false }, { text: "the", changed: true }, { text: "checkout", changed: true }]],
+    },
+  };
+  const html = renderToString(createElement(RunDetail, { data, zone: "UTC", now: at })).replace(/<!-- -->/g, "");
+  assert.match(html, /Proposed rewrite/);
+  assert.match(html, /data-side="current">.*Make.*<mark>checkout<\/mark>/);
+  assert.match(html, /data-side="proposed">.*<mark>the<\/mark>.*<mark>checkout<\/mark>/);
+  assert.match(html, /accepts it on the item&#x27;s page on today&#x27;s dashboard/);
+  assert.doesNotMatch(html, /Accept rewrite/);
+  assert.doesNotMatch(renderToString(createElement(RunDetail, { data: { ...data, rewrite: null }, zone: "UTC", now: at })), /Proposed rewrite/);
+});

@@ -6,6 +6,7 @@ import type { ClaimKey } from "../store/items.ts";
 import type { StoredReadinessCheck } from "../store/readiness-checks.ts";
 import { withEffort } from "../store/effort.ts";
 import { placeKey, placeName, ruleChangesHash, wordDiff, type DiffWord, type RuleChangeRead } from "../gate/rule-changes.ts";
+import { bodyDiff, type BodyLine } from "../gate/propose.ts";
 import { FEATURE_CHANGE_ANCHOR, lineDiff, WAITS_ON_OWNER, type DiffLine, type FeatureChangeFile } from "../core/feature-change.ts";
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
@@ -436,6 +437,11 @@ export type RunDetail = {
    * whether this viewer may give it, and the owner's approval of them as they read now. Null when it read none.
    */
   ruleChanges?: { changes: RuleChangeRead[]; waiting: boolean; canApprove: boolean; approval: { by: string; at: Date } | null } | null;
+  /**
+   * PBI 439: the rewrite the factory proposes for the item's body, beside the body it rewrites, and whether this viewer,
+   * the owner, may accept it. Null when none stands.
+   */
+  rewrite?: { id: string; current: string; body: string; canAccept: boolean } | null;
   /** PBI 364: the feature change request the item waits on in FeatureChangeRequest. Without one, no such section shows. */
   featureChange?: FeatureChangeFile[] | null;
   /** PBI 365: true when the viewer is a product owner, who alone gets Approve the change and Ask for changes. */
@@ -478,6 +484,22 @@ function featureChangeForm(id: string): string {
 /** PBI 365: who approved or turned down the item's last feature change request, and when. */
 function featureChangeDecisionLine(d: NonNullable<RunDetail["featureChangeDecision"]>, zone: string): string {
   return `<p id="feature-change-decision">${escapeHtml(d.by)} ${d.kind === "approve" ? "approved" : "turned down"} the feature change request at ${local(d.at, zone)}.</p>`;
+}
+
+/**
+ * The item page's Proposed rewrite section (PBI 439): the current body beside the proposed one, the words that change
+ * marked, and for the owner alone the Accept rewrite button, its form naming the proposal.
+ */
+function rewriteSection(id: string, r: NonNullable<RunDetail["rewrite"]>): string {
+  const diff = bodyDiff(r.current, r.body);
+  const side = (which: "current" | "proposed", label: string, lines: BodyLine[]) =>
+    `<div><h4>${label}</h4><pre class="scope" data-side="${which}">${lines.map(marked).join("\n")}</pre></div>`;
+  const form = r.canAccept
+    ? `<form method="post" action="/items/${escapeHtml(id)}/rewrite-acceptance"><input type="hidden" name="rewrite" value="${escapeHtml(r.id)}"><p><button>Accept rewrite</button></p></form>`
+    : "";
+  return `<h2>Proposed rewrite</h2><p>The item fails only lines of the team's dor.md, so the factory proposes this rewrite of its body. Only the owner can accept it, and any edit to the item withdraws it.</p>
+<div class="sides">${side("current", "Current body", diff.current)}${side("proposed", "Proposed body", diff.proposed)}</div>
+${form}`;
 }
 
 /** The item page's Rule changes section (PBI 395): each rule's Before beside its After, the words that change marked. */
@@ -608,7 +630,7 @@ ${d.recheck ? `<p id="recheck">${recheckLine(d.recheck.last, zone, true)}</p>\n`
 ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now: ${escapeHtml(d.startNow.reason)}${d.startNow.by ? `, by ${escapeHtml(d.startNow.by)}` : ""}. The next free slot claims it first once it's Queued, not held and not blocked.</p>\n` : ""}${d.moveEnded ? `<p>${d.moveEnded.control} ended by a change to the board's order, at ${local(d.moveEnded.at, zone)}: the board now puts the item and the item it passed the other way round from when it was moved, so it follows the board again.</p>\n` : ""}${d.fixingCi ? fixingCiSection(d.fixingCi) : ""}<dl><dt>SOP version</dt><dd>${escapeHtml(r?.sop_version ?? "not pinned yet")}</dd><dt>Config</dt><dd>${escapeHtml(r?.config_sha ?? "not pinned yet")}</dd>
 <dt>Scenarios locked at</dt><dd>${escapeHtml(r?.features_lock_sha ?? "not signed off")}</dd>
 <dt>Shadow risk tier</dt><dd>${escapeHtml(r?.risk_tier ?? "not classified")}${r?.tier_reasons?.length ? `<ul>${r.tier_reasons.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : ""}</dd></dl>
-${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange, d.item.id, d.canDecideFeatureChange === true) : d.featureChangeDecision ? featureChangeDecisionLine(d.featureChangeDecision, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
+${d.rewrite ? rewriteSection(d.item.id, d.rewrite) : ""}${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange, d.item.id, d.canDecideFeatureChange === true) : d.featureChangeDecision ? featureChangeDecisionLine(d.featureChangeDecision, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
 }
