@@ -69,6 +69,19 @@ test("subagent tasks read as a start and a finish, the finish named by its task'
   ]);
 });
 
+test("a background shell's task isn't a subagent's, so neither its start nor its finish shows", () => {
+  const es = readConversation(jsonl(
+    { type: "system", subtype: "task_started", task_id: "b1", task_type: "local_bash", description: "Run the full test suite", is_backgrounded: true },
+    { type: "system", subtype: "task_notification", task_id: "b1", status: "completed", summary: "Background command completed", output_file: "/tmp/x" },
+    { type: "system", subtype: "task_started", task_id: "a1", task_type: "local_agent", description: "Look around" },
+    { type: "system", subtype: "task_notification", task_id: "a1", status: "completed", summary: "Looked" },
+  ), { running: false });
+  assert.deepEqual(es, [
+    { kind: "subagent-start", name: "subagent", description: "Look around" },
+    { kind: "subagent-finish", name: "subagent", status: "completed", summary: "Looked" },
+  ]);
+});
+
 test("a final result reads as how the call ended, with its cost and tokens summed over its models", () => {
   const usage = (costUSD: number, i: number, o: number) => ({ inputTokens: i, outputTokens: o, cacheReadInputTokens: 100, cacheCreationInputTokens: 0, costUSD });
   const end = (subtype: string, isError: boolean, more: object) => readConversation(jsonl({ type: "result", subtype, is_error: isError, modelUsage: { x: usage(0.25, 1000, 10), y: usage(0.5, 0, 5) }, ...more }), { running: false })[0];

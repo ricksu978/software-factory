@@ -6826,7 +6826,7 @@ from spec §6 rows 1 to 7:
   drawn by `web/src/pages/Transcript.tsx` from one read,
   `readTranscript` in `web/src/api.ts`,
   which reads the item and then the stored transcript as text from `/bff/v1/blobs/{transcript_ref}`.
-  `readConversation` in `web/src/transcript.ts` reads the JSON Lines as the conversation, in the order it happened:
+  `readConversation` in `src/core/transcript.ts` (which `web/src/transcript.ts` re-exports) reads the JSON Lines as the conversation, in the order it happened:
   each call's brief,
   each assistant turn as every message with its message id,
   with its thinking labelled as thinking,
@@ -6835,6 +6835,7 @@ from spec §6 rows 1 to 7:
   and followed by the result with its `tool_use_id`,
   marked when it's an error.
   A subagent task's `task_started` and `task_notification` show as its start and finish with its `subagent_type`,
+  and a task that isn't a subagent's, such as a background shell's, doesn't show,
   and each call's final result shows how it ended,
   its cost and its tokens as Run detail formats them.
   A line that isn't a JSON object shows as itself,
@@ -6849,6 +6850,13 @@ from spec §6 rows 1 to 7:
   `web/src/transcript.test.ts`,
   `web/src/routes.test.ts` and `src/agent/run.test.ts` cover it,
   and `features/pbi-326-transcript-as-conversation.feature` renders the page with `react-dom/server`.
+  The 7400 dashboard's Run detail, which serves until step 9,
+  links each transcript to its own page at `/transcripts/{run}/{stage}-{attempt}`
+  (`transcriptPath` and `transcriptPage` in `src/http/views.ts`, `TRANSCRIPT_PAGE` in `src/http/routes.ts`),
+  which reads the same blob through `readConversation`,
+  draws it the same way with every value through `escapeHtml`,
+  and links the raw file at `/blobs/{transcript_ref}`.
+  `src/http/routes.test.ts` covers it.
 - Since step 8c (2026-11-07 design,
   §05 and §07,
   PBI 280),
