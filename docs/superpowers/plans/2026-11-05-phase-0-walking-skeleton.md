@@ -895,13 +895,23 @@ A task that touches one of them follows this section and does not restate it.
       It makes no agent call,
       runs only after a line failed,
       and runs each command at most once per cell.
-      `failingTests` reads the failing tests' names from the whole output:
-      TAP's `not ok` lines,
-      node's spec reporter's `✖` lines and,
+      `failingTests` in `src/core/failing-tests.ts` reads the failing tests' names from the whole output (PBI 321).
+      It is the factory's one such reader:
+      the GitHub repo host reads a failed check's log with it for the cell's CI finding,
+      the base-failure check reads a command's output with it,
+      and the scheduler reads a red main's check log with it for the bug item,
+      so the same log names the same tests whoever reads it.
+      It names TAP's `not ok` lines,
+      leaving out TODO and SKIP and a failing suite whose own test failed,
+      the tests under node's spec reporter's `✖ failing tests:` list and,
       from cucumber-js 13.3.0,
-      each `N) <name> # <path>:<line>` entry of its "Failed scenarios:" block,
+      the `<name>` of each `N) <name> # <path>:<line>` entry under its "Failed scenarios:", "Ambiguous scenarios:", "Undefined scenarios:" and "Pending scenarios:" blocks,
       skipping the indented step and error lines under each,
-      up to the `N scenarios (...)` summary.
+      up to the first line that isn't indented, such as the `N scenarios (...)` summary.
+      It drops GitHub's timestamps and the reporters' colours first.
+      A failed `run:` line's reason names the tests on a line of its own before the output,
+      `exit N. Failing tests: "a", "b".`,
+      so Green's retry brief says which tests failed.
       When every test that failed on the item's branch also fails on the base,
       and at least one was named,
       the base is at fault.
@@ -5445,12 +5455,12 @@ export function haikuJudge(sop: Sop, run: typeof runAgent | undefined, effort: (
     The item moves to Failed through `dod_failed` with its comment,
     and the same transaction inserts a `main_break` row with each failed check,
     its URL and the tests its `checkLog` names,
-    which `failingTests` reads from the Actions job log,
+    which the factory's one `failingTests`, in `src/core/failing-tests.ts`, reads from the Actions job log (PBI 321),
     after each line's timestamp and any colours:
     node's spec reporter's `✖ failing tests:` list,
     the default since Node 23,
-    cucumber's `N) <scenario> # <path>:<line>` entries under `Failed scenarios:` and `Ambiguous scenarios:`,
-    named with their path and line,
+    cucumber's scenarios under `Failed scenarios:`, `Ambiguous scenarios:`, `Undefined scenarios:` and `Pending scenarios:`,
+    named as the cell's CI finding names them,
     and TAP's `not ok` lines,
     leaving out a failing suite whose test failed.
     A log that can't be read names no test.

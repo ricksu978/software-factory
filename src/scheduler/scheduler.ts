@@ -17,7 +17,8 @@ import { repoName, runBranch } from "../store/runs.ts";
 // The poller compares against the same hash, so a claim and a poll can never disagree about unchanged criteria.
 import { criteriaHash } from "../watcher/poller.ts";
 import type { Launcher } from "./launcher.ts";
-import { bugItem, compareWithParent, failingTests, type FailedCheck } from "./main-break.ts";
+import { failingTests } from "../core/failing-tests.ts";
+import { bugItem, compareWithParent, type FailedCheck } from "./main-break.ts";
 
 export const TICK_MS = 15_000;
 const DAY_MS = 86_400_000;
