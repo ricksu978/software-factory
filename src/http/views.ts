@@ -11,6 +11,7 @@ import { FEATURE_CHANGE_ANCHOR, lineDiff, WAITS_ON_OWNER, type DiffLine, type Fe
 import { pauseActive } from "./configuration.ts";
 import { issueUrl } from "../core/links.ts";
 import { cost, localTime, timeSpent, tokens } from "./format.ts";
+import { clip, readConversation, type Entry, type Part, type ToolResult } from "../core/transcript.ts";
 import type { PartOf, ProductionLineRow, WaitingOnYouRow } from "./floor-lists.ts";
 
 export function escapeHtml(value: unknown): string {
@@ -586,7 +587,7 @@ export function runDetailPage(d: RunDetail, banner: string | null): string {
     : `<p class="muted">No policy results yet.</p>`;
   const stages = d.stages.length
     ? `<table><thead><tr><th scope="col">Stage</th><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Model</th><th scope="col">Started</th><th scope="col">Time spent</th><th scope="col">Tokens</th><th scope="col">Cost</th><th scope="col">Transcript</th><th scope="col">Notes</th></tr></thead><tbody>${d.stages
-        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ? withEffort(s.model, s.effort) : "model not recorded")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${costCell(s.cost_usd)}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="/blobs/${escapeHtml(s.transcript_ref)}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
+        .map((s) => `<tr><td>${escapeHtml(s.stage_id)}</td><td>${escapeHtml(s.attempt)}</td><td>${escapeHtml(status(s))}</td><td>${escapeHtml(s.model ? withEffort(s.model, s.effort) : "model not recorded")}</td><td>${started(s)}</td><td>${escapeHtml(took(s))}</td>${exactTokens(s.tokens_in, s.tokens_out)}${escapeHtml(tokens(s.tokens_in ?? 0))} in, ${escapeHtml(tokens(s.tokens_out ?? 0))} out</td>${costCell(s.cost_usd)}</td><td>${!s.transcript_ref ? "" : d.linkBlobs ? `<a href="${escapeHtml(transcriptPath(s.transcript_ref))}">transcript</a>` : escapeHtml(s.transcript_ref)}</td><td>${notes(s)}</td></tr>`)
         .join("")}</tbody></table>`
     : `<p class="muted">No stage has run yet.</p>`;
   const readiness = d.readiness.length
@@ -633,6 +634,75 @@ ${d.claim ? `${claimLines(d.claim)}\n` : ""}${d.startNow ? `<p>Marked Start now:
 ${d.rewrite ? rewriteSection(d.item.id, d.rewrite) : ""}${d.ruleChanges ? ruleChangesSection(d.item.id, d.ruleChanges, zone) : ""}${d.featureChange?.length ? featureChangeSection(d.featureChange, d.item.id, d.canDecideFeatureChange === true) : d.featureChangeDecision ? featureChangeDecisionLine(d.featureChangeDecision, zone) : ""}${scope}${criteria}${pending}${form}${controls}${verdicts}${d.durations ? timeSection(d.durations) : ""}<h2>Policy results</h2>${policies}<h2>Stages</h2><p class="muted">Times show in ${escapeHtml(zone)}.</p>${stages}<h2>Readiness checks</h2>${readiness}${
     d.features.length ? `<h2>Signed-off scenarios</h2>${files(d.features)}` : ""
   }${zoneScript(zone)}`, banner);
+}
+
+/**
+ * PBI 326: the address of an attempt's transcript page on this dashboard, from its blob path
+ * transcripts/<run>/<stage>-<attempt>.jsonl: /transcripts/<run>/<stage>-<attempt>. The raw file stays at /blobs/<path>.
+ */
+export const transcriptPath = (ref: string) => `/${ref.replace(/\.jsonl$/, "")}`;
+
+export type TranscriptView = {
+  item: Issue & { id: string; title: string };
+  stage: { stage_id: string; attempt: number };
+  /** The attempt is still running (PBI 209), or it stopped before it finished, its cell gone (PBI 239). */
+  running: boolean;
+  stopped: boolean;
+  /** The raw JSON Lines file's address, null when the factory serves none. */
+  rawHref: string | null;
+  /** The transcript as stored, null when it isn't. */
+  jsonl: string | null;
+};
+
+/** A text from the transcript, escaped: its first lines, and a <details> that opens to the rest when there's more. */
+function longText(text: string, cls = ""): string {
+  const c = clip(text);
+  const pre = (t: string) => `<pre class="scope${cls ? ` ${cls}` : ""}">${escapeHtml(t)}</pre>`;
+  return `${pre(c.head)}${c.rest ? `<details><summary class="muted">Show the rest: ${escapeHtml(c.more)}</summary>${pre(c.rest)}</details>` : ""}`;
+}
+
+const label = (t: string) => `<div class="muted"><strong>${escapeHtml(t)}</strong></div>`;
+const card = (kind: Entry["kind"], body: string) => `<section data-entry="${kind}" class="entry">${body}</section>`;
+
+function toolResult(r: ToolResult): string {
+  return `<div data-part="tool-result"${r.error ? " data-error" : ""} class="result">${label(r.error ? "Result: error" : "Result")}${longText(r.text)}</div>`;
+}
+
+function turnPart(p: Part): string {
+  if (p.kind === "thinking") {
+    return `<div data-part="thinking"><em>${label("Thinking")}${p.text === null ? "<p>The model's thinking was withheld: its content is redacted.</p>" : longText(p.text)}</em></div>`;
+  }
+  if (p.kind === "text") return `<div data-part="text">${longText(p.text)}</div>`;
+  return `<div data-part="tool-call"><div><span class="badge" data-slot="tool-name">${escapeHtml(p.name)}</span> <code>${escapeHtml(p.short)}</code></div>${p.fields
+    .map((f) => `<div><span class="muted">${escapeHtml(f.key)}:</span>${longText(f.value)}</div>`).join("")}${p.result ? "" : `<p class="muted">No result yet.</p>`}</div>${p.result ? toolResult(p.result) : ""}`;
+}
+
+function entryHtml(e: Entry): string {
+  switch (e.kind) {
+    case "brief": return card("brief", `${label("The brief the agent got")}${longText(e.text)}`);
+    case "turn": return card("turn", `${label(e.subagent ? "Subagent's assistant" : "Assistant")}${e.parts.map(turnPart).join("")}`);
+    case "subagent-start": return card("subagent-start", `${label("Subagent started")}<p><strong>${escapeHtml(e.name)}</strong></p>${e.description ? longText(e.description) : ""}`);
+    case "subagent-finish": return card("subagent-finish", `${label("Subagent finished")}<p><strong>${escapeHtml(e.name)}</strong> ${escapeHtml(e.status || "finished")}</p>${e.summary ? longText(e.summary) : ""}`);
+    case "result": return card("result", `${label("Final result")}<p>The agent call ${escapeHtml(e.ended)}. Cost ${escapeHtml(cost(e.costUsd))}, tokens ${escapeHtml(tokens(e.tokensIn))} in, ${escapeHtml(tokens(e.tokensOut))} out.</p>${e.message ? longText(e.message) : ""}`);
+    case "unreadable": return card("unreadable", `${label("A line the page can't read")}${longText(e.line)}`);
+  }
+}
+
+/**
+ * PBI 326: an attempt's transcript as a conversation, as the SPA's transcript page draws it (web/src/pages/Transcript.tsx),
+ * for the dashboard that serves Run detail on 7400 until step 9. Everything from the transcript goes through escapeHtml.
+ */
+export function transcriptPage(d: TranscriptView, banner: string | null): string {
+  const s = d.stage;
+  const entries = d.jsonl === null ? [] : readConversation(d.jsonl, { running: d.running });
+  const body = d.jsonl === null
+    ? `<p class="muted">${d.rawHref ? "The transcript can't be found: it's no longer stored." : "The transcript can't be found: this attempt has none the factory can serve."}</p>`
+    : entries.length ? entries.map(entryHtml).join("\n") : `<p class="muted">The transcript holds no messages yet.</p>`;
+  return page(`Transcript of ${s.stage_id} attempt ${s.attempt}`, `<style>.entry { border: 1px solid var(--line); border-radius: .4rem; margin: .75rem 0; padding: .5rem .75rem; } .result { border-left: 2px solid var(--line); margin-left: 1rem; padding-left: .75rem; }</style>
+<p><a href="/items/${escapeHtml(d.item.id)}">${d.item.external_id !== null ? `#${escapeHtml(d.item.external_id)} ` : ""}${escapeHtml(d.item.title)}</a></p>
+<h1>Transcript of ${escapeHtml(s.stage_id)} attempt ${escapeHtml(s.attempt)}</h1>
+${d.running ? `<p class="banner" role="status">The attempt is still running. This is what the cell has uploaded so far: open the page again for newer turns.</p>` : ""}${d.stopped ? `<p class="banner" role="status">The attempt stopped before it finished.</p>` : ""}${d.rawHref && d.jsonl !== null ? `<p><a href="${escapeHtml(d.rawHref)}">Raw JSON Lines file</a></p>` : ""}
+${body}`, banner);
 }
 
 export type Phase0Row = Issue & { item_id: string; title: string; pr_url: string | null; merged_at: Date | null; cost: number; risk_tier: string | null; tier_reasons: string[] | null };

@@ -10,7 +10,8 @@ import { formatDuration } from "../../../src/core/durations.ts";
 import { timeSpent, tokens } from "../../../src/http/format.ts";
 import { withEffort } from "../../../src/store/effort.ts";
 import { FEATURE_CHANGE_ANCHOR, lineDiff } from "../../../src/core/feature-change.ts";
-import type { CiFailure, ItemData, ItemDurations, ReadinessCheck, RunDetailProps, Stage } from "../api.ts";
+import { runningAttempt, type CiFailure, type ItemData, type ItemDurations, type ReadinessCheck, type RunDetailProps, type Stage } from "../api.ts";
+import { transcriptPath } from "../routes.ts";
 import { buttonsFor } from "../forms.ts";
 import { claimLines, recheckLine } from "../lines.ts";
 import { CheckLink } from "./Floor.tsx";
@@ -163,11 +164,10 @@ function Files({ files }: { files: { path: string; text: string }[] }) {
 
 /** The Stages table: each attempt, how long it took, what it used and cost, its transcript and its notes. */
 function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
-  const at = (s: Stage) => (s.started_at ? Date.parse(s.started_at) : NaN);
   // An attempt with no end is running only while the item is In progress on an open run, and only if it's the run's
   // newest attempt, so a row a dead cell left open never counts against now (PBI 209, PBI 239).
-  const newest = d.stages.reduce<Stage | null>((a, s) => (s.started_at && (!a?.started_at || at(s) >= at(a)) ? s : a), null);
-  const live = (s: Stage) => d.item.state === "InProgress" && d.run?.open === true && s === newest;
+  const running = runningAttempt(d);
+  const live = (s: Stage) => s === running;
   const took = (s: Stage) => !s.started_at ? ""
     : s.ended_at ? timeSpent(new Date(s.started_at), new Date(s.ended_at))
     : live(s) ? `${timeSpent(new Date(s.started_at), now)} so far` : "didn't finish";
@@ -191,7 +191,8 @@ function Stages({ d, zone, now }: { d: ItemData; zone: string; now: Date }) {
             <TableCell>{took(s)}</TableCell>
             <TokensCell tokensIn={s.tokens_in} tokensOut={s.tokens_out} />
             <CostCell usd={s.cost_usd} />
-            <TableCell>{!s.transcript_ref ? "" : d.linkBlobs ? <A href={`/bff/v1/blobs/${s.transcript_ref}`}>transcript</A> : s.transcript_ref}</TableCell>
+            {/* PBI 326: the link opens the transcript page, which links the raw JSON Lines file. */}
+            <TableCell>{!s.transcript_ref ? "" : d.linkBlobs ? <A href={transcriptPath(d.item.id, s.stage_id, s.attempt)}>transcript</A> : s.transcript_ref}</TableCell>
             <TableCell className="whitespace-normal">{notes(s).map((n, j) => <span key={j}>{j > 0 && <br />}{n}</span>)}</TableCell>
           </TableRow>
         ))}

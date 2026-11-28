@@ -8298,6 +8298,46 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
   with the transcript as far as it got (PBI 209).</p>
 
+  <p><b>A transcript reads as a conversation (PBI 326).</b>
+
+  Run detail links each stored transcript to the attempt's transcript page,
+
+  in the SPA and on the 7400 dashboard alike,
+
+  which shows the attempt as a conversation in the order it happened.
+
+  Each call's transcript starts with the brief the agent got,
+
+  then come its turns.
+
+  Each assistant turn shows its thinking,
+
+  labelled as thinking,
+
+  then its text,
+
+  then each tool call with the tool's name and a short form of its input,
+
+  each followed by its result.
+
+  A long input or result shows its first lines and opens to the rest,
+
+  so a large transcript reads as a page of short turns.
+
+  Subagent tasks show where they start and finish with the subagent's name,
+
+  and each call's final result shows its cost,
+
+  its tokens and how it ended.
+
+  Everything from the transcript shows as text,
+
+  never as HTML.
+
+  A running attempt's page shows what the cell has uploaded so far and says the attempt is still running,
+
+  and the raw JSON Lines file stays one click away.</p>
+
   <p><b>Every AI call records its cost.</b>
 
   A cell's calls are charged to the stage attempt open at the time,

@@ -3,6 +3,7 @@
 // forwards one for one to the API's /v1/*:
 //   GET  /bff/v1/floor                 FloorData: /v1/floor, today's Floor's data as JSON, with canOperate and claudeToken
 //   GET  /bff/v1/items/{id}            ItemData: /v1/items/{id}, everything today's Run detail shows, as JSON
+//   GET  /bff/v1/blobs/{ref}           a stored transcript as text, which the transcript page reads (PBI 326)
 //   GET  /bff/v1/phase0                Phase0Data: /v1/phase0
 //   GET  /bff/v1/activity              ActivityData: /v1/activity
 //   POST /bff/v1/overrides             OverrideSent, answered 201 { ok: true }, or 4xx { error }
@@ -211,6 +212,8 @@ export type FloorProps = {
 };
 export type RunDetailProps = { data: ItemData; zone: string; now: Date; message?: string | null; onSubmit?: OnSubmit };
 export type Phase0Props = { data: Phase0Data };
+/** PBI 326: the transcript page draws with its one read, readTranscript's. */
+export type TranscriptProps = { data: TranscriptData };
 export type ActivityProps = { data: ActivityData };
 
 /**
@@ -238,6 +241,48 @@ async function read<T>(call: Call, path: string): Promise<T> {
 
 /** Floor's one read of the factory. */
 export const readFloor = (call: Call) => read<FloorData>(call, "/bff/v1/floor");
+
+/**
+ * PBI 326: what the transcript page shows for one stage attempt: the item, the attempt's row as Run detail has it,
+ * whether it's still running, the raw JSON Lines file's address, and the transcript as stored, or null when it isn't.
+ */
+export type TranscriptData = {
+  item: Named & { state: string };
+  stage: Stage;
+  running: boolean;
+  /** The raw JSON Lines file, /bff/v1/blobs/{transcript_ref}, or null when the attempt has none. */
+  rawHref: string | null;
+  jsonl: string | null;
+};
+
+/**
+ * The attempt still running, as Run detail has it (PBI 209, PBI 239): the item's newest attempt, if it has no end and the
+ * item is In progress on an open run. A row a dead cell left open is never running.
+ */
+export function runningAttempt(d: ItemData): Stage | null {
+  const at = (s: Stage) => (s.started_at ? Date.parse(s.started_at) : NaN);
+  const newest = d.stages.reduce<Stage | null>((a, s) => (s.started_at && (!a?.started_at || at(s) >= at(a)) ? s : a), null);
+  return newest && d.item.state === "InProgress" && d.run?.open === true && newest.status === "started" && !newest.ended_at ? newest : null;
+}
+
+/**
+ * PBI 326: the transcript page's one read of the factory, for the item's `stage` attempt `attempt`: the item as Run
+ * detail reads it, then the attempt's stored transcript as text from /bff/v1/blobs/{transcript_ref}, as the cell last
+ * uploaded it. A transcript no longer stored, or one that can't be served, reads as null.
+ */
+export async function readTranscript(call: Call, id: string, stage: string, attempt: number): Promise<TranscriptData> {
+  const d = await readItem(call, id);
+  const s = d.stages.find((x) => x.stage_id === stage && x.attempt === attempt);
+  if (!s) throw new Error(`the item has no "${stage}" attempt ${attempt}`);
+  const rawHref = s.transcript_ref && d.linkBlobs ? `/bff/v1/blobs/${s.transcript_ref}` : null;
+  let jsonl: string | null = null;
+  if (rawHref) {
+    const r = await call(rawHref);
+    if (r.ok) jsonl = await r.text();
+    else if (r.status !== 404) throw new Error(`${rawHref} answered ${r.status}`);
+  }
+  return { item: d.item, stage: s, running: runningAttempt(d) === s, rawHref, jsonl };
+}
 
 /** Run detail's one read of the factory. */
 export const readItem = (call: Call, id: string) => read<ItemData>(call, `/bff/v1/items/${encodeURIComponent(id)}`);

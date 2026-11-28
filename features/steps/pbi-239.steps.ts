@@ -567,7 +567,7 @@ Then("green's attempt {int} shows the message saying the cell's lease ran out", 
 });
 
 Then("green's attempt {int} shows no transcript link", function (n: number) {
-  assert.doesNotMatch(stageRow(this, "green", n), /<a href="\/blobs\//, `green's attempt ${n} links a transcript`);
+  assert.doesNotMatch(stageRow(this, "green", n), /<a href="\/(blobs\/)?transcripts\//, `green's attempt ${n} links a transcript`);
 });
 
 Then("green's attempt {int} doesn't show {string}", function (n: number, shown: string) {
@@ -575,7 +575,7 @@ Then("green's attempt {int} doesn't show {string}", function (n: number, shown: 
 });
 
 Then("green's attempt {int} links its transcript", function (n: number) {
-  assert.match(stageRow(this, "green", n), new RegExp(`<a href="/blobs/transcripts/[0-9a-f-]{36}/green-${n}\\.jsonl">`), `green's attempt ${n} doesn't link its transcript`);
+  assert.match(stageRow(this, "green", n), new RegExp(`<a href="/transcripts/[0-9a-f-]{36}/green-${n}">`), `green's attempt ${n} doesn't link its transcript`);
 });
 
 Then("green's attempt {int} shows as stopped, with the message saying the cell's lease ran out", function (n: number) {
