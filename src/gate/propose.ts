@@ -16,14 +16,35 @@ const headingName = (line: string) => line.replace(/^#+\s*/, "").trim();
 /** A dor.md line about testing, such as "Every acceptance criterion can be tested". */
 const TESTING_LINE = /\btest/i;
 
+/** Where a judge's reason turns from one criterion to the next: a sentence's end, a semicolon, or a contrast. */
+const CLAUSE = /(?<=[.;!?])\s+|;\s*|,?\s+\b(?:but|while|whereas|although|though|however|yet)\b,?\s+/i;
+/** A clause that finds what it names testable, such as "... is fine" or "... can be tested". */
+const PASSING = /\b(?:is|are)\s+(?:fine|ok|okay|good|testable|measurable|clear|specific)\b|\bcan be (?:tested|measured|checked)\b|\bpasses\b/i;
+
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
- * Each acceptance criterion the judge found untestable, with the judge's reason: one a failed dor.md line about
- * testing names word for word in its reason.
+ * Where `criterion` stands in `clause` as words of its own, not inside a longer word, nor inside a longer criterion
+ * the clause names too.
+ */
+function names(clause: string, criterion: string, criteria: string[]): boolean {
+  const at = (needle: string) => [...clause.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${escape(needle)}(?![\\p{L}\\p{N}])`, "giu"))]
+    .map((m) => [m.index, m.index + needle.length] as const);
+  const longer = criteria.filter((o) => o !== criterion && o.length > criterion.length && o.toLowerCase().includes(criterion.toLowerCase())).flatMap(at);
+  return at(criterion).some(([s, e]) => !longer.some(([ls, le]) => ls <= s && e <= le));
+}
+
+/**
+ * Each acceptance criterion the judge found untestable, with the judge's reason. A criterion is untestable when a
+ * failed dor.md line about testing names it word for word in a clause of its reason that doesn't find it testable. So
+ * a reason that names one criterion as fine and another as untestable moves only the second, and a criterion that
+ * is only part of a longer one the reason names stays where it is.
  */
 export function untestable(criteria: string[], failed: Verdict[]): { criterion: string; reason: string }[] {
   const out: { criterion: string; reason: string }[] = [];
+  const lines = failed.filter((f) => f.index > 0 && f.status !== "passed" && TESTING_LINE.test(f.criterion));
   for (const c of criteria) {
-    const v = failed.find((f) => f.index > 0 && f.status !== "passed" && TESTING_LINE.test(f.criterion) && f.reason.includes(c));
+    const v = lines.find((f) => f.reason.split(CLAUSE).some((clause) => clause && names(clause, c, criteria) && !PASSING.test(clause)));
     if (v) out.push({ criterion: c, reason: v.reason });
   }
   return out;

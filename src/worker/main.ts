@@ -22,13 +22,13 @@ import { dockerLauncher, ensureEgress, type Launcher } from "../scheduler/launch
 import { tick, TICK_MS, type CiMemo, type RecheckHoursMemo } from "../scheduler/scheduler.ts";
 import { createPool } from "../store/db.ts";
 import { recordHeartbeat } from "../store/heartbeat.ts";
-import { markRechecked, rechecksOwed } from "../store/rewrites.ts";
 import { clearRestartOnStart } from "../store/overrides.ts";
 import { pollOnce, POLL_INTERVAL_MS, type PollDeps } from "../watcher/poller.ts";
 import { realClock, type Clock } from "../clock.ts";
 import { dockerBuilder, pollCellImage, startCellImage, type CellImageDeps } from "./cell-image.ts";
 import { factoryRepoAt, mainDefaults } from "./main-defaults.ts";
 import { OUTBOX_MS, workOutbox } from "./outbox.ts";
+import { onRewriteAccepted, recheckAccepted } from "./rechecks.ts";
 
 type Egress = (cfg: { image: string; controlUrl: string; blob: string }) => Promise<void>;
 
@@ -330,16 +330,23 @@ function jobs(d: WorkerDeps, clock: Clock, runs: Map<string, number>, log: Pick<
     polls.set(s.id, poll);
     loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, `polling source ${s.id}`, poll, runs, log));
   }
-  // PBI 439: a rewrite the owner accepted on the dashboard is checked again at once, on the next tick, without waiting
-  // for its board's next poll.
-  loops.push(every(clock, d.tickMs ?? TICK_MS, "rechecking accepted rewrites", async () => {
-    for (const [sourceId, ids] of await rechecksOwed(d.pool)) {
-      const poll = polls.get(sourceId);
-      if (!poll) continue;
-      await poll();
-      await markRechecked(d.pool, ids);
-    }
-  }, runs, log));
+  // PBI 439: a rewrite the owner accepted on the dashboard is checked again at once: its rewrite_accepted event wakes
+  // the worker. The tick runs the same recheck too, for an acceptance whose notification was missed. Rechecks run one
+  // at a time, and each is counted in runs as "rechecking accepted rewrites".
+  const RECHECK = "rechecking accepted rewrites";
+  let rechecking: Promise<unknown> = Promise.resolve();
+  const recheck = () => (rechecking = rechecking.then(() => recheckAccepted(d.pool, polls, log)));
+  loops.push(every(clock, d.tickMs ?? TICK_MS, RECHECK, recheck, runs, log));
+  const listening = onRewriteAccepted(d.pool, () => {
+    void attempt(RECHECK, recheck, log).then(() => runs.set(RECHECK, (runs.get(RECHECK) ?? 0) + 1));
+  }, log).catch((e: Error) => {
+    log.error("The worker couldn't listen for accepted rewrites, so they're rechecked on its tick:", e.message);
+    return async () => {};
+  });
+  loops.push(async () => {
+    await (await listening)();
+    await rechecking.catch(() => undefined);
+  });
   if (d.cellImage) {
     const cellImage = { ...d.cellImage, pool: d.pool, log };
     loops.push(every(clock, d.pollMs ?? POLL_INTERVAL_MS, "polling main for the cell image", () => pollCellImage(cellImage), runs, log));

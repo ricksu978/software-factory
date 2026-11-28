@@ -94,8 +94,9 @@ export function controlHandlers(d: ControlDeps): { handlers: Handler[]; close():
 
   // ponytail: Phase 0 has one board, so the dashboard reads items from the first source. Route by item.source_id when a second board arrives.
   const first = d.sources[0];
-  // PBI 439: the owner's accepted rewrite is written over the issue by the factory's App. The accepted proposal is the
-  // worker's cue to check the item again, on its next tick, so recheck has nothing more to do here.
+  // PBI 439: the owner's accepted rewrite is written over the issue by the factory's App. Its rewrite_accepted event
+  // wakes the worker, which checks the item again at once (src/worker/rechecks.ts), so recheck has nothing more to do
+  // here: the control plane runs no judge.
   const editBody = first?.file?.board.editBody;
   const rewrites = editBody && { editBody: (externalId: string, body: string) => editBody.call(first.file!.board, externalId, body), recheck: async () => {} };
   const dashboard = dashboardRoutes({

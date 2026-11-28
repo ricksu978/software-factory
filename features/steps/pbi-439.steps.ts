@@ -29,7 +29,8 @@
 //   person's edit withdrew 409 with a reason that says it was withdrawn.
 // - Accepting writes the proposed body over the issue with DashboardDeps.rewrites.editBody, posts its comment with the
 //   dashboard's adapter, and runs the readiness check at once with DashboardDeps.rewrites.recheck, before it answers.
-//   Here, editBody seeds the board item with that body and the criteria it lists, and recheck runs one poll.
+//   Here, editBody seeds the board item with that body and the criteria it lists, and recheck runs the worker's
+//   recheckAccepted with one poll. In production the acceptance's event wakes the worker, which runs the same call.
 // - A person's edit withdrawing a proposal is an event of kind "rewrite_withdrawn" whose payload's cause is
 //   "item_edited". The approval of a rules section is PBI 395's "rule_change_approved" event, its payload's `changes`
 //   the section as accepted.
@@ -38,7 +39,8 @@ import assert from "node:assert/strict";
 import type { FactoryItem } from "../../src/adapters/types.ts";
 import type { AgentArgs, AgentResult } from "../../src/agent/run.ts";
 import type { Policy } from "../../src/policy/policy.ts";
-import { proposedRewrites, type ProposedRewrite } from "../../src/store/rewrites.ts";
+import { proposedRewrites, rechecksOwed, type ProposedRewrite } from "../../src/store/rewrites.ts";
+import { recheckAccepted } from "../../src/worker/rechecks.ts";
 import { ctx as pollCtx, poll, polled } from "./pbi-12.steps.ts";
 import { ctx as commentCtx } from "./pbi-149.steps.ts";
 import { text } from "./pbi-189.steps.ts";
@@ -163,8 +165,12 @@ function install(world: object, k: Ctx): void {
         k.written.add(body);
         await reseed(world, externalId, body);
       },
-      async recheck() {
-        await poll(pollCtx(world));
+      // The worker's own recheck, src/worker/rechecks.ts, with this board's poll: it finds the rewrite owed a
+      // check, polls, and marks it rechecked, as the worker does when the acceptance's event wakes it.
+      async recheck(itemId) {
+        const source = (await pool().query<{ source_id: string }>("select source_id from item where id = $1", [itemId])).rows[0].source_id;
+        await recheckAccepted(pool(), new Map([[source, () => poll(pollCtx(world))]]));
+        assert.equal((await rechecksOwed(pool())).has(source), false, "the accepted rewrite is still owed its recheck");
       },
     },
   };

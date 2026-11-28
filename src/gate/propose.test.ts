@@ -18,6 +18,30 @@ describe("untestable", () => {
     assert.deepEqual(untestable(criteria, [line(2, "The item names the screen", "Paying takes one click names none")]), []);
     assert.deepEqual(untestable(criteria, [{ ...testable, index: 0 }]), []);
   });
+
+  test("a reason that names one criterion as fine and another as untestable moves only the second", () => {
+    for (const reason of [
+      "The checkout page loads the saved card is fine, but Paying takes one click has no measure",
+      "The checkout page loads the saved card can be tested. Paying takes one click has no measure of a click.",
+      "The checkout page loads the saved card is testable; Paying takes one click isn't",
+    ]) {
+      const v = line(1, "Every acceptance criterion can be tested", reason);
+      assert.deepEqual(untestable(criteria, [v]), [{ criterion: "Paying takes one click", reason }], reason);
+    }
+  });
+
+  test("a criterion that is part of a longer one the reason names, or of a longer word, stays", () => {
+    const both = ["Paying takes one click", "Paying takes one click on a phone"];
+    const v = line(1, "Every acceptance criterion can be tested", "Paying takes one click on a phone has no measure of a phone");
+    assert.deepEqual(untestable(both, [v]), [{ criterion: both[1], reason: v.reason }]);
+    const word = line(1, "Every acceptance criterion can be tested", "Prepaying takes one clicker is vague");
+    assert.deepEqual(untestable(["paying takes one click"], [word]), []);
+  });
+
+  test("a reason that names two criteria as untestable together moves both", () => {
+    const v = line(1, "Every acceptance criterion can be tested", "The checkout page loads the saved card and Paying takes one click have no measure");
+    assert.deepEqual(untestable(criteria, [v]).map((m) => m.criterion), criteria);
+  });
 });
 
 describe("proposedBody", () => {
