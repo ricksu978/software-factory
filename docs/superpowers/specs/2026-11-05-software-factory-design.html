@@ -4052,7 +4052,19 @@ Feature: Export invoices to CSV
 
     and checks the item again at once:
 
-    the worker runs the item's board's poll on its next tick rather than waiting for the poll interval.
+    the acceptance's <code>rewrite_accepted</code> event wakes the worker through Postgres's LISTEN/NOTIFY,
+
+    and the worker runs the item's board's poll then rather than waiting for the poll interval.
+
+    The worker listens on a connection of its own, outside its pool, as it holds its lock,
+
+    and its tick runs the same check too, for an acceptance whose wake-up was missed.
+
+    The recheck counts as done even when its poll fails:
+
+    the failure is logged, and the board's regular poll checks the item again,
+
+    so a failing board isn't polled on every tick.
 
     When the accepted text adds or changes a <code>## Changes the factory's rules</code> section,
 

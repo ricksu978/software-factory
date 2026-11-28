@@ -3895,7 +3895,10 @@ export type ReviewComment = { threadId: string; path: string | null; line: numbe
     the model's body without any criteria or Notes section of its own,
     then the current body's criteria heading and its criteria word for word,
     less each one `untestable` finds,
-    a criterion a failed `dor.md` line about testing names in its reason,
+    a criterion a failed `dor.md` line about testing names in its reason:
+    a clause of the reason names the criterion in whole words,
+    the clause doesn't find it testable,
+    and the criterion isn't only part of a longer criterion the clause names,
     then `## Notes` with the model's own notes and a line for each criterion moved there with the judge's reason.
     `ctx.rewrites.keep` inserts it into `item_rewrite`,
     with a null body when the reply carried none,
@@ -6974,11 +6977,23 @@ from spec §6 rows 1 to 7:
       and 503 when the dashboard has no `rewrites`.
       The control plane's `editBody` is the first board's `splitBoard.editBody`.
       Its `recheck` does nothing,
-      since the worker's "rechecking accepted rewrites" loop,
-      on the tick interval,
-      reads `rechecksOwed` and runs each such board's poll,
-      one at a time with its regular poll,
-      then `markRechecked`.
+      since the `rewrite_accepted` event wakes the worker.
+      `onRewriteAccepted` in `src/worker/rechecks.ts` opens a `pg.Client` with the pool's settings,
+      outside the pool as the lock connection is,
+      runs `LISTEN factory_events`,
+      and calls back on each notification whose payload's `kind` is `rewrite_accepted`.
+      The callback runs `recheckAccepted` at once,
+      which reads `rechecksOwed` and runs each such board's poll,
+      then `markRechecked` in a `finally`,
+      so an owed recheck is marked done even when its poll fails.
+      A failed poll is logged,
+      and the board's regular poll checks the item again,
+      so a failing board isn't polled on every tick.
+      The worker's "rechecking accepted rewrites" loop runs `recheckAccepted` on the tick interval too,
+      for a notification that was missed,
+      and rechecks from either run one at a time.
+      A listener that can't connect, or whose connection drops, logs it and leaves the rechecks to the tick.
+      The worker's stop closes the listener's connection and waits for a recheck in flight.
       Run detail's `<h2>Proposed rewrite</h2>` shows the current body and the proposed one side by side, in `<pre data-side="current">` and `data-side="proposed"`,
       each changed word of `bodyDiff` in a `<mark>`:
       lines are matched first,
