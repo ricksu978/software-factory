@@ -1,58 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { bugItem, compareWithParent, failingTests } from "./main-break.ts";
-
-describe("failingTests (PBI 255)", () => {
-  test("names each `not ok` test in a TAP log, once, and no passing one", () => {
-    const log = ["TAP version 13", "ok 1 - loads the policy", "not ok 2 - parses the config", "not ok 3 - reads the board", "not ok 4 - parses the config", "1..4"].join("\n");
-    assert.deepEqual(failingTests(log), ["parses the config", "reads the board"]);
-  });
-
-  test("names the failing test inside a failing suite, and not the suite", () => {
-    const log = [
-      "# Subtest: config", "    # Subtest: parses the config", "    not ok 1 - parses the config", "      ---", "      ...",
-      "    ok 2 - reads defaults", "    1..2", "not ok 1 - config", "not ok 2 - a test on its own", "1..2",
-    ].join("\n");
-    assert.deepEqual(failingTests(log), ["parses the config", "a test on its own"]);
-  });
-
-  test("reads a GitHub Actions log, whose lines start with a timestamp, and skips a TODO", () => {
-    const log = ["2026-11-14T10:00:00.1234567Z not ok 1 - reads the board", "2026-11-14T10:00:00.2Z not ok 2 - later # TODO not yet"].join("\n");
-    assert.deepEqual(failingTests(log), ["reads the board"]);
-  });
-
-  // Node 26's spec reporter, as `npm test` prints it on CI, with GitHub's timestamps and the reporter's colours.
-  const spec = [
-    "▶ suite one", "  ✖ parses the config (0.58ms)", "  ✔ passes (0.10ms)", "✖ suite one (1.22ms)", "✖ reads the board (0.11ms)",
-    "⚠ later (0.10ms) # TODO", "ℹ tests 4", "ℹ fail 2", "", "✖ failing tests:", "", "test at src/a.test.ts:3:31",
-    "\x1b[31m✖ parses the config (0.58ms)\x1b[39m", "  AssertionError [ERR_ASSERTION]: 1 == 2", "      at TestContext.<anonymous> (file:///src/a.test.ts:3:70)",
-    "", "test at src/a.test.ts:4:1", "✖ reads the board (0.11ms)", "  Error: x", "", "test at src/a.test.ts:5:6", "⚠ later (0.10ms) # TODO", "  Error: t",
-  ].map((l) => `2026-11-14T10:00:00.1234567Z ${l}`).join("\n");
-
-  test("names each failing test in the spec reporter's failing tests list, and no suite or TODO", () => {
-    assert.deepEqual(failingTests(spec), ["parses the config", "reads the board"]);
-  });
-
-  test("names each scenario cucumber's summary lists as failed or ambiguous, with its file and line", () => {
-    const log = [
-      "##[group]Run npm run bdd -- --tags \"not @local\"", "##[endgroup]", "FA.", "", "Ambiguous scenarios:", "  1) Two steps match # features/a.feature:4",
-      "       Given amb", "           Multiple matching step definitions found:", "             • amb # features/steps/s.ts:3", "",
-      "Failed scenarios:",
-      "  1) The stage reads the PR's diff at the head the reviewer reviewed before it posts the review # features/pbi-266-review-findings-outside-diff.feature:27",
-      "       Given a thing # features/steps/s.ts:2", "           Error: boom", "", "3 scenarios (1 passed, 1 ambiguous, 1 failed)", "3 steps (1 passed, 1 ambiguous, 1 failed)",
-      "##[error]Process completed with exit code 1.",
-    ].map((l) => `2026-11-14T10:00:00.1234567Z ${l}`).join("\n");
-    assert.deepEqual(failingTests(log), [
-      "Two steps match (features/a.feature:4)",
-      "The stage reads the PR's diff at the head the reviewer reviewed before it posts the review (features/pbi-266-review-findings-outside-diff.feature:27)",
-    ]);
-  });
-
-  test("names nothing for a log that names no test, or no log", () => {
-    assert.deepEqual(failingTests("src/main.ts(3,1): error TS1005: ';' expected."), []);
-    assert.deepEqual(failingTests(null), []);
-  });
-});
+import { bugItem, compareWithParent } from "./main-break.ts";
 
 describe("compareWithParent (PBI 255)", () => {
   const run = (name: string, status: "success" | "failure" | "pending" | "cancelled") => ({ name, status, url: `u/${name}` });

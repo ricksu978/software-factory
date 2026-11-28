@@ -22,6 +22,7 @@ import { jsonLines, loadPolicy, parseJudgement, PolicyError, type Criterion, typ
 import { cancelledCiQuestion, pendingCiQuestion } from "./ci-cap.ts";
 import { LeaseLost, type CellApi, type CheckAnswer, type TransitionBody } from "./api-client.ts";
 import { baseQuestion, failingTests, runOnBase, sharedWithBase, type BaseLine } from "./base-run.ts";
+import { quoted } from "../core/ci-findings.ts";
 import { ciFailureOf, ciFindings, ciQuestion, sharedCiLines, type CiFailure } from "./ci-failure.ts";
 import { failedNames, refusedNotes, rerunNotes } from "./ci-rerun.ts";
 import type { Git } from "./git.ts";
@@ -774,7 +775,11 @@ export async function checkDefinitionOfDone(d: {
       }
     }
     // A command stopped at its limit didn't fail, so it isn't run again on the base either (PBI 399).
-    let reason = r.code === 0 ? "exit 0" : r.stopped ? stoppedFinding("the line's command", command, minutes, r.out) : `exit ${r.code}: ${r.out.trim()}`;
+    // PBI 321: a failed command's reason names the failing tests its output lists, on a line of their own before the
+    // output, so a retry brief says which tests to fix however long the output runs.
+    const tests = r.code === 0 || r.stopped ? [] : failingTests(r.all);
+    let reason = r.code === 0 ? "exit 0" : r.stopped ? stoppedFinding("the line's command", command, minutes, r.out)
+      : tests.length ? `exit ${r.code}. Failing tests: ${quoted(tests)}.\n${r.out.trim()}` : `exit ${r.code}: ${r.out.trim()}`;
     if (r.code !== 0 && !r.stopped && d.onRunFailed) {
       const prefix = await d.onRunFailed({ ...c, run: command }, r);
       if (prefix) reason = `${prefix}: ${reason}`;

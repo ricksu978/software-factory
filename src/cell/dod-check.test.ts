@@ -217,3 +217,21 @@ describe("gateNote", () => {
     assert.equal(gateNote(null, "@pbi-7"), "");
   });
 });
+
+// PBI 321: a failed run: line's reason names the failing tests its output lists, so Green's retry brief says which.
+describe("checkDefinitionOfDone with a failed run: line", () => {
+  const prints = (out: string, code: number) => `node -e "process.stdout.write(${JSON.stringify(out).replace(/"/g, '\\"')});process.exit(${code})"`;
+
+  test("names the failing tests the output lists on a line of their own, before the output", async () => {
+    const out = "Pending scenarios:\n  1) A discount is shown on the invoice # features/invoices.feature:15\n\n6 scenarios (1 pending, 5 passed)\n";
+    const r = await check([`Scenarios pass. \`run: ${prints(out, 1)}\``], null);
+    const [first, ...rest] = r.verdicts[0].reason.split("\n");
+    assert.equal(first, `exit 1. Failing tests: "A discount is shown on the invoice".`);
+    assert.equal(rest.join("\n"), out.trim());
+  });
+
+  test("keeps `exit N: <output>` when the output names no test", async () => {
+    const r = await check([`Types check. \`run: ${prints("src/a.ts(3,1): error TS2304", 2)}\``], null);
+    assert.equal(r.verdicts[0].reason, "exit 2: src/a.ts(3,1): error TS2304");
+  });
+});
