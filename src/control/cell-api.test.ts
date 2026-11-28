@@ -385,6 +385,7 @@ describe("cell API", dbTest, () => {
       trustedComments: [],
       threadCommentCounts: {},
       trustedBot: "factory[bot]",
+      trustedLogins: [],
       stageAttempts: { specify: 2 },
       failedCiHeads: [],
       effort: "medium",
@@ -406,6 +407,14 @@ describe("cell API", dbTest, () => {
     const { body } = await send(cell.runId, cell.token, "GET", "/context");
     assert.deepEqual(body.trustedComments.map((c: { author: string }) => c.author), ["ricksu978", "factory[bot]"]);
     assert.deepEqual(body.threadCommentCounts, { t1: 3 }, "every author's comment counts, so address can tell one that came later (PBI 258)");
+  });
+
+  test("a PR review run's context hands the allowlist's logins as it stores them, for the factory's threads (PBI 328)", async () => {
+    const cell = await claimed("pr-review");
+    await db.pool.query("update run set pr_number = 9 where id = $1", [cell.runId]);
+    await db.pool.query(`insert into "user" (provider, subject, github_login, role) values ('dev', 'owner', 'RickSu978', 'owner'), ('dev', 'nologin', null, 'owner')`);
+    const { body } = await send(cell.runId, cell.token, "GET", "/context");
+    assert.deepEqual(body.trustedLogins, ["RickSu978"]);
   });
 
   test("an address run's context holds none of a thread the factory's own review opened, a person's reply included (PBI 130)", async () => {
