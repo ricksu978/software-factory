@@ -6,6 +6,14 @@ name: ci
 on:
   push:
 
+# A new push to a branch cancels that branch's run still going, since only its newest head matters. The factory reads
+# a cancelled run as neither failed nor passed (PBI 423). Each push to main gets a group of its own, keyed by its
+# commit, so main runs side by side as before: one group for main would hold a merge's run behind another's, and a
+# third merge would cancel the one waiting, leaving a merge commit with no verdict.
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
