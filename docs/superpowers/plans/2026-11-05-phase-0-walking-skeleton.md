@@ -6657,6 +6657,14 @@ from spec §6 rows 1 to 7:
   Concurrent calls for one session share one refresh.
   A missing or refused refresh token answers 401,
   and a provider that doesn't answer gives 502.
+  Since PBI 325,
+  `save` in `createBff` keeps refreshed tokens in an in-memory map by cookie hash until `updateTokens` takes them.
+  A failed save logs the session store's failure and answers 503 naming the session store,
+  and the session's next call saves the kept tokens before it refreshes or forwards,
+  so a provider that rotates refresh tokens never sees the replaced one again.
+  A `find` that fails answers 503 naming the session store too.
+  Logout drops the kept tokens.
+  The `@db` scenarios in `features/pbi-325-failed-token-save-keeps-rotated-refresh-token.feature` fail the save with a trigger on `session`.
   The call then goes to `API_URL` + `/v1/*` with its query,
   method and body,
   `Authorization: Bearer` with the session's token,
