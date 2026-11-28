@@ -10,12 +10,13 @@ export const FAILED_ON_MAIN = `join lateral (select e.at, e.payload->>'event' as
 /** When the item was last re-checked since it last failed, or null, as `rechecked`. */
 export const LAST_RECHECK = "(select max(e.at) from event e where e.item_id = i.id and e.kind = 'recheck' and e.at >= f.at)";
 
-export type FailedOnMain = { id: string; external_id: string; title: string; rechecked: Date | null };
+/** `failed_at` is the item's last move to Failed (PBI 430). */
+export type FailedOnMain = { id: string; external_id: string; title: string; failed_at: Date; rechecked: Date | null };
 
 /** Every Failed item that failed its Definition of Done on main, with its last re-check, oldest failure first. Just `itemId`'s when given. */
 export async function failedOnMain(pool: pg.Pool, itemId: string | null = null): Promise<FailedOnMain[]> {
   return (await pool.query<FailedOnMain>(
-    `select i.id, i.external_id, i.title, ${LAST_RECHECK} as rechecked
+    `select i.id, i.external_id, i.title, f.at as failed_at, ${LAST_RECHECK} as rechecked
      from item i ${FAILED_ON_MAIN}
      where i.state = 'Failed' and ($1::uuid is null or i.id = $1) order by f.at, i.title`,
     [itemId],

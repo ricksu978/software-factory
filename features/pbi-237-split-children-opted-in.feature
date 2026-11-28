@@ -62,7 +62,7 @@ Feature: Children of a split get the opt-in label when the factory files them
       When the factory polls the backlog again
       Then the readiness judge was asked about child "Payment receipts"
       And the factory holds child "Payment receipts" in state "NotReady"
-      And the dashboard's "Not ready" list shows child "Payment receipts"
+      And the dashboard's "Waiting on you" list shows child "Payment receipts" as Not ready
 
     @ac-1
     Scenario: A child filed on the poll that finishes a partway filing still gets the label

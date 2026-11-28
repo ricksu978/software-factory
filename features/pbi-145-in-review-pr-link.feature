@@ -44,23 +44,15 @@ Feature: The dashboard links an InReview item to its PR
       Then "Waiting on you" shows "PR #42" for "Export a month"
       And "Waiting on you" shows no PR link for "Import a year"
 
-  Rule: Floor's "In flight" table shows the same PR link
+  Rule: Floor shows an InReview item's PR link once, under "Waiting on you", since an item in review isn't in "Production Line" (PBI 430)
 
     @ac-2 @db
-    Scenario: An InReview item in the "In flight" table shows its PR as a link
+    Scenario: An InReview item shows its PR link once on Floor, under "Waiting on you"
       Given the item is InReview
       And its open run holds PR number 42 at "https://github.com/acme/widgets/pull/42"
       When a viewer opens Floor
-      Then the "In flight" table shows "PR #42" for the item
-      And "PR #42" in the "In flight" table links to "https://github.com/acme/widgets/pull/42"
-
-    @ac-2 @db
-    Scenario: Floor shows the PR link in both places for the same InReview item
-      Given the item is InReview
-      And its open run holds PR number 42 at "https://github.com/acme/widgets/pull/42"
-      When a viewer opens Floor
-      Then "Waiting on you" and the "In flight" table each show "PR #42" for the item
-      And both links go to "https://github.com/acme/widgets/pull/42"
+      Then "Waiting on you" shows "PR #42" for the item, linked to "https://github.com/acme/widgets/pull/42"
+      And Floor shows the "PR #42" link once
 
   Rule: Run detail shows the same PR link next to the item's state
 
@@ -101,9 +93,8 @@ Feature: The dashboard links an InReview item to its PR
       And the page has no link to "https://github.com/acme/widgets/pull/42"
 
       Examples:
-        | place                        | page  |
-        | Floor's "Waiting on you"     | Floor |
-        | Floor's "In flight" table    | Floor |
+        | place                    | page  |
+        | Floor's "Waiting on you" | Floor |
 
     @ac-4 @db
     Scenario: Run detail for an InReview item whose open run has no PR address shows no link

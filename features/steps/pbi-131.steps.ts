@@ -347,9 +347,27 @@ export function render(html: string): Rendered {
   return { text, hrefs, links };
 }
 
-const SECTIONS = ["Waiting on you", "Next up", "Not ready", "In flight"];
+// PBI 430: Floor's two lists.
+const SECTIONS = ["Waiting on you", "Production Line"];
 
 /** The html of a place on the page. */
+/**
+ * PBI 430: the rows of Floor's "Waiting on you" that wait because the readiness gate turned the item down, each the
+ * markup inside its outermost <li>, joined.
+ */
+export function notReadyRows(html: string): string {
+  const waiting = scope(html, '"Waiting on you"');
+  const rows: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (const m of waiting.matchAll(/<(\/?)li\b[^>]*>/gi)) {
+    if (!m[1]) {
+      if (depth++ === 0) start = m.index! + m[0].length;
+    } else if (--depth === 0) rows.push(waiting.slice(start, m.index));
+  }
+  return rows.filter((r) => r.includes("Not ready.")).join("\n");
+}
+
 export function scope(html: string, place: string): string {
   const floor = /^(?:Floor's )?"([^"]+)"$/.exec(place)?.[1];
   if (floor) {

@@ -39,7 +39,7 @@ import { fakeClock, type FakeClock } from "../../src/clock.ts";
 import { CONSUMER } from "../../src/store/outbox.ts";
 import { body, ctx as pbi284, startIssuer, stopAll } from "./pbi-284.steps.ts";
 import {
-  addActive, all, banners, ctx as pbi279, floorRoot, includes, named, open, override, render, role, rowFor, section, showsCells, table, text,
+  addActive, addQueued, all, banners, ctx as pbi279, floorRoot, includes, named, open, override, render, role, rowFor, section, showsCells, table, text,
   type El, type PageName,
 } from "./pbi-279.steps.ts";
 import { long, need } from "./pbi-8.steps.ts";
@@ -340,8 +340,8 @@ Given("I am a viewer with Floor open in the SPA", long, async function () {
 
 Given("I am a viewer with Floor open in the SPA, showing {string} under {string}", long, async function (label: string, where: string) {
   const p = pbi279(this);
-  assert.equal(where, "Next up", `this step puts items under "Next up", not "${where}"`);
-  p.floor.next.push(named(p, label));
+  assert.equal(where, "Production Line", `this step puts items under "Production Line", not "${where}"`);
+  addQueued(p, named(p, label));
   await openFloor(this, false);
   includes(section(floorRoot(this), where), label, `Floor's "${where}"`);
 });
@@ -365,14 +365,14 @@ Given("I am a viewer with Floor open in the SPA, and the worker last ticked {int
 Given("the factory, asked for the floor again, reports {string} In progress at stage {string}", function (label: string, stage: string) {
   const p = pbi279(this);
   const n = named(p, label);
-  p.floor.next = p.floor.next.filter((x) => x.id !== n.id);
+  p.floor.productionLine = p.floor.productionLine.filter((x) => x.id !== n.id);
   addActive(p, n, { state: "InProgress", stage });
 });
 
 Given("the factory, asked for the floor again, reports {string} under {string}", function (label: string, where: string) {
-  assert.equal(where, "Next up", `this step puts items under "Next up", not "${where}"`);
+  assert.equal(where, "Production Line", `this step puts items under "Production Line", not "${where}"`);
   const p = pbi279(this);
-  p.floor.next.push(named(p, label));
+  addQueued(p, named(p, label));
 });
 
 Given("the factory, asked for the floor again, reports a {string} override with the reason {string}", function (kind: string, why: string) {
@@ -610,8 +610,10 @@ Then("the {string} table has a row for {string} showing {string} and {string}", 
   showsCells(rowFor(t, what), [a, b]);
 });
 
-Then("Floor shows nothing under {string} but {string}", function (where: string, want: string) {
-  assert.equal(text(section(floorRoot(this), where)), want);
+Then("Floor shows {string} in one row under {string}", function (what: string, where: string) {
+  const t = table(section(floorRoot(this), where), `Floor's "${where}"`);
+  const rows = t.rows.filter((r) => r.some((x) => text(x).includes(what)));
+  assert.equal(rows.length, 1, `Floor's "${where}" shows "${what}" in ${rows.length} rows`);
 });
 
 Then("Floor shows {string} under {string}", function (what: string, where: string) {

@@ -1257,7 +1257,7 @@ stateDiagram-v2
 
     on the next poll and before the readiness gate sees it,
 
-    so it leaves Floor's "Not ready" list.
+    so it leaves Floor's Not ready items under "Waiting on you".
 
     It has no run,
 
@@ -3480,7 +3480,15 @@ Feature: Export invoices to CSV
 
         <li>The readiness check flags item text that asks for credentials,
 
-        CI changes or access outside the repo.</li>
+        CI changes or access outside the repo that building the item needs.
+
+        A feature the item builds that handles credentials or other repos once it runs isn't flagged,
+
+        as long as the item's tests use stand-ins (PBI 433).
+
+        Nor is a change to the factory's rules that waits for the owner's approval,
+
+        since the engine asks for that approval once the item is filed and passes everything else.</li>
 
         <li>The readiness check reports whether an item is too big for one Sprint.
 
@@ -3884,7 +3892,7 @@ Feature: Export invoices to CSV
 
     in the same commit that moves the parent to Split,
 
-    so Floor and the parent's Run detail can show it as "Split into" (PBI 227).
+    so the parent's Run detail can show it as "Split into" and Floor can show each child as part of it (PBI 227, PBI 430).
 
     Filing is safe to repeat.
 
@@ -3961,6 +3969,24 @@ Feature: Export invoices to CSV
     or that the judge flags,
 
     files no child of the split.
+
+    A child with a <code>## Changes the factory's rules</code> section has it held to <code>main</code> and to the rules the judge finds,
+
+    as any item's is,
+
+    so a Before that isn't on <code>main</code> word for word,
+
+    or a rule the section misses,
+
+    fails the child.
+
+    Waiting for the owner's approval doesn't:
+
+    nobody can approve a child before it's filed,
+
+    so a child that passes every other check is filed,
+
+    and then waits in NotReady for that approval like any item with the section (PBI 444).
 
     The proposal comment then names,
 
@@ -4065,6 +4091,12 @@ Feature: Export invoices to CSV
 
     and the finding names each section the item's section should cover.
 
+    For an item with the section, the engine alone decides that line:
+
+    it passes when every entry holds against <code>main</code> and the section covers every rule the judge finds,
+
+    whatever verdict the judge gave it.
+
     An item whose section covers every rule the judge finds,
 
     and that passes everything else,
@@ -4119,13 +4151,19 @@ Feature: Export invoices to CSV
 
     and an item that changes no rule and has no such section is checked as before.
 
+    The judge's prompt says a rule change that still needs the owner's approval is never a flag,
+
+    since the engine asks for that approval,
+
+    so only the owner's approval holds such an item back (PBI 444).
+
     <span class="tag call">My call</span></li>
 
     <li><b>Visible results.</b>
 
     Run detail lists every criterion with its result and reason.
 
-    Floor's not-ready strip shows the <code>dor.md</code> lines an item failed.
+    Floor's "Waiting on you" shows the <code>dor.md</code> lines a Not ready item failed.
 
     The PR body carries the <code>dod.md</code> checklist with the cell's results,
 
@@ -4687,9 +4725,37 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       <tr><td>Floor</td>
 
-      <td>Every item in flight,
+      <td>Two lists,
 
-      with its stage,
+      under the banners and above the Controls (PBI 430).
+
+      "Waiting on you" holds every item that needs the owner,
+
+      oldest first by when it began waiting:
+
+      a question or sign-off from the factory's oldest open question,
+
+      a PR in review from its move to InReview,
+
+      a feature change request from its move there,
+
+      an item the readiness gate turned away from its move to NotReady,
+
+      with the <code>dor.md</code> lines it failed,
+
+      and an item that failed on <code>main</code> from its move to Failed.
+
+      Each row says why it waits.
+
+      "Production Line" holds the factory's own work,
+
+      up to 10 rows.
+
+      Every item in flight comes first,
+
+      with its state,
+
+      stage,
 
       time in stage,
 
@@ -4713,29 +4779,35 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       with each check's URL and failing tests (PBI 292).
 
-      Above it,
+      Then come the queued items that wait on no open dependency,
 
-      four strips:
+      in the order the claim takes them,
 
-      what waits on you,
+      read from the claim's own query,
 
-      the next five items in the factory queue,
+      then the Queued items blocked by open dependencies,
 
-      items the readiness gate turned away,
-
-      with its reasons,
-
-      and Queued items blocked by open dependencies,
-
-      with the issues each waits on.
+      each naming the issues it waits on.
 
       The gate no longer turns an item away for an open dependency,
 
-      so the Blocked strip is where the owner sees why a ready item doesn't start (PBI 237).
+      so the Production Line is where the owner sees why a ready item doesn't start (PBI 237).
 
-      Below those,
+      A line under the list says how many more items are queued than fit.
 
-      each Split parent with a child still to follow shows as "Split into",
+      No item shows in both lists,
+
+      or twice in one.
+
+      A split child shows "part of #N",
+
+      linking to its parent's Run detail.
+
+      A Split parent shows in neither list,
+
+      since its work goes on in its children.
+
+      Its Run detail shows it as "Split into",
 
       with a link to each child's issue and the child's state,
 
@@ -4751,13 +4823,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       such as one split before PBI 227,
 
-      gets its filed children kept by the next poll.
-
-      A parent leaves the strip once every child is Done,
-
-      Abandoned or Split,
-
-      and its Run detail still lists them (PBI 227).
+      gets its filed children kept by the next poll (PBI 227).
 
       While any item waits on a question that says the base fails in the cell,
 
@@ -4775,9 +4841,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       that a restart is needed and the commit it would pick up (PBI 210).
 
-      Below Split,
-
-      "Failed on main" lists each item that failed its Definition of Done on <code>main</code>,
+      An item that failed its Definition of Done on <code>main</code> shows "Failed on main" under "Waiting on you",
 
       with when the factory last re-checked it,
 
@@ -5325,7 +5389,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
   so the owner reaches it in one click.
 
-  That covers Floor's "Waiting on you" and "In flight" table,
+  That covers Floor's "Waiting on you",
 
   and the line with the item's state in Run detail.
 
@@ -5587,7 +5651,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       a NotReady item marked Start now is claimed first once it passes readiness.
 
-      Floor's "Next up" shares the claim order,
+      Floor's "Production Line" shares the claim order,
 
       so it shows each change at once (PBI 265).</td></tr>
 
@@ -7798,7 +7862,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       A row with neither an answer nor <code>closed_at</code> is open.
 
-      Open rows feed the Inbox and Floor's waiting strip.</td></tr>
+      Open rows feed the Inbox and Floor's "Waiting on you".</td></tr>
 
       <tr><td>policy_result</td>
 
@@ -8250,7 +8314,7 @@ wip    = min(clamp(demand, wip_min, wip_max), budget)</div>
 
       Dashboard with Floor,
 
-      its four strips and Run detail,
+      its two lists and Run detail,
 
       plus the first overrides:
 

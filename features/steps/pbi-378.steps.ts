@@ -2,7 +2,7 @@
 //
 // Every scenario runs PBI 89's control plane on PBI 4's test database, with a fake board and a fake repo host, set up
 // as PBI 265's and PBI 320's scenarios set theirs up. Their items, priorities, final-stage items, dependencies, board
-// order, polls, ticks, Next up and Move up steps are reused, and so are PBI 140's "the operator opens Floor" and
+// order, polls, ticks, Production Line and Move up steps are reused, and so are PBI 140's "the operator opens Floor" and
 // "the operator opens item {string}'s Run detail", which record the page they open.
 //
 // The contract these steps set up, which the code reads:

@@ -38,6 +38,8 @@ export type Ctx = {
   asked: Map<string, number>;
   /** PBI 261: a judge that fails only the line with this text, with this reason. Only read while `judge` is "fail". */
   failText?: { text: string; reason: string };
+  /** PBI 414: a judge that fails each of these lines, with its reason. Read before failLine while `judge` is "fail". */
+  failLines?: { index: number; reason: string }[];
   /** PBI 261: every dor.md line the judge was asked about, by external id. */
   askedLines?: Map<string, string[]>;
   /** PBI 261: run before each poll, as the worker's fetch of `main` is. */
@@ -72,6 +74,8 @@ export type Ctx = {
   lastLine?: Record<string, unknown>;
   /** PBI 395: more dependencies each poll hands pollOnce, such as the factory's own repo. */
   deps?: Record<string, unknown>;
+  /** PBI 444: keys the judge's last line carries for this item, read on each ask, after `lastLine`. */
+  lastLineFor?: (item: FactoryItem, dor: { criteria: { index: number; text: string }[] }) => Record<string, unknown>;
 };
 
 export function ctx(world: object): Ctx {
@@ -86,11 +90,12 @@ const judge = (c: Ctx): Judge => async (item, dor, spent) => {
   if (c.metered) await c.metered(item, dor as never, spent);
   if (c.judge === "throw") throw new Error("usage limit reached");
   const line = ({ index, text }: { index: number; text: string }) => {
-    const failed = c.judge === "fail" && (c.failText ? c.failText.text === text : !c.failLine || c.failLine.index === index);
-    const reason = failed ? (c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
+    const many = c.failLines?.find((f) => f.index === index);
+    const failed = c.judge === "fail" && (c.failLines ? !!many : c.failText ? c.failText.text === text : !c.failLine || c.failLine.index === index);
+    const reason = failed ? (many?.reason ?? c.failText?.reason ?? c.failLine?.reason ?? "failed") : "passed";
     return JSON.stringify({ index, status: failed ? "failed" : "passed", reason });
   };
-  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine };
+  const last = { ...(c.oversized === undefined ? { flags: [] } : { flags: [], oversized: c.oversized }), ...c.lastLine, ...c.lastLineFor?.(item, dor) };
   return [...dor.criteria.map(line), JSON.stringify(last)].join("\n");
 };
 

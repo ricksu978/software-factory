@@ -17,22 +17,22 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       And "#131" comes before "Export a month"
 
       Examples:
-        | place                       | state                                  | page                     |
-        | Floor's "Waiting on you"    | waiting for sign-off                   | Floor                    |
-        | Floor's "Next up"           | queued                                 | Floor                    |
-        | Floor's "Not ready"         | not ready                              | Floor                    |
-        | Floor's "In flight"         | in flight                              | Floor                    |
-        | the Run detail heading      | in flight                              | the item's Run detail    |
-        | the Phase 0 report          | done, with its PR merged               | the Phase 0 report       |
-        | the activity log            | just claimed                           | the activity log         |
+        | place                     | state                    | page                  |
+        | Floor's "Waiting on you"  | waiting for sign-off     | Floor                 |
+        | Floor's "Production Line" | queued                   | Floor                 |
+        | Floor's "Waiting on you"  | not ready                | Floor                 |
+        | Floor's "Production Line" | in flight                | Floor                 |
+        | the Run detail heading    | in flight                | the item's Run detail |
+        | the Phase 0 report        | done, with its PR merged | the Phase 0 report    |
+        | the activity log          | just claimed             | the activity log      |
 
     @ac-1 @db
     Scenario: Each item on a page shows its own issue number
       Given item "131" titled "Export a month" and item "57" titled "Import a year" are issues in the repo "acme/widgets"
       And both items are queued
       When a viewer opens Floor
-      Then "Next up" shows "#131" before "Export a month"
-      And "Next up" shows "#57" before "Import a year"
+      Then "Production Line" shows "#131" before "Export a month"
+      And "Production Line" shows "#57" before "Import a year"
 
     @ac-1 @db
     Scenario: Every activity row for an item shows its issue number
@@ -58,14 +58,14 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       Then "#131" on <place> links to "https://github.com/acme/widgets/issues/131"
 
       Examples:
-        | place                       | state                                  | page                     |
-        | Floor's "Waiting on you"    | waiting for sign-off                   | Floor                    |
-        | Floor's "Next up"           | queued                                 | Floor                    |
-        | Floor's "Not ready"         | not ready                              | Floor                    |
-        | Floor's "In flight"         | in flight                              | Floor                    |
-        | the Run detail heading      | in flight                              | the item's Run detail    |
-        | the Phase 0 report          | done, with its PR merged               | the Phase 0 report       |
-        | the activity log            | just claimed                           | the activity log         |
+        | place                     | state                    | page                  |
+        | Floor's "Waiting on you"  | waiting for sign-off     | Floor                 |
+        | Floor's "Production Line" | queued                   | Floor                 |
+        | Floor's "Waiting on you"  | not ready                | Floor                 |
+        | Floor's "Production Line" | in flight                | Floor                 |
+        | the Run detail heading    | in flight                | the item's Run detail |
+        | the Phase 0 report        | done, with its PR merged | the Phase 0 report    |
+        | the activity log          | just claimed             | the activity log      |
 
     @ac-2 @db
     Scenario: Items in different repos link to their own repos
@@ -86,19 +86,19 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       Then "Export a month" on <place> links to the item's Run detail
 
       Examples:
-        | place                       | state                                  | page                     |
-        | Floor's "Waiting on you"    | waiting for sign-off                   | Floor                    |
-        | Floor's "Next up"           | queued                                 | Floor                    |
-        | Floor's "Not ready"         | not ready                              | Floor                    |
-        | Floor's "In flight"         | in flight                              | Floor                    |
-        | the Phase 0 report          | done, with its PR merged               | the Phase 0 report       |
+        | place                     | state                    | page               |
+        | Floor's "Waiting on you"  | waiting for sign-off     | Floor              |
+        | Floor's "Production Line" | queued                   | Floor              |
+        | Floor's "Waiting on you"  | not ready                | Floor              |
+        | Floor's "Production Line" | in flight                | Floor              |
+        | the Phase 0 report        | done, with its PR merged | the Phase 0 report |
 
     @ac-3 @db
     Scenario: The issue number and the title are separate links
       Given item "131" titled "Export a month" is an issue in the repo "acme/widgets"
       And the item is queued
       When a viewer opens Floor
-      Then "#131" in "Next up" is its own link, to the issue on GitHub
+      Then "#131" in "Production Line" is its own link, to the issue on GitHub
       And the link to the item's Run detail holds "Export a month" and not "#131"
 
   Rule: When the factory can't tell which repo an issue is in, "#N" shows with no link
@@ -114,14 +114,14 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       And the page has no link to an issue on GitHub
 
       Examples:
-        | place                       | state                                  | page                     |
-        | Floor's "Waiting on you"    | waiting for sign-off                   | Floor                    |
-        | Floor's "Next up"           | queued                                 | Floor                    |
-        | Floor's "Not ready"         | not ready                              | Floor                    |
-        | Floor's "In flight"         | in flight                              | Floor                    |
-        | the Run detail heading      | in flight                              | the item's Run detail    |
-        | the Phase 0 report          | done, with its PR merged               | the Phase 0 report       |
-        | the activity log            | just claimed                           | the activity log         |
+        | place                     | state                    | page                  |
+        | Floor's "Waiting on you"  | waiting for sign-off     | Floor                 |
+        | Floor's "Production Line" | queued                   | Floor                 |
+        | Floor's "Waiting on you"  | not ready                | Floor                 |
+        | Floor's "Production Line" | in flight                | Floor                 |
+        | the Run detail heading    | in flight                | the item's Run detail |
+        | the Phase 0 report        | done, with its PR merged | the Phase 0 report    |
+        | the activity log          | just claimed             | the activity log      |
 
     @ac-4 @db
     Scenario: An item on a board that maps to more than one repo, with no run, shows its number unlinked
@@ -129,7 +129,7 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       And the item has no run in any repo
       And the item is queued
       When a viewer opens Floor
-      Then "Next up" shows "#131" before "Export a month"
+      Then "Production Line" shows "#131" before "Export a month"
       And "#131" is not a link
       And the page has no link to "https://github.com/acme/widgets/issues/131"
       And the page has no link to "https://github.com/acme/gadgets/issues/131"
@@ -139,7 +139,7 @@ Feature: The dashboard shows each item's issue number and links it to the issue
       Given item "131" titled "Export a month" has a run in a repo that isn't hosted on GitHub
       And the item is in flight
       When a viewer opens Floor
-      Then "In flight" shows "#131" before "Export a month"
+      Then "Production Line" shows "#131" before "Export a month"
       And "#131" is not a link
 
     @ac-4 @db

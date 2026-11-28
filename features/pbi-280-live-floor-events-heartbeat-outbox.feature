@@ -37,13 +37,13 @@ Feature: Live Floor: the event stream with reconnect, a stale scheduler heartbea
 
     @ac-1
     Scenario: An event refreshes Floor with what changed, and the page doesn't reload
-      Given I am a viewer with Floor open in the SPA, showing "#43 Export CSV" under "Next up"
+      Given I am a viewer with Floor open in the SPA, showing "#43 Export CSV" under "Production Line"
       And the factory, asked for the floor again, reports "#43 Export CSV" In progress at stage "red"
       When the factory sends an event on the stream
       And a second passes
       Then the SPA reads the floor from the factory again
-      And the "In flight" table has a row for "#43 Export CSV" showing "InProgress" and "red"
-      And Floor shows nothing under "Next up" but "Nothing is ready to start."
+      And the "Production Line" table has a row for "#43 Export CSV" showing "InProgress" and "red"
+      And Floor shows "#43 Export CSV" in one row under "Production Line"
       And the browser didn't reload the page
 
     @ac-1
@@ -65,11 +65,11 @@ Feature: Live Floor: the event stream with reconnect, a stale scheduler heartbea
     @ac-1
     Scenario: When the factory ends a stream after five minutes, Floor opens a new one and keeps updating
       Given I am a viewer with Floor open in the SPA
-      And the factory, asked for the floor again, reports "#43 Export CSV" under "Next up"
+      And the factory, asked for the floor again, reports "#43 Export CSV" under "Production Line"
       When the factory ends the event stream, as it does after five minutes
       Then the SPA opens the event stream at "/bff/v1/events" again within 10 seconds
       And once the new stream is open, the SPA reads the floor from the factory again
-      And Floor shows "#43 Export CSV" under "Next up"
+      And Floor shows "#43 Export CSV" under "Production Line"
 
     @ac-1
     Scenario: An event on the new stream refreshes Floor

@@ -85,7 +85,7 @@ Feature: The factory stores each item's repo at intake, so "#N" never links to a
       And the item has no run
       And the item is not ready
       When a viewer opens Floor
-      Then "#131" in "Not ready" links to "https://github.com/other/tools/issues/131"
+      Then "#131" in "Waiting on you" links to "https://github.com/other/tools/issues/131"
 
     @ac-2 @db
     Scenario: A new issue from a repo the board doesn't map to links to that repo once the poller has run
@@ -104,7 +104,7 @@ Feature: The factory stores each item's repo at intake, so "#N" never links to a
       And the item has no run
       And the item is queued
       When a viewer opens Floor
-      Then "Next up" shows "#131" before "Export a month"
+      Then "Production Line" shows "#131" before "Export a month"
       And "#131" is not a link
       And the page has no link to "https://github.com/acme/widgets/issues/131"
 
@@ -120,11 +120,11 @@ Feature: The factory stores each item's repo at intake, so "#N" never links to a
       And the page has no link to an issue on GitHub
 
       Examples:
-        | place                    | state                | page                  |
-        | Floor's "Waiting on you" | waiting for sign-off | Floor                 |
-        | Floor's "Next up"        | queued               | Floor                 |
-        | Floor's "Not ready"      | not ready            | Floor                 |
-        | the Run detail heading   | queued               | the item's Run detail |
+        | place                     | state                | page                  |
+        | Floor's "Waiting on you"  | waiting for sign-off | Floor                 |
+        | Floor's "Production Line" | queued               | Floor                 |
+        | Floor's "Waiting on you"  | not ready            | Floor                 |
+        | the Run detail heading    | queued               | the item's Run detail |
 
     @ac-3 @db
     Scenario: An item with no stored repo doesn't stop another item's "#N" from linking

@@ -87,10 +87,10 @@ export function mainRedLead(rows: MainBreak[]): string {
   return `${branches} is red. ${fixes} item merged onto it meanwhile waits for it to pass again.`;
 }
 
-/** When the factory last re-checked a Failed item (PBI 369): Floor's short form, or Run detail's sentence. */
+/** When the factory last re-checked a Failed item (PBI 369): Floor's short form (PBI 430), or Run detail's sentence. */
 export function recheckLine(at: string | null, zone: string, sentence: boolean): string {
   const when = at ? localTime(new Date(at), zone) : null;
-  if (!sentence) return `Failed, ${when ? `last re-checked at ${when}` : "not yet re-checked"}`;
+  if (!sentence) return `Failed on main, ${when ? `last re-checked at ${when}` : "not yet re-checked"}`;
   const tail = "The factory re-checks it every few hours and moves it back to Accepted once its merge no longer counts as breaking main.";
   return when ? `Last re-checked at ${when}. ${tail}` : `It hasn't been re-checked yet. ${tail}`;
 }

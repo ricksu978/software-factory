@@ -19,20 +19,20 @@ Feature: The Floor shows each item's cost to the cent
       Given the item's "specify" stage cost $6.0412
       And the item's "build" stage cost $7.5000
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "$13.54" for the item
-      And the "In flight" table doesn't show "$13.5412"
+      Then the "Production Line" table shows a cost of exactly "$13.54" for the item
+      And the "Production Line" table doesn't show "$13.5412"
 
     @ac-1 @db
     Scenario: An item's cost under a dollar shows rounded to the nearest cent
       Given the item's "specify" stage cost $0.5291
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "$0.53" for the item
+      Then the "Production Line" table shows a cost of exactly "$0.53" for the item
 
     @ac-1 @db
     Scenario Outline: An item that cost <cost> shows "<shown>", as Run detail shows the same cost
       Given the item's "specify" stage cost <cost>
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "<shown>" for the item
+      Then the "Production Line" table shows a cost of exactly "<shown>" for the item
       When a viewer opens the item's Run detail
       Then the Stages table shows a cost of exactly "<shown>" for the "specify" stage
 
@@ -52,8 +52,8 @@ Feature: The Floor shows each item's cost to the cent
       And the item's "specify" stage cost $2.0049
       And item "264"'s "specify" stage cost $0.7351
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "$2.00" for "Export a month"
-      And the "In flight" table shows a cost of exactly "$0.74" for "Import a year"
+      Then the "Production Line" table shows a cost of exactly "$2.00" for "Export a month"
+      And the "Production Line" table shows a cost of exactly "$0.74" for "Import a year"
 
   Rule: A cost above zero that rounds to nothing shows "<$0.01", and no cost shows "$0.00"
 
@@ -61,15 +61,15 @@ Feature: The Floor shows each item's cost to the cent
     Scenario: A cheap item never reads as free
       Given the item's "specify" stage cost $0.0031
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "<$0.01" for the item
-      And the "In flight" table doesn't show a cost of "$0.00" for the item
+      Then the "Production Line" table shows a cost of exactly "<$0.01" for the item
+      And the "Production Line" table doesn't show a cost of "$0.00" for the item
 
     @ac-2 @db
     Scenario Outline: An item that cost <cost> in all shows "<shown>"
       Given the item's "specify" stage cost <specify>
       And the item's "build" stage cost <build>
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "<shown>" for the item
+      Then the "Production Line" table shows a cost of exactly "<shown>" for the item
 
       Examples:
         | cost    | specify | build   | shown  |
@@ -82,14 +82,14 @@ Feature: The Floor shows each item's cost to the cent
       Given the item's "specify" stage cost $0
       And the item's "build" stage cost $0
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "$0.00" for the item
-      And the "In flight" table doesn't show a cost of "<$0.01" for the item
+      Then the "Production Line" table shows a cost of exactly "$0.00" for the item
+      And the "Production Line" table doesn't show a cost of "<$0.01" for the item
 
     @ac-2 @db
     Scenario: An item with no stage cost recorded yet shows a cost of nothing
       Given the item has no stage cost recorded
       When a viewer opens Floor
-      Then the "In flight" table shows a cost of exactly "$0.00" for the item
+      Then the "Production Line" table shows a cost of exactly "$0.00" for the item
 
   Rule: Hovering the Floor's Cost cell shows the exact figure, as Run detail's Cost cells do
 
@@ -98,21 +98,21 @@ Feature: The Floor shows each item's cost to the cent
       Given the item's "specify" stage cost $6.0412
       And the item's "build" stage cost $7.5000
       When a viewer opens Floor
-      And the viewer hovers over the item's cost in the "In flight" table
+      And the viewer hovers over the item's cost in the "Production Line" table
       Then the viewer sees the exact cost "$13.5412"
 
     @ac-3 @db
     Scenario: Hovering a cheap item's cost shows what it really cost
       Given the item's "specify" stage cost $0.0031
       When a viewer opens Floor
-      And the viewer hovers over the item's cost in the "In flight" table
+      And the viewer hovers over the item's cost in the "Production Line" table
       Then the viewer sees the exact cost "$0.0031"
 
     @ac-3 @db
     Scenario: Hovering an item's cost on the Floor shows the same exact figure as on Run detail
       Given the item's "specify" stage cost $0.5291
       When a viewer opens Floor
-      And the viewer hovers over the item's cost in the "In flight" table
+      And the viewer hovers over the item's cost in the "Production Line" table
       Then the viewer sees the exact cost "$0.5291"
       When a viewer opens the item's Run detail
       And the viewer hovers over the "specify" stage's cost in the Stages table

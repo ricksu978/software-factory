@@ -100,13 +100,13 @@ Feature: A red main after a merge files a bug item the factory fixes first, and 
       And the factory holds item 491 in state "Queued"
 
     @ac-2
-    Scenario: The Floor's "Next up" list shows the bug item first
+    Scenario: The Floor's "Production Line" list shows the bug item first to claim
       Given the factory runs locally for "octo"
       And "octo" is signed in to the dashboard
       And the factory holds item 490 in state "Queued" with priority 9 and backlog rank 1
       And the factory holds, in state "Queued", the bug item it filed because commit "m3rg001" broke "main"
       When "octo" opens the Floor
-      Then the first item in the Floor's "Next up" list is the bug item
+      Then the first item to claim in the Floor's "Production Line" list is the bug item
       And item 490 comes after it
 
     @ac-2

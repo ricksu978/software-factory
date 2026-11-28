@@ -17,24 +17,28 @@ const between = (html, from, to) => {
 };
 // An item's number is the leading `#N` of its row, linked or not (issueRef in src/http/views.ts).
 const issue = (html) => strip(html).match(/^#(\d+)/)?.[1] ?? "?";
-// A Floor list's top-level rows. A Not ready row nests its failed checks as <li>s, so split where an item starts.
+// A Floor list's top-level rows. A NotReady row of Waiting on you nests its failed checks as <li>s, so split where an item starts.
 const rows = (section) => section.split(/<li>(?=(?:<a [^>]*>)?#\d)/).slice(1);
 
 /** The Floor reduced to what the watch acts on. Markup: floorPage in src/http/views.ts. */
 export function digest(floor, config = "", now = Date.now()) {
   const banners = [...floor.matchAll(/<(p|section)\b[^>]*role="(?:status|alert)"[^>]*>([\s\S]*?)<\/\1>/g)].map((m) => strip(m[2]));
-  const waiting = rows(between(floor, "<h2>Waiting on you</h2>", "<h2>")).map((li) => {
+  const waitingRows = rows(between(floor, "<h2>Waiting on you</h2>", "<h2>"));
+  // The state leads the row's first muted span; a split child's "part of #N" span comes before it and doesn't match.
+  const stateOf = (li) => li.match(/<span class="muted">(\w+)(?:,|<\/span>)/)?.[1];
+  const waiting = waitingRows.map((li) => {
     const item = li.match(/\/items\/([0-9a-f-]{36})/)?.[1];
     const pr = li.match(/pull\/(\d+)/)?.[1];
-    const state = li.match(/<span class="muted">(\w+), waiting/)?.[1];
-    return `#${issue(li)} ${state}${pr ? ` pr=#${pr}` : ""} item=${item}`;
+    return `#${issue(li)} ${stateOf(li)}${pr ? ` pr=#${pr}` : ""} item=${item}`;
   });
-  const next = rows(between(floor, "<h2>Next up</h2>", "<h2>")).map((li) => `#${issue(li)}`);
-  const rules = rows(between(floor, "<h2>Not ready</h2>", "<h2>")).filter((li) => li.includes("waits for the owner to approve")).map((li) => `#${issue(li)}`);
-  const inFlight = [...between(floor, "<h2>In flight</h2>", "</table>").matchAll(/<tr><td>([\s\S]*?)<\/tr>/g)].map(([, row]) => {
+  const rules = waitingRows.filter((li) => stateOf(li) === "NotReady" && li.includes("waits for the owner to approve")).map((li) => `#${issue(li)}`);
+  // Production Line: InProgress rows are in flight, every other row is queued, in claim order.
+  const line = [...between(floor, "<h2>Production Line</h2>", "</table>").matchAll(/<tr><td>([\s\S]*?)<\/tr>/g)].map(([, row]) => {
     const [item, state, stage] = row.split(/<\/td>\s*<td[^>]*>/);
-    return `#${issue(item)} ${strip(state ?? "")}/${strip(stage ?? "")}`;
+    return { n: issue(item), state: strip(state ?? ""), stage: strip(stage ?? "") };
   });
+  const inFlight = line.filter((r) => r.state === "InProgress").map((r) => `#${r.n} ${r.state}/${r.stage}`);
+  const next = line.filter((r) => r.state !== "InProgress").map((r) => `#${r.n}`);
   const pause = strip(config).match(/usage pause (\S+)/)?.[1];
   const paused = pause && Date.parse(pause) > now; // the column keeps a past pause, which holds nothing (pauseActive)
   return [
@@ -90,21 +94,22 @@ function selftest() {
 <p class="banner" role="status">Drain done. Reason: r.</p><p class="muted">The cell image was built from commit <code>fdd3692</code>.</p>
 <p>2 of 4 waiting. <a href="/activity">Activity</a></p>
 <h2>Waiting on you</h2>
-<ol><li><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a> <a href="https://github.com/o/r/pull/415">PR #415</a> <span class="muted">InReview, waiting 3 min</span></li><li>#283 <a href="/items/0c8e162a-ad76-457b-ac4b-4b6b08ddb767">Keycloak</a> <span class="muted">SignOff, waiting 0 min</span></li></ol>
-<h2>Next up</h2><ol><li><a href="https://github.com/o/r/issues/418">#418</a> <a href="/items/x">A</a></li><li>#419 <a href="/items/y">B</a></li></ol>
-<h2>Final stage</h2><p class="muted">No item is in the review loop.</p>
-<h2>Not ready</h2><ol><li><a href="https://github.com/o/r/issues/414">#414</a> <a href="/items/z">C</a><ul><li>The item waits for the owner to approve its change to spec section §6.</li></ul></li><li>#412 <a href="/items/w">D</a><ul><li>An item that changes the rules says so.</li></ul></li></ol>
-<h2>Blocked</h2><p class="muted">No ready item waits on another.</p>
-<h2>In flight</h2><table><thead><tr><th scope="col">Item</th></tr></thead><tbody>
-<tr><td>#280 <a href="/items/d9b532d1-bd18-4664-81ba-533d19ce3d13">Live</a></td><td>InProgress</td><td>red</td><td>4 min</td><td title="$1">$1</td><td class="muted"></td></tr>
-<tr><td><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a></td><td>InReview</td><td>open-pr</td><td>3 min</td><td>$2</td><td class="muted"></td></tr>
-</tbody></table></main>`;
+<ol><li><a href="https://github.com/o/r/issues/319">#319</a> <a href="/items/5de6c0b0-64bc-4496-9504-21ee32a2c907">Effort</a> <span class="muted">InReview, waiting 3 min</span> Waits on your review of <a href="https://github.com/o/r/pull/415">PR #415</a>.</li><li>#283 <a href="/items/0c8e162a-ad76-457b-ac4b-4b6b08ddb767">Keycloak</a> <span class="muted">part of <a href="/items/11111111-1111-4111-8111-111111111111">#280</a></span> <span class="muted">SignOff, waiting 0 min</span> Waits on your sign-off.</li><li><a href="https://github.com/o/r/issues/414">#414</a> <a href="/items/22222222-2222-4222-8222-222222222222">C</a> <span class="muted">NotReady, waiting 1 min</span> Not ready. The readiness gate turned it down, failing:<ul><li>The item waits for the owner to approve its change to spec section §6.</li></ul></li><li>#412 <a href="/items/33333333-3333-4333-8333-333333333333">D</a> <span class="muted">NotReady</span> Not ready. The readiness gate turned it down, failing:<ul><li>An item that changes the rules says so.</li></ul></li></ol>
+<h2>Production Line</h2>
+<table><thead><tr><th scope="col">Item</th><th scope="col">State</th><th scope="col">Stage</th><th scope="col">In stage</th><th scope="col">Cost</th><th scope="col">Last agent message</th></tr></thead><tbody>
+<tr><td>#280 <a href="/items/d9b532d1-bd18-4664-81ba-533d19ce3d13">Live</a> <span class="badge">bug</span></td><td>InProgress</td><td>red</td><td>4 min</td><td title="$1">$1</td><td class="muted"></td></tr>
+<tr><td><a href="https://github.com/o/r/issues/418">#418</a> <a href="/items/x">A</a></td><td>Accepted</td><td></td><td></td><td></td><td></td></tr>
+<tr><td>#419 <a href="/items/y">B</a> <span class="muted">Waits on #418, which is still open. It starts once it closes.</span></td><td>Accepted</td><td></td><td></td><td></td><td></td></tr>
+</tbody></table>
+<p class="muted">2 more items are queued.</p>
+</main>`;
   const pauseRow = (at) => `<tr><th scope="row">usage pause</th><td>${at}</td><td>Set by the factory</td></tr>`;
   check("busy Floor", digest(floor, pauseRow("2026-11-26T23:00:00Z"), now),
     "banners: Your Claude token expires in 2 days. / Drain done. Reason: r. | "
-    + "waiting: #319 InReview pr=#415 item=5de6c0b0-64bc-4496-9504-21ee32a2c907; #283 SignOff item=0c8e162a-ad76-457b-ac4b-4b6b08ddb767 | "
-    + "in flight: #280 InProgress/red; #319 InReview/open-pr | next up: #418 #419 | rule approval: #414 | usage pause until 2026-11-26T23:00:00Z");
-  const quiet = `<main><h1>Floor</h1><p>0 of 4 waiting. <a>x</a></p><h2>Waiting on you</h2><p class="muted">Nothing waits on you.</p><h2>Next up</h2><p class="muted">Nothing is ready to start.</p><h2>Not ready</h2><p class="muted">Every item that entered is ready.</p><h2>In flight</h2><p class="muted">No item is in flight.</p></main>`;
+    + "waiting: #319 InReview pr=#415 item=5de6c0b0-64bc-4496-9504-21ee32a2c907; #283 SignOff item=0c8e162a-ad76-457b-ac4b-4b6b08ddb767; "
+    + "#414 NotReady item=22222222-2222-4222-8222-222222222222; #412 NotReady item=33333333-3333-4333-8333-333333333333 | "
+    + "in flight: #280 InProgress/red | next up: #418 #419 | rule approval: #414 | usage pause until 2026-11-26T23:00:00Z");
+  const quiet = `<main><h1>Floor</h1><p>0 of 4 waiting. <a>x</a></p><h2>Waiting on you</h2><p class="muted">Nothing waits on you.</p><h2>Production Line</h2><p class="muted">Nothing is in production.</p></main>`;
   check("past pause", digest(quiet, pauseRow("2026-11-26T01:00:00Z"), now), "waiting: none | in flight: none | next up: none");
   check("no pause", digest(quiet, pauseRow("not set"), now), "waiting: none | in flight: none | next up: none");
   console.log("selftest passed");

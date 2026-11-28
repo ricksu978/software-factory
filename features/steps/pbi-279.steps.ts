@@ -74,7 +74,7 @@ type Pages = {
   activity: { Activity: ComponentType<ActivityProps> };
 };
 const api = () => load<Api>("/src/api.ts");
-const floorModule = () => load<Pages["floor"]>("/src/pages/Floor.tsx");
+export const floorModule = () => load<Pages["floor"]>("/src/pages/Floor.tsx");
 const itemModule = () => load<Pages["item"]>("/src/pages/RunDetail.tsx");
 
 // ---- the scenario's context ----
@@ -160,8 +160,8 @@ const zoneOf = (world: object) => (world as { pbi131?: { viewerZone?: string } }
 
 export function emptyFloor(): FloorData {
   return {
-    active: [], waiting: [], waitingCount: 0, capacity: 3, next: [], notReady: [], blocked: [], factory: [], keys: {},
-    finalStage: [], baseFails: [], mainBreaks: [], split: [], failed: [], restart: null, cellImage: null, canOperate: false,
+    waitingOnYou: [], productionLine: [], productionMore: 0, waitingCount: 0, capacity: 3, factory: [], keys: {},
+    baseFails: [], mainBreaks: [], restart: null, cellImage: null, canOperate: false,
     claudeToken: null, workerHeartbeat: null,
   };
 }
@@ -331,7 +331,7 @@ function decode(s: string): string {
   });
 }
 
-function parse(html: string): El {
+export function parse(html: string): El {
   const root: El = { tag: "#root", attrs: {}, children: [], parent: null };
   let cur = root;
   const tags = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:\s+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/?)>|[^<]+|</g;
@@ -519,13 +519,35 @@ const before = (root: El, a: El, b: El) => {
 
 // ---- the fixture: Floor ----
 
-const sectionNames = ["Waiting on you", "Next up", "Final stage", "Not ready", "Blocked", "Split", "Failed on main", "In flight"];
+// PBI 430: Floor's two lists.
+const sectionNames = ["Waiting on you", "Production Line"];
 
-export function addActive(c: Ctx, n: Named, extra: Partial<FloorData["active"][number]>): FloorData["active"][number] {
-  const row = { ...n, state: "InProgress", stage: "green", since: ago(c, 5 * MIN), cost: "0", badges: [], message: null, pr_number: null, pr_url: null, ci_failure: null, ...extra };
-  c.floor.active.push(row);
+type LineRow = FloorData["productionLine"][number];
+type WaitingRow = FloorData["waitingOnYou"][number];
+
+/** A row of Production Line for an InProgress item, with In flight's columns. */
+export function addActive(c: Ctx, n: Named, extra: Partial<LineRow>): LineRow {
+  const row: LineRow = { ...n, state: "InProgress", stage: "green", since: ago(c, 5 * MIN), cost: "0", badges: [], message: null, pr_number: null, pr_url: null, ci_failure: null, waitsOn: [], partOf: null, ...extra };
+  c.floor.productionLine.push(row);
   return row;
 }
+
+/** A row of Production Line for a queued item, after the InProgress ones. */
+export function addQueued(c: Ctx, n: Named, extra: Partial<LineRow> = {}): LineRow {
+  const row: LineRow = { ...n, state: "Queued", stage: null, since: null, cost: null, message: null, ci_failure: null, badges: [], waitsOn: [], partOf: null, ...extra };
+  c.floor.productionLine.push(row);
+  return row;
+}
+
+/** A row of Waiting on you, which counts among the waiting when it's a question, a sign-off or a review. */
+export function addWaiting(c: Ctx, n: Named, extra: Partial<WaitingRow> & Pick<WaitingRow, "state" | "why">): WaitingRow {
+  const row: WaitingRow = { ...n, since: ago(c, HOUR), pr_number: null, pr_url: null, partOf: null, ...extra };
+  c.floor.waitingOnYou.push(row);
+  if (["sign-off", "question", "review", "feature-change"].includes(row.why)) c.floor.waitingCount++;
+  return row;
+}
+
+const WHY: Record<string, WaitingRow["why"]> = { SignOff: "sign-off", NeedsInput: "question", InReview: "review" };
 
 function ciFailure(sha: string, checks: string[], url = `https://github.com/${REPO}/actions/runs/1`) {
   return { sha, checks: checks.map((name) => ({ name, url, failingTests: [] })) };
@@ -544,36 +566,37 @@ Given("the factory's floor holds:", function (t: DataTable) {
   const c = ctx(this);
   for (const r of t.hashes()) {
     const n = named(c, `${r.issue} ${r.title}`);
-    if (r.section === "Waiting on you") {
+    if (r.section === "Waiting on you" && r.detail.startsWith("NotReady, failed ")) {
+      addWaiting(c, n, { state: "NotReady", why: "not-ready", failed: [...r.detail.matchAll(/"([^"]+)"/g)].map((x) => x[1]) });
+    } else if (r.section === "Waiting on you") {
       const m = /^(\w+), waiting for (\d+) (minute|hour|day)s?(?:, PR #(\d+))?$/.exec(r.detail);
       assert.ok(m, `can't read the wait "${r.detail}"`);
       const ms = Number(m[2]) * ({ minute: MIN, hour: HOUR, day: DAY } as Record<string, number>)[m[3]];
-      c.floor.waiting.push({ ...n, state: m[1], since: ago(c, ms), pr_number: m[4] ? Number(m[4]) : null, pr_url: m[4] ? `https://github.com/${REPO}/pull/${m[4]}` : null });
-      c.floor.waitingCount++;
-    } else if (r.section === "Next up") c.floor.next.push(n);
-    else if (r.section === "Final stage") c.floor.finalStage.push({ ...n, state: r.detail });
-    else if (r.section === "Not ready") c.floor.notReady.push({ ...n, failed: [...r.detail.matchAll(/"([^"]+)"/g)].map((x) => x[1]) });
+      assert.ok(WHY[m[1]], `no item waits on you in ${m[1]}`);
+      addWaiting(c, n, { state: m[1], why: WHY[m[1]], since: ago(c, ms), pr_number: m[4] ? Number(m[4]) : null, pr_url: m[4] ? `https://github.com/${REPO}/pull/${m[4]}` : null });
+    } else if (r.section === "Production Line") addQueued(c, n, { state: r.detail });
     else throw new Error(`no fixture for the section "${r.section}"`);
   }
 });
 
 Given("the factory's floor has {string} in the repo {string} under {string}", function (label: string, repo: string, where: string) {
-  assert.equal(where, "Next up");
+  assert.equal(where, "Production Line");
   const c = ctx(this);
-  c.floor.next.push(named(c, label, repo));
+  addQueued(c, named(c, label, repo));
 });
 
 Given("the factory's floor has {string} under {string} with no repo known", function (label: string, where: string) {
-  assert.equal(where, "Next up");
+  assert.equal(where, "Production Line");
   const c = ctx(this);
-  c.floor.next.push(named(c, label, null));
+  addQueued(c, named(c, label, null));
 });
 
 Given("the factory's floor holds a Queued item {string} blocked by {string} and {string}", function (label: string, a: string, b: string) {
   const c = ctx(this);
-  c.floor.blocked.push({ ...named(c, label), blocked_by: [a, b].map((x) => x.replace(/^#/, "")) });
+  addQueued(c, named(c, label), { waitsOn: [a, b].map((x) => x.replace(/^#/, "")) });
 });
 
+/** A Split parent's children, for Run detail's "Split into". */
 function children(c: Ctx, queued: string, done: string, missing: string) {
   return [[queued, "Queued"], [done, "Done"], [missing, null]].map(([label, state]) => {
     const n = named(c, label!);
@@ -581,36 +604,37 @@ function children(c: Ctx, queued: string, done: string, missing: string) {
   });
 }
 
-Given("it holds a Split parent {string} split into {string}, which is Queued, {string}, which is Done, and {string}, which the factory doesn't hold", function (parent: string, a: string, b: string, d: string) {
+Given("it holds a Queued item {string}, part of the split parent {string}", function (label: string, parent: string) {
   const c = ctx(this);
-  c.floor.split.push({ ...named(c, parent), children: children(c, a, b, d) });
+  const p = named(c, parent);
+  addQueued(c, named(c, label), { partOf: { id: p.id, external_id: p.external_id } });
 });
 
 Given("the factory's floor has {string}, which failed its Definition of Done on main and hasn't been re-checked yet", function (label: string) {
   const c = ctx(this);
-  c.floor.failed.push({ ...named(c, label), rechecked: null });
+  addWaiting(c, named(c, label), { state: "Failed", why: "failed-on-main", rechecked: null });
 });
 
 Given("the factory's floor has {string}, which failed its Definition of Done on main and was last re-checked at {int}-{int}-{int} {int}:{int} UTC", function (label: string, y: number, mo: number, d: number, h: number, mi: number) {
   const c = ctx(this);
-  c.floor.failed.push({ ...named(c, label), rechecked: iso(y, mo, d, h, mi) });
+  addWaiting(c, named(c, label), { state: "Failed", why: "failed-on-main", rechecked: iso(y, mo, d, h, mi) });
 });
 
 Given("the factory's floor has {string} under {string} at priority {int}, taken from {string}, and final-stage because of {string}", function (label: string, where: string, priority: number, from: string, group: string) {
-  assert.equal(where, "Next up");
+  assert.equal(where, "Production Line");
   const c = ctx(this);
   const n = named(c, label);
-  c.floor.next.push(n);
+  addQueued(c, n);
   const f = named(c, from);
   const g = named(c, group);
   c.floor.keys[n.id] = { own: priority + 1, priority, priorityFrom: { id: f.id, externalId: f.external_id }, finalStage: true, finalStageFrom: { id: g.id, externalId: g.external_id }, bug: false };
 });
 
 Given("the factory's floor has {string}, which carries the bug label, under {string} at priority {int}", function (label: string, where: string, priority: number) {
-  assert.equal(where, "Next up");
+  assert.equal(where, "Production Line");
   const c = ctx(this);
   const n = named(c, label);
-  c.floor.next.push(n);
+  addQueued(c, n);
   c.floor.keys[n.id] = { own: priority, priority, priorityFrom: null, finalStage: false, finalStageFrom: null, bug: true };
 });
 
@@ -646,7 +670,7 @@ Given("the factory's floor has nothing under {string}", function (where: string)
 
 Given("the factory's floor has {int} items waiting on a person against a limit of {int}", function (n: number, limit: number) {
   const c = ctx(this);
-  for (let i = 0; i < n; i++) c.floor.waiting.push({ ...named(c, `#${70 + i} Waiting ${i + 1}`), state: "SignOff", since: ago(c, HOUR), pr_number: null, pr_url: null });
+  for (let i = 0; i < n; i++) addWaiting(c, named(c, `#${70 + i} Waiting ${i + 1}`), { state: "SignOff", why: "sign-off" });
   c.floor.waitingCount = n;
   c.floor.capacity = limit;
 });
@@ -715,11 +739,13 @@ Given("{string} waits on a question because its tests {string} and {string} fail
   const c = ctx(this);
   const n = named(c, label);
   c.floor.baseFails.push({ ...n, sha, tests: [a, b] });
-  c.floor.waiting.push({ ...n, state: "NeedsInput", since: ago(c, HOUR), pr_number: null, pr_url: null });
-  c.floor.waitingCount++;
+  addWaiting(c, n, { state: "NeedsInput", why: "question", question: `Its tests ${a} and ${b} fail on base commit ${sha}.` });
 });
 
 Given("the Claude token expires in {int} days", function (days: number) {
+  // PBI 430's scenarios set the token's age in the control plane's environment.
+  const own = (this as { tokenExpiresIn?: (days: number) => void }).tokenExpiresIn;
+  if (own) return own(days);
   const c = ctx(this);
   const age = 365 - days;
   c.floor.claudeToken = {
@@ -1360,6 +1386,9 @@ Given("I submitted the {string} form with {string} and {string} left empty, and 
 // ---- Then: Floor ----
 
 export function floorRoot(world: object): El {
+  // PBI 430's scenarios read the Floor they opened, today's or the SPA's, through their own context.
+  const own = (world as { floorTree?: () => El }).floorTree;
+  if (own) return own();
   return opened(ctx(world), "floor");
 }
 
@@ -1381,7 +1410,7 @@ Then("under {string} Floor shows {string} with {string} and {string}", function 
 Then("under {string} Floor shows {string} with a link {string} to that PR and {string}", function (where: string, what: string, link: string, detail: string) {
   const c = ctx(this);
   const row = rowOf(section(floorRoot(this), where), what);
-  const pr = c.floor.waiting.find((w) => what.includes(w.title))?.pr_url;
+  const pr = c.floor.waitingOnYou.find((w) => what.includes(w.title))?.pr_url;
   assert.ok(links(row).some((l) => l.text === link && l.href === pr), `"${what}" has no link "${link}" to ${pr}: ${JSON.stringify(links(row))}`);
   includes(row, detail, `"${what}" under "${where}"`);
 });
@@ -1405,13 +1434,6 @@ Then("Floor shows {string} as plain text, not a link", function (ref: string) {
   const root = floorRoot(this);
   includes(root, ref, "Floor");
   assert.deepEqual(links(root).filter((l) => l.text.includes(ref)), [], `Floor links "${ref}"`);
-});
-
-Then("under {string} Floor shows {string} split into, in order, {string} as {string}, {string} as {string} and {string} as {string}", function (where: string, what: string, a: string, as: string, b: string, bs: string, d: string, ds: string) {
-  const s = section(floorRoot(this), where);
-  const parent = all(s).filter((e) => e.tag === "li" && text(e).includes(what)).at(-1);
-  assert.ok(parent, `"${where}" doesn't show "${what}"`);
-  splitIn(parent, [[a, as], [b, bs], [d, ds]]);
 });
 
 function splitIn(scope: El, kids: string[][]): void {
@@ -1455,11 +1477,11 @@ function columnsAre(world: object, name: string, cols: string[]): void {
   assert.deepEqual(t.columns, cols, `the "${name}" table's columns`);
 }
 
-/** The table a step about "its row" means: Floor's In flight, or the one table the open page has. */
+/** The table a step about "its row" means: Floor's Production Line (PBI 430), or the one table the open page has. */
 function pageTable(world: object): Table {
   const c = ctx(world);
   const root = opened(c);
-  if (c.page === "floor") return table(section(root, "In flight"), `"In flight"`);
+  if (c.page === "floor") return table(section(root, "Production Line"), `"Production Line"`);
   if (c.page === "item") return table(section(root, "Stages"), `"Stages"`);
   return table(root, PAGE_NAMES[c.page!]);
 }
@@ -1487,7 +1509,7 @@ Then("the row's cost has the title {string}", function (title: string) {
 
 Then("its Stage shows {string}", function (want: string) {
   const t = pageTable(this);
-  assert.equal(t.rows.length, 1, "In flight doesn't hold one row");
+  assert.equal(t.rows.length, 1, "Production Line doesn't hold one row");
   assert.equal(text(cell(t, t.rows[0], "Stage")), want);
 });
 
